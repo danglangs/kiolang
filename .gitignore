@@ -1,0 +1,14 @@
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Rust
+/target/
+**/*.rs.bk
+
+# Wasm build output
+*.wasm
+
+# OS
+.DS_Store

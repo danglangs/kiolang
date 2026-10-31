@@ -1,0 +1,35 @@
+// The only hand-written declaration of what crosses the sandbox wall.
+// prelude.kio and the guest and host Rust bindings are generated from this file.
+// Changing it is a security-review event.
+
+package kio:caps;
+
+interface fs {
+  variant io-err { not-found, denied, too-large, invalid-path }
+
+  // A directory the host opened. Paths are relative to it and cannot escape it.
+  resource dir {
+    read:   func(path: string) -> result<list<u8>, io-err>;
+    create: func(path: string, data: list<u8>) -> result<_, io-err>;
+  }
+}
+
+interface net {
+  variant http-err { denied, timeout, too-large, status(u16) }
+
+  // A host and method set the operator granted. Rechecked on every redirect.
+  resource http {
+    get: func(path: string) -> result<list<u8>, http-err>;
+  }
+}
+
+world guest {
+  import fs;
+  import net;
+
+  // Parse and check. Returns the authority report or the errors. Needs no handles.
+  export check: func(source: string) -> result<string, string>;
+
+  // Check, then evaluate main with the given handles bound by parameter name.
+  export run: func(source: string, dirs: list<borrow<dir>>, https: list<borrow<http>>) -> result<_, string>;
+}
