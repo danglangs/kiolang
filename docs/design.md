@@ -14,7 +14,7 @@
                             to agent                     ┌──────────────────────────┐
         ┌──────────────────────────────┐                 │ HOST (Rust)              │
         │ caps.wit                     │                 │ trusted, hand-written:   │
-        │ generates prelude.kio and    │────implements──▶│ dir.read / dir.create    │
+        │ generates the cap table and  │────implements──▶│ dir.read / dir.create    │
         │ the guest and host bindings  │                 │ http.get (allowlisted)   │
         └──────────────────────────────┘                 │ validates every handle   │
                                                          └──────────────────────────┘
@@ -23,7 +23,7 @@
 | Component | Trusted | Role |
 |---|---|---|
 | `.kio` source | No | Business logic. Capabilities are opaque values that can be passed and called, never created. |
-| Checker | Yes, but runs in the sandbox | Accepts or rejects the program against the prelude. Emits the authority report. Generates no code. |
+| Checker | Yes, but runs in the sandbox | Accepts or rejects the program against the capability table. Emits the authority report. Generates no code. |
 | Interpreter | Yes, but runs in the sandbox | Evaluates the checked program. Rust, compiled to `wasm32`. |
 | `caps.wit` | Yes | Declares every function that crosses the sandbox wall. Changing it is a security-review event. |
 | Wasmtime | Yes | In-process sandbox. No ambient file, network, env or clock. Fuel, memory and epoch limits. |
@@ -42,12 +42,12 @@ Everything runs in one OS process, the `kio` binary. Wasmtime is a library insid
 | File | Written by | Read by | When |
 |---|---|---|---|
 | `caps.wit` | you, by hand, rarely | build step | at build |
-| `prelude.kio` | generated from `caps.wit` | checker, inside the guest | embedded at build |
+| capability table (Rust) | generated from `caps.wit` by a `guest` build script | checker, inside the guest | at build |
 | guest and host Rust bindings | generated from `caps.wit` by wit-bindgen | rustc | at build |
 | `prog.kio` | the agent | checker, then interpreter | every run |
 | grants (`--dir name=path`) | the operator | host | every run |
 
-Adding a method to `caps.wit` regenerates the prelude, the guest import stub and the host trait. The host no longer compiles until the method is implemented. The three cannot drift.
+Adding a method to `caps.wit` regenerates the capability table, the guest import stub and the host trait. The host no longer compiles until the method is implemented. The three cannot drift.
 
 `caps.wit` is one file for the whole toolchain. It says what a `Dir` *can* do. A grant says which directory *this run* gets. The program says which roles it *needs*. Three layers, three owners.
 
@@ -62,7 +62,7 @@ kio run prog.kio --dir input=/srv/jobs/42/in --dir out=/srv/jobs/42/out
 | 1 | Host opens each granted directory with cap-std and builds the handle table `{0: input, 1: out}` | host, native |
 | 2 | Host instantiates the guest with fuel, memory and epoch limits, and binds the WIT imports to its host functions | Wasmtime |
 | 3 | Host calls `run(source, [0, 1])` | wall crossed, into the guest |
-| 4 | Guest parses and checks against the embedded prelude. On reject it returns the errors. No I/O has happened. | guest |
+| 4 | Guest parses and checks against the embedded capability table. On reject it returns the errors. No I/O has happened. | guest |
 | 5 | Guest checks that `main`'s cap parameters match the grants by name and kind | guest |
 | 6 | Interpreter starts `main` with `Cap(Dir, 0)` and `Cap(Dir, 1)` | guest |
 | 7 | On `input.read("invoices.csv")` the interpreter calls the import `dir.read(0, "invoices.csv")` | wall crossed, out of the guest |

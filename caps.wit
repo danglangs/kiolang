@@ -1,5 +1,5 @@
 // The only hand-written declaration of what crosses the sandbox wall.
-// prelude.kio and the guest and host Rust bindings are generated from this file.
+// The checker's capability table and the guest and host Rust bindings are generated from this file.
 // Changing it is a security-review event.
 
 package kio:caps;

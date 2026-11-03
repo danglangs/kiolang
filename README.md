@@ -27,7 +27,7 @@ fn summarize(data: Bytes) -> Bytes {
 }
 
 fn main(input: Dir, out: Dir) -> Result<(), IoErr> {
-  let data = input.read("invoices.csv")?
+  let data = input.read("invoices.csv")?;
   out.create("summary.csv", summarize(data))
 }
 ```
@@ -84,7 +84,7 @@ Steps:
 
 1. Parser, checker and authority report natively, with accept/reject tests (G1, G2).
 2. Interpreter natively, with stub host functions.
-3. `caps.wit`, generated prelude, real host functions (G3, G4).
+3. Capability table generated from `caps.wit`, real host functions (G3, G4).
 4. Guest built for `wasm32`, running in Wasmtime with limits (G5).
 5. Adversarial suite: path escapes, disallowed hosts, redirects, forged handles, runaway loops, slow servers.
 6. MCP tool that serves the primer and runs `check`, so agents can learn and iterate.
@@ -96,6 +96,7 @@ v0 has no closures, globals, reflection or `unsafe`. Capabilities are parameters
 
 - [docs/language.md](docs/language.md): one-screen primer and the rules the checker enforces.
 - [docs/design.md](docs/design.md): components, trust boundary, one run step by step, open questions.
+- [docs/lang-todo.md](docs/lang-todo.md): decisions and milestones for the native language crate.
 - [caps.wit](caps.wit): the interface. The only hand-written source of truth for what crosses the sandbox wall.
 
 ## Related work
