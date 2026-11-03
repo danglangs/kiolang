@@ -38,13 +38,20 @@ pub fn run(p: &Program, caps: &mut dyn Caps) -> Result<Value, RunErr>;
 
 Each task covers lexing, parsing, checking and evaluating its constructs, unless it says otherwise.
 
-- [ ] **1. Lexer.** Workspace, crate, `Span { start, end }` byte offsets, `Diag { span, msg, hint }`. Tokens: identifiers, keywords, `Int` and `Str` literals with `\n \t \" \\` escapes, punctuation, `//` comments. Reject float literals, `'` and `&` with kio messages.
-  Done: token-stream tests, and error tests checking span and message.
+- [ ] **1. Lexer.** Workspace (edition 2021), crate, `.gitignore` with `target/`. In `lib.rs`: `Span { start, end }` byte offsets, `Diag { span, msg, hint: Option<String> }`. In `lex.rs`: `pub fn lex(src: &str) -> Result<Vec<Token>, Diag>`, stopping at the first error; `Token { kind, span }`.
+  - Identifiers: ASCII `[A-Za-z_][A-Za-z0-9_]*`.
+  - Keywords: `fn let mut if else while for in return match break continue true false struct enum`. Reserve every other Rust keyword so later features cannot break programs: `as async await box const crate dyn extern impl loop mod move pub ref self Self static super trait type unsafe use where yield abstract become do final macro override priv typeof unsized virtual try gen union`. Reserved words lex as `Reserved(name)`; the parser rejects them by name.
+  - `Int` literals: decimal digits fitting `i64`; larger is an error. `Str` literals: `"..."` with `\n \t \" \\`; other escapes and unterminated strings are errors.
+  - Symbols: `( ) { } [ ] , ; : :: . .. -> => = += -= + - * / % == != < <= > >= && || ! ?`.
+  - `0..n` lexes as `Int`, `..`, `Ident`. `1.5` is an error: kio has no floats.
+  - Skip whitespace and `//` comments.
+  - Errors with kio hints: `&` (no references; pass by value), `|` (no closures; use `for`), `'` (no chars or lifetimes; use `Str`), `/*` (use `//`), any other character.
+  Done: one token-stream test per bullet, and error tests checking span, message and hint.
 
-- [ ] **2. Parser core.** `fn` items, typed parameters, return type, blocks with tail expression, `let`, `let mut`, `=`, `+=`, `-=`, `if`/`else if`/`else`, `while`, `return`, literals, unary and binary operators with Rust precedence, calls, method calls, field access, indexing. Types are names with optional `<..>` arguments. Reject `impl`, `trait`, `use`, `mod`, `pub`, closures and tuples with kio messages.
+- [ ] **2. Parser core.** `fn` items, typed parameters, return type, blocks with tail expression, `let`, `let mut`, `=`, `+=`, `-=`, `if`/`else if`/`else`, `while`, `return`, literals, unary and binary operators with Rust precedence, calls, method calls, field access, indexing. Types are names with optional `<..>` arguments. Reject `impl`, `trait`, `use`, `mod`, `pub`, closures and tuples with kio messages. Nesting deeper than 256 is a `Diag`, so hostile input cannot overflow the Rust stack.
   Done: parse tests for each construct, and one rejection test per unsupported item.
 
-- [ ] **3. Checker and interpreter core.** `Int`, `Bool`, `Str`, `()`. Name resolution, operator types, call arity and types, `mut` required for assignment, every path returns the declared type. Evaluation with runtime errors for overflow and division by zero. `CapTable` and `Caps` exist but stay empty.
+- [ ] **3. Checker and interpreter core.** `Int`, `Bool`, `Str`, `()`. Name resolution, operator types, call arity and types, `mut` required for assignment, every path returns the declared type. Evaluation with runtime errors for overflow, division by zero and call depth over 10_000. `CapTable` and `Caps` exist but stay empty.
   Done: a recursive `fib` checks and runs. Rejection tests for unknown name, type mismatch, missing return, and assignment to a non-`mut` local.
 
 - [ ] **4. Structs and enums.** Declarations, struct literals (not allowed in `if`, `while` or `match` heads, as in Rust), paths such as `Status::Paid`, field access, field assignment `x.f = v` on `mut` locals, enum variants with payloads, exhaustive `match` with one-level patterns.
