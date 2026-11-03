@@ -53,8 +53,8 @@ Everything else is rejected with a message that names the kio alternative, for e
 
 ## Semantics
 
-- **Values are copied.** Assignment and argument passing never share state. Only `let mut` locals change, through `=` and the mutating methods `push`, `set`, `insert` and `remove`.
-- **Statements end in `;`**, as in Rust. A block's last expression has no `;` and is the block's value. `if`, `while`, `for` and `match` used as statements need no `;`.
+- **Values are copied.** Assignment and argument passing never share state. Only `let mut` locals change: `x = v`, `x += v`, `x -= v`, `x.f = v`, `xs[i] = v`, `m.insert(k, v)`, `xs.push(v)`, `m.remove(k)`. A function changes its caller's data only by returning a new value.
+- **Statements end in `;`**, as in Rust. A block's last expression has no `;` and is the block's value. `if`, `while`, `for` and `match` used as statements need no `;`. `if` chains with `else if`.
 - **Types are explicit where they cannot be read off the value.** `[]`, `Map::new()` and `None` need a declared or expected type: `let mut rows: List<Row> = [];`.
 - **Operators.** `+ - * / %` on `Int`, `+` on `Str`, `== !=` on scalars, `< <= > >=` on `Int`, `&& || !` on `Bool`.
 - **Runtime errors stop the run:** `Int` overflow, division by zero, an out-of-bounds index, invalid UTF-8 in `to_str`. Nothing wraps or panics silently.
@@ -67,9 +67,9 @@ Everything else is rejected with a message that names the kio alternative, for e
 | Type | Methods |
 |---|---|
 | `Int` | `to_str() -> Str` |
-| `Str` | `len() -> Int`, `split(Str) -> List<Str>`, `lines() -> List<Str>`, `trim() -> Str`, `parse_int() -> Option<Int>`, `to_bytes() -> Bytes` |
+| `Str` | `len() -> Int`, `split(Str) -> List<Str>`, `lines() -> List<Str>`, `trim() -> Str`, `contains(Str) -> Bool`, `starts_with(Str) -> Bool`, `parse_int() -> Option<Int>`, `to_bytes() -> Bytes` |
 | `Bytes` | `len() -> Int`, `to_str() -> Str` |
-| `List<T>` | `xs[i]`, `len() -> Int`, `push(T)`, `set(Int, T)` |
+| `List<T>` | `xs[i]`, `len() -> Int`, `push(T)` |
 | `Map<K, V>` | `Map::new()`, `get(K) -> Option<V>`, `insert(K, V)`, `remove(K)`, `keys() -> List<K>` |
 
 ## Capabilities

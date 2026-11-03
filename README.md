@@ -2,6 +2,8 @@
 
 A small capability-typed language for AI agents. A function can only touch the files and network named in its signature.
 
+The goal is a general-purpose systems language: near-native speed, memory safe without a garbage collector, and capability safe. v0 is a minimal start.
+
 **Status: design stage. Nothing is implemented yet.**
 
 ## Why

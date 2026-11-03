@@ -88,9 +88,20 @@ The checker is part of `lang`, and `lang` is what gets compiled to `wasm32`. Run
 
 The consequence: the host never relies on the checker's verdict for safety. The handle table and host functions enforce every guarantee on their own. The checker exists for early, readable rejection and for the authority report.
 
+## Memory model
+
+Value semantics without a garbage collector or lifetimes. Programs mean the same in every phase; only the cost changes.
+
+| Phase | Passing by value | Changing the caller's data |
+|---|---|---|
+| v0 interpreter | the value is cloned | not available: return the new value |
+| compiler | buffer shared with a reference count; copied only if the callee changes it; moved, not shared, on a variable's last use | `&mut` parameter writes in place, no copy |
+
+`&mut` follows the capability rule: parameters only, never stored, returned or put in a container, so it cannot outlive the call. One call cannot pass the same variable twice, so two `&mut` never alias. Linked structures use indexes into a `List`.
+
 ## Open questions
 
 - **Attenuation.** `dir.sub("invoices")` would let `main` hand a helper less than it has. It conflicts with "caps are parameters only" because it returns a cap. Options: allow it only in argument position, or make the host mint sub-handles. Deferred to v1.
 - **Relaxing second-class caps.** Storing caps in records would need flow analysis in the checker. Not until there is a program that needs it.
-- **Compiler.** The interpreter is the fastest path to a working v0. A compiler to Wasm would remove the interpreter from the trusted set and run faster. Later.
+- **Compiler.** The interpreter is the fastest path to a working v0. A compiler to Wasm removes the interpreter from the trusted set and runs near native: the interpreter costs roughly 30 to 100 times. Language and interfaces stay the same.
 - **Grant format.** CLI flags for v0. A manifest file once there are more than a handful of grants per run.

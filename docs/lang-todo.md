@@ -41,19 +41,19 @@ Each task covers lexing, parsing, checking and evaluating its constructs, unless
 - [ ] **1. Lexer.** Workspace, crate, `Span { start, end }` byte offsets, `Diag { span, msg, hint }`. Tokens: identifiers, keywords, `Int` and `Str` literals with `\n \t \" \\` escapes, punctuation, `//` comments. Reject float literals, `'` and `&` with kio messages.
   Done: token-stream tests, and error tests checking span and message.
 
-- [ ] **2. Parser core.** `fn` items, typed parameters, return type, blocks with tail expression, `let`, `let mut`, `=`, `if`/`else`, `while`, `return`, literals, unary and binary operators with Rust precedence, calls, method calls, field access, indexing. Types are names with optional `<..>` arguments. Reject `impl`, `trait`, `use`, `mod`, `pub`, closures and tuples with kio messages.
+- [ ] **2. Parser core.** `fn` items, typed parameters, return type, blocks with tail expression, `let`, `let mut`, `=`, `+=`, `-=`, `if`/`else if`/`else`, `while`, `return`, literals, unary and binary operators with Rust precedence, calls, method calls, field access, indexing. Types are names with optional `<..>` arguments. Reject `impl`, `trait`, `use`, `mod`, `pub`, closures and tuples with kio messages.
   Done: parse tests for each construct, and one rejection test per unsupported item.
 
 - [ ] **3. Checker and interpreter core.** `Int`, `Bool`, `Str`, `()`. Name resolution, operator types, call arity and types, `mut` required for assignment, every path returns the declared type. Evaluation with runtime errors for overflow and division by zero. `CapTable` and `Caps` exist but stay empty.
   Done: a recursive `fib` checks and runs. Rejection tests for unknown name, type mismatch, missing return, and assignment to a non-`mut` local.
 
-- [ ] **4. Structs and enums.** Declarations, struct literals (not allowed in `if`, `while` or `match` heads, as in Rust), paths such as `Status::Paid`, field access, enum variants with payloads, exhaustive `match` with one-level patterns.
+- [ ] **4. Structs and enums.** Declarations, struct literals (not allowed in `if`, `while` or `match` heads, as in Rust), paths such as `Status::Paid`, field access, field assignment `x.f = v` on `mut` locals, enum variants with payloads, exhaustive `match` with one-level patterns.
   Done: a function matching on an enum with payloads runs. Rejection tests for unknown field, missing field and non-exhaustive match.
 
 - [ ] **5. Option, Result and `?`.** `Some`, `None`, `Ok`, `Err` as built-in enums. `?` with matching error types only. `None` takes its type from the declared or expected type.
   Done: `?` propagates through two calls. `?` on a `Result` inside an `Option` function is rejected.
 
-- [ ] **6. Lists, loops, Bytes.** `List<T>`, `[a, b]`, `[]` with declared type, indexing, `for x in list`, `for i in 0..n`, `break`, `continue`, and the `Str`, `Bytes`, `Int` and `List` built-ins in language.md. Values are copied: changing a copy leaves the original unchanged.
+- [ ] **6. Lists, loops, Bytes.** `List<T>`, `[a, b]`, `[]` with declared type, indexing, index assignment `xs[i] = v` (nested: `xs[i].f = v`), `for x in list`, `for i in 0..n`, `break`, `continue`, and the `Str`, `Bytes`, `Int` and `List` built-ins in language.md. Values are copied: changing a copy leaves the original unchanged.
   Done: tests per built-in, an out-of-bounds runtime error, and a copy test.
 
 - [ ] **7. Map.** `Map<K, V>` with `Int` or `Str` keys, `Map::new()` (a path call), `get`, `insert`, `remove`, `keys` in key order. Use `BTreeMap`.
