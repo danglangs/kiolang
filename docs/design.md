@@ -90,14 +90,24 @@ The consequence: the host never relies on the checker's verdict for safety. The 
 
 ## Memory model
 
-Value semantics without a garbage collector or lifetimes. Programs mean the same in every phase; only the cost changes.
+Value semantics without a garbage collector or lifetimes. The v0 interpreter clones eagerly and is the reference: later optimizations must not change what a program observes, and the tests that pin copy behavior are what make them safe.
 
-| Phase | Passing by value | Changing the caller's data |
+| Step | Change | Observable behavior |
 |---|---|---|
-| v0 interpreter | the value is cloned | not available: return the new value |
-| compiler | buffer shared with a reference count; copied only if the callee changes it; moved, not shared, on a variable's last use | `&mut` parameter writes in place, no copy |
+| v0 | every assignment, argument and container read clones | reference |
+| copy on write | values share storage with a reference count; any write to shared storage, including `x.f = v` and `xs[i] = v`, copies it first | unchanged |
+| last-use moves | a variable's last use moves its storage instead of sharing it | unchanged |
+| `&mut` parameters | a callee changes the caller's value; shared storage is still copied first | new feature |
 
-`&mut` follows the capability rule: parameters only, never stored, returned or put in a container, so it cannot outlive the call. One call cannot pass the same variable twice, so two `&mut` never alias. Linked structures use indexes into a `List`.
+Each step lands in the interpreter before any compiler. No stored references and no shared mutable objects means no cycles, so reference counting never leaks.
+
+`&mut` rules:
+- **No escape.** Parameters only: never stored, returned or put in a container. It cannot outlive the call.
+- **No overlap.** First version: an `&mut` argument is a whole local or a forwarded `&mut` parameter, and all arguments in one call have distinct roots. Field and index arguments (`&mut xs[i]`) wait until overlap checking is defined.
+
+Linked structures use indexes into a `List`. Copies stay implicit, as in Swift's value types. Hylo's explicit-copy default is not adopted, because switching later would change existing programs.
+
+`Program` holds resolved names and types and nothing from the interpreter, so a compiler can consume it.
 
 ## Open questions
 

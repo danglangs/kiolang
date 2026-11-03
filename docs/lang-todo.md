@@ -32,7 +32,7 @@ pub fn report(p: &Program) -> String;
 pub fn run(p: &Program, caps: &mut dyn Caps) -> Result<Value, RunErr>;
 ```
 
-`Program` can only be built by `check`, so unchecked code can never run.
+`Program` can only be built by `check`, so unchecked code can never run. It holds resolved names and types and no interpreter state.
 
 ## Tasks
 
@@ -60,10 +60,10 @@ Each task covers lexing, parsing, checking and evaluating its constructs, unless
 - [ ] **5. Option, Result and `?`.** `Some`, `None`, `Ok`, `Err` as built-in enums. `?` with matching error types only. `None` takes its type from the declared or expected type.
   Done: `?` propagates through two calls. `?` on a `Result` inside an `Option` function is rejected.
 
-- [ ] **6. Lists, loops, Bytes.** `List<T>`, `[a, b]`, `[]` with declared type, indexing, index assignment `xs[i] = v` (nested: `xs[i].f = v`), `for x in list`, `for i in 0..n`, `break`, `continue`, and the `Str`, `Bytes`, `Int` and `List` built-ins in language.md. Values are copied: changing a copy leaves the original unchanged.
+- [ ] **6. Lists, loops, Bytes.** `List<T>`, `[a, b]`, `[]` with declared type, indexing, index assignment `xs[i] = v` (nested: `xs[i].f = v`), `for x in list`, `for i in 0..n`, `break`, `continue`, and the `Str`, `Bytes`, `Int` and `List` built-ins in language.md. Copy tests: after `b = a`, a change to either leaves the other unchanged, for nested lists, structs holding lists and function arguments. Changing `xs` inside `for x in xs` does not change the iteration.
   Done: tests per built-in, an out-of-bounds runtime error, and a copy test.
 
-- [ ] **7. Map.** `Map<K, V>` with `Int` or `Str` keys, `Map::new()` (a path call), `get`, `insert`, `remove`, `keys` in key order. Use `BTreeMap`.
+- [ ] **7. Map.** `Map<K, V>` with `Int` or `Str` keys, `Map::new()` (a path call), `get`, `insert`, `remove`, `keys` in key order. Use `BTreeMap`. Copy test: changing a value read with `get` leaves the map unchanged.
   Done: a word-count function runs and `keys()` returns sorted keys.
 
 - [ ] **8. Capabilities.** `CapTable`: capability types, each with methods and signatures, built by hand in tests for `Dir`, `Http`, `IoErr` and `HttpErr` as in language.md. Enforce checker rules 1 to 3. `Caps::call(&mut self, cap: &str, method: &str, args: Vec<Value>) -> Value`, where `cap` is the name of `main`'s parameter. Add an in-memory `StubDir` for tests.

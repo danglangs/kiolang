@@ -53,7 +53,7 @@ Everything else is rejected with a message that names the kio alternative, for e
 
 ## Semantics
 
-- **Values are copied.** Assignment and argument passing never share state. Only `let mut` locals change: `x = v`, `x += v`, `x -= v`, `x.f = v`, `xs[i] = v`, `m.insert(k, v)`, `xs.push(v)`, `m.remove(k)`. A function changes its caller's data only by returning a new value.
+- **Values are copied.** Assignment and argument passing never share state. Only `let mut` locals change: `x = v`, `x += v`, `x -= v`, `x.f = v`, `xs[i] = v`, `m.insert(k, v)`, `xs.push(v)`, `m.remove(k)`. A function changes its caller's data only by returning a new value. `for x in xs` iterates over `xs` as it was when the loop started.
 - **Statements end in `;`**, as in Rust. A block's last expression has no `;` and is the block's value. `if`, `while`, `for` and `match` used as statements need no `;`. `if` chains with `else if`.
 - **Types are explicit where they cannot be read off the value.** `[]`, `Map::new()` and `None` need a declared or expected type: `let mut rows: List<Row> = [];`.
 - **Operators.** `+ - * / %` on `Int`, `+` on `Str`, `== !=` on scalars, `< <= > >=` on `Int`, `&& || !` on `Bool`. `/` and `%` truncate toward zero, as in Rust.
