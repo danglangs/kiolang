@@ -8,3 +8,5 @@ Decisions taken without the owner, cheap to undo. Each: the question, what was c
 | 2 | Parser nesting limit | 64, so debug builds do not overflow | Raise the constant |
 | 3 | How `None`, `Ok`, `Err` get their type parameters | Expected-type passing from annotations, parameters, fields, returns and branches; no unification | Add inference later; it only accepts more programs |
 | 4 | Which capability uses are allowed | Only a parameter name as a method receiver or whole call argument; everything else, including `if` branches yielding a capability, is rejected | Relax later; it only accepts more programs |
+| 5 | `main` return type (rule 3) | Any type for now; the runner prints it. Spec says `()` or `Result<(), E>` | One check in `signature` once `host` defines exit status |
+| 6 | Binding a name `None`, `Some`, `Ok` or `Err` | Rejected for parameters and locals, so those names always mean the constructors | Allow shadowing later |

@@ -146,7 +146,7 @@ Order: enums and `Result` first, because capability methods return `Result<_, Io
   - The receiver is evaluated first, then the arguments left to right.
   Done: a `Str` to `Bytes` to `Str` round trip with non-ASCII text; `len` on both; unknown-method and arity rejection tests assert hints. Kio code cannot produce invalid UTF-8 yet, so that runtime test moves to task 9, where a stub `Dir` returns raw bytes.
 
-- [ ] **8. Capability types.** Checker only; no eval change.
+- [x] **8. Capability types.** Checker only; no eval change.
   - `CapTable { caps: Vec<CapType> }`, `CapType { name, methods: Vec<(String, Vec<Ty>, Ty)> }`, plus the error enums it needs, `IoErr` and `HttpErr`, declared as ordinary enums the checker adds before user types. `CapTable::default()` stays empty. A test helper builds `Dir`, `Http`, `IoErr`, `HttpErr` as in language.md. `Ty::Cap(String)`.
   - Rule 1, one rule for every escape: a capability-typed expression may appear only as a parameter name used directly as a method receiver (`d.read(p)`) or as a whole call argument (`helper(d)`). Anywhere else is an error at that expression. So these are rejected:
     ```

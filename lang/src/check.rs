@@ -4,9 +4,20 @@ use crate::{Diag, Span};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-/// The capability types a program may use. Empty until task 8.
+/// The capability types a program may use, and the error enums their methods return.
 #[derive(Debug, Default)]
-pub struct CapTable {}
+pub struct CapTable {
+    pub caps: Vec<CapType>,
+    /// Declared as ordinary enums before the user's types, such as `IoErr`.
+    pub enums: Vec<Enum>,
+}
+
+#[derive(Debug)]
+pub struct CapType {
+    pub name: String,
+    /// Method name, parameter types and return type.
+    pub methods: Vec<(String, Vec<Ty>, Ty)>,
+}
 
 /// A program that passed `check`. Only `check` builds one.
 #[derive(Debug)]
@@ -17,7 +28,7 @@ pub struct Program {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum Ty {
+pub enum Ty {
     Int,
     Bool,
     Str,
@@ -27,6 +38,8 @@ enum Ty {
     Enum(String),
     Option(Box<Ty>),
     Result(Box<Ty>, Box<Ty>),
+    /// A capability, which only a parameter can hold.
+    Cap(String),
     /// A block that always returns; it matches any type.
     Never,
 }
@@ -39,13 +52,16 @@ impl fmt::Display for Ty {
             Ty::Str => f.write_str("Str"),
             Ty::Bytes => f.write_str("Bytes"),
             Ty::Unit => f.write_str("()"),
-            Ty::Struct(name) | Ty::Enum(name) => f.write_str(name),
+            Ty::Struct(name) | Ty::Enum(name) | Ty::Cap(name) => f.write_str(name),
             Ty::Option(t) => write!(f, "Option<{t}>"),
             Ty::Result(t, e) => write!(f, "Result<{t}, {e}>"),
             Ty::Never => f.write_str("!"),
         }
     }
 }
+
+/// Hint for rule 2: no expression produces a capability.
+const NO_CAP_SYNTAX: &str = "capabilities come only as parameters of `main`";
 
 /// Resolved field names and types of each struct, in declaration order.
 type Fields = HashMap<String, Vec<(String, Ty)>>;
@@ -176,20 +192,27 @@ fn binary_ty(op: &str, l: &Ty, r: &Ty) -> Option<Ty> {
         ("+" | "-" | "*" | "/" | "%", Int, Int) => Some(Int),
         ("<" | "<=" | ">" | ">=", Int, Int) => Some(Bool),
         ("&&" | "||", Bool, Bool) => Some(Bool),
-        ("==" | "!=", a, b) if a == b && !matches!(a, Never | Struct(_) | Enum(_) | Option(_) | Result(..)) => {
+        ("==" | "!=", a, b)
+            if a == b && !matches!(a, Never | Cap(_) | Struct(_) | Enum(_) | Option(_) | Result(..)) =>
+        {
             Some(Bool)
         }
         _ => None,
     }
 }
 
-fn resolve(t: &Type, structs: &HashMap<String, Struct>, enums: &HashMap<String, Enum>) -> Result<Ty, Diag> {
+fn resolve(
+    t: &Type,
+    caps: &CapTable,
+    structs: &HashMap<String, Struct>,
+    enums: &HashMap<String, Enum>,
+) -> Result<Ty, Diag> {
     match &t.kind {
         TypeKind::Unit => Ok(Ty::Unit),
         TypeKind::Named(n, args) => match (n.as_str(), args.as_slice()) {
-            ("Option", [a]) => Ok(Ty::Option(Box::new(resolve(a, structs, enums)?))),
+            ("Option", [a]) => Ok(Ty::Option(Box::new(resolve(a, caps, structs, enums)?))),
             ("Result", [a, b]) => {
-                let (a, b) = (resolve(a, structs, enums)?, resolve(b, structs, enums)?);
+                let (a, b) = (resolve(a, caps, structs, enums)?, resolve(b, caps, structs, enums)?);
                 Ok(Ty::Result(Box::new(a), Box::new(b)))
             }
             ("Option" | "Result", _) => {
@@ -207,6 +230,7 @@ fn resolve(t: &Type, structs: &HashMap<String, Struct>, enums: &HashMap<String, 
             ("Bytes", []) => Ok(Ty::Bytes),
             (_, []) if structs.contains_key(n) => Ok(Ty::Struct(n.clone())),
             (_, []) if enums.contains_key(n) => Ok(Ty::Enum(n.clone())),
+            (_, []) if caps.caps.iter().any(|c| c.name == *n) => Ok(Ty::Cap(n.clone())),
             _ => Err(unknown_type(t)),
         },
     }
@@ -220,9 +244,50 @@ fn unknown_type(t: &Type) -> Diag {
     )
 }
 
+/// Where a type is written, for the type-level half of rule 1.
+enum Place<'a> {
+    Param,
+    Field,
+    Payload,
+    Local,
+    /// The function whose return type it is.
+    Return(&'a str),
+}
+
+/// The first capability named inside `ty`.
+fn cap_in(ty: &Ty) -> Option<&str> {
+    match ty {
+        Ty::Cap(c) => Some(c),
+        Ty::Option(t) => cap_in(t),
+        Ty::Result(t, e) => cap_in(t).or_else(|| cap_in(e)),
+        _ => None,
+    }
+}
+
+/// Rule 1 for types: a capability type is allowed only as the whole type of a parameter.
+fn cap_type_ok(ty: &Ty, span: Span, place: Place) -> Result<(), Diag> {
+    let Some(cap) = cap_in(ty) else { return Ok(()) };
+    let hint = "capabilities are parameters only".to_string();
+    let nested = (
+        format!("capability nested in `{ty}`"),
+        format!("take `{cap}` as a parameter"),
+    );
+    let (msg, hint) = match place {
+        Place::Param if matches!(ty, Ty::Cap(_)) => return Ok(()),
+        Place::Param => nested,
+        Place::Local if !matches!(ty, Ty::Cap(_)) => nested,
+        Place::Field => ("capability type in a field".to_string(), hint),
+        Place::Payload => ("capability type in a payload".to_string(), hint),
+        Place::Local => ("capability type in a local".to_string(), hint),
+        Place::Return(f) => (format!("cannot return `{ty}` from `{f}`"), hint),
+    };
+    Err(err(span, msg, Some(&hint)))
+}
+
 fn signature(
     f: &Fn,
     sigs: &HashMap<String, Sig>,
+    caps: &CapTable,
     structs: &HashMap<String, Struct>,
     enums: &HashMap<String, Enum>,
 ) -> Result<Sig, Diag> {
@@ -230,17 +295,21 @@ fn signature(
         let msg = format!("duplicate function `{}`", f.name);
         return Err(err(f.span, msg, Some("rename one of them")));
     }
-    if f.name == "main" && !f.params.is_empty() {
-        let hint = "capabilities come later; remove the parameters";
-        return Err(err(f.span, "`main` takes no parameters yet".to_string(), Some(hint)));
-    }
     let mut params = Vec::new();
     for (i, p) in f.params.iter().enumerate() {
+        not_builtin(&p.name, p.span)?;
         if f.params[..i].iter().any(|q| q.name == p.name) {
             let msg = format!("duplicate parameter `{}`", p.name);
             return Err(err(p.span, msg, Some("rename one of them")));
         }
-        params.push(resolve(&p.ty, structs, enums)?);
+        let ty = resolve(&p.ty, caps, structs, enums)?;
+        cap_type_ok(&ty, p.ty.span, Place::Param)?;
+        if f.name == "main" && !matches!(ty, Ty::Cap(_)) {
+            let msg = format!("`main` parameter `{}` is not a capability", p.name);
+            let hint = "`main` parameters must be capabilities, like `input: Dir`";
+            return Err(err(p.span, msg, Some(hint)));
+        }
+        params.push(ty);
     }
     let typed: Vec<_> = f
         .params
@@ -248,15 +317,18 @@ fn signature(
         .zip(&params)
         .map(|(p, ty)| format!("{}: {ty}", p.name))
         .collect();
+    let ret = resolve(&f.ret, caps, structs, enums)?;
+    cap_type_ok(&ret, f.ret.span, Place::Return(&f.name))?;
     Ok(Sig {
         decl: format!("fn {}({})", f.name, typed.join(", ")),
         params,
-        ret: resolve(&f.ret, structs, enums)?,
+        ret,
     })
 }
 
 fn struct_fields(
     s: &Struct,
+    caps: &CapTable,
     structs: &HashMap<String, Struct>,
     enums: &HashMap<String, Enum>,
 ) -> Result<Vec<(String, Ty)>, Diag> {
@@ -266,13 +338,16 @@ fn struct_fields(
             let msg = format!("duplicate field `{}`", p.name);
             return Err(err(p.span, msg, Some("rename one of them")));
         }
-        fields.push((p.name.clone(), resolve(&p.ty, structs, enums)?));
+        let ty = resolve(&p.ty, caps, structs, enums)?;
+        cap_type_ok(&ty, p.ty.span, Place::Field)?;
+        fields.push((p.name.clone(), ty));
     }
     Ok(fields)
 }
 
 fn enum_variants(
     e: &Enum,
+    caps: &CapTable,
     structs: &HashMap<String, Struct>,
     enums: &HashMap<String, Enum>,
 ) -> Result<Vec<(String, Vec<Ty>)>, Diag> {
@@ -282,8 +357,13 @@ fn enum_variants(
             let msg = format!("duplicate variant `{}`", v.name);
             return Err(err(v.span, msg, Some("rename one of them")));
         }
-        let payload = v.fields.iter().map(|t| resolve(t, structs, enums));
-        variants.push((v.name.clone(), payload.collect::<Result<_, _>>()?));
+        let mut payload = Vec::new();
+        for t in &v.fields {
+            let ty = resolve(t, caps, structs, enums)?;
+            cap_type_ok(&ty, t.span, Place::Payload)?;
+            payload.push(ty);
+        }
+        variants.push((v.name.clone(), payload));
     }
     Ok(variants)
 }
@@ -292,6 +372,18 @@ fn enum_variants(
 fn variant<'a>(variants: &'a [(String, Vec<Ty>)], v: &str) -> Option<(usize, &'a [Ty])> {
     let i = variants.iter().position(|(name, _)| name == v)?;
     Some((i, &variants[i].1))
+}
+
+/// `None`, `Some`, `Ok` and `Err` always mean the constructors, so no binding may take those names.
+fn not_builtin(name: &str, span: Span) -> Result<(), Diag> {
+    match builtin(name) {
+        Some(_) => Err(err(
+            span,
+            format!("`{name}` is a built-in constructor"),
+            Some("choose another name"),
+        )),
+        None => Ok(()),
+    }
 }
 
 /// The enum and variant index of the built-in constructors `None`, `Some`, `Ok` and `Err`.
@@ -305,9 +397,13 @@ pub(crate) fn builtin(name: &str) -> Option<(&'static str, usize)> {
     }
 }
 
-/// The parameter and return types of the built-in method `name` on `recv`.
-fn method(recv: &Ty, name: &str) -> Option<(Vec<Ty>, Ty)> {
+/// The parameter and return types of method `name` on `recv`: a capability's from `caps`, else built in.
+fn method(caps: &CapTable, recv: &Ty, name: &str) -> Option<(Vec<Ty>, Ty)> {
     match (recv, name) {
+        (Ty::Cap(c), _) => {
+            let (_, params, ret) = cap_methods(caps, c).iter().find(|m| m.0 == name)?;
+            Some((params.clone(), ret.clone()))
+        }
         (Ty::Int, "to_str") | (Ty::Bytes, "to_str") => Some((vec![], Ty::Str)),
         (Ty::Str, "len") | (Ty::Bytes, "len") => Some((vec![], Ty::Int)),
         (Ty::Str, "to_bytes") => Some((vec![], Ty::Bytes)),
@@ -318,8 +414,19 @@ fn method(recv: &Ty, name: &str) -> Option<(Vec<Ty>, Ty)> {
 /// Every built-in method name, so hints can list the ones `method` accepts on a type.
 const METHODS: &[&str] = &["len", "to_bytes", "to_str"];
 
-fn method_names(recv: &Ty) -> Vec<&'static str> {
-    METHODS.iter().copied().filter(|n| method(recv, n).is_some()).collect()
+fn cap_methods<'a>(caps: &'a CapTable, name: &str) -> &'a [(String, Vec<Ty>, Ty)] {
+    caps.caps.iter().find(|c| c.name == name).map_or(&[], |c| &c.methods)
+}
+
+fn method_names<'a>(caps: &'a CapTable, recv: &Ty) -> Vec<&'a str> {
+    if let Ty::Cap(c) = recv {
+        return cap_methods(caps, c).iter().map(|m| m.0.as_str()).collect();
+    }
+    METHODS
+        .iter()
+        .copied()
+        .filter(|n| method(caps, recv, n).is_some())
+        .collect()
 }
 
 /// The user types named inside `ty`.
@@ -358,20 +465,29 @@ fn no_field(span: Span, field: &str, ty: &str, decl: &[(String, Ty)]) -> Diag {
 }
 
 /// Checks `src`. Reports at most one `Diag` per function, in source order.
-pub fn check(src: &str, _caps: &CapTable) -> Result<Program, Vec<Diag>> {
+pub fn check(src: &str, caps: &CapTable) -> Result<Program, Vec<Diag>> {
     let items = parse(src).map_err(|d| vec![d])?;
     let mut fns = Vec::new();
     let mut structs = HashMap::new();
     let mut enums = HashMap::new();
     let mut order = Vec::new();
     let mut diags = Vec::new();
+    for e in &caps.enums {
+        order.push(e.name.clone());
+        enums.insert(e.name.clone(), e.clone());
+    }
+    let reserved = |n: &str| {
+        matches!(n, "Option" | "Result")
+            || caps.enums.iter().any(|e| e.name == n)
+            || caps.caps.iter().any(|c| c.name == n)
+    };
     for item in items {
         let declared = match &item {
             Item::Struct(s) => Some((s.name.as_str(), s.span)),
             Item::Enum(e) => Some((e.name.as_str(), e.span)),
             Item::Fn(_) => None,
         };
-        if let Some((name @ ("Option" | "Result"), span)) = declared {
+        if let Some((name, span)) = declared.filter(|(n, _)| reserved(n)) {
             let msg = format!("`{name}` is a built-in type");
             diags.push(err(span, msg, Some("rename your type")));
             continue;
@@ -408,8 +524,8 @@ pub fn check(src: &str, _caps: &CapTable) -> Result<Program, Vec<Diag>> {
     let mut variants = Variants::new();
     for name in &order {
         let resolved = match structs.get(name) {
-            Some(s) => struct_fields(s, &structs, &enums).map(|f| drop(fields.insert(name.clone(), f))),
-            None => enum_variants(&enums[name], &structs, &enums).map(|v| drop(variants.insert(name.clone(), v))),
+            Some(s) => struct_fields(s, caps, &structs, &enums).map(|f| drop(fields.insert(name.clone(), f))),
+            None => enum_variants(&enums[name], caps, &structs, &enums).map(|v| drop(variants.insert(name.clone(), v))),
         };
         diags.extend(resolved.err());
     }
@@ -431,7 +547,7 @@ pub fn check(src: &str, _caps: &CapTable) -> Result<Program, Vec<Diag>> {
     let mut sigs = HashMap::new();
     let mut sig_errs = Vec::new();
     for f in &fns {
-        match signature(f, &sigs, &structs, &enums) {
+        match signature(f, &sigs, caps, &structs, &enums) {
             Ok(sig) => {
                 sigs.insert(f.name.clone(), sig);
                 sig_errs.push(None);
@@ -442,6 +558,7 @@ pub fn check(src: &str, _caps: &CapTable) -> Result<Program, Vec<Diag>> {
 
     for (f, sig_err) in fns.iter().zip(sig_errs) {
         let mut c = Checker {
+            caps,
             sigs: &sigs,
             fields: &fields,
             variants: &variants,
@@ -468,6 +585,7 @@ pub fn check(src: &str, _caps: &CapTable) -> Result<Program, Vec<Diag>> {
 }
 
 struct Checker<'a> {
+    caps: &'a CapTable,
     sigs: &'a HashMap<String, Sig>,
     fields: &'a Fields,
     variants: &'a Variants,
@@ -514,14 +632,20 @@ impl Checker<'_> {
         let mut names: Vec<_> = self.scopes.iter().flat_map(|s| s.keys().map(String::as_str)).collect();
         names.sort();
         let hint = match closest(name, &names) {
+            _ if self.is_cap(name) => NO_CAP_SYNTAX.to_string(),
             Some(c) => format!("did you mean `{c}`?"),
             None => "declare it with `let`".to_string(),
         };
         err(span, format!("unknown name `{name}`"), Some(&hint))
     }
 
+    fn is_cap(&self, name: &str) -> bool {
+        self.caps.caps.iter().any(|c| c.name == name)
+    }
+
     fn unknown_variant(&self, span: Span, en: &str, v: &str) -> Diag {
         let hint = match (en, self.variants.get(en)) {
+            _ if self.is_cap(en) => NO_CAP_SYNTAX.to_string(),
             ("Option", _) => suggest(v, &["None", "Some"], "variants"),
             ("Result", _) => suggest(v, &["Ok", "Err"], "variants"),
             (_, Some(vs)) => suggest(v, &vs.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), "variants"),
@@ -557,8 +681,18 @@ impl Checker<'_> {
                 ty,
                 init,
             } => {
-                let declared = ty.as_ref().map(|t| resolve(t, self.structs, self.enums));
+                not_builtin(name, s.span)?;
+                let declared = ty.as_ref().map(|t| resolve(t, self.caps, self.structs, self.enums));
                 let declared = declared.transpose()?;
+                if let ExprKind::Name(from) = &init.kind {
+                    if let Some(Local { ty: Ty::Cap(_), .. }) = self.lookup(from) {
+                        let msg = format!("capability `{from}` bound to local `{name}`");
+                        return Err(err(init.span, msg, Some(&format!("pass `{from}` directly instead"))));
+                    }
+                }
+                if let (Some(d), Some(t)) = (&declared, ty) {
+                    cap_type_ok(d, t.span, Place::Local)?;
+                }
                 let mut found = self.expr(init, declared.as_ref())?;
                 if let Some(declared) = declared {
                     want_expr(init, &found, &declared)?;
@@ -612,6 +746,10 @@ impl Checker<'_> {
             ExprKind::Unit => Ok(Ty::Unit),
             ExprKind::Name(name) if builtin(name).is_some() => self.constructor(e, name, &[], expected),
             ExprKind::Name(name) => match self.lookup(name) {
+                Some(Local { ty: Ty::Cap(_), .. }) => {
+                    let hint = "call methods on the parameter itself";
+                    Err(err(e.span, "capability used as a value".to_string(), Some(hint)))
+                }
                 Some(local) => Ok(local.ty.clone()),
                 None => Err(self.unknown_name(e.span, name)),
             },
@@ -662,10 +800,25 @@ impl Checker<'_> {
         }
     }
 
+    /// Like `expr`, but a capability parameter is allowed: the one place rule 1 lets it appear.
+    fn operand(&mut self, e: &Expr, expected: Option<&Ty>) -> Result<Ty, Diag> {
+        if let ExprKind::Name(name) = &e.kind {
+            if builtin(name).is_none() {
+                if let Some(Local {
+                    ty: ty @ Ty::Cap(_), ..
+                }) = self.lookup(name)
+                {
+                    return Ok(ty.clone());
+                }
+            }
+        }
+        self.expr(e, expected)
+    }
+
     fn method_call(&mut self, e: &Expr, recv: &Expr, name: &str, args: &[Expr]) -> Result<Ty, Diag> {
-        let recv_ty = self.expr(recv, None)?;
-        let Some((params, ret)) = method(&recv_ty, name) else {
-            let names = method_names(&recv_ty);
+        let recv_ty = self.operand(recv, None)?;
+        let Some((params, ret)) = method(self.caps, &recv_ty, name) else {
+            let names = method_names(self.caps, &recv_ty);
             let hint = if names.is_empty() {
                 format!("{recv_ty} has no methods")
             } else {
@@ -902,7 +1055,10 @@ impl Checker<'_> {
     fn struct_lit(&mut self, e: &Expr, name: &str, inits: &[(String, Expr)]) -> Result<Ty, Diag> {
         let fields = self.fields;
         let Some(decl) = fields.get(name) else {
-            let hint = suggest(name, &sorted_keys(self.structs), "structs");
+            let hint = match self.is_cap(name) {
+                true => NO_CAP_SYNTAX.to_string(),
+                false => suggest(name, &sorted_keys(self.structs), "structs"),
+            };
             return Err(err(e.span, format!("unknown struct `{name}`"), Some(&hint)));
         };
         let mut seen = Vec::new();
@@ -973,7 +1129,7 @@ impl Checker<'_> {
             return Err(err(e.span, msg, Some(&hint)));
         }
         for (a, param) in args.iter().zip(&sig.params) {
-            want_expr(a, &self.expr(a, Some(param))?, param)?;
+            want_expr(a, &self.operand(a, Some(param))?, param)?;
         }
         Ok(sig.ret.clone())
     }

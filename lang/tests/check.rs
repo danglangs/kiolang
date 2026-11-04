@@ -1,5 +1,6 @@
-use lang::check::closest;
-use lang::{check, CapTable};
+use lang::ast::{Enum, Type, TypeKind, Variant};
+use lang::check::{closest, CapType, Ty};
+use lang::{check, CapTable, Span};
 
 /// Checks `src` and returns the single diagnostic's text and the source it points at.
 fn reject(src: &str) -> (String, String) {
@@ -502,7 +503,7 @@ fn hints_for_declarations_and_match() {
     assert_eq!(hint("fn f() {}"), "add `fn main() { .. }`");
     assert_eq!(
         hint("fn main(a: Int) {}"),
-        "capabilities come later; remove the parameters"
+        "`main` parameters must be capabilities, like `input: Dir`"
     );
     let q = "struct P { a: Int, b: Int } ";
     assert_eq!(hint(&format!("{q}fn main() {{ P {{ a: 1 }}; }}")), "add `b: ..`");
@@ -667,4 +668,303 @@ fn methods() {
         hint("fn main() { let b = \"a\".to_bytes(); match b { _ => {} } }"),
         "match works on Int, Bool, Str and enums"
     );
+}
+
+// Capabilities (task 8).
+
+fn caps() -> CapTable {
+    let at = Span { start: 0, end: 0 };
+    let err_enum = |name: &str, vs: &[(&str, bool)]| Enum {
+        name: name.to_string(),
+        variants: vs
+            .iter()
+            .map(|(v, payload)| Variant {
+                name: v.to_string(),
+                fields: if *payload {
+                    vec![Type {
+                        kind: TypeKind::Named("Int".to_string(), vec![]),
+                        span: at,
+                    }]
+                } else {
+                    vec![]
+                },
+                span: at,
+            })
+            .collect(),
+        span: at,
+    };
+    let result = |e: &str| Ty::Result(Box::new(Ty::Bytes), Box::new(Ty::Enum(e.to_string())));
+    let method = |name: &str, params, ret| (name.to_string(), params, ret);
+    CapTable {
+        caps: vec![
+            CapType {
+                name: "Dir".to_string(),
+                methods: vec![
+                    method("read", vec![Ty::Str], result("IoErr")),
+                    method(
+                        "create",
+                        vec![Ty::Str, Ty::Bytes],
+                        Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("IoErr".to_string()))),
+                    ),
+                ],
+            },
+            CapType {
+                name: "Http".to_string(),
+                methods: vec![method("get", vec![Ty::Str], result("HttpErr"))],
+            },
+        ],
+        enums: vec![
+            err_enum(
+                "IoErr",
+                &[
+                    ("NotFound", false),
+                    ("Denied", false),
+                    ("TooLarge", false),
+                    ("InvalidPath", false),
+                ],
+            ),
+            err_enum(
+                "HttpErr",
+                &[
+                    ("Denied", false),
+                    ("Timeout", false),
+                    ("TooLarge", false),
+                    ("Status", true),
+                ],
+            ),
+        ],
+    }
+}
+
+/// Rejects `src` with the capability table and returns message, hint and the source it points at.
+fn reject_cap(src: &str) -> (String, String, String) {
+    let diags = check(src, &caps()).expect_err("should be rejected");
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    let d = &diags[0];
+    (
+        d.msg.clone(),
+        d.hint.clone().unwrap_or_default(),
+        src[d.span.start..d.span.end].to_string(),
+    )
+}
+
+fn assert_rejected(src: &str, msg: &str, hint: &str, at: &str) {
+    assert_eq!(
+        reject_cap(src),
+        (msg.to_string(), hint.to_string(), at.to_string()),
+        "{src}"
+    );
+}
+
+const ONLY_PARAMS: &str = "capabilities are parameters only";
+const AS_VALUE: &str = "call methods on the parameter itself";
+
+#[test]
+fn accepts_capabilities_passed_to_helpers() {
+    let src = "fn load(d: Dir, name: Str) -> Result<Bytes, IoErr> { d.read(name) }
+        fn save(d: Dir, b: Bytes) -> Result<(), IoErr> { d.create(\"o\", b) }
+        fn main(input: Dir, out: Dir) -> Result<(), IoErr> {
+            let data = load(input, \"in\")?;
+            save(out, data)
+        }";
+    check(src, &caps()).unwrap_or_else(|d| panic!("{d:?}"));
+    let src = "fn leaf(d: Dir) -> Result<Bytes, IoErr> { d.read(\"x\") }
+        fn mid(d: Dir) -> Result<Bytes, IoErr> { leaf(d) }
+        fn main(input: Dir, net: Http) -> Result<(), HttpErr> {
+            let a = mid(input);
+            net.get(\"u\")?;
+            Ok(())
+        }";
+    check(src, &caps()).unwrap_or_else(|d| panic!("{d:?}"));
+}
+
+#[test]
+fn rule1_local() {
+    assert_rejected(
+        "fn main(input: Dir) { let d = input; }",
+        "capability `input` bound to local `d`",
+        "pass `input` directly instead",
+        "input",
+    );
+}
+
+#[test]
+fn rule1_field_and_payload() {
+    assert_rejected(
+        "struct Job { dir: Dir } fn main() {}",
+        "capability type in a field",
+        ONLY_PARAMS,
+        "Dir",
+    );
+    assert_rejected(
+        "enum E { A(Dir) } fn main() {}",
+        "capability type in a payload",
+        ONLY_PARAMS,
+        "Dir",
+    );
+}
+
+#[test]
+fn rule1_return() {
+    assert_rejected(
+        "fn pick(a: Dir) -> Dir { a } fn main() {}",
+        "cannot return `Dir` from `pick`",
+        ONLY_PARAMS,
+        "Dir",
+    );
+}
+
+#[test]
+fn rule1_nested_type() {
+    assert_rejected(
+        "fn f(x: Option<Dir>) {} fn main() {}",
+        "capability nested in `Option<Dir>`",
+        "take `Dir` as a parameter",
+        "Option<Dir>",
+    );
+}
+
+#[test]
+fn rule1_expression() {
+    let value = "capability used as a value";
+    assert_rejected(
+        "fn main(a: Dir, b: Dir) { (if true { a } else { b }).read(\"x\"); }",
+        value,
+        AS_VALUE,
+        "a",
+    );
+    assert_rejected("fn main(d: Dir) { Some(d); }", value, AS_VALUE, "d");
+    assert_rejected("fn main(d: Dir) { let x = Some(d); }", value, AS_VALUE, "d");
+    assert_rejected("fn main(d: Dir, e: Dir) -> Bool { d == e }", value, AS_VALUE, "d");
+}
+
+#[test]
+fn rule1_adversarial() {
+    let value = "capability used as a value";
+    // Struct literal field, match arm, block tail, `?`, return, statement, scrutinee, method argument.
+    for body in [
+        "let j = Job { n: d };",
+        "let x = match 1 { _ => d };",
+        "let x = { d };",
+        "let x = d?;",
+        "return d;",
+        "d;",
+        "match d { _ => {} }",
+        "d.create(\"p\", d);",
+        "let x = -d;",
+        "if d { }",
+        "let x: Dir = d;",
+    ] {
+        let src = format!("struct Job {{ n: Int }} fn main(d: Dir) {{ {body} }}");
+        let (msg, hint, _) = reject_cap(&src);
+        let local = msg.starts_with("capability `d` bound");
+        assert!(
+            local || msg == value || msg.starts_with("cannot return"),
+            "{src}: {msg} / {hint}"
+        );
+    }
+    // A local cannot be declared with a capability type, even from a non-capability expression.
+    assert_rejected(
+        "fn main() { let x: Option<Dir> = None; }",
+        "capability nested in `Option<Dir>`",
+        "take `Dir` as a parameter",
+        "Option<Dir>",
+    );
+    assert_rejected(
+        "fn main() { let x: Dir = 1; }",
+        "capability type in a local",
+        ONLY_PARAMS,
+        "Dir",
+    );
+    // A capability parameter is never `mut`.
+    reject_cap("fn f(d: Dir, e: Dir) { d = e; } fn main() {}");
+    // Passing a capability to the wrong parameter type.
+    assert_rejected(
+        "fn f(h: Http) {} fn main(d: Dir) { f(d); }",
+        "expected Http, found Dir",
+        "",
+        "d",
+    );
+}
+
+#[test]
+fn rule2_no_construction() {
+    let hint = "capabilities come only as parameters of `main`";
+    assert_rejected("fn main() { let d = Dir; }", "unknown name `Dir`", hint, "Dir");
+    assert_rejected(
+        "fn main() { let d = Dir::new(); }",
+        "unknown variant `Dir::new`",
+        hint,
+        "Dir::new()",
+    );
+    assert_rejected("fn main() { let d = Dir {}; }", "unknown struct `Dir`", hint, "Dir {}");
+}
+
+#[test]
+fn rule3_main_parameters() {
+    assert_rejected(
+        "fn main(n: Int) {}",
+        "`main` parameter `n` is not a capability",
+        "`main` parameters must be capabilities, like `input: Dir`",
+        "n: Int",
+    );
+    assert_rejected(
+        "fn main(o: Option<Dir>) {}",
+        "capability nested in `Option<Dir>`",
+        "take `Dir` as a parameter",
+        "Option<Dir>",
+    );
+    check("fn main(a: Dir, b: Http) {}", &caps()).unwrap_or_else(|d| panic!("{d:?}"));
+}
+
+#[test]
+fn capability_methods_are_typed() {
+    let (msg, hint, _) = reject_cap("fn main(d: Dir) { d.delete(\"x\"); }");
+    assert_eq!(
+        (msg.as_str(), hint.as_str()),
+        ("no method `delete` on Dir", "Dir has: read, create")
+    );
+    let (msg, hint, _) = reject_cap("fn main(d: Dir) { d.read(); }");
+    assert_eq!(msg, "`read` takes 1 arguments, found 0");
+    assert_eq!(hint, "`Dir.read` is declared as `read(Str) -> Result<Bytes, IoErr>`");
+    assert_rejected("fn main(d: Dir) { d.read(1); }", "expected Str, found Int", "", "1");
+}
+
+#[test]
+fn builtin_error_enums_are_reserved_and_usable() {
+    let (msg, hint, _) = reject_cap("enum IoErr { A } fn main() {}");
+    assert_eq!(
+        (msg.as_str(), hint.as_str()),
+        ("`IoErr` is a built-in type", "rename your type")
+    );
+    reject_cap("struct Dir {} fn main() {}");
+    let src = "fn main(d: Dir) { match d.read(\"x\") { Ok(b) => {}, Err(e) => {} } }";
+    check(src, &caps()).unwrap_or_else(|d| panic!("{d:?}"));
+}
+
+#[test]
+fn builtin_constructor_names_cannot_be_bound() {
+    let (msg, _) = reject("fn f(Some: Int) {} fn main() {}");
+    assert_eq!(msg, "`Some` is a built-in constructor");
+    assert_eq!(hint("fn main() { let None = 1; }"), "choose another name");
+}
+
+#[test]
+fn capabilities_cannot_hide_in_payloads() {
+    for src in [
+        "enum E { A(Int) } fn f(d: Dir) { let x = E::A(d); } fn main() {}",
+        "fn f(d: Dir) -> Result<Int, Int> { Ok(d) } fn main() {}",
+        "fn f(d: Dir) -> Result<Int, Int> { Err(d) } fn main() {}",
+    ] {
+        let (msg, hint, at) = reject_cap(src);
+        assert_eq!(
+            (msg.as_str(), hint.as_str(), at.as_str()),
+            (
+                "capability used as a value",
+                "call methods on the parameter itself",
+                "d"
+            ),
+            "{src}"
+        );
+    }
 }
