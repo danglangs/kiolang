@@ -14,6 +14,7 @@ pub enum Value {
     Int(i64),
     Bool(bool),
     Str(String),
+    Bytes(Vec<u8>),
     Unit,
     /// The struct's name and its field values in declaration order.
     Struct(String, Vec<Value>),
@@ -199,8 +200,24 @@ impl Interp<'_> {
             ExprKind::Path(en, v) => Ok(self.variant(en, v, Vec::new())),
             ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms),
             ExprKind::Try(x) => self.try_expr(x),
-            ExprKind::Method(..) | ExprKind::Index(..) => unreachable!("rejected by check"),
+            ExprKind::Method(recv, name, _) => self.method(recv, name, e.span),
+            ExprKind::Index(..) => unreachable!("rejected by check"),
         }
+    }
+
+    /// Every built-in method takes no arguments, so only the receiver is evaluated.
+    fn method(&mut self, recv: &Expr, name: &str, span: Span) -> Res {
+        Ok(match (self.expr(recv)?, name) {
+            (Value::Int(n), "to_str") => Value::Str(n.to_string()),
+            (Value::Str(s), "len") => Value::Int(s.len() as i64),
+            (Value::Str(s), "to_bytes") => Value::Bytes(s.into_bytes()),
+            (Value::Bytes(b), "len") => Value::Int(b.len() as i64),
+            (Value::Bytes(b), "to_str") => match String::from_utf8(b) {
+                Ok(s) => Value::Str(s),
+                Err(_) => return Err(fail(span, "invalid UTF-8")),
+            },
+            _ => unreachable!("checked method"),
+        })
     }
 
     fn field(&mut self, base: &Expr, field: &str) -> Res {

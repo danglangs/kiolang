@@ -488,7 +488,7 @@ fn hints_for_calls_and_operators() {
     assert_eq!(hint("fn main() -> Bool { 1 && 2 }"), "`&&` works on two Bool");
     assert_eq!(
         hint("fn main() -> Bool { 1 == true }"),
-        "`==` works on two Int, two Bool or two Str"
+        "`==` works on two Int, two Bool, two Str or two Bytes"
     );
     assert_eq!(
         hint("fn main() { let mut x = true; x += 1; }"),
@@ -645,5 +645,26 @@ fn constructor_against_wrong_expected_type() {
     assert_eq!(
         hint("fn main() { let x = Ok(1); }"),
         "add a type: `let x: Result<Int, Str> = Ok(1);`"
+    );
+}
+
+#[test]
+fn methods() {
+    ok("fn main() -> Bool { 1.to_str().to_bytes().to_str().len() == 1 && \"\".to_bytes() == \"\".to_bytes() }");
+    let (msg, at) = reject("fn main() { \"a\".size(); }");
+    assert_eq!((msg.as_str(), at.as_str()), ("no method `size` on Str", "\"a\".size()"));
+    assert_eq!(hint("fn main() { \"a\".lenn(); }"), "did you mean `len`?");
+    assert_eq!(hint("fn main() { \"a\".zzzzzz(); }"), "Str has: len, to_bytes");
+    assert_eq!(hint("fn main() { 1.zzzzzz(); }"), "Int has: to_str");
+    assert_eq!(hint("fn main() { true.len(); }"), "Bool has no methods");
+    let src = "fn main() { \"a\".len(1); }";
+    assert_eq!(reject(src).0, "`len` takes 0 arguments, found 1");
+    assert_eq!(hint(src), "`Str.len` is declared as `len() -> Int`");
+    let (msg, _) = reject("fn main() -> Str { \"a\".len() }");
+    assert_eq!(msg, "expected Str, found Int");
+    reject("fn main() { let b = \"a\".to_bytes(); match b { _ => {} } }");
+    assert_eq!(
+        hint("fn main() { let b = \"a\".to_bytes(); match b { _ => {} } }"),
+        "match works on Int, Bool, Str and enums"
     );
 }

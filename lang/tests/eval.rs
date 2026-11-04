@@ -315,3 +315,21 @@ fn match_on_option_and_result() {
                fn main() -> Int { f(Some(5)) + f(None) + g(Ok(10)) + g(Err(\"e\")) }";
     assert_eq!(int(src), Value::Int(14));
 }
+
+#[test]
+fn methods() {
+    let round = "fn main() -> Str { \"h\u{e9}llo \u{4e16}\".to_bytes().to_str() }";
+    assert_eq!(int(round), Value::Str("h\u{e9}llo \u{4e16}".into()));
+    let src = "fn main() -> Int { \"h\u{e9}\".len() * 10 + \"h\u{e9}\".to_bytes().len() }";
+    assert_eq!(int(src), Value::Int(33));
+    assert_eq!(int("fn main() -> Str { (-42).to_str() }"), Value::Str("-42".into()));
+    assert_eq!(int("fn main() -> Bytes { \"a\".to_bytes() }"), Value::Bytes(vec![97]));
+    assert_eq!(
+        int("fn main() -> Bool { \"a\".to_bytes() == \"a\".to_bytes() }"),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        int("fn main() -> Bool { \"a\".to_bytes() != \"b\".to_bytes() }"),
+        Value::Bool(true)
+    );
+}

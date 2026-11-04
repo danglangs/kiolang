@@ -138,7 +138,7 @@ Order: enums and `Result` first, because capability methods return `Result<_, Io
   - `==` stays scalar-only.
   Done: `?` propagates through two calls on both types; `?` on `Result` in an `Option` function and on mismatched error types is rejected with hints; `None` without a type is rejected with its hint; `let x: Option<Int> = None;`, `return None;` and `Ok(())` in `-> Result<(), E>` are accepted; a `match` on `Option` and on `Result` runs.
 
-- [ ] **7. Methods and `Bytes`.** Checker and interpreter; no parser change.
+- [x] **7. Methods and `Bytes`.** Checker and interpreter; no parser change.
   - Built-in methods: one table in `check.rs`, `fn method(recv: &Ty, name: &str) -> Option<(Vec<Ty>, Ty)>`, giving parameter and return types. Eval dispatches on `(value, name)` in one `match`. Task 8's capability methods are typed the same way, from `CapTable`.
   - This task's methods: `Int.to_str() -> Str`, `Str.len() -> Int` (bytes), `Str.to_bytes() -> Bytes`, `Bytes.len() -> Int`, `Bytes.to_str() -> Str`. Invalid UTF-8 in `to_str` is the runtime error "invalid UTF-8".
   - `Ty::Bytes`, `Value::Bytes(Vec<u8>)`. No `Bytes` literal. `==` works on `Bytes`.

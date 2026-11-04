@@ -21,6 +21,7 @@ enum Ty {
     Int,
     Bool,
     Str,
+    Bytes,
     Unit,
     Struct(String),
     Enum(String),
@@ -36,6 +37,7 @@ impl fmt::Display for Ty {
             Ty::Int => f.write_str("Int"),
             Ty::Bool => f.write_str("Bool"),
             Ty::Str => f.write_str("Str"),
+            Ty::Bytes => f.write_str("Bytes"),
             Ty::Unit => f.write_str("()"),
             Ty::Struct(name) | Ty::Enum(name) => f.write_str(name),
             Ty::Option(t) => write!(f, "Option<{t}>"),
@@ -161,7 +163,7 @@ fn op_hint(op: &str) -> String {
         "+" => "two Int or two Str",
         "-" | "*" | "/" | "%" | "<" | "<=" | ">" | ">=" => "two Int",
         "&&" | "||" => "two Bool",
-        _ => "two Int, two Bool or two Str",
+        _ => "two Int, two Bool, two Str or two Bytes",
     };
     format!("`{op}` works on {accepts}")
 }
@@ -202,6 +204,7 @@ fn resolve(t: &Type, structs: &HashMap<String, Struct>, enums: &HashMap<String, 
             ("Int", []) => Ok(Ty::Int),
             ("Bool", []) => Ok(Ty::Bool),
             ("Str", []) => Ok(Ty::Str),
+            ("Bytes", []) => Ok(Ty::Bytes),
             (_, []) if structs.contains_key(n) => Ok(Ty::Struct(n.clone())),
             (_, []) if enums.contains_key(n) => Ok(Ty::Enum(n.clone())),
             _ => Err(unknown_type(t)),
@@ -213,7 +216,7 @@ fn unknown_type(t: &Type) -> Diag {
     err(
         t.span,
         "type is not available yet".to_string(),
-        Some("the types so far are Int, Bool, Str, (), Option, Result and your structs and enums"),
+        Some("the types so far are Int, Bool, Str, Bytes, (), Option, Result and your structs and enums"),
     )
 }
 
@@ -300,6 +303,23 @@ pub(crate) fn builtin(name: &str) -> Option<(&'static str, usize)> {
         "Err" => Some(("Result", 1)),
         _ => None,
     }
+}
+
+/// The parameter and return types of the built-in method `name` on `recv`.
+fn method(recv: &Ty, name: &str) -> Option<(Vec<Ty>, Ty)> {
+    match (recv, name) {
+        (Ty::Int, "to_str") | (Ty::Bytes, "to_str") => Some((vec![], Ty::Str)),
+        (Ty::Str, "len") | (Ty::Bytes, "len") => Some((vec![], Ty::Int)),
+        (Ty::Str, "to_bytes") => Some((vec![], Ty::Bytes)),
+        _ => None,
+    }
+}
+
+/// Every built-in method name, so hints can list the ones `method` accepts on a type.
+const METHODS: &[&str] = &["len", "to_bytes", "to_str"];
+
+fn method_names(recv: &Ty) -> Vec<&'static str> {
+    METHODS.iter().copied().filter(|n| method(recv, n).is_some()).collect()
 }
 
 /// The user types named inside `ty`.
@@ -626,14 +646,7 @@ impl Checker<'_> {
             }
             ExprKind::Block(b) => self.block(b, expected),
             ExprKind::Call(callee, args) => self.call(e, callee, args, expected),
-            ExprKind::Method(..) => {
-                let hint = "call a function instead, like `f(x)`";
-                Err(err(
-                    e.span,
-                    "method calls are not available yet".to_string(),
-                    Some(hint),
-                ))
-            }
+            ExprKind::Method(recv, name, args) => self.method_call(e, recv, name, args),
             ExprKind::Field(base, name) => {
                 let ty = self.expr(base, None)?;
                 self.field(&ty, name, e.span)
@@ -647,6 +660,32 @@ impl Checker<'_> {
             ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms, expected),
             ExprKind::Try(x) => self.try_expr(e, x),
         }
+    }
+
+    fn method_call(&mut self, e: &Expr, recv: &Expr, name: &str, args: &[Expr]) -> Result<Ty, Diag> {
+        let recv_ty = self.expr(recv, None)?;
+        let Some((params, ret)) = method(&recv_ty, name) else {
+            let names = method_names(&recv_ty);
+            let hint = if names.is_empty() {
+                format!("{recv_ty} has no methods")
+            } else {
+                suggest(name, &names, &format!("{recv_ty} has"))
+            };
+            return Err(err(e.span, format!("no method `{name}` on {recv_ty}"), Some(&hint)));
+        };
+        if args.len() != params.len() {
+            let msg = format!("`{name}` takes {} arguments, found {}", params.len(), args.len());
+            let tys: Vec<_> = params.iter().map(Ty::to_string).collect();
+            let hint = format!(
+                "`{recv_ty}.{name}` is declared as `{name}({}) -> {ret}`",
+                tys.join(", ")
+            );
+            return Err(err(e.span, msg, Some(&hint)));
+        }
+        for (a, param) in args.iter().zip(&params) {
+            want_expr(a, &self.expr(a, Some(param))?, param)?;
+        }
+        Ok(ret)
     }
 
     /// `None`, `Some(x)`, `Ok(x)` or `Err(x)`; all but `Some` take their type from `expected`.
