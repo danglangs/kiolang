@@ -1,6 +1,8 @@
-use lang::ast::{Enum, Type, TypeKind, Variant};
-use lang::check::{closest, CapType, Ty};
-use lang::{check, CapTable, Span};
+use common::caps;
+use lang::check::closest;
+use lang::{check, CapTable};
+
+mod common;
 
 /// Checks `src` and returns the single diagnostic's text and the source it points at.
 fn reject(src: &str) -> (String, String) {
@@ -671,70 +673,6 @@ fn methods() {
 }
 
 // Capabilities (task 8).
-
-fn caps() -> CapTable {
-    let at = Span { start: 0, end: 0 };
-    let err_enum = |name: &str, vs: &[(&str, bool)]| Enum {
-        name: name.to_string(),
-        variants: vs
-            .iter()
-            .map(|(v, payload)| Variant {
-                name: v.to_string(),
-                fields: if *payload {
-                    vec![Type {
-                        kind: TypeKind::Named("Int".to_string(), vec![]),
-                        span: at,
-                    }]
-                } else {
-                    vec![]
-                },
-                span: at,
-            })
-            .collect(),
-        span: at,
-    };
-    let result = |e: &str| Ty::Result(Box::new(Ty::Bytes), Box::new(Ty::Enum(e.to_string())));
-    let method = |name: &str, params, ret| (name.to_string(), params, ret);
-    CapTable {
-        caps: vec![
-            CapType {
-                name: "Dir".to_string(),
-                methods: vec![
-                    method("read", vec![Ty::Str], result("IoErr")),
-                    method(
-                        "create",
-                        vec![Ty::Str, Ty::Bytes],
-                        Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("IoErr".to_string()))),
-                    ),
-                ],
-            },
-            CapType {
-                name: "Http".to_string(),
-                methods: vec![method("get", vec![Ty::Str], result("HttpErr"))],
-            },
-        ],
-        enums: vec![
-            err_enum(
-                "IoErr",
-                &[
-                    ("NotFound", false),
-                    ("Denied", false),
-                    ("TooLarge", false),
-                    ("InvalidPath", false),
-                ],
-            ),
-            err_enum(
-                "HttpErr",
-                &[
-                    ("Denied", false),
-                    ("Timeout", false),
-                    ("TooLarge", false),
-                    ("Status", true),
-                ],
-            ),
-        ],
-    }
-}
 
 /// Rejects `src` with the capability table and returns message, hint and the source it points at.
 fn reject_cap(src: &str) -> (String, String, String) {

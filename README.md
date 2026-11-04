@@ -10,7 +10,7 @@ kio is a fresh language built around that idea, using Rust's ecosystem for speed
 
 ## Try it
 
-There is no `kio` command yet; a temporary runner checks and runs a `.kio` file. Today the language has `Int`, `Bool`, `Str`, `Bytes`, structs, enums with `match`, `Option`, `Result` and `?`, functions, `let`, `if`, `while` and recursion. Requires Rust (stable).
+There is no `kio` command yet; a temporary runner checks and runs a `.kio` file. Today the language has `Int`, `Bool`, `Str`, `Bytes`, structs, enums with `match`, `Option`, `Result` and `?`, `Dir` and `Http` capabilities, functions, `let`, `if`, `while` and recursion. Requires Rust (stable).
 
 ```
 git clone https://github.com/danglangs/kiolang && cd kiolang
@@ -49,6 +49,8 @@ a.kio:3: error: cannot assign to `x`, it is not `mut`
 b.kio:5: error: unknown name `cuont`
   hint: did you mean `count`?
 ```
+
+Capabilities type-check, but the runner grants none, so a program that takes `input: Dir` stops with `no grant for \`input: Dir\``. Granting real directories comes with the `kio` host. Until then, `cargo test -p lang --test cap` runs capability programs against an in-memory directory.
 
 Run the test suite with `cargo test`.
 

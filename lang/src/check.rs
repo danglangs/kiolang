@@ -12,6 +12,73 @@ pub struct CapTable {
     pub enums: Vec<Enum>,
 }
 
+impl CapTable {
+    /// `Dir` and `Http` and their error enums, mirroring caps.wit until a build step generates this.
+    pub fn v0() -> CapTable {
+        let at = Span { start: 0, end: 0 };
+        let err_enum = |name: &str, vs: &[(&str, bool)]| Enum {
+            name: name.to_string(),
+            variants: vs
+                .iter()
+                .map(|(v, payload)| Variant {
+                    name: v.to_string(),
+                    fields: if *payload {
+                        vec![Type {
+                            kind: TypeKind::Named("Int".to_string(), vec![]),
+                            span: at,
+                        }]
+                    } else {
+                        vec![]
+                    },
+                    span: at,
+                })
+                .collect(),
+            span: at,
+        };
+        let result = |e: &str| Ty::Result(Box::new(Ty::Bytes), Box::new(Ty::Enum(e.to_string())));
+        let method = |name: &str, params, ret| (name.to_string(), params, ret);
+        CapTable {
+            caps: vec![
+                CapType {
+                    name: "Dir".to_string(),
+                    methods: vec![
+                        method("read", vec![Ty::Str], result("IoErr")),
+                        method(
+                            "create",
+                            vec![Ty::Str, Ty::Bytes],
+                            Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("IoErr".to_string()))),
+                        ),
+                    ],
+                },
+                CapType {
+                    name: "Http".to_string(),
+                    methods: vec![method("get", vec![Ty::Str], result("HttpErr"))],
+                },
+            ],
+            enums: vec![
+                err_enum(
+                    "IoErr",
+                    &[
+                        ("NotFound", false),
+                        ("Denied", false),
+                        ("TooLarge", false),
+                        ("InvalidPath", false),
+                    ],
+                ),
+                err_enum(
+                    "HttpErr",
+                    &[
+                        ("Denied", false),
+                        ("Timeout", false),
+                        ("TooLarge", false),
+                        ("Status", true),
+                    ],
+                ),
+            ],
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct CapType {
     pub name: String,

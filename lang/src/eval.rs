@@ -6,8 +6,14 @@ use std::collections::HashMap;
 /// Bounds Rust recursion, and so stack use, for any program.
 const MAX_DEPTH: usize = 3_000;
 
-/// Host capabilities. Empty until task 9.
-pub trait Caps {}
+/// What the host grants and does for `main`'s capability parameters.
+pub trait Caps {
+    /// Whether the host granted a capability of type `ty` for parameter `name`.
+    fn has(&self, name: &str, ty: &str) -> bool;
+    /// Runs `method` on the capability granted as `cap`. `Ok` must have the method's declared
+    /// type; `Err` is a host failure that stops the run.
+    fn call(&mut self, cap: &str, method: &str, args: Vec<Value>) -> Result<Value, String>;
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
@@ -20,6 +26,8 @@ pub enum Value {
     Struct(String, Vec<Value>),
     /// The enum's name, the variant's index in declaration order and its payload.
     Enum(String, usize, Vec<Value>),
+    /// A capability, named by the `main` parameter it came from.
+    Cap(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,16 +53,30 @@ fn fail(span: Span, msg: &str) -> Box<Stop> {
 
 /// Evaluates `main`. Recursion is capped at `MAX_DEPTH` nested expressions, which needs
 /// about 6 MB of stack in debug builds and 3 MB in release. Callers provide that stack.
-pub fn run(p: &Program, _caps: &mut dyn Caps) -> Result<Value, RunErr> {
+pub fn run(p: &Program, caps: &mut dyn Caps) -> Result<Value, RunErr> {
+    let main = &p.funcs["main"];
+    let mut locals = Vec::new();
+    for param in &main.params {
+        let TypeKind::Named(ty, _) = &param.ty.kind else {
+            unreachable!("checked parameter");
+        };
+        if !caps.has(&param.name, ty) {
+            return Err(RunErr {
+                span: param.span,
+                msg: format!("no grant for `{}: {ty}`", param.name),
+            });
+        }
+        locals.push((param.name.clone(), Value::Cap(param.name.clone())));
+    }
     let mut it = Interp {
         funcs: &p.funcs,
         structs: &p.structs,
         enums: &p.enums,
-        locals: Vec::new(),
+        caps,
+        locals,
         base: 0,
         depth: 0,
     };
-    let main = &p.funcs["main"];
     match returned(it.block(&main.body)) {
         Ok(v) => Ok(v),
         Err(s) => match *s {
@@ -68,6 +90,7 @@ struct Interp<'a> {
     funcs: &'a HashMap<String, Fn>,
     structs: &'a HashMap<String, Struct>,
     enums: &'a HashMap<String, Enum>,
+    caps: &'a mut dyn Caps,
     /// Locals of all running calls, innermost last; a block truncates it on exit.
     locals: Vec<(String, Value)>,
     /// Index of the running function's first local; callers' locals below it are invisible.
@@ -200,14 +223,25 @@ impl Interp<'_> {
             ExprKind::Path(en, v) => Ok(self.variant(en, v, Vec::new())),
             ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms),
             ExprKind::Try(x) => self.try_expr(x),
-            ExprKind::Method(recv, name, _) => self.method(recv, name, e.span),
+            ExprKind::Method(recv, name, args) => self.method(recv, name, args, e.span),
             ExprKind::Index(..) => unreachable!("rejected by check"),
         }
     }
 
-    /// Every built-in method takes no arguments, so only the receiver is evaluated.
-    fn method(&mut self, recv: &Expr, name: &str, span: Span) -> Res {
-        Ok(match (self.expr(recv)?, name) {
+    /// Evaluates the receiver, then the arguments left to right.
+    /// Built-in methods take none; capability methods go to the host.
+    fn method(&mut self, recv: &Expr, name: &str, args: &[Expr], span: Span) -> Res {
+        let recv = self.expr(recv)?;
+        if let Value::Cap(cap) = recv {
+            let vals = args.iter().map(|a| self.expr(a)).collect::<Result<_, _>>()?;
+            let v = self.caps.call(&cap, name, vals).map_err(|msg| fail(span, &msg))?;
+            // Every method in caps.wit returns a result; refuse anything else from the host.
+            return match &v {
+                Value::Enum(en, 0 | 1, payload) if en == "Result" && payload.len() == 1 => Ok(v),
+                _ => Err(fail(span, &format!("host returned a malformed value for `{name}`"))),
+            };
+        }
+        Ok(match (recv, name) {
             (Value::Int(n), "to_str") => Value::Str(n.to_string()),
             (Value::Str(s), "len") => Value::Int(s.len() as i64),
             (Value::Str(s), "to_bytes") => Value::Bytes(s.into_bytes()),

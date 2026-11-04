@@ -1,7 +1,15 @@
 use lang::{check, run, CapTable, Caps, RunErr, Value};
 
 struct NoCaps;
-impl Caps for NoCaps {}
+impl Caps for NoCaps {
+    fn has(&self, _: &str, _: &str) -> bool {
+        false
+    }
+
+    fn call(&mut self, _: &str, _: &str, _: Vec<Value>) -> Result<Value, String> {
+        Err("no capabilities granted".to_string())
+    }
+}
 
 /// Runs on the stack `run` documents for debug builds.
 fn exec(src: &str) -> Result<Value, RunErr> {
