@@ -217,8 +217,15 @@ Order: enums and `Result` first, because capability methods return `Result<_, Io
   - `Program::fits` gains the `Map` case. `Map` of a capability is rejected by the existing type rule; add a test.
   Done: a word-count function (`for w in words { .. insert(w, n + 1) }`) runs; `keys()` returns sorted keys for both key types; `get` on a missing key is `None`; changing a value read with `get` leaves the map unchanged; `Map<Bool, Int>` and `Map<Str, Dir>` are rejected with hints.
 
-- [ ] **13. Remaining built-ins.** The other `Str`, `Int` and `List` methods in language.md.
-  Done: one test per method.
+- [ ] **13. Remaining built-ins.** Checker method table and eval only.
+  - `Str.split(Str) -> List<Str>`, as Rust's `str::split`; an empty separator is the runtime error "`split` needs a non-empty separator".
+  - `Str.lines() -> List<Str>`, as Rust's `str::lines` (`\n` or `\r\n`, no trailing empty line).
+  - `Str.trim() -> Str`, as Rust's `str::trim`.
+  - `Str.contains(Str) -> Bool`, `Str.starts_with(Str) -> Bool`.
+  - `Str.parse_int() -> Option<Int>`: an optional `-` or `+` and decimal digits, as Rust's `i64::from_str`; anything else, including overflow, is `None`.
+  - Add each to `METHODS` so hints list them.
+  - Check language.md's built-ins table matches what exists after this task, and fix the table, not the code, if they differ.
+  Done: one test per method, including the edge cases above; `examples/words.kio`, a word count using `split`, `Map` and `for`, runs and is listed in the README.
 
 - [ ] **14. Primer end to end.** The one-screen program in language.md checks, prints the documented report and runs against `StubDir`. Rust-ism rejection tests: `&str`, `String`, `Vec`, `.iter().map(|x| ..)`, `impl`, `let x: f64`.
   Done: those tests pass.
