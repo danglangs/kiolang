@@ -69,6 +69,7 @@ pub fn run(p: &Program, caps: &mut dyn Caps) -> Result<Value, RunErr> {
         locals.push((param.name.clone(), Value::Cap(param.name.clone())));
     }
     let mut it = Interp {
+        program: p,
         funcs: &p.funcs,
         structs: &p.structs,
         enums: &p.enums,
@@ -87,6 +88,7 @@ pub fn run(p: &Program, caps: &mut dyn Caps) -> Result<Value, RunErr> {
 }
 
 struct Interp<'a> {
+    program: &'a Program,
     funcs: &'a HashMap<String, Fn>,
     structs: &'a HashMap<String, Struct>,
     enums: &'a HashMap<String, Enum>,
@@ -228,6 +230,15 @@ impl Interp<'_> {
         }
     }
 
+    /// The capability type of `main`'s parameter `cap`, such as `Dir`.
+    fn cap_type(&self, cap: &str) -> String {
+        let param = self.funcs["main"].params.iter().find(|p| p.name == cap);
+        match param.map(|p| &p.ty.kind) {
+            Some(TypeKind::Named(ty, _)) => ty.clone(),
+            _ => unreachable!("Value::Cap names a main parameter"),
+        }
+    }
+
     /// Evaluates the receiver, then the arguments left to right.
     /// Built-in methods take none; capability methods go to the host.
     fn method(&mut self, recv: &Expr, name: &str, args: &[Expr], span: Span) -> Res {
@@ -235,11 +246,12 @@ impl Interp<'_> {
         if let Value::Cap(cap) = recv {
             let vals = args.iter().map(|a| self.expr(a)).collect::<Result<_, _>>()?;
             let v = self.caps.call(&cap, name, vals).map_err(|msg| fail(span, &msg))?;
-            // Every method in caps.wit returns a result; refuse anything else from the host.
-            return match &v {
-                Value::Enum(en, 0 | 1, payload) if en == "Result" && payload.len() == 1 => Ok(v),
-                _ => Err(fail(span, &format!("host returned a malformed value for `{name}`"))),
-            };
+            // The host is trusted code but checked anyway: a value of the wrong type stops the run.
+            let ty = &self.program.cap_methods[&(self.cap_type(&cap), name.to_string())];
+            if !self.program.fits(&v, ty) {
+                return Err(fail(span, &format!("host returned a malformed value for `{name}`")));
+            }
+            return Ok(v);
         }
         Ok(match (recv, name) {
             (Value::Int(n), "to_str") => Value::Str(n.to_string()),

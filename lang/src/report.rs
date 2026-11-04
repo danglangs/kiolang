@@ -8,7 +8,7 @@ type Uses = BTreeMap<(String, String), BTreeSet<String>>;
 /// One line per function: its capability parameters and the methods they may call, including
 /// through helpers. Reads the checked AST only.
 pub fn report(p: &Program) -> String {
-    let is_cap = |d: &Param| matches!(&d.ty.kind, TypeKind::Named(n, a) if a.is_empty() && p.caps.contains(n));
+    let is_cap = |d: &Param| matches!(&d.ty.kind, TypeKind::Named(n, a) if a.is_empty() && p.is_cap(n));
     let mut uses = Uses::new();
     for f in p.funcs.values() {
         for d in f.params.iter().filter(|d| is_cap(d)) {

@@ -29,6 +29,9 @@ impl Caps for StubDir {
         if path == "liar" {
             return Ok(Value::Int(7));
         }
+        if path == "wrong-payload" {
+            return Ok(Value::Enum("Result".into(), 0, vec![Value::Int(5)]));
+        }
         let files = self.files.get_mut(cap).ok_or("not granted")?;
         let variant = |en: &str, i, payload| Value::Enum(en.to_string(), i, payload);
         Ok(match (method, args.get(1)) {
@@ -146,4 +149,11 @@ fn malformed_host_value_stops_the_run() {
     let (r, s) = exec(src, stub(&[("d", &[])]));
     assert_eq!(r.unwrap_err().msg, "host returned a malformed value for `read`");
     assert_eq!(s.calls, calls(&[("d", "read", "liar")]));
+}
+
+#[test]
+fn host_value_of_wrong_payload_type_stops_the_run() {
+    let src = "fn main(d: Dir) -> Int { let b = d.read(\"wrong-payload\"); 1 }";
+    let (r, _) = exec(src, stub(&[("d", &[])]));
+    assert_eq!(r.unwrap_err().msg, "host returned a malformed value for `read`");
 }

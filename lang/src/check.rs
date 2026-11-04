@@ -1,4 +1,5 @@
 use crate::ast::*;
+use crate::eval::Value;
 use crate::parse::parse;
 use crate::{Diag, Span};
 use std::collections::{HashMap, HashSet};
@@ -92,8 +93,36 @@ pub struct Program {
     pub(crate) funcs: HashMap<String, Fn>,
     pub(crate) structs: HashMap<String, Struct>,
     pub(crate) enums: HashMap<String, Enum>,
-    /// Names of the capability types, such as `Dir`.
-    pub(crate) caps: HashSet<String>,
+    /// Return type of each capability method, keyed by (capability, method), such as (`Dir`, `read`).
+    pub(crate) cap_methods: HashMap<(String, String), Ty>,
+    /// Resolved payload types of every enum, for checking host values.
+    variants: Variants,
+}
+
+impl Program {
+    pub(crate) fn is_cap(&self, ty: &str) -> bool {
+        self.cap_methods.keys().any(|(c, _)| c == ty)
+    }
+
+    /// Whether `v` is a value of type `ty`; used to refuse malformed results from the host.
+    pub(crate) fn fits(&self, v: &Value, ty: &Ty) -> bool {
+        match (v, ty) {
+            (Value::Int(_), Ty::Int) | (Value::Bool(_), Ty::Bool) | (Value::Unit, Ty::Unit) => true,
+            (Value::Str(_), Ty::Str) | (Value::Bytes(_), Ty::Bytes) => true,
+            (Value::Enum(en, i, vals), Ty::Result(ok, e)) if en == "Result" && vals.len() == 1 => match i {
+                0 => self.fits(&vals[0], ok),
+                1 => self.fits(&vals[0], e),
+                _ => false,
+            },
+            (Value::Enum(en, i, vals), Ty::Enum(name)) if en == name => {
+                let Some((_, payload)) = self.variants.get(name).and_then(|vs| vs.get(*i)) else {
+                    return false;
+                };
+                vals.len() == payload.len() && vals.iter().zip(payload).all(|(v, t)| self.fits(v, t))
+            }
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -650,7 +679,14 @@ pub fn check(src: &str, caps: &CapTable) -> Result<Program, Vec<Diag>> {
         funcs: fns.into_iter().map(|f| (f.name.clone(), f)).collect(),
         structs,
         enums,
-        caps: caps.caps.iter().map(|c| c.name.clone()).collect(),
+        variants,
+        cap_methods: (caps.caps.iter())
+            .flat_map(|c| {
+                c.methods
+                    .iter()
+                    .map(|(m, _, ret)| ((c.name.clone(), m.clone()), ret.clone()))
+            })
+            .collect(),
     })
 }
 
