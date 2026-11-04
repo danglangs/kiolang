@@ -152,6 +152,7 @@ v0 has no closures, globals, reflection or `unsafe`. Capabilities are parameters
 - [docs/design.md](docs/design.md): components, trust boundary, one run step by step, open questions.
 - [docs/lang-todo.md](docs/lang-todo.md): decisions and milestones for the native language crate (done for v0).
 - [docs/guest-host-todo.md](docs/guest-host-todo.md): tasks for the Wasm sandbox and the `kio` binary.
+- [docs/web-support-todo.md](docs/web-support-todo.md): kio-web, a web framework in kio, and the language features it drives.
 - [docs/open_questions.md](docs/open_questions.md): decisions taken without full review, and how to undo each.
 - [caps.wit](caps.wit): the interface. The only hand-written source of truth for what crosses the sandbox wall.
 
