@@ -48,7 +48,7 @@ Each task covers lexing, parsing, checking and evaluating its constructs, unless
   - Errors with kio hints: `&` (no references; pass by value), `|` (no closures; use `for`), `'` (no chars or lifetimes; use `Str`), `/*` (use `//`), any other character.
   Done: one token-stream test per bullet, and error tests checking span, message and hint.
 
-- [ ] **2. Parser core.** `ast.rs` and `parse.rs`. `pub fn parse(src: &str) -> Result<Vec<Item>, Diag>` lexes, then parses with recursive descent, stopping at the first error. Every expression, statement and type node carries a `Span`.
+- [x] **2. Parser core.** `ast.rs` and `parse.rs`. `pub fn parse(src: &str) -> Result<Vec<Item>, Diag>` lexes, then parses with recursive descent, stopping at the first error. Every expression, statement and type node carries a `Span`.
   - Items: `fn name(a: T, ..) -> T { .. }`; no return type means `()`. Only `fn` for now.
   - Types: a name with optional `<T, ..>` arguments, and `()`. Meaning is checked in task 3.
   - Statements: `let x = e;`, `let mut x: T = e;`, `x = e;`, `x += e;`, `x -= e;` (left side: a name, field or index), `return;` and `return e;`, `while e { .. }`, expression statements.
@@ -56,8 +56,8 @@ Each task covers lexing, parsing, checking and evaluating its constructs, unless
   - Expressions: `Int`, `Str`, `true`, `false`, names, `()`, `( e )`, `if e { .. } else if e { .. } else { .. }`, `f(a, ..)`, `e.m(a, ..)`, `e.f`, `e[i]`.
   - Precedence, highest first: postfix `() . []`; unary `- !`; `* / %`; `+ -`; `== != < <= > >=`; `&&`; `||`. Binary operators are left-associative. Comparisons do not chain: `a < b < c` is an error, as in Rust.
   - Rejected with kio hints: `Reserved` words in item or expression position (`impl`, `trait`, `use`, `mod`, `pub`, ..), tuples `(a, b)`, `struct`, `enum`, `for`, `match` and `break` until their tasks, trailing tokens after the last item.
-  - Nesting deeper than 256 (blocks plus expressions) is a `Diag`, so hostile input cannot overflow the Rust stack.
-  Done: one parse test per bullet, asserting tree shape; a precedence test (`1 + 2 * 3 == 7 && !b`); one rejection test per rejected item, checking span and message; a 300-deep nesting test.
+  - Nesting deeper than 64 (blocks plus expressions) is a `Diag`, so hostile input cannot overflow the Rust stack.
+  Done: one parse test per bullet, asserting tree shape; a precedence test (`1 + 2 * 3 == 7 && !b`); one rejection test per rejected item, checking span and message; a 65-deep nesting test on the default test stack.
 
 - [ ] **3. Checker and interpreter core.** `Int`, `Bool`, `Str`, `()`. Name resolution, operator types, call arity and types, `mut` required for assignment, every path returns the declared type. Evaluation with runtime errors for overflow, division by zero and call depth over 10_000. `CapTable` and `Caps` exist but stay empty.
   Done: a recursive `fib` checks and runs. Rejection tests for unknown name, type mismatch, missing return, and assignment to a non-`mut` local.

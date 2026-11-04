@@ -143,3 +143,4 @@ error: kio has no references
 - Attenuation: deriving a narrower cap, such as a sub-directory. First candidate for v1.
 - Closures, traits, `impl` and user generics.
 - Floats and tuples.
+- Modules. A program is one file; `mod`, `use` and `pub` are reserved for them.
