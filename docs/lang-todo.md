@@ -230,6 +230,15 @@ Order: enums and `Result` first, because capability methods return `Result<_, Io
 - [x] **14. Primer end to end.** The one-screen program in language.md checks, prints the documented report and runs against `StubDir`. Rust-ism rejection tests: `&str`, `String`, `Vec`, `.iter().map(|x| ..)`, `impl`, `let x: f64`.
   Done: those tests pass.
 
+## Performance
+
+- [ ] **P1. Borrowing reads.** Every variable read clones the whole value, so `xs[i]`, `.len()` and `m.get(k)` copy the receiver, and a loop that indexes a list is quadratic: 20,000 elements take 1.8 s and 40,000 take 7.0 s. Evaluate these on the variable in place instead of on a clone. No change to what programs mean.
+  Done: the indexing loop over 40,000 elements runs in under 0.1 s in release; all copy tests still pass.
+
+- [ ] **P2. Copy-on-write values.** `design.md` memory model step 2: `Rc` inside `List`, `Map`, `Str` and `Bytes`, copied only on write when shared. Makes passing values to functions cheap. Decide after web W10 measures where time goes.
+
+- [ ] **P3. Lowering.** Resolve names, field and variant indexes into a typed form before evaluation, as design.md's `Program` describes. Prerequisite for the bytecode VM or a compiler.
+
 ## Later, not in `lang`
 
 `guest`, `host` and the MCP `check` tool.
