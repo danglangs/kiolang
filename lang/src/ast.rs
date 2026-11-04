@@ -93,7 +93,23 @@ pub enum StmtKind {
         cond: Expr,
         body: Block,
     },
+    For {
+        name: String,
+        iter: Iter,
+        body: Block,
+    },
+    Break,
+    Continue,
     Expr(Expr),
+}
+
+/// What a `for` loop runs over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Iter {
+    /// `for x in xs`
+    List(Expr),
+    /// `for i in a..b`
+    Range(Expr, Expr),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

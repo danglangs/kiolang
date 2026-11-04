@@ -40,6 +40,8 @@ pub struct RunErr {
 /// Why evaluation left the normal path.
 enum Stop {
     Return(Value),
+    Break,
+    Continue,
     Err(RunErr),
 }
 
@@ -90,7 +92,7 @@ pub fn run(p: &Program, caps: &mut dyn Caps) -> Result<Value, RunErr> {
         Ok(v) => Ok(v),
         Err(s) => match *s {
             Stop::Err(e) => Err(e),
-            Stop::Return(_) => unreachable!(),
+            Stop::Return(_) | Stop::Break | Stop::Continue => unreachable!(),
         },
     }
 }
@@ -156,6 +158,9 @@ impl Interp<'_> {
             StmtKind::Assign { target, op, value } => self.assign(target, op, value, s.span),
             StmtKind::Return(value) => self.return_stmt(value.as_ref()),
             StmtKind::While { cond, body } => self.while_stmt(cond, body),
+            StmtKind::For { name, iter, body } => self.for_stmt(name, iter, body),
+            StmtKind::Break => Err(Box::new(Stop::Break)),
+            StmtKind::Continue => Err(Box::new(Stop::Continue)),
             StmtKind::Expr(e) => self.expr(e).map(drop),
         }
     }
@@ -234,9 +239,57 @@ impl Interp<'_> {
 
     fn while_stmt(&mut self, cond: &Expr, body: &Block) -> Result<(), Box<Stop>> {
         while self.expr(cond)? == Value::Bool(true) {
-            self.block(body)?;
+            if !self.iteration(body)? {
+                break;
+            }
         }
         Ok(())
+    }
+
+    /// Runs `name` over `iter`; a list is the value it had when the loop started.
+    fn for_stmt(&mut self, name: &str, iter: &Iter, body: &Block) -> Result<(), Box<Stop>> {
+        let items: Box<dyn Iterator<Item = Value>> = match iter {
+            Iter::List(e) => {
+                let Value::List(vals) = self.expr(e)? else {
+                    unreachable!("checked list");
+                };
+                Box::new(vals.into_iter())
+            }
+            Iter::Range(a, b) => {
+                let (Value::Int(a), Value::Int(b)) = (self.expr(a)?, self.expr(b)?) else {
+                    unreachable!("checked range");
+                };
+                Box::new((a..b).map(Value::Int))
+            }
+        };
+        for v in items {
+            self.locals.push((name.to_string(), v));
+            let go = self.iteration(body)?;
+            self.locals.pop();
+            if !go {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Runs one pass of a loop body. False when it ends the loop with `break`.
+    fn iteration(&mut self, body: &Block) -> Result<bool, Box<Stop>> {
+        let mark = self.locals.len();
+        match self.block(body) {
+            Err(s) => match *s {
+                Stop::Break => {
+                    self.locals.truncate(mark);
+                    Ok(false)
+                }
+                Stop::Continue => {
+                    self.locals.truncate(mark);
+                    Ok(true)
+                }
+                e => Err(Box::new(e)),
+            },
+            Ok(_) => Ok(true),
+        }
     }
 
     fn expr(&mut self, e: &Expr) -> Res {

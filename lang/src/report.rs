@@ -84,7 +84,17 @@ fn walk_block(b: &Block, visit: &mut dyn FnMut(&Expr)) {
                 walk(cond, visit);
                 walk_block(body, visit);
             }
-            StmtKind::Return(None) => {}
+            StmtKind::For { iter, body, .. } => {
+                match iter {
+                    Iter::List(e) => walk(e, visit),
+                    Iter::Range(a, b) => {
+                        walk(a, visit);
+                        walk(b, visit);
+                    }
+                }
+                walk_block(body, visit);
+            }
+            StmtKind::Return(None) | StmtKind::Break | StmtKind::Continue => {}
         }
     }
     if let Some(t) = &b.tail {

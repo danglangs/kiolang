@@ -673,6 +673,7 @@ pub fn check(src: &str, caps: &CapTable) -> Result<Program, Vec<Diag>> {
             enums: &enums,
             scopes: Vec::new(),
             ret: Ty::Unit,
+            loops: 0,
         };
         diags.extend(sig_err.or_else(|| c.function(f).err()));
     }
@@ -709,6 +710,8 @@ struct Checker<'a> {
     scopes: Vec<HashMap<String, Local>>,
     /// Return type of the function being checked.
     ret: Ty,
+    /// Loops enclosing the statement being checked.
+    loops: usize,
 }
 
 impl Checker<'_> {
@@ -843,8 +846,48 @@ impl Checker<'_> {
             }
             StmtKind::While { cond, body } => {
                 want_expr(cond, &self.expr(cond, None)?, &Ty::Bool)?;
-                want(body.span, &self.block(body, None)?, &Ty::Unit)?;
+                self.loops += 1;
+                let found = self.block(body, None);
+                self.loops -= 1;
+                want(body.span, &found?, &Ty::Unit)?;
                 Ok(Ty::Unit)
+            }
+            StmtKind::For { name, iter, body } => {
+                not_builtin(name, s.span)?;
+                let ty = match iter {
+                    Iter::List(e) => match self.expr(e, None)? {
+                        Ty::List(t) => *t,
+                        found => {
+                            let hint = "`for` runs over a List or a range `a..b`";
+                            return Err(err(e.span, format!("cannot iterate over {found}"), Some(hint)));
+                        }
+                    },
+                    Iter::Range(a, b) => {
+                        want_expr(a, &self.expr(a, None)?, &Ty::Int)?;
+                        want_expr(b, &self.expr(b, None)?, &Ty::Int)?;
+                        Ty::Int
+                    }
+                };
+                self.scopes
+                    .push(HashMap::from([(name.clone(), Local { ty, mutable: false })]));
+                self.loops += 1;
+                let found = self.block(body, None);
+                self.loops -= 1;
+                self.scopes.pop();
+                want(body.span, &found?, &Ty::Unit)?;
+                Ok(Ty::Unit)
+            }
+            StmtKind::Break | StmtKind::Continue => {
+                if self.loops == 0 {
+                    let word = if matches!(s.kind, StmtKind::Break) {
+                        "break"
+                    } else {
+                        "continue"
+                    };
+                    let hint = "use `return` to leave a function";
+                    return Err(err(s.span, format!("`{word}` outside a loop"), Some(hint)));
+                }
+                Ok(Ty::Never)
             }
             StmtKind::Expr(e) => Ok(match self.expr(e, None)? {
                 Ty::Never => Ty::Never,

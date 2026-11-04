@@ -73,3 +73,11 @@ fn main(d: Dir) -> Result<(), IoErr> {
 }"#;
     assert_eq!(rep(src), "main : d create");
 }
+
+#[test]
+fn for_loops_are_walked() {
+    let src = format!(
+        "{LOAD}\nfn main(d: Dir) {{ for x in [1] {{ let _b = load(d); }} for i in 0..1 {{ let _c = d.read(\"a\"); }} }}"
+    );
+    assert_eq!(rep(&src), "load : d read\nmain : d read");
+}

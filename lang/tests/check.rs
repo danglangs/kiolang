@@ -64,6 +64,25 @@ fn non_bool_condition() {
 }
 
 #[test]
+fn loops() {
+    ok("fn main() { for x in [1, 2] { if x == 1 { continue; } break; } for i in 0..3 { let _j: Int = i; } }");
+    ok("fn main() -> Int { let mut n = 0; while true { n += 1; if n > 2 { break; } } n }");
+    let (msg, at) = reject("fn main() { break; }");
+    assert_eq!((msg.as_str(), at.as_str()), ("`break` outside a loop", "break;"));
+    let diags = check("fn main() { continue; }", &CapTable::default()).unwrap_err();
+    assert_eq!(diags[0].hint.as_deref(), Some("use `return` to leave a function"));
+    reject("fn main() { for x in [1] { } break; }");
+    reject("fn main() { for x in [1] { f(); } } fn f() { break; }");
+    let (msg, at) = reject("fn main() { for x in 5 { } }");
+    assert_eq!((msg.as_str(), at.as_str()), ("cannot iterate over Int", "5"));
+    let (msg, at) = reject("fn main() { for i in 0..\"a\" { } }");
+    assert_eq!((msg.as_str(), at.as_str()), ("expected Int, found Str", "\"a\""));
+    let (msg, _) = reject("fn main() { for x in [1] { x = 2; } }");
+    assert!(msg.contains("mut"), "{msg}");
+    reject("fn main() { for x in [1] { } let y = x; }");
+}
+
+#[test]
 fn missing_return() {
     let (msg, at) = reject("fn main() -> Int { let x = 1; }");
     assert_eq!(msg, "missing return: `main` must return Int");

@@ -78,6 +78,15 @@ fn stmt(s: &Stmt) -> String {
         StmtKind::Return(None) => "(return)".into(),
         StmtKind::Return(Some(e)) => format!("(return {})", show(e)),
         StmtKind::While { cond, body } => format!("(while {} {})", show(cond), block(body)),
+        StmtKind::For { name, iter, body } => {
+            let iter = match iter {
+                Iter::List(e) => show(e),
+                Iter::Range(a, b) => format!("{}..{}", show(a), show(b)),
+            };
+            format!("(for {name} {iter} {})", block(body))
+        }
+        StmtKind::Break => "(break)".into(),
+        StmtKind::Continue => "(continue)".into(),
         StmtKind::Expr(e) => show(e),
     }
 }
@@ -260,9 +269,26 @@ fn list_literals() {
 }
 
 #[test]
-fn rejects_later_features() {
-    rejected("fn f() { for x in y {} }", "for", "`for` is not supported in kio", true);
-    rejected("fn f() { break; }", "break", "`break` is not supported in kio", true);
+fn parses_loops() {
+    assert_eq!(body("for x in xs { break; }"), "{(for x xs {(break)})}");
+    assert_eq!(
+        body("for i in 0..n + 1 { continue; }"),
+        "{(for i 0..(+ n 1) {(continue)})}"
+    );
+    assert_eq!(body("for x in f(P { a: 1 }) {}"), "{(for x (call f (new P a: 1)) {})}");
+    assert_eq!(body("for x in xs {} 1"), "{(for x xs {}); tail 1}");
+}
+
+#[test]
+fn rejects_bad_loops() {
+    rejected_with(
+        "fn f() { let x = 0..3; }",
+        "..",
+        "unexpected `..`",
+        Some("ranges are only for `for` loops"),
+    );
+    rejected("fn f() { for x xs {} }", "xs", "expected `in`", false);
+    rejected("fn f() { break }", "}", "expected `;`", true);
 }
 
 #[test]

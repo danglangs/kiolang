@@ -202,7 +202,7 @@ Order: enums and `Result` first, because capability methods return `Result<_, Io
   - Capabilities: `List<Dir>` is rejected by the type rule and `[input, out]` by the expression rule, with no new code; add tests.
   Done: literal, indexing, nested index-field assignment, `push`, `len`, out-of-bounds (with span), `[]` without a type rejected with its hint; copy tests (`b = a` then changing either leaves the other unchanged, for nested lists, a struct holding a list, and a list argument changed in a callee); `List<Dir>` and `[input, out]` rejected.
 
-- [ ] **11b. Loops.** Parser, checker and interpreter.
+- [x] **11b. Loops.** Parser, checker and interpreter.
   - `for x in e { .. }` where `e: List<T>`; `x: T` is bound per iteration, not `mut`. Iteration is over the value of `e` when the loop starts, so changing the list inside the body does not change the iteration.
   - `for i in a..b { .. }` with `a, b: Int`; `i` takes `a, a+1, .., b-1`; empty if `a >= b`. `..` only in this position; elsewhere it is a parse error with hint "ranges are only for `for` loops".
   - `break` and `continue` as statements, inside `while` and `for` only. Outside a loop: "`break` outside a loop", hint "use `return` to leave a function". No labels, no `break value`.

@@ -36,15 +36,6 @@ fn reserved_hint(word: &str) -> &'static str {
     }
 }
 
-/// Keywords that kio will support in a later task.
-fn later_hint(word: &str) -> Option<&'static str> {
-    match word {
-        "for" => Some("use `while` for now"),
-        "break" | "continue" => Some("use `return` or a `while` condition for now"),
-        _ => None,
-    }
-}
-
 /// A hint for the expected tokens whose fix is clear.
 fn expected_hint(expected: &str) -> Option<&'static str> {
     match expected {
@@ -60,7 +51,7 @@ struct Parser {
     pos: usize,
     /// Tree depth so far, capped at `MAX_DEPTH`.
     depth: usize,
-    /// Set in `if` and `while` conditions, where `{` starts the body, not a struct literal.
+    /// Set in `if`, `while` and `for` heads, where `{` starts the body, not a struct literal.
     no_struct: bool,
 }
 
@@ -162,14 +153,10 @@ impl Parser {
     /// The error for a token that cannot start or continue the current rule.
     fn unexpected(&self, expected: &str) -> Diag {
         let span = self.span();
-        let rejected = match self.peek() {
-            Some(Kind::Reserved(w)) => Some((w, reserved_hint(w))),
-            Some(Kind::Keyword(w)) => later_hint(w).map(|h| (w, h)),
-            _ => None,
-        };
-        match rejected {
-            Some((w, hint)) => err(span, &format!("`{w}` is not supported in kio"), Some(hint)),
-            None => err(span, &format!("expected {expected}"), expected_hint(expected)),
+        match self.peek() {
+            Some(Kind::Reserved(w)) => err(span, &format!("`{w}` is not supported in kio"), Some(reserved_hint(w))),
+            Some(Kind::Sym("..")) => err(span, "unexpected `..`", Some("ranges are only for `for` loops")),
+            _ => err(span, &format!("expected {expected}"), expected_hint(expected)),
         }
     }
 
@@ -318,6 +305,10 @@ impl Parser {
                 self.return_stmt()?
             } else if self.at_kw("while") {
                 self.while_stmt()?
+            } else if self.at_kw("for") {
+                self.for_stmt()?
+            } else if self.at_kw("break") || self.at_kw("continue") {
+                self.jump_stmt()?
             } else {
                 let block_like = self.at_kw("if") || self.at_kw("match") || self.at("{");
                 let e = if block_like { self.primary()? } else { self.expr()? };
@@ -383,6 +374,35 @@ impl Parser {
         let cond = self.cond()?;
         let body = self.block()?;
         Ok(StmtKind::While { cond, body })
+    }
+
+    fn for_stmt(&mut self) -> Result<StmtKind, Diag> {
+        self.pos += 1;
+        let name = self.ident()?;
+        if !self.eat_kw("in") {
+            return Err(self.unexpected("`in`"));
+        }
+        let outer = std::mem::replace(&mut self.no_struct, true);
+        let first = self.expr()?;
+        let iter = if self.eat("..") {
+            Iter::Range(first, self.expr()?)
+        } else {
+            Iter::List(first)
+        };
+        self.no_struct = outer;
+        let body = self.block()?;
+        Ok(StmtKind::For { name, iter, body })
+    }
+
+    fn jump_stmt(&mut self) -> Result<StmtKind, Diag> {
+        let kind = if self.at_kw("break") {
+            StmtKind::Break
+        } else {
+            StmtKind::Continue
+        };
+        self.pos += 1;
+        self.expect(";")?;
+        Ok(kind)
     }
 
     fn cond(&mut self) -> Result<Expr, Diag> {

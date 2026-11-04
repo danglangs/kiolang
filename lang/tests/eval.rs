@@ -96,6 +96,47 @@ fn return_inside_while() {
 }
 
 #[test]
+fn for_loops() {
+    let sum = "fn main() -> Int { let mut s = 0; for x in [1, 2, 3] { s += x; } s }";
+    assert_eq!(int(sum), Value::Int(6));
+    let range = "fn main() -> Int { let mut s = 0; for i in 2..5 { s += i; } for i in 5..2 { s += 100; } s }";
+    assert_eq!(int(range), Value::Int(9));
+}
+
+#[test]
+fn break_and_continue() {
+    let src = "fn main() -> Int { let mut s = 0;
+        for i in 0..10 { if i == 2 { continue; } if i == 5 { break; } s += i; }
+        let mut j = 0;
+        while true { j += 1; if j < 3 { continue; } if j == 6 { break; } s += 100; }
+        s }";
+    assert_eq!(int(src), Value::Int(8 + 300));
+}
+
+#[test]
+fn break_leaves_only_the_inner_loop() {
+    let src = "fn main() -> Int { let mut s = 0;
+        for i in 0..3 { for j in 0..10 { if j == 2 { break; } s += 1; } s += 10; }
+        s }";
+    assert_eq!(int(src), Value::Int(36));
+}
+
+#[test]
+fn for_iterates_over_a_snapshot() {
+    let src = "fn main() -> Int { let mut xs = [1, 2]; let mut n = 0;
+        for x in xs { xs.push(x); n += 1; }
+        n * 10 + xs.len() }";
+    assert_eq!(int(src), Value::Int(24));
+}
+
+#[test]
+fn return_inside_for_and_locals_are_scoped() {
+    let src = "fn f() -> Int { for x in [4, 5] { let y = x; if y == 5 { return y; } } 0 }
+        fn main() -> Int { let a = f(); for x in [1] { let z = 1; if z == 1 { continue; } } a }";
+    assert_eq!(int(src), Value::Int(5));
+}
+
+#[test]
 fn arguments_are_evaluated_in_order_per_call() {
     let src = "fn sub(a: Int, b: Int) -> Int { a - b } fn main() -> Int { sub(10, 3) }";
     assert_eq!(int(src), Value::Int(7));
