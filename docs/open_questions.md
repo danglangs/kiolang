@@ -10,3 +10,4 @@ Decisions taken without the owner, cheap to undo. Each: the question, what was c
 | 4 | Which capability uses are allowed | Only a parameter name as a method receiver or whole call argument; everything else, including `if` branches yielding a capability, is rejected | Relax later; it only accepts more programs |
 | 5 | `main` return type (rule 3) | Any type for now; the runner prints it. Spec says `()` or `Result<(), E>` | One check in `signature` once `host` defines exit status |
 | 6 | Binding a name `None`, `Some`, `Ok` or `Err` | Rejected for parameters and locals, so those names always mean the constructors | Allow shadowing later |
+| 7 | How a helper's capability maps to a grant | `Value::Cap(name of the main parameter)`, passed as an ordinary value | Replace with a handle index when `guest` maps names to WIT handles |

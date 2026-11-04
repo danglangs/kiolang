@@ -165,8 +165,13 @@ Order: enums and `Result` first, because capability methods return `Result<_, Io
   - Rule 1 also bans assignment to a capability parameter: parameters are never `mut`, so this already holds.
   Done: one rejection test per line in the rule 1 table, asserting message and hint; rule 2 and rule 3 tests; accepted: `main(input: Dir, out: Dir)` passing both to a helper that calls `read` and `create`; a capability passed through two helpers.
 
-- [ ] **9. Capability calls.** `Caps::call(&mut self, cap: &str, method: &str, args: Vec<Value>) -> Value`, where `cap` is the name of `main`'s parameter that reaches the call through helpers. An in-memory `StubDir` for tests.
-  Done: a helper reads stub bytes through a passed `Dir`; a rejected program records zero stub calls; `to_str` on invalid UTF-8 from the stub is the runtime error "invalid UTF-8".
+- [ ] **9. Capability calls.** Interpreter; `run` gains capability arguments.
+  - `Value::Cap(String)` holds the name of the `main` parameter it came from. Helpers receive it as an ordinary argument; rule 1 guarantees it is only ever passed or called, never stored or built. `Value` must stay 64 bytes.
+  - `run(p, caps)` binds each `main` parameter `name` to `Value::Cap(name)`. A program whose `main` has capability parameters needs those names: `Caps::has(&self, name: &str, ty: &str) -> bool` is checked for every parameter before evaluation starts; a missing or mistyped grant is `RunErr` "no grant for `input: Dir`" and no code runs.
+  - `Caps::call(&mut self, cap: &str, method: &str, args: Vec<Value>) -> Result<Value, String>`. `Ok` is the method's return value, which must have the declared type (for `Dir.read`, a `Value::Enum("Result", ..)`); `Err(msg)` is a host failure, which becomes `RunErr` and stops the run. Arguments are evaluated left to right before the call.
+  - `StubDir` in `lang/tests/` (not in `src`): a `BTreeMap<String, Vec<u8>>` of files per granted name, recording every call as `(cap, method, path)`. `read` of a missing file returns `Err(IoErr::NotFound)`; `create` stores the bytes.
+  - The temporary runner keeps passing an empty `Caps`; a program asking for capabilities there fails with the no-grant error.
+  Done: a helper reads stub bytes through a passed `Dir` and `main` writes a result with `create`; the stub records exactly those calls with the `main` parameter names; a rejected program records zero calls; a missing grant runs no code; `to_str` on invalid UTF-8 read from the stub is the runtime error "invalid UTF-8"; `?` on a stub `NotFound` propagates.
 
 - [ ] **10. Authority report.** As specified in language.md: map each helper's capability parameters back to the caller's arguments, and iterate until nothing changes so recursion terminates. Sort lines by function name. The spec gets worked examples before handoff.
   Done: report tests for direct calls, a two-level helper chain, mutual recursion, and a pure function (`none`).
