@@ -1,5 +1,4 @@
 use host::{open_dir, Diag, Kio, Limits};
-use wasmtime::Trap;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -7,7 +6,7 @@ fn main() {
         ["check", path] => std::process::exit(check(path)),
         ["run", path, ref flags @ ..] => std::process::exit(run(path, flags)),
         _ => eprintln!(
-            "usage: kio check <prog.kio>\n       kio run <prog.kio> [--dir name=path]... [--fuel n] [--timeout secs]"
+            "usage: kio check <prog.kio>\n       kio run <prog.kio> [--dir name=path]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb]"
         ),
     }
     std::process::exit(2);
@@ -41,13 +40,15 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     let mut limits = Limits::default();
     for pair in flags.chunks(2) {
         let (name, dir) = match pair {
-            ["--fuel", n] | ["--timeout", n] => {
+            [flag @ ("--fuel" | "--timeout" | "--memory" | "--stack"), n] => {
                 let Some(v) = n.parse::<u64>().ok().filter(|&v| v > 0) else {
-                    return fail(format!("{} {n}: expected a positive integer", pair[0]));
+                    return fail(format!("{flag} {n}: expected a positive integer"));
                 };
-                match pair[0] {
+                match *flag {
                     "--fuel" => limits.fuel = v,
-                    _ => limits.timeout_secs = v,
+                    "--timeout" => limits.timeout_secs = v,
+                    "--memory" => limits.memory = (v as usize).saturating_mul(1 << 20),
+                    _ => limits.stack = (v as usize).saturating_mul(1 << 10),
                 }
                 continue;
             }
@@ -55,22 +56,26 @@ fn run(path: &str, flags: &[&str]) -> i32 {
                 Some(nd) => nd,
                 None => return fail(format!("--dir {spec}: expected name=path")),
             },
-            _ => return fail("usage: kio run <prog.kio> [--dir name=path]... [--fuel n] [--timeout secs]".into()),
+            _ => return fail(
+                "usage: kio run <prog.kio> [--dir name=path]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb]"
+                    .into(),
+            ),
         };
         match open_dir(dir.as_ref()) {
             Ok(d) => dirs.push((name.to_string(), d)),
             Err(e) => return fail(format!("--dir {name}={dir}: {e}")),
         }
     }
-    match Kio::new(limits).and_then(|mut k| k.run(&src, dirs)) {
+    let mut kio = match Kio::new(limits) {
+        Ok(k) => k,
+        Err(e) => return fail(format!("{e:#}")),
+    };
+    match kio.run(&src, dirs) {
         Err(e) => {
-            // A trap is the guest failing, not a usage error.
-            if let Some(msg) = limits.explain(&e) {
-                eprintln!("{msg}");
-            } else if e.downcast_ref::<Trap>() == Some(&Trap::StackOverflow) {
-                eprintln!("stack overflow");
-            } else {
-                eprintln!("kio: {e:#}");
+            // A limit or trap is the guest failing, not a usage error.
+            match kio.explain(&e) {
+                Some(msg) => eprintln!("{msg}"),
+                None => eprintln!("kio: {e:#}"),
             }
             1
         }

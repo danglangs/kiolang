@@ -27,6 +27,9 @@ pub fn open_dir(path: &Path) -> io::Result<RealDir> {
 pub struct State {
     pub calls: u32,
     pub peak_memory: usize,
+    memory_limit: usize,
+    /// Set when the guest asked for more memory than `memory_limit`.
+    out_of_memory: bool,
     #[cfg(feature = "test-hooks")]
     delay: Duration,
     wasi: WasiCtx,
@@ -67,6 +70,8 @@ impl State {
         State {
             calls: 0,
             peak_memory: 0,
+            memory_limit: usize::MAX,
+            out_of_memory: false,
             #[cfg(feature = "test-hooks")]
             delay: Duration::ZERO,
             wasi,
@@ -84,9 +89,13 @@ impl WasiView for State {
     }
 }
 
-/// Records peak memory; H3 turns this into the memory limit.
+/// Enforces the memory limit and records the peak.
 impl wasmtime::ResourceLimiter for State {
     fn memory_growing(&mut self, _: usize, desired: usize, _: Option<usize>) -> Result<bool> {
+        if desired > self.memory_limit {
+            self.out_of_memory = true;
+            return Ok(false);
+        }
         self.peak_memory = self.peak_memory.max(desired);
         Ok(true)
     }
@@ -174,6 +183,8 @@ pub struct Limits {
     pub fuel: u64,
     pub timeout_secs: u64,
     pub stack: usize,
+    /// Bytes of guest linear memory.
+    pub memory: usize,
 }
 
 impl Default for Limits {
@@ -182,20 +193,7 @@ impl Default for Limits {
             fuel: 1_000_000_000,
             timeout_secs: 10,
             stack: 2 << 20,
-        }
-    }
-}
-
-impl Limits {
-    /// The message for a trap caused by one of these limits, or `None` for any other error.
-    pub fn explain(&self, e: &wasmtime::Error) -> Option<String> {
-        match e.downcast_ref::<wasmtime::Trap>()? {
-            wasmtime::Trap::OutOfFuel => Some(format!("out of fuel (limit {}; raise it with --fuel)", self.fuel)),
-            wasmtime::Trap::Interrupt => Some(format!(
-                "timed out after {} s (raise it with --timeout)",
-                self.timeout_secs
-            )),
-            _ => None,
+            memory: 256 << 20,
         }
     }
 }
@@ -205,6 +203,7 @@ pub struct Kio {
     store: Store<State>,
     guest: Guest,
     stop: Arc<AtomicBool>,
+    limits: Limits,
 }
 
 impl Drop for Kio {
@@ -235,12 +234,18 @@ impl Kio {
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
         Guest::add_to_linker::<State, wasmtime::component::HasSelf<State>>(&mut linker, |s| s)?;
         let mut store = Store::new(&engine, State::new());
+        store.data_mut().memory_limit = limits.memory;
         store.limiter(|s| s);
         store.set_fuel(limits.fuel)?;
         store.set_epoch_deadline(limits.timeout_secs.saturating_mul(10));
         store.epoch_deadline_trap();
         let guest = Guest::instantiate(&mut store, &component, &linker)?;
-        Ok(Kio { store, guest, stop })
+        Ok(Kio {
+            store,
+            guest,
+            stop,
+            limits,
+        })
     }
 
     /// Make every `Dir.read` sleep first, to test the wall clock against a slow host call.
@@ -248,6 +253,26 @@ impl Kio {
     pub fn slow_reads(&mut self, d: Duration) {
         self.store.data_mut().delay = d;
     }
+    /// The message for a run that hit one of its limits, or `None` for any other error.
+    pub fn explain(&self, e: &wasmtime::Error) -> Option<String> {
+        let l = &self.limits;
+        // A refused memory grow makes the guest's allocator abort, so the trap itself is generic.
+        if self.store.data().out_of_memory {
+            return Some(format!(
+                "out of memory (limit {} MB; raise it with --memory)",
+                l.memory >> 20
+            ));
+        }
+        Some(match e.downcast_ref::<wasmtime::Trap>()? {
+            wasmtime::Trap::OutOfFuel => format!("out of fuel (limit {}; raise it with --fuel)", l.fuel),
+            wasmtime::Trap::Interrupt => format!("timed out after {} s (raise it with --timeout)", l.timeout_secs),
+            wasmtime::Trap::StackOverflow => {
+                format!("stack overflow (limit {} KB; raise it with --stack)", l.stack >> 10)
+            }
+            _ => return None,
+        })
+    }
+
     /// Parse and check `source`: the report lines, or the diagnostics.
     pub fn check(&mut self, source: &str) -> Result<std::result::Result<Report, Vec<Diag>>> {
         self.guest.call_check(&mut self.store, source)

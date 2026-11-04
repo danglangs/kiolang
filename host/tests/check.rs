@@ -263,9 +263,10 @@ fn infinite_loop_runs_out_of_fuel() {
         ..Limits::default()
     };
     let src = "fn main() -> Int { while true {} 0 }";
-    let err = Kio::new(limits).unwrap().run(src, vec![]).unwrap_err();
+    let mut kio = Kio::new(limits).unwrap();
+    let err = kio.run(src, vec![]).unwrap_err();
     assert_eq!(
-        limits.explain(&err).unwrap(),
+        kio.explain(&err).unwrap(),
         "out of fuel (limit 10000000; raise it with --fuel)"
     );
 }
@@ -283,7 +284,40 @@ fn slow_host_call_times_out() {
     kio.slow_reads(std::time::Duration::from_millis(1500));
     let err = kio.run(src, vec![("d".into(), d)]).unwrap_err();
     assert_eq!(
-        limits.explain(&err).unwrap(),
+        kio.explain(&err).unwrap(),
         "timed out after 1 s (raise it with --timeout)"
+    );
+}
+
+/// H3: a program that allocates without bound stops at the memory limit with a message naming it.
+#[test]
+fn unbounded_allocation_runs_out_of_memory() {
+    let limits = Limits {
+        memory: 16 << 20,
+        ..Limits::default()
+    };
+    let src = "fn main() -> Int { let mut xs: List<Str> = []; while true { xs.push(\"0123456789abcdef\"); } 0 }";
+    let mut kio = Kio::new(limits).unwrap();
+    let err = kio.run(src, vec![]).unwrap_err();
+    assert_eq!(
+        kio.explain(&err).unwrap(),
+        "out of memory (limit 16 MB; raise it with --memory)"
+    );
+    assert!(kio.peak_memory() <= 16 << 20);
+}
+
+/// H3: recursion past the Wasm stack stops with a message naming the stack limit.
+#[test]
+fn deep_recursion_overflows_a_small_stack() {
+    let limits = Limits {
+        stack: 64 << 10,
+        ..Limits::default()
+    };
+    let src = "fn down(n: Int) -> Int { if n == 0 { 0 } else { down(n - 1) } } fn main() -> Int { down(100000) }";
+    let mut kio = Kio::new(limits).unwrap();
+    let err = kio.run(src, vec![]).unwrap_err();
+    assert_eq!(
+        kio.explain(&err).unwrap(),
+        "stack overflow (limit 64 KB; raise it with --stack)"
     );
 }

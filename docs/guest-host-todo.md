@@ -50,7 +50,7 @@ host/    the kio binary: Wasmtime, cap-std, limits, host functions
   - `Kio::new` takes a `Limits { fuel, timeout_secs, stack }` struct with `Default` matching design.md; `with_stack` becomes a field.
   Done: `while true {}` stops with the fuel error; a host function that sleeps past a 1 s timeout (a test-only `Caps` hook, or a test dir on a slow path if simpler) stops with the timeout error; examples still run within the defaults; both flags work from the CLI.
 
-- [ ] **H3. Memory and stack.** Wasmtime memory limit and `max_wasm_stack`.
+- [x] **H3. Memory and stack.** Wasmtime memory limit and `max_wasm_stack`.
   Done: a program allocating without bound and one recursing past the stack each stop with an error naming the limit.
 
 - [ ] **H4. Host-call and I/O quotas.** Call count, total bytes and per-read size, enforced in the host functions.
