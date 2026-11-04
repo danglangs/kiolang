@@ -44,6 +44,8 @@ summarize : none
 
 `run` prints the report, then `main`'s value, and `out/summary.csv` holds the byte count of `input/invoices.csv`. Every path in the program is relative to one granted directory: `..`, absolute paths and symlinks out are refused by the host, and `create` never overwrites, so run it again after `rm examples/out/summary.csv`.
 
+Runs are bounded: an infinite loop stops with `out of fuel (limit 1000000000; raise it with --fuel)`, and `--timeout` caps wall-clock seconds.
+
 Mistakes are caught before anything runs, with a hint at the fix:
 
 ```

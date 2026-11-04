@@ -693,6 +693,7 @@ name = "host"
 version = "0.1.0"
 dependencies = [
  "cap-std",
+ "host",
  "lang",
  "tempfile",
  "wasmtime",

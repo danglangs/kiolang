@@ -22,3 +22,4 @@ Decisions taken without the owner, cheap to undo. Each: the question, what was c
 | 16 | A grant that matches no `main` parameter | Error before any code runs, like a missing grant, so an operator typo (`--dir inptu=..`) is caught | Allow and ignore unused grants |
 | 17 | `Dir.create` on an existing file | Fails with `denied`: no overwrites | Add an explicit `write` method later, or a grant flag allowing overwrite |
 | 18 | `Dir.create` when the write fails partway | The file is left with partial content, and a retry is refused as an overwrite | Write to a temporary name in the same directory, then rename (H4) |
+| 19 | What the wall clock bounds | Guest execution only: Wasmtime checks epochs in guest code, so a blocked host call runs to completion and the deadline fires on return | Per-call timeouts in host functions (H4) |

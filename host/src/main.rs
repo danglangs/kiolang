@@ -1,4 +1,4 @@
-use host::{open_dir, Diag, Kio};
+use host::{open_dir, Diag, Kio, Limits};
 use wasmtime::Trap;
 
 fn main() {
@@ -6,7 +6,9 @@ fn main() {
     match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
         ["check", path] => std::process::exit(check(path)),
         ["run", path, ref flags @ ..] => std::process::exit(run(path, flags)),
-        _ => eprintln!("usage: kio check <prog.kio>\n       kio run <prog.kio> [--dir name=path]..."),
+        _ => eprintln!(
+            "usage: kio check <prog.kio>\n       kio run <prog.kio> [--dir name=path]... [--fuel n] [--timeout secs]"
+        ),
     }
     std::process::exit(2);
 }
@@ -20,7 +22,7 @@ fn check(path: &str) -> i32 {
         Ok(s) => s,
         Err(code) => return code,
     };
-    match Kio::new().and_then(|mut k| k.check(&src)) {
+    match Kio::new(Limits::default()).and_then(|mut k| k.check(&src)) {
         Err(e) => fail(format!("{e:#}")),
         Ok(Ok(report)) => {
             println!("{}", report.lines.join("\n"));
@@ -36,23 +38,36 @@ fn run(path: &str, flags: &[&str]) -> i32 {
         Err(code) => return code,
     };
     let mut dirs = Vec::new();
+    let mut limits = Limits::default();
     for pair in flags.chunks(2) {
         let (name, dir) = match pair {
+            ["--fuel", n] | ["--timeout", n] => {
+                let Some(v) = n.parse::<u64>().ok().filter(|&v| v > 0) else {
+                    return fail(format!("{} {n}: expected a positive integer", pair[0]));
+                };
+                match pair[0] {
+                    "--fuel" => limits.fuel = v,
+                    _ => limits.timeout_secs = v,
+                }
+                continue;
+            }
             ["--dir", spec] => match spec.split_once('=') {
                 Some(nd) => nd,
                 None => return fail(format!("--dir {spec}: expected name=path")),
             },
-            _ => return fail("usage: kio run <prog.kio> [--dir name=path]...".into()),
+            _ => return fail("usage: kio run <prog.kio> [--dir name=path]... [--fuel n] [--timeout secs]".into()),
         };
         match open_dir(dir.as_ref()) {
             Ok(d) => dirs.push((name.to_string(), d)),
             Err(e) => return fail(format!("--dir {name}={dir}: {e}")),
         }
     }
-    match Kio::new().and_then(|mut k| k.run(&src, dirs)) {
+    match Kio::new(limits).and_then(|mut k| k.run(&src, dirs)) {
         Err(e) => {
             // A trap is the guest failing, not a usage error.
-            if e.downcast_ref::<Trap>() == Some(&Trap::StackOverflow) {
+            if let Some(msg) = limits.explain(&e) {
+                eprintln!("{msg}");
+            } else if e.downcast_ref::<Trap>() == Some(&Trap::StackOverflow) {
                 eprintln!("stack overflow");
             } else {
                 eprintln!("kio: {e:#}");

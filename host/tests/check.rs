@@ -1,10 +1,10 @@
-use host::Kio;
+use host::{Kio, Limits};
 use lang::{check, CapTable};
 
 #[test]
 fn summarize_reports_two_lines() {
     let src = std::fs::read_to_string("../examples/summarize.kio").unwrap();
-    let mut kio = Kio::new().unwrap();
+    let mut kio = Kio::new(Limits::default()).unwrap();
     let report = kio.check(&src).unwrap().unwrap();
     let want = lang::report(&check(&src, &CapTable::v0()).unwrap());
     assert_eq!(report.lines.len(), 2);
@@ -15,7 +15,7 @@ fn summarize_reports_two_lines() {
 #[test]
 fn unknown_name_matches_lang_diag() {
     let src = "fn main() -> Int {\n    nope\n}\n";
-    let mut kio = Kio::new().unwrap();
+    let mut kio = Kio::new(Limits::default()).unwrap();
     let got = kio.check(src).unwrap().unwrap_err();
     let want = check(src, &CapTable::v0()).unwrap_err();
     assert_eq!(got.len(), want.len());
@@ -31,7 +31,7 @@ fn unknown_name_matches_lang_diag() {
 #[test]
 fn check_is_deterministic_across_instances() {
     let src = std::fs::read_to_string("../examples/invoices.kio").unwrap();
-    let run = || Kio::new().unwrap().check(&src).unwrap().unwrap().lines;
+    let run = || Kio::new(Limits::default()).unwrap().check(&src).unwrap().unwrap().lines;
     assert_eq!(run(), run());
 }
 
@@ -53,7 +53,7 @@ fn invoices() -> String {
 fn invoices_writes_total() {
     let (_i, input) = dir(&[("invoices.csv", b"a,40\nb,2\nbad\n")]);
     let (out_t, out) = dir(&[]);
-    let mut kio = Kio::new().unwrap();
+    let mut kio = Kio::new(Limits::default()).unwrap();
     let grants = vec![("input".to_string(), input), ("out".to_string(), out)];
     let out = kio.run(&invoices(), grants).unwrap().unwrap();
     assert_eq!(out.report.lines.len(), 4);
@@ -69,7 +69,7 @@ fn summarize_writes_summary() {
     let (_i, input) = dir(&[("invoices.csv", b"12345")]);
     let (out_t, out) = dir(&[]);
     let grants = vec![("input".to_string(), input), ("out".to_string(), out)];
-    Kio::new().unwrap().run(&src, grants).unwrap().unwrap();
+    Kio::new(Limits::default()).unwrap().run(&src, grants).unwrap().unwrap();
     assert_eq!(std::fs::read(out_t.path().join("summary.csv")).unwrap(), b"5");
 }
 
@@ -79,7 +79,7 @@ fn on(d: cap_std::fs::Dir, body: &str) -> String {
         "fn main(d: Dir) -> Result<{}, IoErr> {{ {body} }}",
         if body.contains("create") { "()" } else { "Bytes" }
     );
-    Kio::new()
+    Kio::new(Limits::default())
         .unwrap()
         .run(&src, vec![("d".into(), d)])
         .unwrap()
@@ -163,7 +163,7 @@ fn open_dir_refuses_missing_and_files() {
 fn rejected(names: &[&str], message: &str, hint: &str) {
     let ts: Vec<_> = names.iter().map(|_| dir(&[])).collect();
     let grants = names.iter().zip(ts).map(|(n, (_t, d))| (n.to_string(), d)).collect();
-    let mut kio = Kio::new().unwrap();
+    let mut kio = Kio::new(Limits::default()).unwrap();
     let diags = kio.run(&invoices(), grants).unwrap().unwrap_err();
     assert_eq!(diags.len(), 1);
     assert_eq!(diags[0].message, message);
@@ -192,7 +192,7 @@ fn extra_grant() {
 #[test]
 fn missing_grant_is_no_grant_error() {
     let (_t, d) = dir(&[]);
-    let mut kio = Kio::new().unwrap();
+    let mut kio = Kio::new(Limits::default()).unwrap();
     let diags = kio.run(&invoices(), vec![("input".into(), d)]).unwrap().unwrap_err();
     assert_eq!(diags[0].message, "no grant for `out: Dir`");
     assert_eq!(kio.import_calls(), 0);
@@ -202,7 +202,7 @@ fn missing_grant_is_no_grant_error() {
 fn runtime_error_has_span() {
     let src = "fn main(d: Dir) -> Int {\n    let xs: List<Int> = [];\n    xs[1]\n}\n";
     let (_t, d) = dir(&[]);
-    let diags = Kio::new()
+    let diags = Kio::new(Limits::default())
         .unwrap()
         .run(src, vec![("d".into(), d)])
         .unwrap()
@@ -217,14 +217,24 @@ fn runtime_error_has_span() {
 #[test]
 fn depth_budget_fits_the_default_stack() {
     let src = "fn down(n: Int) -> Int { if n == 0 { 0 } else { down(n - 1) } } fn main() -> Int { down(100000) }";
-    let diags = Kio::new().unwrap().run(src, vec![]).unwrap().unwrap_err();
+    let diags = Kio::new(Limits::default())
+        .unwrap()
+        .run(src, vec![])
+        .unwrap()
+        .unwrap_err();
     assert_eq!(diags[0].message, "evaluation is too deep");
 }
 
 #[test]
 fn small_stack_traps_with_stack_overflow() {
     let src = "fn down(n: Int) -> Int { if n == 0 { 0 } else { down(n - 1) } } fn main() -> Int { down(1000) }";
-    let err = Kio::with_stack(64 << 10).unwrap().run(src, vec![]).unwrap_err();
+    let err = Kio::new(Limits {
+        stack: 64 << 10,
+        ..Limits::default()
+    })
+    .unwrap()
+    .run(src, vec![])
+    .unwrap_err();
     assert_eq!(
         err.downcast_ref::<wasmtime::Trap>(),
         Some(&wasmtime::Trap::StackOverflow)
@@ -237,7 +247,43 @@ fn main_err_marks_the_run_failed() {
     let (_i, input) = dir(&[("invoices.csv", b"a,1\n")]);
     let (_o, out) = dir(&[("total.txt", b"old")]);
     let grants = vec![("input".to_string(), input), ("out".to_string(), out)];
-    let out = Kio::new().unwrap().run(&invoices(), grants).unwrap().unwrap();
+    let out = Kio::new(Limits::default())
+        .unwrap()
+        .run(&invoices(), grants)
+        .unwrap()
+        .unwrap();
     assert!(out.failed);
     assert_eq!(out.value, r#"Enum("Result", 1, [Enum("IoErr", 1, [])])"#);
+}
+
+#[test]
+fn infinite_loop_runs_out_of_fuel() {
+    let limits = Limits {
+        fuel: 10_000_000,
+        ..Limits::default()
+    };
+    let src = "fn main() -> Int { while true {} 0 }";
+    let err = Kio::new(limits).unwrap().run(src, vec![]).unwrap_err();
+    assert_eq!(
+        limits.explain(&err).unwrap(),
+        "out of fuel (limit 10000000; raise it with --fuel)"
+    );
+}
+
+/// The deadline fires once a slow host call returns control to the guest.
+#[test]
+fn slow_host_call_times_out() {
+    let limits = Limits {
+        timeout_secs: 1,
+        ..Limits::default()
+    };
+    let (_t, d) = dir(&[("a", b"x")]);
+    let src = "fn main(d: Dir) -> Int { let r = d.read(\"a\"); while true {} 0 }";
+    let mut kio = Kio::new(limits).unwrap();
+    kio.slow_reads(std::time::Duration::from_millis(1500));
+    let err = kio.run(src, vec![("d".into(), d)]).unwrap_err();
+    assert_eq!(
+        limits.explain(&err).unwrap(),
+        "timed out after 1 s (raise it with --timeout)"
+    );
 }

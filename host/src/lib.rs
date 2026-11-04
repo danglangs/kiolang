@@ -3,6 +3,8 @@ use cap_std::ambient_authority;
 use cap_std::fs::{Dir as RealDir, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::Arc;
 use std::time::Duration;
 use wasmtime::component::{Component, Linker, Resource, ResourceTable};
 use wasmtime::Result;
@@ -25,6 +27,8 @@ pub fn open_dir(path: &Path) -> io::Result<RealDir> {
 pub struct State {
     pub calls: u32,
     pub peak_memory: usize,
+    #[cfg(feature = "test-hooks")]
+    delay: Duration,
     wasi: WasiCtx,
     table: ResourceTable,
 }
@@ -63,6 +67,8 @@ impl State {
         State {
             calls: 0,
             peak_memory: 0,
+            #[cfg(feature = "test-hooks")]
+            delay: Duration::ZERO,
             wasi,
             table: ResourceTable::new(),
         }
@@ -123,6 +129,8 @@ impl State {
 impl kio::caps::fs::HostDir for State {
     fn read(&mut self, d: Resource<kio::caps::fs::Dir>, path: String) -> Result<Vec<u8>, IoErr> {
         self.calls += 1;
+        #[cfg(feature = "test-hooks")]
+        std::thread::sleep(self.delay);
         check_path(&path)?;
         let dir = self.dir(&d).ok_or(IoErr::Denied)?;
         dir.read(&path).map_err(|e| io_err(&e))
@@ -159,34 +167,87 @@ impl kio::caps::net::HostHttp for State {
     }
 }
 
+/// Per-run limits. `stack` is bytes of Wasm stack: 2 MB by default, since the deepest recursion
+/// the depth budget allows needs about 900 KB in a release host and more in a debug one (G4).
+#[derive(Clone, Copy)]
+pub struct Limits {
+    pub fuel: u64,
+    pub timeout_secs: u64,
+    pub stack: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits {
+            fuel: 1_000_000_000,
+            timeout_secs: 10,
+            stack: 2 << 20,
+        }
+    }
+}
+
+impl Limits {
+    /// The message for a trap caused by one of these limits, or `None` for any other error.
+    pub fn explain(&self, e: &wasmtime::Error) -> Option<String> {
+        match e.downcast_ref::<wasmtime::Trap>()? {
+            wasmtime::Trap::OutOfFuel => Some(format!("out of fuel (limit {}; raise it with --fuel)", self.fuel)),
+            wasmtime::Trap::Interrupt => Some(format!(
+                "timed out after {} s (raise it with --timeout)",
+                self.timeout_secs
+            )),
+            _ => None,
+        }
+    }
+}
+
 /// A fresh instance of the embedded guest.
 pub struct Kio {
     store: Store<State>,
     guest: Guest,
+    stop: Arc<AtomicBool>,
+}
+
+impl Drop for Kio {
+    fn drop(&mut self) {
+        self.stop.store(true, Relaxed);
+    }
 }
 
 impl Kio {
-    /// 2 MB of Wasm stack: the deepest recursion the depth budget allows needs about 900 KB in a
-    /// release host and more in a debug one (G4), so this leaves room in both.
-    pub fn new() -> Result<Self> {
-        Self::with_stack(2 << 20)
-    }
-
-    /// A guest with `bytes` of Wasm stack; running out traps, which the host reports as an error.
-    pub fn with_stack(bytes: usize) -> Result<Self> {
+    /// A guest under `limits`. Running out of stack, fuel or time traps, which the host reports.
+    pub fn new(limits: Limits) -> Result<Self> {
         let mut config = wasmtime::Config::new();
-        config.max_wasm_stack(bytes);
+        config.max_wasm_stack(limits.stack);
+        config.consume_fuel(true);
+        config.epoch_interruption(true);
         let engine = Engine::new(&config)?;
+        // Wasmtime checks epochs only in guest code: a slow host call is not cut short (H4).
+        let stop = Arc::new(AtomicBool::new(false));
+        let (e, s) = (engine.clone(), stop.clone());
+        std::thread::spawn(move || {
+            while !s.load(Relaxed) {
+                std::thread::sleep(Duration::from_millis(100));
+                e.increment_epoch();
+            }
+        });
         let component = Component::new(&engine, GUEST)?;
         let mut linker = Linker::new(&engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
         Guest::add_to_linker::<State, wasmtime::component::HasSelf<State>>(&mut linker, |s| s)?;
         let mut store = Store::new(&engine, State::new());
         store.limiter(|s| s);
+        store.set_fuel(limits.fuel)?;
+        store.set_epoch_deadline(limits.timeout_secs.saturating_mul(10));
+        store.epoch_deadline_trap();
         let guest = Guest::instantiate(&mut store, &component, &linker)?;
-        Ok(Kio { store, guest })
+        Ok(Kio { store, guest, stop })
     }
 
+    /// Make every `Dir.read` sleep first, to test the wall clock against a slow host call.
+    #[cfg(feature = "test-hooks")]
+    pub fn slow_reads(&mut self, d: Duration) {
+        self.store.data_mut().delay = d;
+    }
     /// Parse and check `source`: the report lines, or the diagnostics.
     pub fn check(&mut self, source: &str) -> Result<std::result::Result<Report, Vec<Diag>>> {
         self.guest.call_check(&mut self.store, source)
