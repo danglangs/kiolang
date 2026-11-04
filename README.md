@@ -8,6 +8,28 @@ kio is a fresh language built around that idea, using Rust's ecosystem for speed
 
 **Status: early implementation. Progress: [docs/lang-todo.md](docs/lang-todo.md).**
 
+## Try it
+
+The `kio` command does not exist yet. Today `lang` checks and runs programs with `Int`, `Bool`, `Str`, functions, `let`, `if`, `while` and recursion. Requires Rust (stable).
+
+```
+git clone https://github.com/danglangs/kiolang && cd kiolang
+cargo run -p lang --example run -- examples/fib.kio     # prints Int(6765)
+cargo test
+```
+
+[examples/fib.kio](examples/fib.kio):
+
+```rust
+fn fib(n: Int) -> Int {
+    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+}
+
+fn main() -> Int {
+    fib(20)
+}
+```
+
 ## Why
 
 Agents write code faster than people can review it. In most languages any line can open a file or a socket, so reviewing for safety means reading every line.
