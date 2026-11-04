@@ -43,9 +43,9 @@ cargo run -p lang --example run -- hello.kio             # Int(25)
 Mistakes are caught before anything runs, with a hint at the fix:
 
 ```
-hello.kio:3: error: cannot assign to `x`, it is not `mut`
+a.kio:3: error: cannot assign to `x`, it is not `mut`
   hint: declare it with `let mut`
-hello.kio:5: error: unknown name `cuont`
+b.kio:5: error: unknown name `cuont`
   hint: did you mean `count`?
 ```
 
