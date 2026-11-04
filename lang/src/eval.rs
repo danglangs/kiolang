@@ -81,6 +81,7 @@ fn fail(span: Span, msg: &str) -> Box<Stop> {
 }
 
 /// One step from a local to a part of it, with indexes already evaluated.
+#[derive(Clone, Copy)]
 enum Step<'a> {
     Field(&'a str),
     /// The index and the span of the expression that indexes.
@@ -233,10 +234,10 @@ impl Interp<'_> {
     }
 
     /// The part of local `root` that `steps` lead to.
-    fn slot(&mut self, root: &str, steps: Vec<Step>) -> Result<&mut Value, Box<Stop>> {
+    fn slot(&mut self, root: &str, steps: &[Step]) -> Result<&mut Value, Box<Stop>> {
         let structs = self.structs;
         let mut slot = self.lookup(root);
-        for step in steps {
+        for &step in steps {
             slot = match (step, slot) {
                 (Step::Field(field), Value::Struct(s, vals)) => &mut vals[field_index(structs, s, field)],
                 (Step::Index(i, span), Value::List(vals)) => {
@@ -252,11 +253,68 @@ impl Interp<'_> {
         Ok(slot)
     }
 
+    /// Like `path`, for reading `place` in the local instead of from a copy of it. `None`, with
+    /// nothing evaluated, unless `place` is a local with fields and indexes and neither its indexes
+    /// nor the `later` operands can assign: a copy would have been taken before they ran.
+    /// Fails where evaluating a copy would, in the same order. `entry` is the depth `place` is
+    /// evaluated at.
+    fn walk<'e>(
+        &mut self,
+        place: &'e Expr,
+        entry: usize,
+        later: &[Expr],
+    ) -> Result<Option<(&'e str, Vec<Step<'e>>)>, Box<Stop>> {
+        let mut chain = Vec::new();
+        let mut root = place;
+        while let ExprKind::Field(base, _) | ExprKind::Index(base, _) = &root.kind {
+            chain.push(root);
+            root = base;
+        }
+        let ExprKind::Name(name) = &root.kind else {
+            return Ok(None);
+        };
+        let pure_index = |e: &&Expr| !matches!(&e.kind, ExprKind::Index(_, i) if !pure(i));
+        if builtin(name).is_some() || !chain.iter().all(pure_index) || !later.iter().all(pure) {
+            return Ok(None);
+        }
+        chain.push(root);
+        if let Some(node) = chain.get(MAX_DEPTH - entry) {
+            return Err(fail(node.span, "evaluation is too deep"));
+        }
+        let keep = self.depth;
+        let mut steps = Vec::new();
+        for (j, e) in chain.iter().enumerate().rev().skip(1) {
+            steps.push(match &e.kind {
+                ExprKind::Field(_, field) => Step::Field(field),
+                ExprKind::Index(_, index) => {
+                    self.depth = entry + j + 1;
+                    let i = self.expr(index);
+                    self.depth = keep;
+                    let Value::Int(i) = i? else {
+                        unreachable!("checked index");
+                    };
+                    Step::Index(i, e.span)
+                }
+                _ => unreachable!("chain holds fields and indexes"),
+            });
+            self.slot(name, &steps)?;
+        }
+        Ok(Some((name, steps)))
+    }
+
+    /// A copy of the field or element `e` names, without copying the rest of its local.
+    fn read(&mut self, e: &Expr) -> Result<Option<Value>, Box<Stop>> {
+        let Some((root, steps)) = self.walk(e, self.depth - 1, &[])? else {
+            return Ok(None);
+        };
+        Ok(Some(self.slot(root, &steps)?.clone()))
+    }
+
     #[inline(never)]
     fn assign(&mut self, target: &Expr, op: &str, value: &Expr, span: Span) -> Result<(), Box<Stop>> {
         let (root, steps) = self.path(target)?;
         let mut v = self.expr(value)?;
-        let slot = self.slot(root, steps)?;
+        let slot = self.slot(root, &steps)?;
         if op != "=" {
             v = binary(&op[..1], slot.clone(), v, span)?;
         }
@@ -332,7 +390,7 @@ impl Interp<'_> {
 
     fn expr_kind(&mut self, e: &Expr) -> Res {
         match &e.kind {
-            ExprKind::Name(name) if builtin(name).is_some() => Ok(self.constructor(name, Vec::new())),
+            ExprKind::Name(name) if builtin(name).is_some() => Ok(constructor(name, Vec::new())),
             ExprKind::Name(name) => Ok(self.lookup(name).clone()),
             ExprKind::Int(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Unit => Ok(literal(e)),
             ExprKind::Unary(op, x) => self.unary(op, x, e.span),
@@ -341,13 +399,19 @@ impl Interp<'_> {
             ExprKind::If(cond, then, els) => self.if_expr(cond, then, els.as_deref()),
             ExprKind::Block(b) => self.block(b),
             ExprKind::Call(callee, args) => self.call_expr(callee, args),
-            ExprKind::Field(base, field) => self.field(base, field),
+            ExprKind::Field(base, field) => match self.read(e)? {
+                Some(v) => Ok(v),
+                None => self.field(base, field),
+            },
             ExprKind::StructLit(name, inits) => self.struct_lit(name, inits),
             ExprKind::Path(en, v) => Ok(self.variant(en, v, Vec::new())),
             ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms),
             ExprKind::Try(x) => self.try_expr(x),
             ExprKind::Method(recv, name, args) => self.method(recv, name, args, e.span),
-            ExprKind::Index(base, index) => self.index(base, index, e.span),
+            ExprKind::Index(base, index) => match self.read(e)? {
+                Some(v) => Ok(v),
+                None => self.index(base, index, e.span),
+            },
             ExprKind::List(items) => Ok(Value::List(self.values(items)?)),
         }
     }
@@ -390,7 +454,7 @@ impl Interp<'_> {
             let (root, steps) = self.path(recv)?;
             let mut args = self.values(args)?.into_iter();
             let (a, b) = (args.next(), args.next());
-            match (self.slot(root, steps)?, name, a, b) {
+            match (self.slot(root, &steps)?, name, a, b) {
                 (Value::List(vals), "push", Some(item), _) => vals.push(item),
                 (Value::Map(map), "insert", Some(k), Some(v)) => {
                     map.insert(Key::from_value(k), v);
@@ -402,60 +466,27 @@ impl Interp<'_> {
             }
             return Ok(Value::Unit);
         }
-        let recv = self.expr(recv)?;
-        let mut vals = self.values(args)?;
-        if let Value::Cap(cap) = recv {
-            let v = self.caps.call(&cap, name, vals).map_err(|msg| fail(span, &msg))?;
-            // The host is trusted code but checked anyway: a value of the wrong type stops the run.
-            let ty = &self.program.cap_methods[&(self.cap_type(&cap), name.to_string())];
-            if !self.program.fits(&v, ty) {
-                return Err(fail(span, &format!("host returned a malformed value for `{name}`")));
-            }
-            return Ok(v);
-        }
-        Ok(match (recv, name) {
-            (Value::Int(n), "to_str") => Value::Str(n.to_string()),
-            (Value::Str(s), "len") => Value::Int(s.len() as i64),
-            (Value::Str(s), "to_bytes") => Value::Bytes(s.into_bytes()),
-            (Value::Str(s), "split") => {
-                let Value::Str(sep) = vals.remove(0) else {
-                    unreachable!("checked argument");
-                };
-                if sep.is_empty() {
-                    return Err(fail(span, "`split` needs a non-empty separator"));
+        let place = if on_cap {
+            None
+        } else {
+            self.walk(recv, self.depth, args)?
+        };
+        let Some((root, steps)) = place else {
+            let recv = self.expr(recv)?;
+            let vals = self.values(args)?;
+            if let Value::Cap(cap) = recv {
+                let v = self.caps.call(&cap, name, vals).map_err(|msg| fail(span, &msg))?;
+                // The host is trusted code but checked anyway: a value of the wrong type stops the run.
+                let ty = &self.program.cap_methods[&(self.cap_type(&cap), name.to_string())];
+                if !self.program.fits(&v, ty) {
+                    return Err(fail(span, &format!("host returned a malformed value for `{name}`")));
                 }
-                Value::List(s.split(&sep).map(|p| Value::Str(p.to_string())).collect())
+                return Ok(v);
             }
-            (Value::Str(s), "lines") => Value::List(s.lines().map(|l| Value::Str(l.to_string())).collect()),
-            (Value::Str(s), "trim") => Value::Str(s.trim().to_string()),
-            (Value::Str(s), "contains" | "starts_with") => {
-                let Value::Str(arg) = vals.remove(0) else {
-                    unreachable!("checked argument");
-                };
-                Value::Bool(if name == "contains" {
-                    s.contains(&arg)
-                } else {
-                    s.starts_with(&arg)
-                })
-            }
-            (Value::Str(s), "parse_int") => match s.parse::<i64>() {
-                Ok(n) => self.constructor("Some", vec![Value::Int(n)]),
-                Err(_) => self.constructor("None", vec![]),
-            },
-            (Value::List(v), "len") => Value::Int(v.len() as i64),
-            (Value::Map(m), "len") => Value::Int(m.len() as i64),
-            (Value::Map(m), "keys") => Value::List(m.keys().map(Key::to_value).collect()),
-            (Value::Map(m), "get") => match m.get(&Key::from_value(vals.remove(0))) {
-                Some(v) => self.constructor("Some", vec![v.clone()]),
-                None => self.constructor("None", vec![]),
-            },
-            (Value::Bytes(b), "len") => Value::Int(b.len() as i64),
-            (Value::Bytes(b), "to_str") => match String::from_utf8(b) {
-                Ok(s) => Value::Str(s),
-                Err(_) => return Err(fail(span, "invalid UTF-8")),
-            },
-            _ => unreachable!("checked method"),
-        })
+            return builtin_method(&recv, name, vals, span);
+        };
+        let vals = self.values(args)?;
+        builtin_method(self.slot(root, &steps)?, name, vals, span)
     }
 
     #[inline(never)]
@@ -479,11 +510,6 @@ impl Interp<'_> {
     #[inline(never)]
     fn variant(&self, en: &str, v: &str, payload: Vec<Value>) -> Value {
         let i = variant_index(self.enums, en, v).expect("checked variant");
-        Value::Enum(en.to_string(), i, payload)
-    }
-
-    fn constructor(&self, name: &str, payload: Vec<Value>) -> Value {
-        let (en, i) = builtin(name).expect("checked constructor");
         Value::Enum(en.to_string(), i, payload)
     }
 
@@ -547,7 +573,7 @@ impl Interp<'_> {
         let name = match &callee.kind {
             ExprKind::Name(name) if builtin(name).is_some() => {
                 let vals = args.iter().map(|a| self.expr(a)).collect::<Result<_, _>>()?;
-                return Ok(self.constructor(name, vals));
+                return Ok(constructor(name, vals));
             }
             ExprKind::Name(name) => name,
             ExprKind::Path(en, _) if en == "Map" => return Ok(Value::Map(BTreeMap::new())),
@@ -637,6 +663,73 @@ fn negate(op: &str, x: Value, span: Span) -> Res {
             .ok_or_else(|| fail(span, "Int overflow")),
         (_, Value::Bool(b)) => Ok(Value::Bool(!b)),
         _ => unreachable!("checked operand"),
+    }
+}
+
+/// A built-in method on `recv`, which may be part of a local.
+fn builtin_method(recv: &Value, name: &str, mut args: Vec<Value>, span: Span) -> Res {
+    Ok(match (recv, name) {
+        (Value::Int(n), "to_str") => Value::Str(n.to_string()),
+        (Value::Str(s), "len") => Value::Int(s.len() as i64),
+        (Value::Str(s), "to_bytes") => Value::Bytes(s.clone().into_bytes()),
+        (Value::Str(s), "split") => {
+            let Value::Str(sep) = args.remove(0) else {
+                unreachable!("checked argument");
+            };
+            if sep.is_empty() {
+                return Err(fail(span, "`split` needs a non-empty separator"));
+            }
+            Value::List(s.split(&sep).map(|p| Value::Str(p.to_string())).collect())
+        }
+        (Value::Str(s), "lines") => Value::List(s.lines().map(|l| Value::Str(l.to_string())).collect()),
+        (Value::Str(s), "trim") => Value::Str(s.trim().to_string()),
+        (Value::Str(s), "contains" | "starts_with") => {
+            let Value::Str(arg) = args.remove(0) else {
+                unreachable!("checked argument");
+            };
+            Value::Bool(if name == "contains" {
+                s.contains(&arg)
+            } else {
+                s.starts_with(&arg)
+            })
+        }
+        (Value::Str(s), "parse_int") => match s.parse::<i64>() {
+            Ok(n) => constructor("Some", vec![Value::Int(n)]),
+            Err(_) => constructor("None", vec![]),
+        },
+        (Value::List(v), "len") => Value::Int(v.len() as i64),
+        (Value::Map(m), "len") => Value::Int(m.len() as i64),
+        (Value::Map(m), "keys") => Value::List(m.keys().map(Key::to_value).collect()),
+        (Value::Map(m), "get") => match m.get(&Key::from_value(args.remove(0))) {
+            Some(v) => constructor("Some", vec![v.clone()]),
+            None => constructor("None", vec![]),
+        },
+        (Value::Bytes(b), "len") => Value::Int(b.len() as i64),
+        (Value::Bytes(b), "to_str") => match String::from_utf8(b.clone()) {
+            Ok(s) => Value::Str(s),
+            Err(_) => return Err(fail(span, "invalid UTF-8")),
+        },
+        _ => unreachable!("checked method"),
+    })
+}
+
+fn constructor(name: &str, payload: Vec<Value>) -> Value {
+    let (en, i) = builtin(name).expect("checked constructor");
+    Value::Enum(en.to_string(), i, payload)
+}
+
+/// True when evaluating `e` cannot assign to a local, since only statements do and only
+/// blocks hold them. Calls cannot: a callee has its own locals.
+fn pure(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Int(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Unit => true,
+        ExprKind::Name(_) | ExprKind::Path(..) => true,
+        ExprKind::Block(_) | ExprKind::If(..) | ExprKind::Match(..) => false,
+        ExprKind::Unary(_, x) | ExprKind::Field(x, _) | ExprKind::Try(x) => pure(x),
+        ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) => pure(a) && pure(b),
+        ExprKind::Call(f, xs) | ExprKind::Method(f, _, xs) => pure(f) && xs.iter().all(pure),
+        ExprKind::List(xs) => xs.iter().all(pure),
+        ExprKind::StructLit(_, inits) => inits.iter().all(|(_, x)| pure(x)),
     }
 }
 

@@ -625,3 +625,20 @@ fn str_parse_int() {
     }
     assert_eq!(parse("-9223372036854775808"), some(Value::Int(i64::MIN)));
 }
+
+#[test]
+fn reads_in_place() {
+    let loop_over = |n: i64| {
+        format!(
+            "fn main() -> Int {{ let mut xs: List<Int> = []; for i in 0..{n} {{ xs.push(i); }} \
+             let mut s = 0; for i in 0..xs.len() {{ s += xs[i]; }} s }}"
+        )
+    };
+    assert_eq!(int(&loop_over(40_000)), Value::Int(799_980_000));
+    // An operand that assigns still sees the value the receiver had before it ran.
+    let src = "fn main() -> Int { let mut xs: List<Int> = [1, 2]; xs[{ xs[0] = 9; 0 }] }";
+    assert_eq!(int(src), Value::Int(1));
+    let src = "fn main() -> Int { let mut xs: List<Int> = [1, 2]; \
+               let a = [xs.len(), { xs.push(0); 0 }]; a[0] }";
+    assert_eq!(int(src), Value::Int(2));
+}

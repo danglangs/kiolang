@@ -232,8 +232,8 @@ Order: enums and `Result` first, because capability methods return `Result<_, Io
 
 ## Performance
 
-- [ ] **P1. Borrowing reads.** Every variable read clones the whole value, so `xs[i]`, `.len()` and `m.get(k)` copy the receiver, and a loop that indexes a list is quadratic: 20,000 elements take 1.8 s and 40,000 take 7.0 s. Evaluate these on the variable in place instead of on a clone. No change to what programs mean.
-  Done: the indexing loop over 40,000 elements runs in under 0.1 s in release; all copy tests still pass.
+- [x] **P1. Borrowing reads.** Every variable read clones the whole value, so `xs[i]`, `.len()` and `m.get(k)` copy the receiver, and a loop that indexes a list is quadratic: 20,000 elements take 1.8 s and 40,000 take 7.0 s. Evaluate these on the variable in place instead of on a clone. No change to what programs mean.
+  Done: the indexing loop over 40,000 elements runs in 0.03 s in release (was 7.3 s); all copy tests still pass. Reads that could see a write from their own operands (a block in an index or argument) keep the copying path.
 
 - [ ] **P2. Copy-on-write values.** `design.md` memory model step 2: `Rc` inside `List`, `Map`, `Str` and `Bytes`, copied only on write when shared. Makes passing values to functions cheap. Decide after web W10 measures where time goes.
 
