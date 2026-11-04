@@ -10,25 +10,43 @@ kio is a fresh language built around that idea, using Rust's ecosystem for speed
 
 ## Try it
 
-The `kio` command does not exist yet. Today `lang` checks and runs programs with `Int`, `Bool`, `Str`, structs, functions, `let`, `if`, `while` and recursion. Requires Rust (stable).
+There is no `kio` command yet; a temporary runner checks and runs a `.kio` file. Today the language has `Int`, `Bool`, `Str`, structs, functions, `let`, `if`, `while` and recursion. Requires Rust (stable).
 
 ```
 git clone https://github.com/danglangs/kiolang && cd kiolang
-cargo run -p lang --example run -- examples/fib.kio     # prints Int(6765)
-cargo test
+cargo run -p lang --example run -- examples/fib.kio      # Int(6765)
+cargo run -p lang --example run -- examples/points.kio   # Int(25)
 ```
 
-[examples/fib.kio](examples/fib.kio):
+Write your own as `hello.kio`. `main` takes no parameters and its return value is printed:
 
 ```rust
-fn fib(n: Int) -> Int {
-    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+struct Point { x: Int, y: Int }
+
+fn dist2(a: Point, b: Point) -> Int {
+    let dx = a.x - b.x;
+    let dy = a.y - b.y;
+    dx * dx + dy * dy
 }
 
 fn main() -> Int {
-    fib(20)
+    let mut p = Point { x: 1, y: 2 };
+    p.x += 3;
+    dist2(p, Point { x: 0, y: 5 })
 }
 ```
+
+```
+cargo run -p lang --example run -- hello.kio             # Int(25)
+```
+
+Mistakes are caught before anything runs:
+
+```
+hello.kio:3: error: cannot assign to `x`, it is not `mut`
+```
+
+Run the test suite with `cargo test`.
 
 ## Why
 
