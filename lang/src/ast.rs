@@ -125,6 +125,8 @@ pub enum ExprKind {
     /// `Enum::Variant`; a payload is a `Call` on it.
     Path(String, String),
     Match(Box<Expr>, Vec<Arm>),
+    /// `e?`
+    Try(Box<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

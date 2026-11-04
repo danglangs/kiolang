@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::check::Program;
+use crate::check::{builtin, Program};
 use crate::Span;
 use std::collections::HashMap;
 
@@ -185,6 +185,7 @@ impl Interp<'_> {
 
     fn expr_kind(&mut self, e: &Expr) -> Res {
         match &e.kind {
+            ExprKind::Name(name) if builtin(name).is_some() => Ok(self.constructor(name, Vec::new())),
             ExprKind::Name(name) => Ok(self.lookup(name).clone()),
             ExprKind::Int(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Unit => Ok(literal(e)),
             ExprKind::Unary(op, x) => self.unary(op, x, e.span),
@@ -197,6 +198,7 @@ impl Interp<'_> {
             ExprKind::StructLit(name, inits) => self.struct_lit(name, inits),
             ExprKind::Path(en, v) => Ok(self.variant(en, v, Vec::new())),
             ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms),
+            ExprKind::Try(x) => self.try_expr(x),
             ExprKind::Method(..) | ExprKind::Index(..) => unreachable!("rejected by check"),
         }
     }
@@ -220,6 +222,23 @@ impl Interp<'_> {
     fn variant(&self, en: &str, v: &str, payload: Vec<Value>) -> Value {
         let i = variant_index(self.enums, en, v).expect("checked variant");
         Value::Enum(en.to_string(), i, payload)
+    }
+
+    fn constructor(&self, name: &str, payload: Vec<Value>) -> Value {
+        let (en, i) = builtin(name).expect("checked constructor");
+        Value::Enum(en.to_string(), i, payload)
+    }
+
+    /// `Some` and `Ok` yield their payload; `None` and `Err` return from the function.
+    fn try_expr(&mut self, x: &Expr) -> Res {
+        let Value::Enum(en, i, mut payload) = self.expr(x)? else {
+            unreachable!("checked operand");
+        };
+        let success = if en == "Option" { "Some" } else { "Ok" };
+        if builtin(success) == Some((en.as_str(), i)) {
+            return Ok(payload.remove(0));
+        }
+        Err(Box::new(Stop::Return(Value::Enum(en, i, payload))))
     }
 
     /// The first arm whose pattern matches runs, with its bindings as locals.
@@ -267,6 +286,10 @@ impl Interp<'_> {
 
     fn call_expr(&mut self, callee: &Expr, args: &[Expr]) -> Res {
         let name = match &callee.kind {
+            ExprKind::Name(name) if builtin(name).is_some() => {
+                let vals = args.iter().map(|a| self.expr(a)).collect::<Result<_, _>>()?;
+                return Ok(self.constructor(name, vals));
+            }
             ExprKind::Name(name) => name,
             ExprKind::Path(en, v) => {
                 let vals = args.iter().map(|a| self.expr(a)).collect::<Result<_, _>>()?;
@@ -318,7 +341,12 @@ fn field_index(structs: &HashMap<String, Struct>, name: &str, field: &str) -> us
 }
 
 fn variant_index(enums: &HashMap<String, Enum>, name: &str, variant: &str) -> Option<usize> {
-    enums[name].variants.iter().position(|v| v.name == variant)
+    if let Some((en, i)) = builtin(variant) {
+        if en == name {
+            return Some(i);
+        }
+    }
+    enums.get(name)?.variants.iter().position(|v| v.name == variant)
 }
 
 /// A `return` ends the call with its value; errors keep unwinding.

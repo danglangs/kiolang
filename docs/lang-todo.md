@@ -129,7 +129,7 @@ Order: enums and `Result` first, because capability methods return `Result<_, Io
   - Lexer: unterminated string gives "add a closing `\"`"; integer too large gives "Int is 64-bit: at most 9223372036854775807".
   Done: every existing rejection test asserts its hint; `closest` has its own tests; no `Diag` is built with `None` hint except where this list says "otherwise no hint".
 
-- [ ] **6. Option, Result and `?`.** Checker and interpreter; the parser change is only `?` as a postfix operator (`ExprKind::Try`), binding like `.` and `[]`.
+- [x] **6. Option, Result and `?`.** Checker and interpreter; the parser change is only `?` as a postfix operator (`ExprKind::Try`), binding like `.` and `[]`.
   - Types: `Ty::Option(Box<Ty>)`, `Ty::Result(Box<Ty>, Box<Ty>)`, resolved from `Option<T>` and `Result<T, E>`; wrong arity of type arguments is an error. `Display` prints them as written. This is the shape `List<T>` and `Map<K, V>` reuse.
   - Values: `Some`, `None`, `Ok`, `Err` are `Value::Enum` with enum names `Option` and `Result` and variant indexes `None 0, Some 1` and `Ok 0, Err 1`. No new `Value` variant. Users cannot declare types named `Option` or `Result`.
   - Constructors are bare names: `Some(e)`, `None`, `Ok(e)`, `Err(e)`. Patterns: `Some(x)`, `None`, `Ok(x)`, `Err(e)`, and `Option::Some(x)` etc.

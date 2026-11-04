@@ -519,3 +519,131 @@ fn hints_for_declarations_and_match() {
         "every branch must have the same type"
     );
 }
+
+#[test]
+fn option_and_result_types() {
+    ok("fn f(x: Option<Int>, y: Result<(), Str>) -> Option<Option<Int>> { Some(x) } fn main() {}");
+    ok("fn main() { let x: Option<Int> = None; let y: Result<Int, Str> = Err(\"a\"); let z = Some(1); }");
+    ok("fn f() -> Option<Int> { return None; } fn g() -> Result<(), Str> { Ok(()) } fn main() {}");
+    ok("fn f(b: Bool) -> Option<Int> { if b { None } else { Some(1) } } fn main() {}");
+    ok("struct S { o: Option<Int> } fn main() { let s = S { o: None }; }");
+    ok("enum E { A(Option<Int>) } fn main() { let e = E::A(None); }");
+    ok("fn f(o: Option<Int>) {} fn main() { f(None); f(Some(1)); }");
+    let (msg, at) = reject("fn f(x: Option<Int, Int>) {} fn main() {}");
+    assert_eq!(
+        (msg.as_str(), at.as_str()),
+        ("`Option` takes 1 type arguments, found 2", "Option<Int, Int>")
+    );
+    assert_eq!(hint("fn f(x: Option<Int, Int>) {} fn main() {}"), "write `Option<T>`");
+    assert_eq!(hint("fn f(x: Result<Int>) {} fn main() {}"), "write `Result<T, E>`");
+    let (msg, _) = reject("fn f(x: Option) {} fn main() {}");
+    assert_eq!(msg, "`Option` takes 1 type arguments, found 0");
+    let (msg, _) = reject("struct Option { a: Int } fn main() {}");
+    assert_eq!(msg, "`Option` is a built-in type");
+    assert_eq!(hint("enum Result { A } fn main() {}"), "rename your type");
+    let (msg, _) = reject("fn main() { let x: Option<Int> = Some(\"a\"); }");
+    assert_eq!(msg, "expected Int, found Str");
+    let (msg, _) = reject("fn main() { let x: Option<Int> = Some(1) == Some(1); }");
+    assert_eq!(msg, "`==` cannot be applied to Option<Int> and Option<Int>");
+}
+
+#[test]
+fn constructors_need_a_type() {
+    for (src, tip) in [
+        (
+            "fn main() { let x = None; }",
+            "add a type: `let x: Option<Int> = None;`",
+        ),
+        (
+            "fn main() { let x = Ok(1); }",
+            "add a type: `let x: Result<Int, Str> = Ok(1);`",
+        ),
+        (
+            "fn main() { let x = Err(1); }",
+            "add a type: `let x: Result<Int, Str> = Err(\"no\");`",
+        ),
+    ] {
+        assert_eq!(hint(src), tip, "{src}");
+    }
+    let (msg, _) = reject("fn main() { let x: Result<Int, Int> = None; }");
+    assert_eq!(msg, "expected Result<Int, Int>, found an Option");
+    let (msg, at) = reject("fn main() { let x = None; }");
+    assert_eq!((msg.as_str(), at.as_str()), ("cannot tell the type of `None`", "None"));
+    assert_eq!(
+        hint("fn main() { let x: Option<Int> = Some(); }"),
+        "write `Some(value)`"
+    );
+    assert_eq!(
+        hint("fn main() { let x: Option<Int> = None(1); }"),
+        "write `None` without arguments"
+    );
+    assert_eq!(
+        hint("fn main() { Option::Some(1); }"),
+        "write `Some` without `Option::`"
+    );
+    assert_eq!(hint("fn main() { Option::Soem(1); }"), "did you mean `Some`?");
+}
+
+#[test]
+fn try_operator() {
+    ok("fn a() -> Option<Int> { Some(1) } fn b() -> Option<Int> { let x = a()?; Some(x + 1) } fn main() {}");
+    ok("fn a() -> Result<Int, Str> { Ok(1) } fn b() -> Result<(), Str> { a()?; Ok(()) } fn main() {}");
+    let src = "fn a() -> Result<Int, Str> { Ok(1) } fn b() -> Option<Int> { Some(a()?) } fn main() {}";
+    let (msg, at) = reject(src);
+    assert_eq!(msg, "`?` on Result<Int, Str> in a function returning Option<Int>");
+    assert_eq!(at, "a()?");
+    assert_eq!(hint(src), "change the return type or `match` on the result");
+    let src = "fn a() -> Result<Int, Str> { Ok(1) } fn b() -> Result<Int, Int> { Ok(a()?) } fn main() {}";
+    let (msg, _) = reject(src);
+    assert_eq!(msg, "`?` on Result<Int, Str> in a function returning Result<Int, Int>");
+    assert_eq!(hint(src), "change the return type or `match` on the result");
+    let (msg, at) = reject("fn f() -> Option<Int> { 1? } fn main() {}");
+    assert_eq!(
+        (msg.as_str(), at.as_str()),
+        ("`?` needs an Option or Result, found Int", "1")
+    );
+    assert_eq!(
+        hint("fn f() -> Option<Int> { 1? } fn main() {}"),
+        "`?` works on Option and Result values"
+    );
+    let (msg, _) = reject("fn f() -> Int { Some(1)? } fn main() {}");
+    assert_eq!(msg, "`?` on Option<Int> in a function returning Int");
+}
+
+#[test]
+fn match_on_option_and_result() {
+    ok("fn f(o: Option<Int>) -> Int { match o { Some(x) => x, None => 0 } } fn main() {}");
+    ok("fn f(o: Option<Int>) -> Int { match o { Option::Some(x) => x, Option::None => 0 } } fn main() {}");
+    ok("fn f(r: Result<Int, Str>) -> Int { match r { Ok(x) => x, Err(_) => 0 } } fn main() {}");
+    ok("fn f(r: Result<Int, Str>) -> Int { match r { Result::Ok(x) => x, _ => 0 } } fn main() {}");
+    let (msg, _) = reject("fn f(o: Option<Int>) -> Int { match o { Some(x) => x } } fn main() {}");
+    assert_eq!(msg, "non-exhaustive `match`: missing Option::None");
+    let src = "fn f(o: Option<Int>) -> Int { match o { Some(x) => \"a\", None => 0 } } fn main() {}";
+    assert_eq!(reject(src).0, "`match` arms have different types: Str and Int");
+    let (msg, _) = reject("fn f(o: Option<Int>) -> Int { match o { Ok(x) => x, _ => 0 } } fn main() {}");
+    assert_eq!(msg, "unknown variant `Option::Ok`");
+    assert_eq!(
+        hint("fn f(o: Option<Int>) -> Int { match o { Ok(x) => x, _ => 0 } }  fn main() {}"),
+        "variants: None, Some"
+    );
+    let (msg, _) = reject("fn f(o: Option<Int>) -> Int { match o { Some(a, b) => a, _ => 0 } } fn main() {}");
+    assert_eq!(msg, "`Option::Some` has 1 values, found 2 bindings");
+    assert_eq!(
+        hint("fn f(o: Option<Int>) -> Int { match o { Some(a, b) => a, _ => 0 } } fn main() {}"),
+        "`Option::Some` holds (Int)"
+    );
+    let (msg, _) = reject("fn f(o: Option<Int>) -> Int { match o { Result::Ok(x) => x, _ => 0 } } fn main() {}");
+    assert_eq!(msg, "expected Option<Int>, found Result");
+}
+
+#[test]
+fn constructor_against_wrong_expected_type() {
+    let (msg, _) = reject("fn f() -> Option<Int> { Ok(1) } fn main() {}");
+    assert_eq!(msg, "expected Option<Int>, found a Result");
+    let (msg, _) = reject("fn main() -> Int { let x: Int = None; x }");
+    assert_eq!(msg, "expected Int, found an Option");
+    assert_eq!(
+        hint("fn main() { let x = Ok(1); }"),
+        "add a type: `let x: Result<Int, Str> = Ok(1);`"
+    );
+}

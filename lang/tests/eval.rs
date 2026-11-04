@@ -269,3 +269,49 @@ fn enums_are_copied() {
                }";
     assert_eq!(s_main(src), Value::Int(12));
 }
+
+fn some(v: Value) -> Value {
+    Value::Enum("Option".into(), 1, vec![v])
+}
+
+fn none() -> Value {
+    Value::Enum("Option".into(), 0, vec![])
+}
+
+#[test]
+fn option_and_result_values() {
+    assert_eq!(int("fn main() -> Option<Int> { Some(1) }"), some(Value::Int(1)));
+    assert_eq!(int("fn main() -> Option<Int> { None }"), none());
+    let ok = Value::Enum("Result".into(), 0, vec![Value::Unit]);
+    assert_eq!(int("fn main() -> Result<(), Str> { Ok(()) }"), ok);
+    let err = Value::Enum("Result".into(), 1, vec![Value::Str("e".into())]);
+    assert_eq!(int("fn main() -> Result<(), Str> { return Err(\"e\"); }"), err);
+    assert_eq!(int("fn main() -> Option<Int> { let x: Option<Int> = None; x }"), none());
+}
+
+#[test]
+fn try_propagates_through_calls() {
+    let src = "fn div(a: Int, b: Int) -> Option<Int> { if b == 0 { None } else { Some(a / b) } }
+               fn mid(a: Int, b: Int) -> Option<Int> { let q = div(a, b)?; Some(q + 1) }
+               fn main() -> Option<Int> { let x = mid(10, 2)?; let y = mid(x, 0)?; Some(y) }";
+    assert_eq!(int(src), none());
+    let src = "fn div(a: Int, b: Int) -> Option<Int> { if b == 0 { None } else { Some(a / b) } }
+               fn mid(a: Int, b: Int) -> Option<Int> { let q = div(a, b)?; Some(q + 1) }
+               fn main() -> Option<Int> { let x = mid(10, 2)?; mid(x, 1) }";
+    assert_eq!(int(src), some(Value::Int(7)));
+    let src = "fn parse(s: Str) -> Result<Int, Str> { if s == \"1\" { Ok(1) } else { Err(\"bad \" + s) } }
+               fn add(a: Str, b: Str) -> Result<Int, Str> { Ok(parse(a)? + parse(b)?) }
+               fn main() -> Result<Int, Str> { let x = add(\"1\", \"1\")?; add(\"1\", \"z\") }";
+    assert_eq!(
+        int(src),
+        Value::Enum("Result".into(), 1, vec![Value::Str("bad z".into())])
+    );
+}
+
+#[test]
+fn match_on_option_and_result() {
+    let src = "fn f(o: Option<Int>) -> Int { match o { Some(x) => x, None => -1 } }
+               fn g(r: Result<Int, Str>) -> Int { match r { Result::Ok(x) => x, Result::Err(_) => 0 } }
+               fn main() -> Int { f(Some(5)) + f(None) + g(Ok(10)) + g(Err(\"e\")) }";
+    assert_eq!(int(src), Value::Int(14));
+}

@@ -464,6 +464,8 @@ impl Parser {
                 self.expect("]")?;
                 self.no_struct = outer;
                 ExprKind::Index(Box::new(e), Box::new(index))
+            } else if self.eat("?") {
+                ExprKind::Try(Box::new(e))
             } else {
                 break;
             };

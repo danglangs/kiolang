@@ -19,6 +19,7 @@ fn show(e: &Expr) -> String {
         ExprKind::Method(r, m, args) => format!("(.{m} {}{})", show(r), list(args)),
         ExprKind::Field(r, f) => format!("(. {} {f})", show(r)),
         ExprKind::Index(r, i) => format!("([] {} {})", show(r), show(i)),
+        ExprKind::Try(x) => format!("(? {})", show(x)),
         ExprKind::Path(e, v) => format!("{e}::{v}"),
         ExprKind::Match(s, arms) => {
             let arms = arms.iter().fold(String::new(), |a, arm| {
@@ -450,4 +451,11 @@ fn rejects_match_syntax() {
         "expected `}`",
         Some("a `{` is not closed"),
     );
+}
+
+#[test]
+fn try_operator() {
+    assert_eq!(expr("f()?"), "(? (call f))");
+    assert_eq!(expr("a.b?.c"), "(. (? (. a b)) c)");
+    assert_eq!(expr("-x?"), "(- (? x))");
 }

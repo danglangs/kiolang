@@ -24,6 +24,8 @@ enum Ty {
     Unit,
     Struct(String),
     Enum(String),
+    Option(Box<Ty>),
+    Result(Box<Ty>, Box<Ty>),
     /// A block that always returns; it matches any type.
     Never,
 }
@@ -36,6 +38,8 @@ impl fmt::Display for Ty {
             Ty::Str => f.write_str("Str"),
             Ty::Unit => f.write_str("()"),
             Ty::Struct(name) | Ty::Enum(name) => f.write_str(name),
+            Ty::Option(t) => write!(f, "Option<{t}>"),
+            Ty::Result(t, e) => write!(f, "Result<{t}, {e}>"),
             Ty::Never => f.write_str("!"),
         }
     }
@@ -46,6 +50,9 @@ type Fields = HashMap<String, Vec<(String, Ty)>>;
 
 /// Resolved variant names and payload types of each enum, in declaration order.
 type Variants = HashMap<String, Vec<(String, Vec<Ty>)>>;
+
+/// An enum's name and its variants with payload types, as `Checker::shape` returns.
+type Shape = (String, Vec<(String, Vec<Ty>)>);
 
 /// How a `match` pattern counts toward exhaustiveness.
 #[derive(PartialEq)]
@@ -167,7 +174,9 @@ fn binary_ty(op: &str, l: &Ty, r: &Ty) -> Option<Ty> {
         ("+" | "-" | "*" | "/" | "%", Int, Int) => Some(Int),
         ("<" | "<=" | ">" | ">=", Int, Int) => Some(Bool),
         ("&&" | "||", Bool, Bool) => Some(Bool),
-        ("==" | "!=", a, b) if a == b && !matches!(a, Never | Struct(_) | Enum(_)) => Some(Bool),
+        ("==" | "!=", a, b) if a == b && !matches!(a, Never | Struct(_) | Enum(_) | Option(_) | Result(..)) => {
+            Some(Bool)
+        }
         _ => None,
     }
 }
@@ -175,15 +184,28 @@ fn binary_ty(op: &str, l: &Ty, r: &Ty) -> Option<Ty> {
 fn resolve(t: &Type, structs: &HashMap<String, Struct>, enums: &HashMap<String, Enum>) -> Result<Ty, Diag> {
     match &t.kind {
         TypeKind::Unit => Ok(Ty::Unit),
-        TypeKind::Named(n, args) if args.is_empty() => match n.as_str() {
-            "Int" => Ok(Ty::Int),
-            "Bool" => Ok(Ty::Bool),
-            "Str" => Ok(Ty::Str),
-            _ if structs.contains_key(n) => Ok(Ty::Struct(n.clone())),
-            _ if enums.contains_key(n) => Ok(Ty::Enum(n.clone())),
+        TypeKind::Named(n, args) => match (n.as_str(), args.as_slice()) {
+            ("Option", [a]) => Ok(Ty::Option(Box::new(resolve(a, structs, enums)?))),
+            ("Result", [a, b]) => {
+                let (a, b) = (resolve(a, structs, enums)?, resolve(b, structs, enums)?);
+                Ok(Ty::Result(Box::new(a), Box::new(b)))
+            }
+            ("Option" | "Result", _) => {
+                let (count, hint) = if n == "Option" {
+                    (1, "write `Option<T>`")
+                } else {
+                    (2, "write `Result<T, E>`")
+                };
+                let msg = format!("`{n}` takes {count} type arguments, found {}", args.len());
+                Err(err(t.span, msg, Some(hint)))
+            }
+            ("Int", []) => Ok(Ty::Int),
+            ("Bool", []) => Ok(Ty::Bool),
+            ("Str", []) => Ok(Ty::Str),
+            (_, []) if structs.contains_key(n) => Ok(Ty::Struct(n.clone())),
+            (_, []) if enums.contains_key(n) => Ok(Ty::Enum(n.clone())),
             _ => Err(unknown_type(t)),
         },
-        TypeKind::Named(..) => Err(unknown_type(t)),
     }
 }
 
@@ -191,7 +213,7 @@ fn unknown_type(t: &Type) -> Diag {
     err(
         t.span,
         "type is not available yet".to_string(),
-        Some("the types so far are Int, Bool, Str, () and your structs and enums"),
+        Some("the types so far are Int, Bool, Str, (), Option, Result and your structs and enums"),
     )
 }
 
@@ -263,10 +285,31 @@ fn enum_variants(
     Ok(variants)
 }
 
-/// The index and payload types of variant `v` of enum `en`.
-fn variant<'a>(variants: &'a Variants, en: &str, v: &str) -> Option<(usize, &'a [Ty])> {
-    let i = variants.get(en)?.iter().position(|(name, _)| name == v)?;
-    Some((i, &variants[en][i].1))
+/// The index and payload types of variant `v` among `variants`.
+fn variant<'a>(variants: &'a [(String, Vec<Ty>)], v: &str) -> Option<(usize, &'a [Ty])> {
+    let i = variants.iter().position(|(name, _)| name == v)?;
+    Some((i, &variants[i].1))
+}
+
+/// The enum and variant index of the built-in constructors `None`, `Some`, `Ok` and `Err`.
+pub(crate) fn builtin(name: &str) -> Option<(&'static str, usize)> {
+    match name {
+        "None" => Some(("Option", 0)),
+        "Some" => Some(("Option", 1)),
+        "Ok" => Some(("Result", 0)),
+        "Err" => Some(("Result", 1)),
+        _ => None,
+    }
+}
+
+/// The user types named inside `ty`.
+fn named(ty: &Ty) -> Vec<&str> {
+    match ty {
+        Ty::Struct(n) | Ty::Enum(n) => vec![n],
+        Ty::Option(t) => named(t),
+        Ty::Result(t, e) => [named(t), named(e)].concat(),
+        _ => Vec::new(),
+    }
 }
 
 /// Whether `name` reaches itself through its field or payload types.
@@ -276,14 +319,12 @@ fn contains_itself(name: &str, fields: &Fields, variants: &Variants) -> bool {
     while let Some(n) = todo.pop() {
         let of_struct = fields.get(n).into_iter().flatten().map(|(_, ty)| ty);
         let of_enum = variants.get(n).into_iter().flatten().flat_map(|(_, tys)| tys);
-        for ty in of_struct.chain(of_enum) {
-            if let Ty::Struct(m) | Ty::Enum(m) = ty {
-                if m == name {
-                    return true;
-                }
-                if seen.insert(m.as_str()) {
-                    todo.push(m);
-                }
+        for m in of_struct.chain(of_enum).flat_map(named) {
+            if m == name {
+                return true;
+            }
+            if seen.insert(m) {
+                todo.push(m);
             }
         }
     }
@@ -305,6 +346,16 @@ pub fn check(src: &str, _caps: &CapTable) -> Result<Program, Vec<Diag>> {
     let mut order = Vec::new();
     let mut diags = Vec::new();
     for item in items {
+        let declared = match &item {
+            Item::Struct(s) => Some((s.name.as_str(), s.span)),
+            Item::Enum(e) => Some((e.name.as_str(), e.span)),
+            Item::Fn(_) => None,
+        };
+        if let Some((name @ ("Option" | "Result"), span)) = declared {
+            let msg = format!("`{name}` is a built-in type");
+            diags.push(err(span, msg, Some("rename your type")));
+            continue;
+        }
         match item {
             Item::Fn(f) => fns.push(f),
             Item::Enum(e) if structs.contains_key(&e.name) || enums.contains_key(&e.name) => {
@@ -422,7 +473,7 @@ impl Checker<'_> {
         });
         self.scopes = vec![params.collect()];
         self.ret = sig.ret.clone();
-        let found = self.block(&f.body)?;
+        let found = self.block(&f.body, Some(&sig.ret))?;
         if f.body.tail.is_none() && found == Ty::Unit && sig.ret != Ty::Unit {
             let msg = format!("missing return: `{}` must return {}", f.name, sig.ret);
             let ends_in_expr = f.body.stmts.last().is_some_and(|s| matches!(s.kind, StmtKind::Expr(_)));
@@ -450,9 +501,11 @@ impl Checker<'_> {
     }
 
     fn unknown_variant(&self, span: Span, en: &str, v: &str) -> Diag {
-        let hint = match self.variants.get(en) {
-            Some(vs) => suggest(v, &vs.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), "variants"),
-            None => suggest(en, &sorted_keys(self.enums), "enums"),
+        let hint = match (en, self.variants.get(en)) {
+            ("Option", _) => suggest(v, &["None", "Some"], "variants"),
+            ("Result", _) => suggest(v, &["Ok", "Err"], "variants"),
+            (_, Some(vs)) => suggest(v, &vs.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), "variants"),
+            _ => suggest(en, &sorted_keys(self.enums), "enums"),
         };
         err(span, format!("unknown variant `{en}::{v}`"), Some(&hint))
     }
@@ -461,14 +514,14 @@ impl Checker<'_> {
         self.scopes.iter_mut().rev().find_map(|s| s.get_mut(name))
     }
 
-    fn block(&mut self, b: &Block) -> Result<Ty, Diag> {
+    fn block(&mut self, b: &Block, expected: Option<&Ty>) -> Result<Ty, Diag> {
         self.scopes.push(HashMap::new());
         let mut last = Ty::Unit;
         for s in &b.stmts {
             last = self.stmt(s)?;
         }
         let ty = match &b.tail {
-            Some(t) => self.expr(t)?,
+            Some(t) => self.expr(t, expected)?,
             None => last,
         };
         self.scopes.pop();
@@ -484,9 +537,10 @@ impl Checker<'_> {
                 ty,
                 init,
             } => {
-                let mut found = self.expr(init)?;
-                if let Some(t) = ty {
-                    let declared = resolve(t, self.structs, self.enums)?;
+                let declared = ty.as_ref().map(|t| resolve(t, self.structs, self.enums));
+                let declared = declared.transpose()?;
+                let mut found = self.expr(init, declared.as_ref())?;
+                if let Some(declared) = declared {
                     want_expr(init, &found, &declared)?;
                     found = declared;
                 } else if found == Ty::Never {
@@ -500,7 +554,7 @@ impl Checker<'_> {
                 Ok(Ty::Unit)
             }
             StmtKind::Assign { target, op, value } => {
-                let found = self.expr(value)?;
+                let found = self.expr(value, None)?;
                 let ty = self.place(target)?;
                 if *op == "=" {
                     want_expr(value, &found, &ty)?;
@@ -511,58 +565,56 @@ impl Checker<'_> {
                 Ok(Ty::Unit)
             }
             StmtKind::Return(value) => {
-                let found = match value {
-                    Some(e) => self.expr(e)?,
-                    None => Ty::Unit,
-                };
+                let ret = self.ret.clone();
                 match value {
-                    Some(e) => want_expr(e, &found, &self.ret)?,
-                    None => want(s.span, &found, &self.ret)?,
+                    Some(e) => want_expr(e, &self.expr(e, Some(&ret))?, &ret)?,
+                    None => want(s.span, &Ty::Unit, &ret)?,
                 }
                 Ok(Ty::Never)
             }
             StmtKind::While { cond, body } => {
-                want_expr(cond, &self.expr(cond)?, &Ty::Bool)?;
-                want(body.span, &self.block(body)?, &Ty::Unit)?;
+                want_expr(cond, &self.expr(cond, None)?, &Ty::Bool)?;
+                want(body.span, &self.block(body, None)?, &Ty::Unit)?;
                 Ok(Ty::Unit)
             }
-            StmtKind::Expr(e) => Ok(match self.expr(e)? {
+            StmtKind::Expr(e) => Ok(match self.expr(e, None)? {
                 Ty::Never => Ty::Never,
                 _ => Ty::Unit,
             }),
         }
     }
 
-    fn expr(&mut self, e: &Expr) -> Result<Ty, Diag> {
+    fn expr(&mut self, e: &Expr, expected: Option<&Ty>) -> Result<Ty, Diag> {
         match &e.kind {
             ExprKind::Int(_) => Ok(Ty::Int),
             ExprKind::Str(_) => Ok(Ty::Str),
             ExprKind::Bool(_) => Ok(Ty::Bool),
             ExprKind::Unit => Ok(Ty::Unit),
+            ExprKind::Name(name) if builtin(name).is_some() => self.constructor(e, name, &[], expected),
             ExprKind::Name(name) => match self.lookup(name) {
                 Some(local) => Ok(local.ty.clone()),
                 None => Err(self.unknown_name(e.span, name)),
             },
             ExprKind::Unary(op, x) => {
                 let want_ty = if *op == "-" { Ty::Int } else { Ty::Bool };
-                want_expr(x, &self.expr(x)?, &want_ty)?;
+                want_expr(x, &self.expr(x, None)?, &want_ty)?;
                 Ok(want_ty)
             }
             ExprKind::Binary(op, a, b) => {
-                let (l, r) = (self.expr(a)?, self.expr(b)?);
+                let (l, r) = (self.expr(a, None)?, self.expr(b, None)?);
                 binary_ty(op, &l, &r).ok_or_else(|| {
                     let msg = format!("`{op}` cannot be applied to {l} and {r}");
                     err(e.span, msg, Some(&op_hint(op)))
                 })
             }
             ExprKind::If(cond, then, els) => {
-                want_expr(cond, &self.expr(cond)?, &Ty::Bool)?;
-                let t = self.block(then)?;
+                want_expr(cond, &self.expr(cond, None)?, &Ty::Bool)?;
+                let t = self.block(then, expected)?;
                 let Some(els) = els else {
                     want(then.span, &t, &Ty::Unit)?;
                     return Ok(Ty::Unit);
                 };
-                let f = self.expr(els)?;
+                let f = self.expr(els, expected)?;
                 if t == Ty::Never {
                     Ok(f)
                 } else if f == Ty::Never || t == f {
@@ -572,8 +624,8 @@ impl Checker<'_> {
                     Err(err(e.span, msg, Some("every branch must have the same type")))
                 }
             }
-            ExprKind::Block(b) => self.block(b),
-            ExprKind::Call(callee, args) => self.call(e, callee, args),
+            ExprKind::Block(b) => self.block(b, expected),
+            ExprKind::Call(callee, args) => self.call(e, callee, args, expected),
             ExprKind::Method(..) => {
                 let hint = "call a function instead, like `f(x)`";
                 Err(err(
@@ -583,7 +635,7 @@ impl Checker<'_> {
                 ))
             }
             ExprKind::Field(base, name) => {
-                let ty = self.expr(base)?;
+                let ty = self.expr(base, None)?;
                 self.field(&ty, name, e.span)
             }
             ExprKind::Index(..) => {
@@ -592,13 +644,82 @@ impl Checker<'_> {
             }
             ExprKind::StructLit(name, inits) => self.struct_lit(e, name, inits),
             ExprKind::Path(en, v) => self.variant_value(e, en, v, &[]),
-            ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms),
+            ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms, expected),
+            ExprKind::Try(x) => self.try_expr(e, x),
+        }
+    }
+
+    /// `None`, `Some(x)`, `Ok(x)` or `Err(x)`; all but `Some` take their type from `expected`.
+    fn constructor(&mut self, e: &Expr, name: &str, args: &[Expr], expected: Option<&Ty>) -> Result<Ty, Diag> {
+        let arity = usize::from(name != "None");
+        if args.len() != arity {
+            let msg = format!("`{name}` takes {arity} arguments, found {}", args.len());
+            let hint = if arity == 1 {
+                format!("write `{name}(value)`")
+            } else {
+                "write `None` without arguments".to_string()
+            };
+            return Err(err(e.span, msg, Some(&hint)));
+        }
+        let payload = match (name, expected) {
+            ("None", Some(Ty::Option(_))) => None,
+            ("Some", Some(Ty::Option(t))) | ("Ok", Some(Ty::Result(t, _))) | ("Err", Some(Ty::Result(_, t))) => Some(t),
+            ("Some", _) => {
+                let t = self.expr(&args[0], None)?;
+                return Ok(Ty::Option(Box::new(t)));
+            }
+            (_, Some(t)) => {
+                let what = if name == "None" || name == "Some" {
+                    "an Option"
+                } else {
+                    "a Result"
+                };
+                return Err(err(e.span, format!("expected {t}, found {what}"), None));
+            }
+            _ => {
+                let example = match name {
+                    "None" => "let x: Option<Int> = None;",
+                    "Ok" => "let x: Result<Int, Str> = Ok(1);",
+                    _ => "let x: Result<Int, Str> = Err(\"no\");",
+                };
+                let msg = format!("cannot tell the type of `{name}`");
+                return Err(err(e.span, msg, Some(&format!("add a type: `{example}`"))));
+            }
+        };
+        if let Some(t) = payload {
+            want_expr(&args[0], &self.expr(&args[0], Some(t))?, t)?;
+        }
+        Ok(expected.expect("matched above").clone())
+    }
+
+    /// `x?`: the value of an `Option` or `Result`, or an early return of the `None` or `Err`.
+    fn try_expr(&mut self, e: &Expr, x: &Expr) -> Result<Ty, Diag> {
+        let found = self.expr(x, None)?;
+        match (&found, &self.ret) {
+            (Ty::Option(t), Ty::Option(_)) => Ok((**t).clone()),
+            (Ty::Result(t, e_ty), Ty::Result(_, ret_err)) if e_ty == ret_err => Ok((**t).clone()),
+            (Ty::Option(_) | Ty::Result(..), ret) => {
+                let msg = format!("`?` on {found} in a function returning {ret}");
+                Err(err(
+                    e.span,
+                    msg,
+                    Some("change the return type or `match` on the result"),
+                ))
+            }
+            _ => {
+                let msg = format!("`?` needs an Option or Result, found {found}");
+                Err(err(x.span, msg, Some("`?` works on Option and Result values")))
+            }
         }
     }
 
     /// `E::V` or `E::V(args)`; arity and payload types must match the declaration.
     fn variant_value(&mut self, e: &Expr, en: &str, v: &str, args: &[Expr]) -> Result<Ty, Diag> {
-        let Some((_, payload)) = variant(self.variants, en, v) else {
+        if builtin(v).is_some_and(|(b, _)| b == en) {
+            let msg = format!("`{en}::{v}` cannot be written as a path");
+            return Err(err(e.span, msg, Some(&format!("write `{v}` without `{en}::`"))));
+        }
+        let Some((_, payload)) = self.variants.get(en).and_then(|vs| variant(vs, v)) else {
             return Err(self.unknown_variant(e.span, en, v));
         };
         if args.len() != payload.len() {
@@ -606,17 +727,38 @@ impl Checker<'_> {
             return Err(err(e.span, msg, Some(&holds(en, v, payload))));
         }
         for (a, ty) in args.iter().zip(payload) {
-            want_expr(a, &self.expr(a)?, ty)?;
+            want_expr(a, &self.expr(a, Some(ty))?, ty)?;
         }
         Ok(Ty::Enum(en.to_string()))
     }
 
-    fn match_expr(&mut self, scrut: &Expr, arms: &[Arm]) -> Result<Ty, Diag> {
-        let st = self.expr(scrut)?;
-        if !matches!(st, Ty::Int | Ty::Bool | Ty::Str | Ty::Enum(_)) {
+    /// The enum's name and variants that `ty` matches on; empty for other types.
+    fn shape(&self, ty: &Ty) -> Shape {
+        let some = |t: &Ty| vec![("None".to_string(), vec![]), ("Some".to_string(), vec![t.clone()])];
+        match ty {
+            Ty::Enum(en) => (en.clone(), self.variants[en].clone()),
+            Ty::Option(t) => ("Option".to_string(), some(t)),
+            Ty::Result(t, e) => {
+                let ok = vec![
+                    ("Ok".to_string(), vec![(**t).clone()]),
+                    ("Err".to_string(), vec![(**e).clone()]),
+                ];
+                ("Result".to_string(), ok)
+            }
+            _ => (String::new(), Vec::new()),
+        }
+    }
+
+    fn match_expr(&mut self, scrut: &Expr, arms: &[Arm], expected: Option<&Ty>) -> Result<Ty, Diag> {
+        let st = self.expr(scrut, None)?;
+        if !matches!(
+            st,
+            Ty::Int | Ty::Bool | Ty::Str | Ty::Enum(_) | Ty::Option(_) | Ty::Result(..)
+        ) {
             let hint = "match works on Int, Bool, Str and enums";
             return Err(err(scrut.span, format!("cannot match on {st}"), Some(hint)));
         }
+        let shape = self.shape(&st);
         let mut ty = Ty::Never;
         let mut covers = Vec::new();
         for arm in arms {
@@ -624,11 +766,11 @@ impl Checker<'_> {
                 let hint = "an earlier arm matches everything";
                 return Err(err(arm.pat.span, "unreachable arm".to_string(), Some(hint)));
             }
-            let (cover, binds) = self.pattern(&arm.pat, &st)?;
+            let (cover, binds) = self.pattern(&arm.pat, &st, &shape)?;
             covers.push(cover);
             let binds = binds.into_iter().map(|(name, ty)| (name, Local { ty, mutable: false }));
             self.scopes.push(binds.collect());
-            let body = self.expr(&arm.body)?;
+            let body = self.expr(&arm.body, expected)?;
             self.scopes.pop();
             if ty == Ty::Never {
                 ty = body;
@@ -639,9 +781,9 @@ impl Checker<'_> {
         }
         let seen = |c: Cover| covers.contains(&c) || covers.contains(&Cover::All);
         let missing: Vec<String> = match &st {
-            Ty::Enum(en) => (self.variants[en].iter().enumerate())
+            Ty::Enum(_) | Ty::Option(_) | Ty::Result(..) => (shape.1.iter().enumerate())
                 .filter(|(i, _)| !seen(Cover::Variant(*i)))
-                .map(|(_, (v, _))| format!("{en}::{v}"))
+                .map(|(_, (v, _))| format!("{}::{v}", shape.0))
                 .collect(),
             Ty::Bool => [true, false]
                 .into_iter()
@@ -661,26 +803,23 @@ impl Checker<'_> {
     }
 
     /// What the pattern covers and the names it binds, typed against scrutinee type `st`.
-    fn pattern(&self, p: &Pat, st: &Ty) -> Result<(Cover, Vec<(String, Ty)>), Diag> {
+    fn pattern(&self, p: &Pat, st: &Ty, shape: &Shape) -> Result<(Cover, Vec<(String, Ty)>), Diag> {
         let lit = |ty: Ty| want(p.span, &ty, st).map(|_| (Cover::Lit, Vec::new()));
-        let en = match st {
-            Ty::Enum(en) => en,
-            _ => "",
-        };
+        let (en, vs) = (shape.0.as_str(), &shape.1);
         match &p.kind {
             PatKind::Wild => Ok((Cover::All, Vec::new())),
             PatKind::Int(_) => lit(Ty::Int),
             PatKind::Str(_) => lit(Ty::Str),
             PatKind::Bool(b) => want(p.span, &Ty::Bool, st).map(|_| (Cover::Bool(*b), Vec::new())),
-            PatKind::Name(n) => match variant(self.variants, en, n) {
-                Some(_) => self.variant_pattern(p, en, n, &[]),
+            PatKind::Name(n) => match variant(vs, n) {
+                Some(_) => self.variant_pattern(p, shape, n, &[]),
                 None => Ok((Cover::All, vec![(n.clone(), st.clone())])),
             },
             PatKind::Variant(named, v, names) => {
-                if let Some(named) = named {
-                    want(p.span, &Ty::Enum(named.clone()), st)?;
+                if named.as_deref().is_some_and(|n| n != en) {
+                    want(p.span, &Ty::Enum(named.clone().unwrap()), st)?;
                 }
-                self.variant_pattern(p, en, v, names)
+                self.variant_pattern(p, shape, v, names)
             }
         }
     }
@@ -688,11 +827,11 @@ impl Checker<'_> {
     fn variant_pattern(
         &self,
         p: &Pat,
-        en: &str,
+        (en, vs): &Shape,
         v: &str,
         names: &[Option<String>],
     ) -> Result<(Cover, Vec<(String, Ty)>), Diag> {
-        let Some((i, payload)) = variant(self.variants, en, v) else {
+        let Some((i, payload)) = variant(vs, v) else {
             return Err(self.unknown_variant(p.span, en, v));
         };
         if names.len() != payload.len() {
@@ -740,7 +879,7 @@ impl Checker<'_> {
                 ));
             }
             seen.push(f);
-            want_expr(x, &self.expr(x)?, ty)?;
+            want_expr(x, &self.expr(x, Some(ty))?, ty)?;
         }
         if let Some((missing, _)) = decl.iter().find(|(n, _)| !seen.contains(&n)) {
             let msg = format!("missing field `{missing}` in `{name}`");
@@ -774,8 +913,9 @@ impl Checker<'_> {
         }
     }
 
-    fn call(&mut self, e: &Expr, callee: &Expr, args: &[Expr]) -> Result<Ty, Diag> {
+    fn call(&mut self, e: &Expr, callee: &Expr, args: &[Expr], expected: Option<&Ty>) -> Result<Ty, Diag> {
         let name = match &callee.kind {
+            ExprKind::Name(name) if builtin(name).is_some() => return self.constructor(e, name, args, expected),
             ExprKind::Name(name) => name,
             ExprKind::Path(en, v) => return self.variant_value(e, en, v, args),
             _ => {
@@ -794,7 +934,7 @@ impl Checker<'_> {
             return Err(err(e.span, msg, Some(&hint)));
         }
         for (a, param) in args.iter().zip(&sig.params) {
-            want_expr(a, &self.expr(a)?, param)?;
+            want_expr(a, &self.expr(a, Some(param))?, param)?;
         }
         Ok(sig.ret.clone())
     }

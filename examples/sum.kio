@@ -1,0 +1,24 @@
+enum Problem { Negative(Int), TooBig }
+
+fn check(n: Int) -> Result<Int, Problem> {
+    if n < 0 { return Err(Problem::Negative(n)); }
+    if n > 100 { return Err(Problem::TooBig); }
+    Ok(n)
+}
+
+// `?` returns the first Err to the caller.
+fn sum(a: Int, b: Int) -> Result<Int, Problem> {
+    let x = check(a)?;
+    let y = check(b)?;
+    Ok(x + y)
+}
+
+fn main() -> Int {
+    match sum(40, -2) {
+        Ok(n) => n,
+        Err(p) => match p {
+            Problem::Negative(n) => n,
+            Problem::TooBig => 0,
+        },
+    }
+}
