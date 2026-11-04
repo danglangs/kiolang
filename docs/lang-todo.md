@@ -75,8 +75,23 @@ Each task covers lexing, parsing, checking and evaluating its constructs, unless
 
 Tasks 4 onward are outlines. Each gets a pinned spec, like tasks 1 to 3, before it is handed off. A task that spans parse, check and eval and grows large is split by pass.
 
-- [ ] **4. Structs.** Declarations, struct literals (not in `if` or `while` heads, as in Rust), field access, field assignment `x.f = v` on `mut` locals. Turn `Ty` into a non-`Copy` enum with `Display`.
-  Done: unknown field, missing field and duplicate field are rejected; a struct copy test.
+- [ ] **4a. Struct syntax.** Parser only.
+  - Item `struct Name { f: T, .. }` (trailing comma allowed); `Item` gains a `Struct` variant. `parse` returns items in source order. Empty structs are allowed.
+  - Literal `Name { f: e, .. }` as an `ExprKind::StructLit(name, Vec<(String, Expr)>)`. Field shorthand `Name { f }` is rejected with hint "write `f: f`".
+  - A literal is not parsed directly in an `if` or `while` condition, as in Rust: `if x == P { a: 1 } { .. }` parses `P` as a name. Parenthesized, it is allowed.
+  - `struct` stops being a later-task keyword.
+  Done: parse tests for a declaration, a literal with nested literal, a field chain `a.b.c`, a literal in parentheses in an `if` head, and rejection of shorthand.
+
+- [ ] **4b. Struct types and values.** Checker and interpreter.
+  - `Ty` becomes a non-`Copy` enum with `Ty::Struct(String)` and `Display` instead of `name()`.
+  - Collect struct declarations before signatures. Errors: duplicate struct, duplicate field, unknown field type, a struct that contains itself directly or through other structs (no recursive types; use indexes into a `List` later).
+  - Literal: every field exactly once, each with its declared type. Errors: unknown struct, unknown field, missing field (name it), duplicate field.
+  - Field access `e.f` on a struct value. Error: no field `f` on that type, listing the fields.
+  - Assignment target is a name or a chain of fields rooted at a `let mut` local: `p.a.b = v`. `+=` and `-=` work on fields too.
+  - `==` and `!=` stay scalar-only.
+  - `Value::Struct(Vec<Value>)` in declaration order; the checker resolves field names to indexes, and eval receives the index, not the name. Store that resolution in `Program` alongside the AST, without interpreter state.
+  - Copy semantics: `let b = a;` then changing `b.x` leaves `a.x` unchanged; a struct argument changed inside a callee leaves the caller's value unchanged.
+  Done: tests for each error above, nested field read and write, and both copy tests.
 
 - [ ] **5. Enums and `match`.** Variants with payloads, paths such as `Status::Paid`, exhaustive `match` with one-level patterns, `match` arms as statements.
   Done: a function matching on an enum with payloads runs; non-exhaustive match is rejected.
