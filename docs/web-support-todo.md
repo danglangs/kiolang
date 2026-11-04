@@ -133,7 +133,8 @@ Each changes `caps.wit` or the language. Recommendation first, then the alternat
 - [ ] **W7. `kio serve`.** After W6, H2, H3. tokio + hyper http1 + Wasmtime pooling allocator; decisions 4 and 5. `kio serve app.kio --port 8080 --dir public=./public`.
   Done: an integration test with a real client gets the right body for three routes, and 100 concurrent requests all succeed; a program with a diag exits 1 before binding the port.
 - [ ] **W8. Request limits and slow clients.** After W7. Decisions 3 and 9, and the request/response validation in decision 2.
-  Done: one test per limit (headers stalled past the timeout, oversized body, body sent too slowly, fuel, memory, a full queue answering 503, a response header containing CR LF answering 500); none leaves an instance alive.
+  Also: cap detached host-call workers (H5 leaves one blocked thread per timed-out call); at the cap, answer 503.
+  Done: one test per limit (repeated blocked reads hit the worker cap and get 503, headers stalled past the timeout, oversized body, body sent too slowly, fuel, memory, a full queue answering 503, a response header containing CR LF answering 500); none leaves an instance alive.
 - [ ] **W9. kio-web v0 repo.** After W1-W5 for the library; W7 for the example. `web.kio`: `respond`, `text`, `json`, `html`, `redirect`, `not_found`, `route`, `query` (percent-decoded), `header`, `json_str`, `json_obj`, `file`. Tests are kio programs whose `main` builds a `Request`, calls `handle` and checks the `Response`.
   Done: tests pass under `kio run`; an example app serves a page, a JSON route with a path parameter and files from a granted `Dir`, and its README shows the report.
 - [ ] **W10. Benchmark.** After W9. Requests/s and p50/p99 for the example app, with time split into instantiate, check and handle. Decides decision 5's snapshot, the bytecode VM, and copy-on-write values: v0 copies `req`, body included, into every helper call.

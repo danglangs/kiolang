@@ -4,8 +4,9 @@ use cap_std::fs::{Dir as RealDir, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use wasmtime::component::{Component, Linker, Resource, ResourceTable};
 use wasmtime::Result;
 use wasmtime::{Engine, Store};
@@ -42,8 +43,9 @@ pub struct State {
     io_limit: u64,
     /// Set by the call that exceeded `io_limit`.
     too_much_io: bool,
-    #[cfg(feature = "test-hooks")]
-    delay: Duration,
+    /// When the run's wall clock expires, and whether a host call was cut off by it.
+    deadline: Instant,
+    timed_out: bool,
     #[cfg(feature = "test-hooks")]
     fail_writes: bool,
     wasi: WasiCtx,
@@ -91,8 +93,8 @@ impl State {
             io: 0,
             io_limit: u64::MAX,
             too_much_io: false,
-            #[cfg(feature = "test-hooks")]
-            delay: Duration::ZERO,
+            deadline: Instant::now(),
+            timed_out: false,
             #[cfg(feature = "test-hooks")]
             fail_writes: false,
             wasi,
@@ -169,18 +171,34 @@ impl State {
         Ok(())
     }
 
-    /// The directory behind a guest handle; `None` for a handle that is not a live `Granted`.
-    fn dir(&mut self, h: &Resource<kio::caps::fs::Dir>) -> Option<&RealDir> {
+    /// A private handle to the directory behind a guest handle, for a worker thread; `None` for a
+    /// handle that is not a live `Granted` (or cannot be cloned).
+    fn dir(&mut self, h: &Resource<kio::caps::fs::Dir>) -> Option<RealDir> {
         let g = self.table.get(&Resource::<Granted>::new_borrow(h.rep())).ok()?;
-        Some(&g.0)
+        g.0.try_clone().ok()
+    }
+
+    /// Run `work` on a detached thread and wait for it until the run's deadline; past it, stop the
+    /// run. The thread finishes in the background and its result is dropped.
+    fn within<T: Send + 'static>(&mut self, work: impl FnOnce() -> T + Send + 'static) -> Result<T> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(work());
+        });
+        rx.recv_timeout(self.deadline.saturating_duration_since(Instant::now()))
+            .map_err(|e| match e {
+                RecvTimeoutError::Timeout => {
+                    self.timed_out = true;
+                    wasmtime::Error::msg("host call timed out")
+                }
+                RecvTimeoutError::Disconnected => wasmtime::Error::msg("host call failed"),
+            })
     }
 }
 
 impl kio::caps::fs::HostDir for State {
     fn read(&mut self, d: Resource<kio::caps::fs::Dir>, path: String) -> Result<Result<Vec<u8>, IoErr>> {
         self.count_call()?;
-        #[cfg(feature = "test-hooks")]
-        std::thread::sleep(self.delay);
         if let Err(e) = check_path(&path) {
             return Ok(Err(e));
         }
@@ -188,10 +206,13 @@ impl kio::caps::fs::HostDir for State {
             return Ok(Err(IoErr::Denied));
         };
         // One byte past the cap tells a too-large file from an exact fit, even if it is growing.
-        let mut data = Vec::new();
-        let read = dir
-            .open(&path)
-            .and_then(|f| f.take(READ_CAP + 1).read_to_end(&mut data));
+        let (data, read) = self.within(move || {
+            let mut data = Vec::new();
+            let read = dir
+                .open(&path)
+                .and_then(|f| f.take(READ_CAP + 1).read_to_end(&mut data));
+            (data, read)
+        })?;
         // Charge what was read, even when it is refused.
         self.spend_io(data.len())?;
         Ok(match read {
@@ -213,28 +234,31 @@ impl kio::caps::fs::HostDir for State {
         let Some(dir) = self.dir(&d) else {
             return Ok(Err(IoErr::Denied));
         };
-        // `create_new` fails if the path exists, in the same call that creates it.
-        let mut opts = OpenOptions::new();
-        opts.write(true).create_new(true);
-        let mut file = match dir.open_with(&path, &opts) {
-            Ok(f) => f,
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(Err(IoErr::Denied)),
-            Err(e) => return Ok(Err(io_err(&e))),
-        };
-        let written = file.write_all(&data);
-        #[cfg(feature = "test-hooks")]
-        let written = if fail_write {
-            Err(io::Error::other("injected"))
-        } else {
-            written
-        };
-        if let Err(e) = written {
-            // Remove the partial file so a retry is not refused as an overwrite.
-            drop(file);
-            let _ = dir.remove_file(&path);
-            return Ok(Err(io_err(&e)));
-        }
-        Ok(Ok(()))
+        // After a timeout the worker may still create the file, if it was only slow to open it.
+        self.within(move || {
+            // `create_new` fails if the path exists, in the same call that creates it.
+            let mut opts = OpenOptions::new();
+            opts.write(true).create_new(true);
+            let mut file = match dir.open_with(&path, &opts) {
+                Ok(f) => f,
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(IoErr::Denied),
+                Err(e) => return Err(io_err(&e)),
+            };
+            let written = file.write_all(&data);
+            #[cfg(feature = "test-hooks")]
+            let written = if fail_write {
+                Err(io::Error::other("injected"))
+            } else {
+                written
+            };
+            if let Err(e) = written {
+                // Remove the partial file so a retry is not refused as an overwrite.
+                drop(file);
+                let _ = dir.remove_file(&path);
+                return Err(io_err(&e));
+            }
+            Ok(())
+        })
     }
 
     fn drop(&mut self, d: Resource<kio::caps::fs::Dir>) -> Result<()> {
@@ -308,7 +332,7 @@ impl Kio {
         config.consume_fuel(true);
         config.epoch_interruption(true);
         let engine = Engine::new(&config)?;
-        // Wasmtime checks epochs only in guest code: a slow host call is not cut short (H4).
+        // Wasmtime checks epochs only in guest code: host calls are bounded separately, by `State::within`.
         let stop = Arc::new(AtomicBool::new(false));
         let (e, s) = (engine.clone(), stop.clone());
         std::thread::spawn(move || {
@@ -327,6 +351,7 @@ impl Kio {
         store.data_mut().io_limit = limits.io;
         store.limiter(|s| s);
         store.set_fuel(limits.fuel)?;
+        store.data_mut().deadline = Instant::now() + Duration::from_secs(limits.timeout_secs);
         store.set_epoch_deadline(limits.timeout_secs.saturating_mul(10));
         store.epoch_deadline_trap();
         let guest = Guest::instantiate(&mut store, &component, &linker)?;
@@ -338,11 +363,6 @@ impl Kio {
         })
     }
 
-    /// Make every `Dir.read` sleep first, to test the wall clock against a slow host call.
-    #[cfg(feature = "test-hooks")]
-    pub fn slow_reads(&mut self, d: Duration) {
-        self.store.data_mut().delay = d;
-    }
     /// Make every `Dir.create` fail after the file is created, to test the cleanup.
     #[cfg(feature = "test-hooks")]
     pub fn fail_writes(&mut self) {
@@ -367,6 +387,12 @@ impl Kio {
         }
         if self.store.data().too_much_io {
             return Some(format!("too much I/O (limit {} MB; raise it with --io)", l.io >> 20));
+        }
+        if self.store.data().timed_out {
+            return Some(format!(
+                "timed out after {} s (raise it with --timeout)",
+                l.timeout_secs
+            ));
         }
         Some(match e.downcast_ref::<wasmtime::Trap>()? {
             wasmtime::Trap::OutOfFuel => format!("out of fuel (limit {}; raise it with --fuel)", l.fuel),

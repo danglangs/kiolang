@@ -271,22 +271,46 @@ fn infinite_loop_runs_out_of_fuel() {
     );
 }
 
-/// The deadline fires once a slow host call returns control to the guest.
+/// H5: a read that blocks forever (a FIFO with no writer) stops at the deadline, not after it.
+#[cfg(unix)]
 #[test]
-fn slow_host_call_times_out() {
+fn blocked_host_call_times_out() {
+    let (t, d) = dir(&[("a", b"x")]);
+    let made = std::process::Command::new("mkfifo")
+        .arg(t.path().join("pipe"))
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let limits = Limits {
+        timeout_secs: 1,
+        ..Limits::default()
+    };
+    let src = "fn main(d: Dir) -> Int { let r = d.read(\"pipe\"); 0 }";
+    let mut kio = Kio::new(limits).unwrap();
+    let start = std::time::Instant::now();
+    let err = kio.run(src, vec![("d".into(), d)]).unwrap_err();
+    assert!(start.elapsed() < std::time::Duration::from_secs(2));
+    assert_eq!(
+        kio.explain(&err).unwrap(),
+        "timed out after 1 s (raise it with --timeout)"
+    );
+}
+
+/// H5: with the deadline in force, a read that does not block is unaffected.
+#[test]
+fn quick_host_call_is_unaffected_by_deadline() {
     let limits = Limits {
         timeout_secs: 1,
         ..Limits::default()
     };
     let (_t, d) = dir(&[("a", b"x")]);
-    let src = "fn main(d: Dir) -> Int { let r = d.read(\"a\"); while true {} 0 }";
-    let mut kio = Kio::new(limits).unwrap();
-    kio.slow_reads(std::time::Duration::from_millis(1500));
-    let err = kio.run(src, vec![("d".into(), d)]).unwrap_err();
-    assert_eq!(
-        kio.explain(&err).unwrap(),
-        "timed out after 1 s (raise it with --timeout)"
-    );
+    let src = "fn main(d: Dir) -> Result<Bytes, IoErr> { d.read(\"a\") }";
+    let out = Kio::new(limits)
+        .unwrap()
+        .run(src, vec![("d".into(), d)])
+        .unwrap()
+        .unwrap();
+    assert!(!out.failed);
 }
 
 /// H3: a program that allocates without bound stops at the memory limit with a message naming it.
