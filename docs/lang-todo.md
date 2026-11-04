@@ -114,6 +114,21 @@ Order: enums and `Result` first, because capability methods return `Result<_, Io
   - `==` stays scalar-only.
   Done: a function matching an enum with payloads runs; bare variant patterns; tests for each error above, including non-exhaustive (naming the missing variant) and unreachable arm; enum copy test.
 
+- [ ] **5c. Errors that teach.** Add a hint to every `Diag` that lacks one; no new features. Wording below; keep each hint one line.
+  - `unknown name`, `unknown function`, `unknown struct`, `unknown variant`, `no field`: "did you mean `x`?" naming the closest in-scope candidate by edit distance (at most 2 edits, or a third of the length); otherwise list what exists ("fields: a, b", "variants: A, B", or "declare it with `let`" for names). One small `closest(name, candidates)` helper in `check.rs`.
+  - Duplicates (function, parameter, field, variant, type): "first defined here" is not expressible with one span, so the hint says "rename one of them".
+  - `expected T, found U`: when one side is `()` and the other is not, hint "remove the trailing `;` to return the value" if the found `()` comes from a block whose last statement is an expression statement; otherwise no hint.
+  - Arity: "`f` is declared as `fn f(a: Int, b: Str)`" (for variants, "`E::V` holds (Int, Str)").
+  - `cannot be applied to`: list what the operator accepts, e.g. "`+` works on two Int or two Str".
+  - `if` / `match` branches differ: "every branch must have the same type".
+  - Non-exhaustive: "add arms for the missing cases, or `_ => ..`".
+  - `cannot match on T`: "match works on Int, Bool, Str and enums".
+  - `missing field`: "add `b: ..`". `no main`: "add `fn main() { .. }`". `main` with parameters: "capabilities come later; remove the parameters".
+  - `only functions can be called`: "call a function by name, like `f(x)`".
+  - Parser `expected X`: hint only where the fix is clear: missing `;` gives "add `;`", missing `}` gives "a `{` is not closed", missing `)` likewise.
+  - Lexer: unterminated string gives "add a closing `\"`"; integer too large gives "Int is 64-bit: at most 9223372036854775807".
+  Done: every existing rejection test asserts its hint; `closest` has its own tests; no `Diag` is built with `None` hint except where this list says "otherwise no hint".
+
 - [ ] **6. Option, Result and `?`.** Built-in generic enums `Some`, `None`, `Ok`, `Err`. `?` with matching error types only. `None` takes its type from the declared or expected type.
   Done: `?` propagates through two calls; `?` on a `Result` inside an `Option` function is rejected.
 
