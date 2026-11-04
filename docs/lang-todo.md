@@ -8,7 +8,7 @@ Build the `lang` crate: parser, checker, authority report and interpreter for th
 - Rust std only. No dependencies, no macros beyond `derive`, no `unsafe`.
 - Minimal code: straightforward control flow, no speculative abstractions, no features beyond the task. A human reviews every line.
 - Comments only where the code cannot say it.
-- Tests in `lang/tests/`, using inline source strings. `cargo test -p lang` passes, `cargo clippy -p lang` is clean.
+- Tests in `lang/tests/`, using inline source strings. `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass, as CI runs them.
 - Unsupported syntax fails with a `Diag` naming the kio alternative, never a panic.
 
 ## Layout
@@ -38,7 +38,7 @@ pub fn run(p: &Program, caps: &mut dyn Caps) -> Result<Value, RunErr>;
 
 Each task covers lexing, parsing, checking and evaluating its constructs, unless it says otherwise.
 
-- [ ] **1. Lexer.** Workspace (edition 2021), crate, `.gitignore` with `target/`. In `lib.rs`: `Span { start, end }` byte offsets, `Diag { span, msg, hint: Option<String> }`. In `lex.rs`: `pub fn lex(src: &str) -> Result<Vec<Token>, Diag>`, stopping at the first error; `Token { kind, span }`.
+- [x] **1. Lexer.** Workspace (edition 2021), crate, `.gitignore` with `target/`. In `lib.rs`: `Span { start, end }` byte offsets, `Diag { span, msg, hint: Option<String> }`. In `lex.rs`: `pub fn lex(src: &str) -> Result<Vec<Token>, Diag>`, stopping at the first error; `Token { kind, span }`.
   - Identifiers: ASCII `[A-Za-z_][A-Za-z0-9_]*`.
   - Keywords: `fn let mut if else while for in return match break continue true false struct enum`. Reserve every other Rust keyword so later features cannot break programs: `as async await box const crate dyn extern impl loop mod move pub ref self Self static super trait type unsafe use where yield abstract become do final macro override priv typeof unsized virtual try gen union`. Reserved words lex as `Reserved(name)`; the parser rejects them by name.
   - `Int` literals: decimal digits fitting `i64`; larger is an error. `Str` literals: `"..."` with `\n \t \" \\`; other escapes and unterminated strings are errors.
