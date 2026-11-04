@@ -53,7 +53,7 @@ host/    the kio binary: Wasmtime, cap-std, limits, host functions
 - [x] **H3. Memory and stack.** Wasmtime memory limit and `max_wasm_stack`.
   Done: a program allocating without bound and one recursing past the stack each stop with an error naming the limit.
 
-- [ ] **H4. Host-call and I/O quotas.**
+- [x] **H4. Host-call and I/O quotas.**
   - Bindgen with trappable imports, so a host function can stop the run (`wasmtime::Result<Result<T, IoErr>>`).
   - `--calls n` (default 10,000): the call that exceeds it stops the run: "too many host calls (limit 10000; raise it with --calls)".
   - `--io mb` (default 100): total bytes read plus written; the call that exceeds it stops the run: "too much I/O (limit 100 MB; raise it with --io)".

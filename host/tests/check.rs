@@ -321,3 +321,74 @@ fn deep_recursion_overflows_a_small_stack() {
         "stack overflow (limit 64 KB; raise it with --stack)"
     );
 }
+
+/// H4: the call past `--calls` stops the run.
+#[test]
+fn too_many_calls_stops_the_run() {
+    let limits = Limits {
+        calls: 3,
+        ..Limits::default()
+    };
+    let (_t, d) = dir(&[("a", b"x")]);
+    let src = "fn main(d: Dir) -> Int { let mut i = 0; while i < 10 { let r = d.read(\"a\"); i = i + 1; } i }";
+    let mut kio = Kio::new(limits).unwrap();
+    let err = kio.run(src, vec![("d".into(), d)]).unwrap_err();
+    assert_eq!(
+        kio.explain(&err).unwrap(),
+        "too many host calls (limit 3; raise it with --calls)"
+    );
+    assert_eq!(kio.import_calls(), 4);
+}
+
+/// H4: reads and writes share one byte budget.
+#[test]
+fn too_much_io_stops_the_run() {
+    let limits = Limits {
+        io: 1 << 20,
+        ..Limits::default()
+    };
+    let big = vec![b'x'; 600 << 10];
+    let (_i, input) = dir(&[("big", &big)]);
+    let (out_t, out) = dir(&[]);
+    // 600 KB read, then 600 KB written: only the sum passes 1 MB.
+    let src = "fn main(i: Dir, o: Dir) -> Result<(), IoErr> { let b = i.read(\"big\")?; o.create(\"copy\", b) }";
+    let mut kio = Kio::new(limits).unwrap();
+    let err = kio.run(src, vec![("i".into(), input), ("o".into(), out)]).unwrap_err();
+    assert_eq!(
+        kio.explain(&err).unwrap(),
+        "too much I/O (limit 1 MB; raise it with --io)"
+    );
+    assert!(!out_t.path().join("copy").exists());
+}
+
+/// H4: a file over 10 MB is `too-large` to the program, which can handle it.
+#[test]
+fn oversized_read_is_too_large() {
+    let (_t, d) = dir(&[("big", &vec![b'x'; (10 << 20) + 1]), ("ok", &vec![b'x'; 10 << 20])]);
+    let src = "fn main(d: Dir) -> Int { \
+        let big = match d.read(\"big\") { Ok(_) => 0, Err(TooLarge) => 1, Err(_) => 2 }; \
+        let ok = match d.read(\"ok\") { Ok(b) => 10, Err(_) => 20 }; \
+        big + ok }";
+    let limits = Limits {
+        io: 100 << 20,
+        ..Limits::default()
+    };
+    let out = Kio::new(limits)
+        .unwrap()
+        .run(src, vec![("d".into(), d)])
+        .unwrap()
+        .unwrap();
+    assert_eq!(out.value, "Int(11)");
+}
+
+/// H4: a write that fails after the file is created leaves no file, so a retry works.
+#[test]
+fn failed_write_removes_the_file() {
+    let (t, d) = dir(&[]);
+    let src = "fn main(d: Dir) -> Result<(), IoErr> { d.create(\"f\", \"x\".to_bytes()) }";
+    let mut kio = Kio::new(Limits::default()).unwrap();
+    kio.fail_writes();
+    let out = kio.run(src, vec![("d".into(), d)]).unwrap().unwrap();
+    assert_eq!(out.value, DENIED);
+    assert!(!t.path().join("f").exists());
+}

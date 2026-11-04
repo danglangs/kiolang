@@ -1,7 +1,7 @@
 //! Runs the guest component under Wasmtime. `dir` is backed by cap-std; `http` imports fail. Every import is counted.
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir as RealDir, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::Arc;
@@ -11,9 +11,13 @@ use wasmtime::Result;
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::{HostMonotonicClock, HostWallClock, WasiCtx, WasiCtxView, WasiView};
 
-wasmtime::component::bindgen!({ world: "guest", path: "../caps.wit" });
+// Trappable imports let a host function stop the run by returning `Err`.
+wasmtime::component::bindgen!({ world: "guest", path: "../caps.wit", imports: { default: trappable } });
 
 const GUEST: &[u8] = include_bytes!("../../target/guest/wasm32-wasip2/release/guest.wasm");
+
+/// The most one `Dir.read` returns; a larger file is `too-large`.
+const READ_CAP: u64 = 10 << 20;
 
 /// A granted directory in the resource table. Every guest path goes through it.
 struct Granted(RealDir);
@@ -30,8 +34,18 @@ pub struct State {
     memory_limit: usize,
     /// Set when the guest asked for more memory than `memory_limit`.
     out_of_memory: bool,
+    call_limit: u32,
+    /// Set by the call that exceeded `call_limit`.
+    too_many_calls: bool,
+    /// Bytes read plus written so far, and the most allowed.
+    io: u64,
+    io_limit: u64,
+    /// Set by the call that exceeded `io_limit`.
+    too_much_io: bool,
     #[cfg(feature = "test-hooks")]
     delay: Duration,
+    #[cfg(feature = "test-hooks")]
+    fail_writes: bool,
     wasi: WasiCtx,
     table: ResourceTable,
 }
@@ -72,8 +86,15 @@ impl State {
             peak_memory: 0,
             memory_limit: usize::MAX,
             out_of_memory: false,
+            call_limit: u32::MAX,
+            too_many_calls: false,
+            io: 0,
+            io_limit: u64::MAX,
+            too_much_io: false,
             #[cfg(feature = "test-hooks")]
             delay: Duration::ZERO,
+            #[cfg(feature = "test-hooks")]
+            fail_writes: false,
             wasi,
             table: ResourceTable::new(),
         }
@@ -128,6 +149,26 @@ fn check_path(path: &str) -> Result<(), IoErr> {
 }
 
 impl State {
+    /// Count one capability call; the call past `call_limit` stops the run.
+    fn count_call(&mut self) -> Result<()> {
+        self.calls = self.calls.saturating_add(1);
+        if self.calls > self.call_limit {
+            self.too_many_calls = true;
+            return Err(wasmtime::Error::msg("too many host calls"));
+        }
+        Ok(())
+    }
+
+    /// Count `n` bytes of I/O; the call past `io_limit` stops the run.
+    fn spend_io(&mut self, n: usize) -> Result<()> {
+        self.io = self.io.saturating_add(n as u64);
+        if self.io > self.io_limit {
+            self.too_much_io = true;
+            return Err(wasmtime::Error::msg("too much I/O"));
+        }
+        Ok(())
+    }
+
     /// The directory behind a guest handle; `None` for a handle that is not a live `Granted`.
     fn dir(&mut self, h: &Resource<kio::caps::fs::Dir>) -> Option<&RealDir> {
         let g = self.table.get(&Resource::<Granted>::new_borrow(h.rep())).ok()?;
@@ -136,27 +177,64 @@ impl State {
 }
 
 impl kio::caps::fs::HostDir for State {
-    fn read(&mut self, d: Resource<kio::caps::fs::Dir>, path: String) -> Result<Vec<u8>, IoErr> {
-        self.calls += 1;
+    fn read(&mut self, d: Resource<kio::caps::fs::Dir>, path: String) -> Result<Result<Vec<u8>, IoErr>> {
+        self.count_call()?;
         #[cfg(feature = "test-hooks")]
         std::thread::sleep(self.delay);
-        check_path(&path)?;
-        let dir = self.dir(&d).ok_or(IoErr::Denied)?;
-        dir.read(&path).map_err(|e| io_err(&e))
+        if let Err(e) = check_path(&path) {
+            return Ok(Err(e));
+        }
+        let Some(dir) = self.dir(&d) else {
+            return Ok(Err(IoErr::Denied));
+        };
+        // One byte past the cap tells a too-large file from an exact fit, even if it is growing.
+        let mut data = Vec::new();
+        let read = dir
+            .open(&path)
+            .and_then(|f| f.take(READ_CAP + 1).read_to_end(&mut data));
+        // Charge what was read, even when it is refused.
+        self.spend_io(data.len())?;
+        Ok(match read {
+            Ok(_) if data.len() as u64 > READ_CAP => Err(IoErr::TooLarge),
+            Ok(_) => Ok(data),
+            Err(e) => Err(io_err(&e)),
+        })
     }
 
-    fn create(&mut self, d: Resource<kio::caps::fs::Dir>, path: String, data: Vec<u8>) -> Result<(), IoErr> {
-        self.calls += 1;
-        check_path(&path)?;
-        let dir = self.dir(&d).ok_or(IoErr::Denied)?;
+    fn create(&mut self, d: Resource<kio::caps::fs::Dir>, path: String, data: Vec<u8>) -> Result<Result<(), IoErr>> {
+        self.count_call()?;
+        // Charged before the file exists, so a refused call leaves nothing behind.
+        self.spend_io(data.len())?;
+        if let Err(e) = check_path(&path) {
+            return Ok(Err(e));
+        }
+        #[cfg(feature = "test-hooks")]
+        let fail_write = self.fail_writes;
+        let Some(dir) = self.dir(&d) else {
+            return Ok(Err(IoErr::Denied));
+        };
         // `create_new` fails if the path exists, in the same call that creates it.
         let mut opts = OpenOptions::new();
         opts.write(true).create_new(true);
-        let mut file = dir.open_with(&path, &opts).map_err(|e| match e.kind() {
-            io::ErrorKind::AlreadyExists => IoErr::Denied,
-            _ => io_err(&e),
-        })?;
-        file.write_all(&data).map_err(|e| io_err(&e))
+        let mut file = match dir.open_with(&path, &opts) {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(Err(IoErr::Denied)),
+            Err(e) => return Ok(Err(io_err(&e))),
+        };
+        let written = file.write_all(&data);
+        #[cfg(feature = "test-hooks")]
+        let written = if fail_write {
+            Err(io::Error::other("injected"))
+        } else {
+            written
+        };
+        if let Err(e) = written {
+            // Remove the partial file so a retry is not refused as an overwrite.
+            drop(file);
+            let _ = dir.remove_file(&path);
+            return Ok(Err(io_err(&e)));
+        }
+        Ok(Ok(()))
     }
 
     fn drop(&mut self, d: Resource<kio::caps::fs::Dir>) -> Result<()> {
@@ -166,9 +244,13 @@ impl kio::caps::fs::HostDir for State {
 }
 
 impl kio::caps::net::HostHttp for State {
-    fn get(&mut self, _: Resource<kio::caps::net::Http>, _: String) -> Result<Vec<u8>, kio::caps::net::HttpErr> {
-        self.calls += 1;
-        Err(kio::caps::net::HttpErr::Denied)
+    fn get(
+        &mut self,
+        _: Resource<kio::caps::net::Http>,
+        _: String,
+    ) -> Result<Result<Vec<u8>, kio::caps::net::HttpErr>> {
+        self.count_call()?;
+        Ok(Err(kio::caps::net::HttpErr::Denied))
     }
 
     fn drop(&mut self, _: Resource<kio::caps::net::Http>) -> Result<()> {
@@ -185,6 +267,10 @@ pub struct Limits {
     pub stack: usize,
     /// Bytes of guest linear memory.
     pub memory: usize,
+    /// Capability calls.
+    pub calls: u32,
+    /// Bytes read plus written.
+    pub io: u64,
 }
 
 impl Default for Limits {
@@ -194,6 +280,8 @@ impl Default for Limits {
             timeout_secs: 10,
             stack: 2 << 20,
             memory: 256 << 20,
+            calls: 10_000,
+            io: 100 << 20,
         }
     }
 }
@@ -235,6 +323,8 @@ impl Kio {
         Guest::add_to_linker::<State, wasmtime::component::HasSelf<State>>(&mut linker, |s| s)?;
         let mut store = Store::new(&engine, State::new());
         store.data_mut().memory_limit = limits.memory;
+        store.data_mut().call_limit = limits.calls;
+        store.data_mut().io_limit = limits.io;
         store.limiter(|s| s);
         store.set_fuel(limits.fuel)?;
         store.set_epoch_deadline(limits.timeout_secs.saturating_mul(10));
@@ -253,6 +343,12 @@ impl Kio {
     pub fn slow_reads(&mut self, d: Duration) {
         self.store.data_mut().delay = d;
     }
+    /// Make every `Dir.create` fail after the file is created, to test the cleanup.
+    #[cfg(feature = "test-hooks")]
+    pub fn fail_writes(&mut self) {
+        self.store.data_mut().fail_writes = true;
+    }
+
     /// The message for a run that hit one of its limits, or `None` for any other error.
     pub fn explain(&self, e: &wasmtime::Error) -> Option<String> {
         let l = &self.limits;
@@ -262,6 +358,15 @@ impl Kio {
                 "out of memory (limit {} MB; raise it with --memory)",
                 l.memory >> 20
             ));
+        }
+        if self.store.data().too_many_calls {
+            return Some(format!(
+                "too many host calls (limit {}; raise it with --calls)",
+                l.calls
+            ));
+        }
+        if self.store.data().too_much_io {
+            return Some(format!("too much I/O (limit {} MB; raise it with --io)", l.io >> 20));
         }
         Some(match e.downcast_ref::<wasmtime::Trap>()? {
             wasmtime::Trap::OutOfFuel => format!("out of fuel (limit {}; raise it with --fuel)", l.fuel),

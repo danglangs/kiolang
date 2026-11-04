@@ -6,7 +6,7 @@ fn main() {
         ["check", path] => std::process::exit(check(path)),
         ["run", path, ref flags @ ..] => std::process::exit(run(path, flags)),
         _ => eprintln!(
-            "usage: kio check <prog.kio>\n       kio run <prog.kio> [--dir name=path]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb]"
+            "usage: kio check <prog.kio>\n       kio run <prog.kio> [--dir name=path]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb]"
         ),
     }
     std::process::exit(2);
@@ -40,7 +40,7 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     let mut limits = Limits::default();
     for pair in flags.chunks(2) {
         let (name, dir) = match pair {
-            [flag @ ("--fuel" | "--timeout" | "--memory" | "--stack"), n] => {
+            [flag @ ("--fuel" | "--timeout" | "--memory" | "--stack" | "--calls" | "--io"), n] => {
                 let Some(v) = n.parse::<u64>().ok().filter(|&v| v > 0) else {
                     return fail(format!("{flag} {n}: expected a positive integer"));
                 };
@@ -48,6 +48,8 @@ fn run(path: &str, flags: &[&str]) -> i32 {
                     "--fuel" => limits.fuel = v,
                     "--timeout" => limits.timeout_secs = v,
                     "--memory" => limits.memory = (v as usize).saturating_mul(1 << 20),
+                    "--calls" => limits.calls = u32::try_from(v).unwrap_or(u32::MAX),
+                    "--io" => limits.io = v.saturating_mul(1 << 20),
                     _ => limits.stack = (v as usize).saturating_mul(1 << 10),
                 }
                 continue;
@@ -57,7 +59,7 @@ fn run(path: &str, flags: &[&str]) -> i32 {
                 None => return fail(format!("--dir {spec}: expected name=path")),
             },
             _ => return fail(
-                "usage: kio run <prog.kio> [--dir name=path]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb]"
+                "usage: kio run <prog.kio> [--dir name=path]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb]"
                     .into(),
             ),
         };
