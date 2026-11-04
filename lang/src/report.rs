@@ -116,6 +116,7 @@ fn walk(e: &Expr, visit: &mut dyn FnMut(&Expr)) {
             walk(r, visit);
             args.iter().for_each(|a| walk(a, visit));
         }
+        ExprKind::List(items) => items.iter().for_each(|a| walk(a, visit)),
         ExprKind::StructLit(_, fields) => fields.iter().for_each(|(_, v)| walk(v, visit)),
         ExprKind::Match(s, arms) => {
             walk(s, visit);

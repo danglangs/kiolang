@@ -512,6 +512,7 @@ impl Parser {
             Some(Kind::Keyword(k)) if k == "if" => return self.if_expr(),
             Some(Kind::Keyword(k)) if k == "match" => return self.match_expr(),
             Some(Kind::Sym("(")) => return self.paren(),
+            Some(Kind::Sym("[")) => return self.list_lit(),
             Some(Kind::Sym("{")) => {
                 let b = self.block()?;
                 return Ok(Expr {
@@ -548,6 +549,16 @@ impl Parser {
         }
         self.pos += 1;
         Ok((name, self.expr()?))
+    }
+
+    fn list_lit(&mut self) -> Result<Expr, Diag> {
+        let start = self.span().start;
+        self.pos += 1;
+        let items = self.list("]", Self::expr)?;
+        Ok(Expr {
+            kind: ExprKind::List(items),
+            span: self.since(start),
+        })
     }
 
     /// `()` or `( e )`; the parentheses leave no node.

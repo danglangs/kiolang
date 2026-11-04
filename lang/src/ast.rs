@@ -117,6 +117,8 @@ pub enum ExprKind {
     If(Box<Expr>, Block, Option<Box<Expr>>),
     Block(Block),
     Call(Box<Expr>, Vec<Expr>),
+    /// `[a, b]`
+    List(Vec<Expr>),
     Method(Box<Expr>, String, Vec<Expr>),
     Field(Box<Expr>, String),
     Index(Box<Expr>, Box<Expr>),

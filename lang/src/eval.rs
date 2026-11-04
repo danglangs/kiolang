@@ -22,6 +22,7 @@ pub enum Value {
     Str(String),
     Bytes(Vec<u8>),
     Unit,
+    List(Vec<Value>),
     /// The struct's name and its field values in declaration order.
     Struct(String, Vec<Value>),
     /// The enum's name, the variant's index in declaration order and its payload.
@@ -49,6 +50,13 @@ fn fail(span: Span, msg: &str) -> Box<Stop> {
         span,
         msg: msg.to_string(),
     }))
+}
+
+/// One step from a local to a part of it, with indexes already evaluated.
+enum Step<'a> {
+    Field(&'a str),
+    /// The index and the span of the expression that indexes.
+    Index(i64, Span),
 }
 
 /// Evaluates `main`. Recursion is capped at `MAX_DEPTH` nested expressions, which needs
@@ -166,25 +174,57 @@ impl Interp<'_> {
         Err(Box::new(Stop::Return(v)))
     }
 
-    fn assign(&mut self, target: &Expr, op: &str, value: &Expr, span: Span) -> Result<(), Box<Stop>> {
-        let mut path = Vec::new();
-        let mut root = target;
-        while let ExprKind::Field(base, field) = &root.kind {
-            path.push(field.as_str());
+    /// Splits a place into its root local and the steps from it, evaluating indexes in source order.
+    fn path<'e>(&mut self, place: &'e Expr) -> Result<(&'e str, Vec<Step<'e>>), Box<Stop>> {
+        let mut chain = Vec::new();
+        let mut root = place;
+        while let ExprKind::Field(base, _) | ExprKind::Index(base, _) = &root.kind {
+            chain.push(root);
             root = base;
         }
         let ExprKind::Name(name) = &root.kind else {
-            unreachable!("checked target");
+            unreachable!("checked place");
         };
-        let mut v = self.expr(value)?;
-        let structs = self.structs;
-        let mut slot = self.lookup(name);
-        for field in path.into_iter().rev() {
-            let Value::Struct(s, vals) = slot else {
-                unreachable!("checked field");
-            };
-            slot = &mut vals[field_index(structs, s, field)];
+        let mut steps = Vec::new();
+        for e in chain.into_iter().rev() {
+            steps.push(match &e.kind {
+                ExprKind::Field(_, field) => Step::Field(field),
+                ExprKind::Index(_, index) => {
+                    let Value::Int(i) = self.expr(index)? else {
+                        unreachable!("checked index");
+                    };
+                    Step::Index(i, e.span)
+                }
+                _ => unreachable!("chain holds fields and indexes"),
+            });
         }
+        Ok((name, steps))
+    }
+
+    /// The part of local `root` that `steps` lead to.
+    fn slot(&mut self, root: &str, steps: Vec<Step>) -> Result<&mut Value, Box<Stop>> {
+        let structs = self.structs;
+        let mut slot = self.lookup(root);
+        for step in steps {
+            slot = match (step, slot) {
+                (Step::Field(field), Value::Struct(s, vals)) => &mut vals[field_index(structs, s, field)],
+                (Step::Index(i, span), Value::List(vals)) => {
+                    let len = vals.len();
+                    match usize::try_from(i).ok().and_then(|i| vals.get_mut(i)) {
+                        Some(v) => v,
+                        None => return Err(fail(span, &format!("index {i} out of bounds for length {len}"))),
+                    }
+                }
+                _ => unreachable!("checked place"),
+            };
+        }
+        Ok(slot)
+    }
+
+    fn assign(&mut self, target: &Expr, op: &str, value: &Expr, span: Span) -> Result<(), Box<Stop>> {
+        let (root, steps) = self.path(target)?;
+        let mut v = self.expr(value)?;
+        let slot = self.slot(root, steps)?;
         if op != "=" {
             v = binary(&op[..1], slot.clone(), v, span)?;
         }
@@ -226,7 +266,8 @@ impl Interp<'_> {
             ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms),
             ExprKind::Try(x) => self.try_expr(x),
             ExprKind::Method(recv, name, args) => self.method(recv, name, args, e.span),
-            ExprKind::Index(..) => unreachable!("rejected by check"),
+            ExprKind::Index(base, index) => self.index(base, index, e.span),
+            ExprKind::List(items) => Ok(Value::List(self.values(items)?)),
         }
     }
 
@@ -239,9 +280,38 @@ impl Interp<'_> {
         }
     }
 
-    /// Evaluates the receiver, then the arguments left to right.
-    /// Built-in methods take none; capability methods go to the host.
+    fn values(&mut self, exprs: &[Expr]) -> Result<Vec<Value>, Box<Stop>> {
+        exprs.iter().map(|x| self.expr(x)).collect()
+    }
+
+    fn index(&mut self, base: &Expr, index: &Expr, span: Span) -> Res {
+        let (Value::List(mut vals), Value::Int(i)) = (self.expr(base)?, self.expr(index)?) else {
+            unreachable!("checked index");
+        };
+        match usize::try_from(i).ok().filter(|&i| i < vals.len()) {
+            Some(i) => Ok(vals.swap_remove(i)),
+            None => Err(fail(
+                span,
+                &format!("index {i} out of bounds for length {}", vals.len()),
+            )),
+        }
+    }
+
+    /// `push` changes its receiver in place; the checker only allows it on a place.
+    /// Other built-in methods take no arguments; capability methods go to the host.
     fn method(&mut self, recv: &Expr, name: &str, args: &[Expr], span: Span) -> Res {
+        // `push` on a list changes it in place. A capability could have its own `push`, so only
+        // a receiver that is not a capability takes this path.
+        let on_cap = matches!(&recv.kind, ExprKind::Name(n) if matches!(self.lookup(n), Value::Cap(_)));
+        if name == "push" && !on_cap {
+            let (root, steps) = self.path(recv)?;
+            let item = self.expr(&args[0])?;
+            let Value::List(vals) = self.slot(root, steps)? else {
+                unreachable!("checked push");
+            };
+            vals.push(item);
+            return Ok(Value::Unit);
+        }
         let recv = self.expr(recv)?;
         if let Value::Cap(cap) = recv {
             let vals = args.iter().map(|a| self.expr(a)).collect::<Result<_, _>>()?;
@@ -257,6 +327,7 @@ impl Interp<'_> {
             (Value::Int(n), "to_str") => Value::Str(n.to_string()),
             (Value::Str(s), "len") => Value::Int(s.len() as i64),
             (Value::Str(s), "to_bytes") => Value::Bytes(s.into_bytes()),
+            (Value::List(v), "len") => Value::Int(v.len() as i64),
             (Value::Bytes(b), "len") => Value::Int(b.len() as i64),
             (Value::Bytes(b), "to_str") => match String::from_utf8(b) {
                 Ok(s) => Value::Str(s),

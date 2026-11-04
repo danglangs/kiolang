@@ -19,6 +19,7 @@ fn show(e: &Expr) -> String {
         ExprKind::Method(r, m, args) => format!("(.{m} {}{})", show(r), list(args)),
         ExprKind::Field(r, f) => format!("(. {} {f})", show(r)),
         ExprKind::Index(r, i) => format!("([] {} {})", show(r), show(i)),
+        ExprKind::List(items) => format!("(list{})", list(items)),
         ExprKind::Try(x) => format!("(? {})", show(x)),
         ExprKind::Path(e, v) => format!("{e}::{v}"),
         ExprKind::Match(s, arms) => {
@@ -247,6 +248,15 @@ fn rejects_reserved_words() {
 fn rejects_tuples() {
     rejected("fn f() { (1, 2) }", ",", "kio has no tuples", true);
     rejected("fn f(a: (Int, Int)) {}", "Int", "kio has no tuple types", true);
+}
+
+#[test]
+fn list_literals() {
+    assert_eq!(expr("[]"), "(list)");
+    assert_eq!(expr("[1, f(2),]"), "(list 1 (call f 2))");
+    assert_eq!(expr("[[1], []][0][1]"), "([] ([] (list (list 1) (list)) 0) 1)");
+    assert_eq!(body("xs[0].f = [1];"), "{(= (. ([] xs 0) f) (list 1))}");
+    rejected("fn f() { [1 2]; }", "2", "expected `]`", false);
 }
 
 #[test]

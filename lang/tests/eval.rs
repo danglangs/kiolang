@@ -341,3 +341,101 @@ fn methods() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn list_values_and_indexing() {
+    let ints = |ns: &[i64]| Value::List(ns.iter().map(|n| Value::Int(*n)).collect());
+    assert_eq!(int("fn main() -> List<Int> { [1, 2 + 1,] }"), ints(&[1, 3]));
+    assert_eq!(int("fn main() -> List<Int> { [] }"), ints(&[]));
+    assert_eq!(
+        int("fn main() -> Int { [[1, 2], [3]][0][1] + [5].len() }"),
+        Value::Int(3)
+    );
+    assert_eq!(int("fn main() -> Int { let xs = [7, 8]; xs[1 - 1] }"), Value::Int(7));
+}
+
+#[test]
+fn list_out_of_bounds() {
+    let src = "fn main() -> Int { let xs = [1, 2, 3]; xs[5] }";
+    let e = exec(src).unwrap_err();
+    assert_eq!(e.msg, "index 5 out of bounds for length 3");
+    assert_eq!(&src[e.span.start..e.span.end], "xs[5]");
+    fails("fn main() -> Int { [1][0 - 1] }", "index -1 out of bounds for length 1");
+    let src = "fn main() { let mut xs = [1]; xs[2] = 0; }";
+    let e = exec(src).unwrap_err();
+    assert_eq!(e.msg, "index 2 out of bounds for length 1");
+    assert_eq!(&src[e.span.start..e.span.end], "xs[2]");
+    fails(
+        "fn main() { let mut xs = [[1]]; xs[0][1] += 1; }",
+        "index 1 out of bounds for length 1",
+    );
+}
+
+#[test]
+fn list_assignment_and_push() {
+    let src = "struct S { items: List<Int> }
+               fn main() -> Int {
+                   let mut xs = [S { items: [1, 2] }];
+                   xs[0].items[1] = 10;
+                   xs[0].items[0] += 5;
+                   xs[0].items.push(3);
+                   xs.push(S { items: [] });
+                   xs[1].items.push(4);
+                   xs[0].items[0] + xs[0].items[1] + xs[0].items[2] + xs[1].items[0] + xs.len()
+               }";
+    assert_eq!(int(src), Value::Int(6 + 10 + 3 + 4 + 2));
+    assert_eq!(
+        int("fn main() -> List<Int> { let mut xs = [1]; xs.push(2); xs }"),
+        Value::List(vec![Value::Int(1), Value::Int(2)])
+    );
+}
+
+#[test]
+fn list_index_is_evaluated_before_the_value() {
+    fails(
+        "fn main() { let mut xs = [1]; xs[1 / 0] = 9223372036854775807 + 1; }",
+        "division by zero",
+    );
+    fails("fn main() { let mut xs = [1]; xs[5] = 1 / 0; }", "division by zero");
+}
+
+#[test]
+fn lists_are_copied() {
+    let src = "fn main() -> Int {
+                   let mut a = [1, 2];
+                   let mut b = a;
+                   b[0] = 9;
+                   a.push(3);
+                   a[1] = 7;
+                   a[0] * 1000 + b[0] * 100 + a.len() * 10 + b.len()
+               }";
+    assert_eq!(int(src), Value::Int(1000 + 900 + 30 + 2));
+    let src = "fn main() -> Int {
+                   let mut a = [[1], [2]];
+                   let mut b = a;
+                   b[0][0] = 5;
+                   a[1].push(6);
+                   a[0][0] * 100 + b[0][0] * 10 + b[1].len() + a[1].len() * 1000
+               }";
+    assert_eq!(int(src), Value::Int(2000 + 100 + 50 + 1));
+    let src = "struct W { xs: List<Int> }
+               fn main() -> Int {
+                   let a = W { xs: [1] };
+                   let mut b = a;
+                   b.xs.push(2);
+                   b.xs[0] = 9;
+                   a.xs[0] * 10 + a.xs.len() + b.xs[0] * 100 + b.xs.len() * 1000
+               }";
+    assert_eq!(int(src), Value::Int(10 + 1 + 900 + 2000));
+}
+
+#[test]
+fn list_argument_changed_in_callee() {
+    let src = "fn bump(xs: List<Int>) -> List<Int> { let mut ys = xs; ys[0] += 1; ys.push(0); ys }
+               fn main() -> Int {
+                   let a = [1];
+                   let b = bump(a);
+                   a[0] * 100 + a.len() * 10 + b[0] + b.len() * 1000
+               }";
+    assert_eq!(int(src), Value::Int(100 + 10 + 2 + 2000));
+}

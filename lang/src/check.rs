@@ -109,6 +109,7 @@ impl Program {
         match (v, ty) {
             (Value::Int(_), Ty::Int) | (Value::Bool(_), Ty::Bool) | (Value::Unit, Ty::Unit) => true,
             (Value::Str(_), Ty::Str) | (Value::Bytes(_), Ty::Bytes) => true,
+            (Value::List(vals), Ty::List(t)) => vals.iter().all(|v| self.fits(v, t)),
             (Value::Enum(en, i, vals), Ty::Result(ok, e)) if en == "Result" && vals.len() == 1 => match i {
                 0 => self.fits(&vals[0], ok),
                 1 => self.fits(&vals[0], e),
@@ -136,6 +137,7 @@ pub enum Ty {
     Enum(String),
     Option(Box<Ty>),
     Result(Box<Ty>, Box<Ty>),
+    List(Box<Ty>),
     /// A capability, which only a parameter can hold.
     Cap(String),
     /// A block that always returns; it matches any type.
@@ -153,6 +155,7 @@ impl fmt::Display for Ty {
             Ty::Struct(name) | Ty::Enum(name) | Ty::Cap(name) => f.write_str(name),
             Ty::Option(t) => write!(f, "Option<{t}>"),
             Ty::Result(t, e) => write!(f, "Result<{t}, {e}>"),
+            Ty::List(t) => write!(f, "List<{t}>"),
             Ty::Never => f.write_str("!"),
         }
     }
@@ -291,7 +294,11 @@ fn binary_ty(op: &str, l: &Ty, r: &Ty) -> Option<Ty> {
         ("<" | "<=" | ">" | ">=", Int, Int) => Some(Bool),
         ("&&" | "||", Bool, Bool) => Some(Bool),
         ("==" | "!=", a, b)
-            if a == b && !matches!(a, Never | Cap(_) | Struct(_) | Enum(_) | Option(_) | Result(..)) =>
+            if a == b
+                && !matches!(
+                    a,
+                    Never | Cap(_) | Struct(_) | Enum(_) | Option(_) | Result(..) | List(_)
+                ) =>
         {
             Some(Bool)
         }
@@ -313,11 +320,12 @@ fn resolve(
                 let (a, b) = (resolve(a, caps, structs, enums)?, resolve(b, caps, structs, enums)?);
                 Ok(Ty::Result(Box::new(a), Box::new(b)))
             }
-            ("Option" | "Result", _) => {
-                let (count, hint) = if n == "Option" {
-                    (1, "write `Option<T>`")
-                } else {
-                    (2, "write `Result<T, E>`")
+            ("List", [a]) => Ok(Ty::List(Box::new(resolve(a, caps, structs, enums)?))),
+            ("Option" | "Result" | "List", _) => {
+                let (count, hint) = match n.as_str() {
+                    "Option" => (1, "write `Option<T>`"),
+                    "Result" => (2, "write `Result<T, E>`"),
+                    _ => (1, "write `List<T>`"),
                 };
                 let msg = format!("`{n}` takes {count} type arguments, found {}", args.len());
                 Err(err(t.span, msg, Some(hint)))
@@ -338,7 +346,7 @@ fn unknown_type(t: &Type) -> Diag {
     err(
         t.span,
         "type is not available yet".to_string(),
-        Some("the types so far are Int, Bool, Str, Bytes, (), Option, Result and your structs and enums"),
+        Some("the types so far are Int, Bool, Str, Bytes, (), Option, Result, List and your structs and enums"),
     )
 }
 
@@ -356,7 +364,7 @@ enum Place<'a> {
 fn cap_in(ty: &Ty) -> Option<&str> {
     match ty {
         Ty::Cap(c) => Some(c),
-        Ty::Option(t) => cap_in(t),
+        Ty::Option(t) | Ty::List(t) => cap_in(t),
         Ty::Result(t, e) => cap_in(t).or_else(|| cap_in(e)),
         _ => None,
     }
@@ -503,14 +511,15 @@ fn method(caps: &CapTable, recv: &Ty, name: &str) -> Option<(Vec<Ty>, Ty)> {
             Some((params.clone(), ret.clone()))
         }
         (Ty::Int, "to_str") | (Ty::Bytes, "to_str") => Some((vec![], Ty::Str)),
-        (Ty::Str, "len") | (Ty::Bytes, "len") => Some((vec![], Ty::Int)),
+        (Ty::Str, "len") | (Ty::Bytes, "len") | (Ty::List(_), "len") => Some((vec![], Ty::Int)),
+        (Ty::List(t), "push") => Some((vec![(**t).clone()], Ty::Unit)),
         (Ty::Str, "to_bytes") => Some((vec![], Ty::Bytes)),
         _ => None,
     }
 }
 
 /// Every built-in method name, so hints can list the ones `method` accepts on a type.
-const METHODS: &[&str] = &["len", "to_bytes", "to_str"];
+const METHODS: &[&str] = &["len", "push", "to_bytes", "to_str"];
 
 fn cap_methods<'a>(caps: &'a CapTable, name: &str) -> &'a [(String, Vec<Ty>, Ty)] {
     caps.caps.iter().find(|c| c.name == name).map_or(&[], |c| &c.methods)
@@ -531,7 +540,7 @@ fn method_names<'a>(caps: &'a CapTable, recv: &Ty) -> Vec<&'a str> {
 fn named(ty: &Ty) -> Vec<&str> {
     match ty {
         Ty::Struct(n) | Ty::Enum(n) => vec![n],
-        Ty::Option(t) => named(t),
+        Ty::Option(t) | Ty::List(t) => named(t),
         Ty::Result(t, e) => [named(t), named(e)].concat(),
         _ => Vec::new(),
     }
@@ -895,10 +904,11 @@ impl Checker<'_> {
                 let ty = self.expr(base, None)?;
                 self.field(&ty, name, e.span)
             }
-            ExprKind::Index(..) => {
-                let hint = "indexing comes with `List`, later";
-                Err(err(e.span, "indexing is not available yet".to_string(), Some(hint)))
+            ExprKind::Index(base, index) => {
+                let ty = self.expr(base, None)?;
+                self.element(&ty, index, e.span)
             }
+            ExprKind::List(items) => self.list_lit(e, items, expected),
             ExprKind::StructLit(name, inits) => self.struct_lit(e, name, inits),
             ExprKind::Path(en, v) => self.variant_value(e, en, v, &[]),
             ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms, expected),
@@ -921,8 +931,46 @@ impl Checker<'_> {
         self.expr(e, expected)
     }
 
+    /// The element type of list type `ty`, with `index` checked as an `Int`.
+    fn element(&mut self, ty: &Ty, index: &Expr, span: Span) -> Result<Ty, Diag> {
+        let Ty::List(t) = ty else {
+            return Err(err(
+                span,
+                format!("cannot index {ty}"),
+                Some("only a List can be indexed"),
+            ));
+        };
+        want_expr(index, &self.expr(index, None)?, &Ty::Int)?;
+        Ok((**t).clone())
+    }
+
+    /// `[a, b]`: the elements share the expected element type, else the first one's.
+    fn list_lit(&mut self, e: &Expr, items: &[Expr], expected: Option<&Ty>) -> Result<Ty, Diag> {
+        let mut elem = match expected {
+            Some(Ty::List(t)) => Some((**t).clone()),
+            _ => None,
+        };
+        for item in items {
+            let found = self.expr(item, elem.as_ref())?;
+            match &elem {
+                Some(t) => want_expr(item, &found, t)?,
+                None => elem = Some(found),
+            }
+        }
+        match elem {
+            Some(t) => Ok(Ty::List(Box::new(t))),
+            None => {
+                let hint = "add a type: `let xs: List<Int> = [];`";
+                Err(err(e.span, "cannot tell the type of `[]`".to_string(), Some(hint)))
+            }
+        }
+    }
+
     fn method_call(&mut self, e: &Expr, recv: &Expr, name: &str, args: &[Expr]) -> Result<Ty, Diag> {
         let recv_ty = self.operand(recv, None)?;
+        if name == "push" && matches!(recv_ty, Ty::List(_)) {
+            self.push_target(recv)?;
+        }
         let Some((params, ret)) = method(self.caps, &recv_ty, name) else {
             let names = method_names(self.caps, &recv_ty);
             let hint = if names.is_empty() {
@@ -1189,7 +1237,7 @@ impl Checker<'_> {
         Ok(Ty::Struct(name.to_string()))
     }
 
-    /// The type of an assignment target: a `let mut` local or a field chain rooted at one.
+    /// The type of an assignment target: a `let mut` local followed by fields and indexes.
     fn place(&mut self, target: &Expr) -> Result<Ty, Diag> {
         match &target.kind {
             ExprKind::Name(name) => {
@@ -1206,12 +1254,37 @@ impl Checker<'_> {
                 let ty = self.place(base)?;
                 self.field(&ty, name, target.span)
             }
+            ExprKind::Index(base, index) => {
+                let ty = self.place(base)?;
+                self.element(&ty, index, target.span)
+            }
             _ => Err(err(
                 target.span,
-                "assigning to indexes is not available yet".to_string(),
-                Some("assign to a name or a field"),
+                "cannot assign to this expression".to_string(),
+                Some("assign to a `let mut` variable, or a field or index of one"),
             )),
         }
+    }
+
+    /// `push` changes its list, so the receiver must be a place rooted at a `let mut` local.
+    fn push_target(&mut self, recv: &Expr) -> Result<(), Diag> {
+        let mut root = recv;
+        while let ExprKind::Field(base, _) | ExprKind::Index(base, _) = &root.kind {
+            root = base;
+        }
+        let ExprKind::Name(name) = &root.kind else {
+            let hint = "`push` changes a list; call it on a `let mut` variable";
+            return Err(err(
+                recv.span,
+                "cannot `push` to this expression".to_string(),
+                Some(hint),
+            ));
+        };
+        if !self.lookup(name).is_some_and(|l| l.mutable) {
+            let msg = format!("cannot `push` to `{name}`, it is not `mut`");
+            return Err(err(root.span, msg, Some("declare it with `let mut`")));
+        }
+        Ok(())
     }
 
     fn call(&mut self, e: &Expr, callee: &Expr, args: &[Expr], expected: Option<&Ty>) -> Result<Ty, Diag> {

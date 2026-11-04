@@ -191,7 +191,7 @@ Order: enums and `Result` first, because capability methods return `Result<_, Io
   - The runner prints the report after a successful check, before running.
   Done: tests for the example above; a two-level helper chain; mutual recursion passing a capability back and forth (terminates, both get the union); an unused capability parameter (omitted, `none` if it was the only one); a method in an untaken branch (still reported); the README example's report matches exactly.
 
-- [ ] **11a. Lists.** Parser, checker and interpreter.
+- [x] **11a. Lists.** Parser, checker and interpreter.
   - Parser: list literal `[a, b, ..]` and `[]` as `ExprKind::List(Vec<Expr>)` (trailing comma allowed). Indexing and index assignment already parse.
   - `Ty::List(Box<Ty>)` from `List<T>`; `Value::List(Vec<Value>)`. `Value` stays 64 bytes.
   - `[]` needs an expected `List<T>` (same rule as `None`, same hint style: "add a type: `let xs: List<Int> = [];`"). `[a, ..]` takes its element type from the expected type if any, else from the first element; every element must have it.

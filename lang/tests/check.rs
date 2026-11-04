@@ -125,7 +125,7 @@ fn main_rules() {
 fn unavailable_types_and_features() {
     let (_, at) = reject("fn main() { let x: Foo = 1; }");
     assert_eq!(at, "Foo");
-    reject("fn f(x: List<Int>) {} fn main() {}");
+    reject("fn f(x: Vec<Int>) {} fn main() {}");
     reject("fn main() { let x = 1; x.f; }");
     reject("fn main() { let x = 1; x[0]; }");
     reject("fn main() { let x = 1; x.m(); }");
@@ -905,4 +905,109 @@ fn capabilities_cannot_hide_in_payloads() {
             "{src}"
         );
     }
+}
+
+#[test]
+fn list_types_and_literals() {
+    ok("fn f(xs: List<List<Int>>) -> Int { xs[0][1] + xs.len() } fn main() {}");
+    ok("fn main() { let a = [1, 2]; let b: List<Int> = []; let c: List<Option<Int>> = [None, Some(1)]; }");
+    ok("fn main() -> List<Str> { [] }");
+    let (msg, at) = reject("fn main() { let x = []; }");
+    assert_eq!((msg.as_str(), at.as_str()), ("cannot tell the type of `[]`", "[]"));
+    assert_eq!(
+        hint("fn main() { let x = []; }"),
+        "add a type: `let xs: List<Int> = [];`"
+    );
+    let (msg, at) = reject("fn main() { let x = [1, \"a\"]; }");
+    assert_eq!((msg.as_str(), at.as_str()), ("expected Int, found Str", "\"a\""));
+    let (msg, _) = reject("fn main() { let x: List<Int> = [true]; }");
+    assert_eq!(msg, "expected Int, found Bool");
+    assert_eq!(hint("fn f(x: List<Int, Int>) {} fn main() {}"), "write `List<T>`");
+    assert!(hint("fn f(x: Foo) {} fn main() {}").contains("List"));
+}
+
+#[test]
+fn list_indexing() {
+    let (msg, at) = reject("fn main() { let x = [1]; x[true]; }");
+    assert_eq!((msg.as_str(), at.as_str()), ("expected Int, found Bool", "true"));
+    let (msg, at) = reject("fn main() { let x = 1; x[0]; }");
+    assert_eq!((msg.as_str(), at.as_str()), ("cannot index Int", "x[0]"));
+    assert_eq!(hint("fn main() { let x = 1; x[0]; }"), "only a List can be indexed");
+    reject("fn main() { let x: Int = [1][0] + [\"a\"][0]; }");
+    let (msg, _) = reject("fn main() { let x = [1, 2]; x == x; }");
+    assert_eq!(msg, "`==` cannot be applied to List<Int> and List<Int>");
+}
+
+#[test]
+fn list_places() {
+    let s = "struct S { items: List<Int> } ";
+    ok(&format!(
+        "{s}fn main() {{ let mut xs = [S {{ items: [1] }}]; xs[0].items[0] = 2; xs[0].items[0] += 1; }}"
+    ));
+    let (msg, at) = reject("fn main() { let xs = [1]; xs[0] = 2; }");
+    assert_eq!(
+        (msg.as_str(), at.as_str()),
+        ("cannot assign to `xs`, it is not `mut`", "xs")
+    );
+    assert_eq!(
+        hint("fn main() { let xs = [1]; xs[0] = 2; }"),
+        "declare it with `let mut`"
+    );
+    let (msg, _) = reject("fn main() { let mut xs = [1]; xs[0] = \"a\"; }");
+    assert_eq!(msg, "expected Int, found Str");
+    reject("fn main() { let mut xs = [1]; xs[true] = 2; }");
+    reject("fn main() { let mut x = 1; x[0] = 2; }");
+}
+
+#[test]
+fn list_methods() {
+    ok("fn main() { let mut xs: List<Int> = []; xs.push(1); let n: Int = xs.len(); }");
+    ok("struct S { items: List<Int> } fn main() { let mut s = S { items: [] }; s.items.push(1); }");
+    ok("fn main() { let mut xs = [[1]]; xs[0].push(2); xs.push([]); }");
+    let (msg, at) = reject("fn f() -> List<Int> { [1] } fn main() { f().push(1); }");
+    assert_eq!((msg.as_str(), at.as_str()), ("cannot `push` to this expression", "f()"));
+    assert_eq!(
+        hint("fn f() -> List<Int> { [1] } fn main() { f().push(1); }"),
+        "`push` changes a list; call it on a `let mut` variable"
+    );
+    let (msg, at) = reject("fn main() { let xs = [1]; xs.push(2); }");
+    assert_eq!(
+        (msg.as_str(), at.as_str()),
+        ("cannot `push` to `xs`, it is not `mut`", "xs")
+    );
+    assert_eq!(
+        hint("fn main() { let xs = [1]; xs.push(2); }"),
+        "declare it with `let mut`"
+    );
+    let (msg, at) = reject("fn main() { let mut xs = [1]; xs.push(\"a\"); }");
+    assert_eq!((msg.as_str(), at.as_str()), ("expected Int, found Str", "\"a\""));
+    assert_eq!(
+        hint("fn main() { let mut xs = [1]; xs.pusj(2); }"),
+        "did you mean `push`?"
+    );
+    reject("fn main() { let mut xs = [1]; xs.push(); }");
+}
+
+#[test]
+fn lists_cannot_hold_capabilities() {
+    let (msg, hint, at) = reject_cap("fn f(xs: List<Dir>) {} fn main(d: Dir) {}");
+    assert_eq!(
+        (msg.as_str(), hint.as_str(), at.as_str()),
+        (
+            "capability nested in `List<Dir>`",
+            "take `Dir` as a parameter",
+            "List<Dir>"
+        )
+    );
+    let (msg, _, _) = reject_cap("fn main(d: Dir) { let xs: List<Dir> = []; }");
+    assert_eq!(msg, "capability nested in `List<Dir>`");
+    let (msg, hint, at) = reject_cap("fn main(input: Dir, out: Dir) { let dirs = [input, out]; }");
+    assert_eq!(
+        (msg.as_str(), hint.as_str(), at.as_str()),
+        (
+            "capability used as a value",
+            "call methods on the parameter itself",
+            "input"
+        )
+    );
 }

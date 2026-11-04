@@ -10,7 +10,7 @@ kio is a fresh language built around that idea, using Rust's ecosystem for speed
 
 ## Try it
 
-There is no `kio` command yet; a temporary runner checks and runs a `.kio` file. Today the language has `Int`, `Bool`, `Str`, `Bytes`, structs, enums with `match`, `Option`, `Result` and `?`, `Dir` and `Http` capabilities, functions, `let`, `if`, `while` and recursion. Requires Rust (stable).
+There is no `kio` command yet; a temporary runner checks and runs a `.kio` file. Today the language has `Int`, `Bool`, `Str`, `Bytes`, `List`, structs, enums with `match`, `Option`, `Result` and `?`, `Dir` and `Http` capabilities, functions, `let`, `if`, `while` and recursion. Requires Rust (stable).
 
 ```
 git clone https://github.com/danglangs/kiolang && cd kiolang
