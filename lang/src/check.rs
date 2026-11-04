@@ -170,6 +170,7 @@ pub fn check(src: &str, _caps: &CapTable) -> Result<Program, Vec<Diag>> {
     for item in items {
         match item {
             Item::Fn(f) => fns.push(f),
+            Item::Enum(e) => diags.push(err(e.span, "enums are not available yet".to_string(), None)),
             Item::Struct(s) if structs.contains_key(&s.name) => {
                 diags.push(err(s.span, format!("duplicate struct `{}`", s.name), None));
             }
@@ -390,6 +391,9 @@ impl Checker<'_> {
             }
             ExprKind::Index(..) => Err(err(e.span, "indexing is not available yet".to_string(), None)),
             ExprKind::StructLit(name, inits) => self.struct_lit(e, name, inits),
+            ExprKind::Path(..) | ExprKind::Match(..) => {
+                Err(err(e.span, "enums are not available yet".to_string(), None))
+            }
         }
     }
 

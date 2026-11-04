@@ -4,6 +4,7 @@ use crate::Span;
 pub enum Item {
     Fn(Fn),
     Struct(Struct),
+    Enum(Enum),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +22,21 @@ pub struct Struct {
     pub name: String,
     /// Declared fields, which have the shape of parameters.
     pub fields: Vec<Param>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Enum {
+    pub name: String,
+    pub variants: Vec<Variant>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Variant {
+    pub name: String,
+    /// Payload types; empty for `A`.
+    pub fields: Vec<Type>,
     pub span: Span,
 }
 
@@ -106,4 +122,33 @@ pub enum ExprKind {
     Index(Box<Expr>, Box<Expr>),
     /// `Name { f: e, .. }`, with fields in source order.
     StructLit(String, Vec<(String, Expr)>),
+    /// `Enum::Variant`; a payload is a `Call` on it.
+    Path(String, String),
+    Match(Box<Expr>, Vec<Arm>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Arm {
+    pub pat: Pat,
+    pub body: Expr,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pat {
+    pub kind: PatKind,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PatKind {
+    /// `_`
+    Wild,
+    /// Binds the value; the checker decides whether it is a variant such as `None`.
+    Name(String),
+    Int(i64),
+    Str(String),
+    Bool(bool),
+    /// `Enum::Variant(a, _)` or `Variant(a)`; a `None` binding is `_`.
+    Variant(Option<String>, String, Vec<Option<String>>),
 }

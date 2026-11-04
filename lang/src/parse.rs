@@ -39,9 +39,7 @@ fn reserved_hint(word: &str) -> &'static str {
 /// Keywords that kio will support in a later task.
 fn later_hint(word: &str) -> Option<&'static str> {
     match word {
-        "enum" => Some("user types are not available yet"),
         "for" => Some("use `while` for now"),
-        "match" => Some("use `if` / `else if` for now"),
         "break" | "continue" => Some("use `return` or a `while` condition for now"),
         _ => None,
     }
@@ -192,6 +190,16 @@ impl Parser {
                 span: self.since(start),
             }));
         }
+        if self.eat_kw("enum") {
+            let name = self.ident()?;
+            self.expect("{")?;
+            let variants = self.list("}", Self::variant)?;
+            return Ok(Item::Enum(Enum {
+                name,
+                variants,
+                span: self.since(start),
+            }));
+        }
         if !self.eat_kw("fn") {
             return Err(self.unexpected("`fn`"));
         }
@@ -215,6 +223,25 @@ impl Parser {
             body,
             span: self.since(start),
         }))
+    }
+
+    fn variant(&mut self) -> Result<Variant, Diag> {
+        let start = self.span().start;
+        let name = self.ident()?;
+        let fields = if self.eat("(") {
+            self.list(")", Self::ty)?
+        } else {
+            Vec::new()
+        };
+        if self.at("{") {
+            let hint = "use `A(T)` or a struct payload";
+            return Err(err(self.span(), "struct-like variants are not supported", Some(hint)));
+        }
+        Ok(Variant {
+            name,
+            fields,
+            span: self.since(start),
+        })
     }
 
     fn param(&mut self) -> Result<Param, Diag> {
@@ -275,7 +302,7 @@ impl Parser {
             } else if self.at_kw("while") {
                 self.while_stmt()?
             } else {
-                let block_like = self.at_kw("if") || self.at("{");
+                let block_like = self.at_kw("if") || self.at_kw("match") || self.at("{");
                 let e = if block_like { self.primary()? } else { self.expr()? };
                 if let Some(&Kind::Sym(op @ ("=" | "+=" | "-="))) = self.peek() {
                     if !matches!(e.kind, ExprKind::Name(_) | ExprKind::Field(..) | ExprKind::Index(..)) {
@@ -450,10 +477,21 @@ impl Parser {
             {
                 return self.struct_lit();
             }
+            Some(Kind::Ident(_)) if self.toks.get(self.pos + 1).is_some_and(|t| t.kind == Kind::Sym("::")) => {
+                let start = span.start;
+                let enum_name = self.ident()?;
+                self.pos += 1;
+                let variant = self.ident()?;
+                return Ok(Expr {
+                    kind: ExprKind::Path(enum_name, variant),
+                    span: self.since(start),
+                });
+            }
             Some(Kind::Ident(name)) => ExprKind::Name(name.clone()),
             Some(Kind::Keyword(k)) if k == "true" => ExprKind::Bool(true),
             Some(Kind::Keyword(k)) if k == "false" => ExprKind::Bool(false),
             Some(Kind::Keyword(k)) if k == "if" => return self.if_expr(),
+            Some(Kind::Keyword(k)) if k == "match" => return self.match_expr(),
             Some(Kind::Sym("(")) => return self.paren(),
             Some(Kind::Sym("{")) => {
                 let b = self.block()?;
@@ -536,5 +574,110 @@ impl Parser {
             kind: ExprKind::If(Box::new(cond), then, els),
             span: self.since(start),
         })
+    }
+
+    fn match_expr(&mut self) -> Result<Expr, Diag> {
+        let depth = self.depth;
+        self.enter()?;
+        let start = self.span().start;
+        self.pos += 1;
+        let scrutinee = self.cond()?;
+        self.expect("{")?;
+        let outer = std::mem::replace(&mut self.no_struct, false);
+        let mut arms = Vec::new();
+        while !self.at("}") {
+            let arm_start = self.span().start;
+            let pat = self.pat()?;
+            if self.at_kw("if") {
+                let hint = "test the condition inside the arm with `if`";
+                return Err(err(self.span(), "match guards are not supported", Some(hint)));
+            }
+            self.expect("=>")?;
+            let block_body = self.at("{");
+            let body = if block_body { self.primary()? } else { self.expr()? };
+            arms.push(Arm {
+                pat,
+                body,
+                span: self.since(arm_start),
+            });
+            if !self.eat(",") && !block_body {
+                break;
+            }
+        }
+        self.expect("}")?;
+        self.no_struct = outer;
+        self.depth = depth;
+        Ok(Expr {
+            kind: ExprKind::Match(Box::new(scrutinee), arms),
+            span: self.since(start),
+        })
+    }
+
+    fn pat(&mut self) -> Result<Pat, Diag> {
+        let start = self.span().start;
+        let neg = self.eat("-");
+        let kind = match self.peek() {
+            Some(Kind::Int(n)) => {
+                let n = if neg { -*n } else { *n };
+                self.pos += 1;
+                PatKind::Int(n)
+            }
+            _ if neg => return Err(self.unexpected("an integer")),
+            Some(Kind::Str(s)) => {
+                let s = s.clone();
+                self.pos += 1;
+                PatKind::Str(s)
+            }
+            Some(Kind::Keyword(k)) if k == "true" || k == "false" => {
+                let b = k == "true";
+                self.pos += 1;
+                PatKind::Bool(b)
+            }
+            Some(Kind::Ident(_)) => {
+                let name = self.ident()?;
+                if self.eat("::") {
+                    let variant = self.ident()?;
+                    PatKind::Variant(Some(name), variant, self.bindings()?)
+                } else if self.at("(") {
+                    PatKind::Variant(None, name, self.bindings()?)
+                } else if name == "_" {
+                    PatKind::Wild
+                } else {
+                    PatKind::Name(name)
+                }
+            }
+            Some(Kind::Sym("..")) => return Err(self.dotdot()),
+            _ => return Err(self.unexpected("a pattern")),
+        };
+        Ok(Pat {
+            kind,
+            span: self.since(start),
+        })
+    }
+
+    /// The optional `(a, _)` after a variant pattern.
+    fn bindings(&mut self) -> Result<Vec<Option<String>>, Diag> {
+        if !self.eat("(") {
+            return Ok(Vec::new());
+        }
+        self.list(")", Self::binding)
+    }
+
+    fn binding(&mut self) -> Result<Option<String>, Diag> {
+        if self.at("..") {
+            return Err(self.dotdot());
+        }
+        let span = self.span();
+        let name = self.ident()?;
+        if self.at("(") || self.at("::") {
+            let hint = "match the inner value in a separate `match`";
+            return Err(err(span, "nested patterns are not supported", Some(hint)));
+        }
+        Ok((name != "_").then_some(name))
+    }
+
+    fn dotdot(&self) -> Diag {
+        let hint = "list every payload field, using `_` to ignore one";
+        err(self.span(), "`..` is not supported in patterns", Some(hint))
     }
 }

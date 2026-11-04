@@ -191,7 +191,9 @@ impl Interp<'_> {
             ExprKind::Call(callee, args) => self.call_expr(callee, args),
             ExprKind::Field(base, field) => self.field(base, field),
             ExprKind::StructLit(name, inits) => self.struct_lit(name, inits),
-            ExprKind::Method(..) | ExprKind::Index(..) => unreachable!("rejected by check"),
+            ExprKind::Method(..) | ExprKind::Index(..) | ExprKind::Path(..) | ExprKind::Match(..) => {
+                unreachable!("rejected by check")
+            }
         }
     }
 

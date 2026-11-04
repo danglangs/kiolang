@@ -19,11 +19,35 @@ fn show(e: &Expr) -> String {
         ExprKind::Method(r, m, args) => format!("(.{m} {}{})", show(r), list(args)),
         ExprKind::Field(r, f) => format!("(. {} {f})", show(r)),
         ExprKind::Index(r, i) => format!("([] {} {})", show(r), show(i)),
+        ExprKind::Path(e, v) => format!("{e}::{v}"),
+        ExprKind::Match(s, arms) => {
+            let arms = arms.iter().fold(String::new(), |a, arm| {
+                a + &format!(" ({} {})", pat(&arm.pat), show(&arm.body))
+            });
+            format!("(match {}{arms})", show(s))
+        }
         ExprKind::StructLit(n, fields) => {
             let fields = fields
                 .iter()
                 .fold(String::new(), |s, (f, v)| s + &format!(" {f}: {}", show(v)));
             format!("(new {n}{fields})")
+        }
+    }
+}
+
+fn pat(p: &Pat) -> String {
+    match &p.kind {
+        PatKind::Wild => "_".into(),
+        PatKind::Name(n) => n.clone(),
+        PatKind::Int(n) => n.to_string(),
+        PatKind::Str(s) => format!("{s:?}"),
+        PatKind::Bool(b) => b.to_string(),
+        PatKind::Variant(e, v, bindings) => {
+            let e = e.as_ref().map_or(String::new(), |e| format!("{e}::"));
+            let bindings = bindings
+                .iter()
+                .fold(String::new(), |s, b| s + " " + b.as_deref().unwrap_or("_"));
+            format!("[{e}{v}{bindings}]")
         }
     }
 }
@@ -218,14 +242,7 @@ fn rejects_tuples() {
 
 #[test]
 fn rejects_later_features() {
-    rejected("enum E {}", "enum", "`enum` is not supported in kio", true);
     rejected("fn f() { for x in y {} }", "for", "`for` is not supported in kio", true);
-    rejected(
-        "fn f() { match x {} }",
-        "match",
-        "`match` is not supported in kio",
-        true,
-    );
     rejected("fn f() { break; }", "break", "`break` is not supported in kio", true);
 }
 
@@ -312,4 +329,110 @@ fn rejects_struct_shorthand() {
     assert_eq!(d.span, Span { start: 13, end: 14 });
     assert_eq!(d.msg, "field shorthand is not supported");
     assert_eq!(d.hint.as_deref(), Some("write `a: a`"));
+}
+
+#[test]
+fn enum_items() {
+    let src = "enum S { A, B(Int, List<Str>), C(),} enum E {} fn f() {}";
+    let items = parse(src).unwrap();
+    let Item::Enum(e) = &items[0] else { panic!() };
+    assert_eq!(e.name, "S");
+    let shape: Vec<_> = e.variants.iter().map(|v| (v.name.as_str(), v.fields.len())).collect();
+    assert_eq!(shape, [("A", 0), ("B", 2), ("C", 0)]);
+    assert_eq!(ty(&e.variants[1].fields[1]), "List<Str>");
+    assert_eq!(e.variants[1].span, Span { start: 12, end: 29 });
+    assert_eq!(e.span, Span { start: 0, end: 36 });
+    let Item::Enum(e) = &items[1] else { panic!() };
+    assert!(e.variants.is_empty());
+}
+
+#[test]
+fn paths() {
+    assert_eq!(expr("Status::Due"), "Status::Due");
+    assert_eq!(expr("Status::Due(5)"), "(call Status::Due 5)");
+    assert_eq!(expr("Status::Due(Status::Idle)"), "(call Status::Due Status::Idle)");
+}
+
+#[test]
+fn match_patterns() {
+    assert_eq!(
+        expr("match x { _ => 0, n => 1, 7 => 2, -7 => 3, \"s\" => 4, true => 5, false => 6, E::A => 7, E::B(a, _) => 8, B(_, b,) => 9, None => 10 }"),
+        "(match x (_ 0) (n 1) (7 2) (-7 3) (\"s\" 4) (true 5) (false 6) ([E::A] 7) ([E::B a _] 8) ([B _ b] 9) (None 10))"
+    );
+}
+
+#[test]
+fn match_arms() {
+    assert_eq!(expr("match x {}"), "(match x)");
+    assert_eq!(expr("match x { a => 1, }"), "(match x (a 1))");
+    assert_eq!(
+        expr("match x { a => { 1 } b => { 2 }, c => 3 }"),
+        "(match x (a {tail 1}) (b {tail 2}) (c 3))"
+    );
+    assert_eq!(
+        expr("match x { a => match y { _ => 1 }, _ => 2 }"),
+        "(match x (a (match y (_ 1))) (_ 2))"
+    );
+}
+
+#[test]
+fn match_is_block_like() {
+    assert_eq!(body("match x { _ => {} } y"), "{(match x (_ {})); tail y}");
+    assert_eq!(body("match x { _ => 1 }"), "{tail (match x (_ 1))}");
+    assert_eq!(expr("1 + match x { _ => 1 }"), "(+ 1 (match x (_ 1)))");
+}
+
+#[test]
+fn match_scrutinee_is_a_condition() {
+    assert_eq!(
+        expr("match a == b { _ => P { x: 1 } }"),
+        "(match (== a b) (_ (new P x: 1)))"
+    );
+    assert_eq!(expr("match (P { x: 1 }) { _ => 1 }"), "(match (new P x: 1) (_ 1))");
+}
+
+#[test]
+fn rejects_enum_syntax() {
+    let d = fail("enum E { A { f: Int } }");
+    assert_eq!(d.span, Span { start: 11, end: 12 });
+    assert_eq!(d.msg, "struct-like variants are not supported");
+    assert!(d.hint.is_some());
+    rejected("enum E { A(Int }", "}", "expected `)`", false);
+}
+
+#[test]
+fn rejects_match_syntax() {
+    rejected("fn f() { match x { -y => 1 } }", "y", "expected an integer", false);
+    rejected(
+        "fn f() { match x { n if n > 1 => 1 } }",
+        "if",
+        "match guards are not supported",
+        true,
+    );
+    rejected(
+        "fn f() { match x { Some(Inner(y)) => 1 } }",
+        "Inner",
+        "nested patterns are not supported",
+        true,
+    );
+    rejected(
+        "fn f() { match x { E::A(F::B) => 1 } }",
+        "F",
+        "nested patterns are not supported",
+        true,
+    );
+    rejected(
+        "fn f() { match x { E::A(..) => 1 } }",
+        "..",
+        "`..` is not supported in patterns",
+        true,
+    );
+    rejected(
+        "fn f() { match x { .. => 1 } }",
+        "..",
+        "`..` is not supported in patterns",
+        true,
+    );
+    rejected("fn f() { match x { 1 + 2 => 1 } }", "+", "expected `=>`", false);
+    rejected("fn f() { match x { a => 1 b => 2 } }", "b", "expected `}`", false);
 }

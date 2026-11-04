@@ -95,7 +95,7 @@ Tasks 4 onward are outlines. Each gets a pinned spec, like tasks 1 to 3, before 
 
 Order: enums and `Result` first, because capability methods return `Result<_, IoErr>`; then capabilities, the core feature; then the remaining data types.
 
-- [ ] **5a. Enum and `match` syntax.** Parser only.
+- [x] **5a. Enum and `match` syntax.** Parser only.
   - Item `enum Name { A, B(T, ..), .. }` (trailing comma allowed); `Item` gains `Enum`. Struct-like variants `A { f: T }` are rejected with hint "use `A(T)` or a struct payload".
   - Path expression `Name::Variant` as `ExprKind::Path(String, String)`. Payloads use the existing call: `Status::Due(5)` is `Call(Path, [5])`.
   - `match e { pat => expr, .. }`: arms separated by `,`, which is optional after a `{ .. }` arm body and allowed after the last arm. The scrutinee is a condition: no struct literal, as in `if`. `match` is block-like: no `;` needed as a statement.
@@ -104,8 +104,15 @@ Order: enums and `Result` first, because capability methods return `Result<_, Io
   - `enum` and `match` stop being later-task keywords. The checker rejects enums, paths and `match` with "enums are not available yet" until 5b.
   Done: parse tests for a declaration, path, payload call, a `match` with every pattern kind, a block-bodied arm without `,`, and one rejection test per rejected form.
 
-- [ ] **5b. Enum types, values and `match`.** Checker and interpreter. Spec pinned before handoff.
-  Done: a function matching on an enum with payloads runs; non-exhaustive match is rejected.
+- [ ] **5b. Enum types, values and `match`.** Checker and interpreter.
+  - Declarations: collected with structs, before signatures. Errors: duplicate type name (struct or enum), duplicate variant, unknown payload type. Enums join the recursive-type check: an enum whose payloads reach itself is rejected.
+  - `Ty::Enum(String)`. `Value::Enum(String, usize, Vec<Value>)`: enum name, variant index in declaration order, payload values. Eval finds the index by name in the declaration kept in `Program`, as for structs.
+  - Expressions: `E::A` for a variant without payload; `E::B(x, ..)` as a call on a path, with arity and payload types checked. A payload variant without arguments, or arguments to a variant without payload, is an error.
+  - `match`: the scrutinee is an `Int`, `Bool`, `Str` or enum. Every arm body has the same type, `Never` arms aside, as for `if`. Arms are tried in order; the first match runs.
+  - Patterns: `_` and a name match anything (a name binds the value, scoped to its arm). Literals must match the scrutinee type. `E::V(..)` must name the scrutinee's enum; bare `V(..)` and a bare name equal to a variant of the scrutinee's enum resolve to that variant. Binding count must equal the payload count; each binding gets its payload type.
+  - Exhaustiveness: an enum match is exhaustive if it has `_`, a binding name, or every variant. `Bool` needs both literals or a catch-all. `Int` and `Str` need a catch-all. Missing variants are named in the error. An arm after a catch-all is unreachable: an error.
+  - `==` stays scalar-only.
+  Done: a function matching an enum with payloads runs; bare variant patterns; tests for each error above, including non-exhaustive (naming the missing variant) and unreachable arm; enum copy test.
 
 - [ ] **6. Option, Result and `?`.** Built-in generic enums `Some`, `None`, `Ok`, `Err`. `?` with matching error types only. `None` takes its type from the declared or expected type.
   Done: `?` propagates through two calls; `?` on a `Result` inside an `Option` function is rejected.
