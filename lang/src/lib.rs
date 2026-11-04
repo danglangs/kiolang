@@ -1,4 +1,5 @@
 pub mod ast;
+mod caps_gen;
 pub mod check;
 pub mod eval;
 pub mod lex;

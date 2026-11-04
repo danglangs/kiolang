@@ -42,7 +42,7 @@ Everything runs in one OS process, the `kio` binary. Wasmtime is a library insid
 | File | Written by | Read by | When |
 |---|---|---|---|
 | `caps.wit` | you, by hand, rarely | build step | at build |
-| capability table (Rust) | generated from `caps.wit` by a `guest` build script | checker, inside the guest | at build |
+| capability table (Rust) | generated from `caps.wit` by `tools/capgen` (checked in, CI diffs it) | checker, inside the guest | at build |
 | guest and host Rust bindings | generated from `caps.wit` by wit-bindgen | rustc | at build |
 | `prog.kio` | the agent | checker, then interpreter | every run |
 | grants (`--dir name=path`) | the operator | host | every run |

@@ -232,7 +232,7 @@ Order: enums and `Result` first, because capability methods return `Result<_, Io
 
 ## Later, not in `lang`
 
-Generating the `CapTable` from `caps.wit` (a `guest` build script using `wit-parser`), `guest`, `host` and the MCP `check` tool.
+`guest`, `host` and the MCP `check` tool.
 
 `guest` must measure the interpreter's stack at the depth budget on `wasm32` (about 3 MB natively in release), then set Wasmtime `max_wasm_stack` and the linker `-z stack-size` to cover it. A stack overflow must trap, never corrupt memory.
 

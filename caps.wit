@@ -26,6 +26,8 @@ interface net {
 world guest {
   import fs;
   import net;
+  use fs.{dir};
+  use net.{http};
 
   // Parse and check. Returns the authority report or the errors. Needs no handles.
   export check: func(source: string) -> result<string, string>;

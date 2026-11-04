@@ -1,0 +1,9 @@
+[package]
+name = "capgen"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+wit-parser = "=0.246.2"
+anyhow = "1"

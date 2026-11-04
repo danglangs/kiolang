@@ -12,6 +12,6 @@ Decisions taken without the owner, cheap to undo. Each: the question, what was c
 | 6 | Binding a name `None`, `Some`, `Ok` or `Err` | Rejected for parameters and locals, so those names always mean the constructors | Allow shadowing later |
 | 7 | How a helper's capability maps to a grant | `Value::Cap(name of the main parameter)`, passed as an ordinary value | Replace with a handle index when `guest` maps names to WIT handles |
 | 8 | Host result checking in `lang` | Full: every capability call result is checked against the method's declared type (`Program::fits`), else `RunErr`. Shallow checking let a lying host panic `run`, found by adversarial review | Keep; WIT bindings in `guest` add a second check |
-| 9 | Capability table source | `CapTable::v0()` in `check.rs`, written by hand to mirror caps.wit | Replace with the table generated from caps.wit |
+| 9 | Capability table source | Generated from caps.wit by `tools/capgen` into `lang/src/caps_gen.rs`; CI fails on drift | Resolved |
 | 10 | Temporary runner and real directories | Runner grants none; real `--dir` waits for the host with cap-std | Add a cap-std-backed `Caps` to the runner |
 | 11 | Interpreter stack as features grow | `#[inline(never)]` on large eval helpers keeps release at 3 MB; debug needs 8 MB, so tests run on 16 MB for headroom. The guest is a release build | Split `expr_kind` arms into helpers to shrink debug frames, or the bytecode VM |
