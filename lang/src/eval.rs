@@ -6,7 +6,7 @@ use std::collections::HashMap;
 /// Bounds Rust recursion, and so stack use, for any program.
 const MAX_DEPTH: usize = 5_000;
 
-/// Host capabilities. Empty until task 11.
+/// Host capabilities. Empty until task 9.
 pub trait Caps {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]

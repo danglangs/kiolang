@@ -93,31 +93,45 @@ Tasks 4 onward are outlines. Each gets a pinned spec, like tasks 1 to 3, before 
   - Copy semantics: `let b = a;` then changing `b.x` leaves `a.x` unchanged; a struct argument changed inside a callee leaves the caller's value unchanged.
   Done: tests for each error above, nested field read and write, and both copy tests.
 
-- [ ] **5. Enums and `match`.** Variants with payloads, paths such as `Status::Paid`, exhaustive `match` with one-level patterns, `match` arms as statements.
+Order: enums and `Result` first, because capability methods return `Result<_, IoErr>`; then capabilities, the core feature; then the remaining data types.
+
+- [ ] **5a. Enum and `match` syntax.** Parser only.
+  - Item `enum Name { A, B(T, ..), .. }` (trailing comma allowed); `Item` gains `Enum`. Struct-like variants `A { f: T }` are rejected with hint "use `A(T)` or a struct payload".
+  - Path expression `Name::Variant` as `ExprKind::Path(String, String)`. Payloads use the existing call: `Status::Due(5)` is `Call(Path, [5])`.
+  - `match e { pat => expr, .. }`: arms separated by `,`, which is optional after a `{ .. }` arm body and allowed after the last arm. The scrutinee is a condition: no struct literal, as in `if`. `match` is block-like: no `;` needed as a statement.
+  - Patterns, one level deep, as `Pat { kind, span }`: `_`; a name (binds it); an `Int` literal, optionally negative; a `Str`; `true` or `false`; `Enum::Variant`; `Enum::Variant(a, _, ..)` and `Variant(a, ..)` where each part is a name or `_`. A bare name like `None` parses as a name; the checker resolves it.
+  - Rejected with kio hints: guards `pat if cond`, nested patterns `Some(Some(x))`, `..` in patterns.
+  - `enum` and `match` stop being later-task keywords. The checker rejects enums, paths and `match` with "enums are not available yet" until 5b.
+  Done: parse tests for a declaration, path, payload call, a `match` with every pattern kind, a block-bodied arm without `,`, and one rejection test per rejected form.
+
+- [ ] **5b. Enum types, values and `match`.** Checker and interpreter. Spec pinned before handoff.
   Done: a function matching on an enum with payloads runs; non-exhaustive match is rejected.
 
 - [ ] **6. Option, Result and `?`.** Built-in generic enums `Some`, `None`, `Ok`, `Err`. `?` with matching error types only. `None` takes its type from the declared or expected type.
   Done: `?` propagates through two calls; `?` on a `Result` inside an `Option` function is rejected.
 
-- [ ] **7. Lists and loops.** `List<T>`, `[a, b]`, `[]` with declared type, indexing, index assignment `xs[i] = v` (nested: `xs[i].f = v`), `len`, `push`, `for x in list`, `for i in 0..n`, `break`, `continue`.
-  Done: an out-of-bounds runtime error. Copy tests: after `b = a`, a change to either leaves the other unchanged, for nested lists, structs holding lists and function arguments; changing `xs` inside `for x in xs` does not change the iteration.
+- [ ] **7. `Bytes`.** The type, `Str.to_bytes()`, `Bytes.to_str()` with invalid UTF-8 a runtime error, `Bytes.len()`. Needed by capability methods.
+  Done: round-trip and invalid UTF-8 tests.
 
-- [ ] **8. Str, Bytes and Int built-ins.** The methods in language.md's built-ins table, and the `Bytes` type.
-  Done: one test per method, and invalid UTF-8 in `to_str` is a runtime error.
+- [ ] **8. Capability types.** `CapTable`: capability types with method signatures, built by hand in tests for `Dir`, `Http`, `IoErr` and `HttpErr` as in language.md. `main` takes capability parameters. Checker rules 1 to 3, with one worked accept or reject example per rule in the spec.
+  Done: one rejection test per escape in rule 1, including `Option<Dir>` (`List<Dir>` and `[input, out]` move to task 11), plus a forged-construction test.
 
-- [ ] **9. Map.** `Map<K, V>` with `Int` or `Str` keys, `Map::new()` (a path call), `get`, `insert`, `remove`, `keys` in key order. Use `BTreeMap`.
-  Done: a word-count function runs; `keys()` returns sorted keys; changing a value read with `get` leaves the map unchanged.
-
-- [ ] **10. Capability types.** `CapTable`: capability types with method signatures, built by hand in tests for `Dir`, `Http`, `IoErr` and `HttpErr` as in language.md. `main` takes capability parameters. Checker rules 1 to 3, with one worked accept or reject example per rule in the spec.
-  Done: one rejection test per escape in rule 1, including `Option<Dir>`, plus a forged-construction test.
-
-- [ ] **11. Capability calls.** `Caps::call(&mut self, cap: &str, method: &str, args: Vec<Value>) -> Value`, where `cap` is the name of `main`'s parameter that reaches the call through helpers. An in-memory `StubDir` for tests.
+- [ ] **9. Capability calls.** `Caps::call(&mut self, cap: &str, method: &str, args: Vec<Value>) -> Value`, where `cap` is the name of `main`'s parameter that reaches the call through helpers. An in-memory `StubDir` for tests.
   Done: a helper reads stub bytes through a passed `Dir`; a rejected program records zero stub calls.
 
-- [ ] **12. Authority report.** As specified in language.md: map each helper's capability parameters back to the caller's arguments, and iterate until nothing changes so recursion terminates. Sort lines by function name. The spec gets worked examples before handoff.
+- [ ] **10. Authority report.** As specified in language.md: map each helper's capability parameters back to the caller's arguments, and iterate until nothing changes so recursion terminates. Sort lines by function name. The spec gets worked examples before handoff.
   Done: report tests for direct calls, a two-level helper chain, mutual recursion, and a pure function (`none`).
 
-- [ ] **13. Primer end to end.** The one-screen program in language.md checks, prints the documented report and runs against `StubDir`. Rust-ism rejection tests: `&str`, `String`, `Vec`, `.iter().map(|x| ..)`, `impl`, `let x: f64`.
+- [ ] **11. Lists and loops.** `List<T>`, `[a, b]`, `[]` with declared type, indexing, index assignment `xs[i] = v` (nested: `xs[i].f = v`), `len`, `push`, `for x in list`, `for i in 0..n`, `break`, `continue`.
+  Done: an out-of-bounds runtime error. Copy tests: after `b = a`, a change to either leaves the other unchanged, for nested lists, structs holding lists and function arguments; changing `xs` inside `for x in xs` does not change the iteration. Capability escape tests for `List<Dir>` and `[input, out]`.
+
+- [ ] **12. Map.** `Map<K, V>` with `Int` or `Str` keys, `Map::new()` (a path call), `get`, `insert`, `remove`, `keys` in key order. Use `BTreeMap`.
+  Done: a word-count function runs; `keys()` returns sorted keys; changing a value read with `get` leaves the map unchanged.
+
+- [ ] **13. Remaining built-ins.** The other `Str`, `Int` and `List` methods in language.md.
+  Done: one test per method.
+
+- [ ] **14. Primer end to end.** The one-screen program in language.md checks, prints the documented report and runs against `StubDir`. Rust-ism rejection tests: `&str`, `String`, `Vec`, `.iter().map(|x| ..)`, `impl`, `let x: f64`.
   Done: those tests pass.
 
 ## Later, not in `lang`

@@ -4,7 +4,7 @@ use crate::{Diag, Span};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-/// The capability types a program may use. Empty until task 10.
+/// The capability types a program may use. Empty until task 8.
 #[derive(Debug, Default)]
 pub struct CapTable {}
 
