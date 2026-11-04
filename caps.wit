@@ -33,9 +33,10 @@ world guest {
   record diag { start: u32, end: u32, message: string, hint: option<string> }
   // The authority report, one line per function.
   record report { lines: list<string> }
-  // A grant binds a handle to the `main` parameter of the same name.
-  record dir-grant { name: string, dir: borrow<dir> }
-  record http-grant { name: string, http: borrow<http> }
+  // A grant binds a handle to the `main` parameter of the same name. The guest owns it for one run;
+  // `borrow` would be tighter but hits a wit-bindgen 0.63 codegen bug inside a list of records.
+  record dir-grant { name: string, dir: dir }
+  record http-grant { name: string, http: http }
 
   // Parse and check. Needs no handles.
   export check: func(source: string) -> result<report, list<diag>>;

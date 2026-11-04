@@ -16,3 +16,4 @@ Decisions taken without the owner, cheap to undo. Each: the question, what was c
 | 10 | Temporary runner and real directories | Runner grants none; real `--dir` waits for the host with cap-std | Add a cap-std-backed `Caps` to the runner |
 | 11 | Interpreter stack as features grow | `#[inline(never)]` on large eval helpers keeps release at 3 MB; debug needs 8 MB, so tests run on 16 MB for headroom. The guest is a release build | Split `expr_kind` arms into helpers to shrink debug frames, or the bytecode VM |
 | 12 | `main`'s value across the WIT boundary | Printed text in `run`'s result; the host only prints it | Add a typed export later; existing hosts keep working |
+| 13 | Grant handles in `run` | `own<dir>` and `own<http>` in the grant records, because wit-bindgen 0.63 generates non-compiling code for `borrow` inside a list of records. Safety is unchanged: only the host mints handles and every call is checked | Switch back to `borrow` once wit-bindgen is fixed |

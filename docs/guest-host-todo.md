@@ -19,7 +19,7 @@ host/    the kio binary: Wasmtime, cap-std, limits, host functions
 
 ## Tasks
 
-- [ ] **G1. Guest component exports `check`.** `guest` crate, `crate-type = ["cdylib"]`, `wit_bindgen::generate!` on `caps.wit` world `guest`. `check` calls `lang::check(src, &CapTable::v0())` and `lang::report`, mapping each `Diag` to `diag { start, end, message, hint }` and the report to `report { lines }`. `run` returns one diag "`run` is not implemented yet". No other code.
+- [x] **G1. Guest component exports `check`.** `guest` crate, `crate-type = ["cdylib"]`, `wit_bindgen::generate!` on `caps.wit` world `guest`. `check` calls `lang::check(src, &CapTable::v0())` and `lang::report`, mapping each `Diag` to `diag { start, end, message, hint }` and the report to `report { lines }`. `run` returns one diag "`run` is not implemented yet". No other code.
   Done: `cargo build -p guest --target wasm32-wasip2 --release` produces the component; CI builds it. Behavior is tested in G2.
 
 - [ ] **G2. `kio check` through Wasmtime.** `host` crate, binary `kio`. A build script builds the guest and the host embeds the bytes. `bindgen!` on world `guest`; `fs` and `net` import implementations return an error and record that they were called. `kio check prog.kio` prints the report, or each diag as `path:line: error: msg` and `  hint: ..`, exit 1.
