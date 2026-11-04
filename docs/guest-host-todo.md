@@ -5,7 +5,7 @@ Run kio inside the Wasm sandbox. The interface is fixed in [caps.wit](../caps.wi
 ## Rules for every task
 
 - The rules in lang-todo.md apply: minimal code, errors that teach, tests assert hints, no unpinned design.
-- Toolchain: rustup stable, target `wasm32-wasip2`. Versions are pinned in `Cargo.toml`: `wit-bindgen` 0.63, `wasmtime` 50.
+- Toolchain: rustup stable, target `wasm32-wasip2`. Versions pinned in `Cargo.toml`: `wit-bindgen` 0.63, `wasmtime` 50.
 - `lang` stays dependency-free and unchanged in behavior. The guest adapts it; it does not fork it.
 - The host is the security boundary. Every host function validates its handle, kind and quotas itself and never trusts the guest or the checker.
 - CI builds the guest and runs the host tests.
@@ -17,33 +17,40 @@ guest/   lang plus the WIT adapter, built to wasm32-wasip2 as a component
 host/    the kio binary: Wasmtime, cap-std, limits, host functions
 ```
 
-The host embeds the guest component bytes at build time.
-
 ## Tasks
 
-- [ ] **G1. Guest component with `check`.**
-  - `guest` crate, `crate-type = ["cdylib"]`, `wit_bindgen::generate!` on `caps.wit` world `guest`. Implements `check` by calling `lang::check(src, &CapTable::v0())` and `lang::report`, mapping each `Diag` to `diag { start, end, message, hint }` and the report to `report { lines }`. `run` returns a single diag "not implemented" until G2.
-  - Build: `cargo build -p guest --target wasm32-wasip2 --release` produces a component (wasip2 emits components directly).
-  - A test crate or `host/tests` file loads the component with `wasmtime` (component model, `bindgen!` on the same world), stubs the `fs` and `net` imports so that any call fails the test, and calls `check`.
-  Done: `check` on examples/summarize.kio returns its two report lines; on a program with an unknown name it returns one diag whose span, message and hint equal `lang::check`'s; no import is called; CI builds the component and runs the test.
+- [ ] **G1. Guest component exports `check`.** `guest` crate, `crate-type = ["cdylib"]`, `wit_bindgen::generate!` on `caps.wit` world `guest`. `check` calls `lang::check(src, &CapTable::v0())` and `lang::report`, mapping each `Diag` to `diag { start, end, message, hint }` and the report to `report { lines }`. `run` returns one diag "`run` is not implemented yet". No other code.
+  Done: `cargo build -p guest --target wasm32-wasip2 --release` produces the component; CI builds it. Behavior is tested in G2.
 
-- [ ] **G2. `run` through the sandbox.** Pinned after G1.
-  Done: a test host with an in-memory `Dir` resource runs examples/invoices.kio through the component and receives the report and `main`'s value; a missing grant returns the no-grant diag and calls no import.
+- [ ] **G2. `kio check` through Wasmtime.** `host` crate, binary `kio`. A build script builds the guest and the host embeds the bytes. `bindgen!` on world `guest`; `fs` and `net` import implementations return an error and record that they were called. `kio check prog.kio` prints the report, or each diag as `path:line: error: msg` and `  hint: ..`, exit 1.
+  Done: tests call the export on examples/summarize.kio (two report lines) and on a program with an unknown name (diag identical to `lang::check`'s); no import is called.
 
-- [ ] **G3. Measure the guest.** Stack and memory at the depth budget and on the primer, in release. Sets the `--stack` default and decides bytecode VM timing.
-  Done: numbers recorded in design.md's limits table and open_questions #11.
+- [ ] **G3. Guest `run` with an in-memory host.** Guest: implement `lang::Caps` by forwarding to the imports, mapping each `main` parameter name to its grant's handle (#7). Host tests: an in-memory `dir` resource.
+  Done: examples/invoices.kio runs through the component and returns the report and `main`'s value; a missing grant returns the no-grant diag and no import is called.
 
-- [ ] **H1. `kio` with real directories.** `kio check prog.kio` and `kio run prog.kio --dir name=path`, cap-std for every path.
-  Done: the README example runs on real files; `..`, absolute paths and outward symlinks are refused.
+- [ ] **G4. Measure the guest.** Wasm stack and memory at the depth budget and on the primer, release build. Sets the `--stack` default; updates design.md limits and open_questions #11; decides bytecode VM timing.
+  Done: numbers recorded.
 
-- [ ] **H2. Limits.** Fuel, memory, stack, wall clock, host calls and I/O, with the defaults and flags in design.md.
-  Done: one test per limit, each stopping a program that exceeds it with an error naming the limit.
+- [ ] **H1. `kio run` with real directories.** `--dir name=path` opens each with cap-std; the `dir` resource reads and creates beneath its root. The README's Example and Try it sections merge into one real walkthrough.
+  Done: examples/summarize.kio runs on files in a temp dir; `..`, absolute paths and outward symlinks return `invalid-path`; the README commands work as written.
 
-- [ ] **H3. Adversarial host suite.** Path escapes, symlink races, forged and wrong-kind handles, runaway loops, huge reads, slow host calls.
-  Done: every case refused or bounded; an independent review attacks the host like the capability-rule review did.
+- [ ] **H2. Fuel and wall clock.** Wasmtime fuel and epoch interruption, defaults and flags from design.md.
+  Done: an infinite loop stops with an error naming fuel; a sleeping host call stops on the timeout.
 
-- [ ] **H4. `Http` with an allowlist.** Grant names host and methods; recheck every redirect, refuse IP literals unless granted, pin DNS per run, cap response size.
-  Done: tests for each rule against a local test server.
+- [ ] **H3. Memory and stack.** Wasmtime memory limit and `max_wasm_stack`.
+  Done: a program allocating without bound and one recursing past the stack each stop with an error naming the limit.
 
-- [ ] **M1. MCP tool.** Serves `primer` (language.md) and `check` (the guest export), so agents can learn kio and iterate.
-  Done: an MCP client gets the primer and a structured diagnostics list for a bad program.
+- [ ] **H4. Host-call and I/O quotas.** Call count, total bytes and per-read size, enforced in the host functions.
+  Done: one test per quota.
+
+- [ ] **H5. Adversarial host review.** An independent agent attacks the host: path escapes, symlink races, forged and wrong-kind handles, quota bypasses, panics in host functions.
+  Done: every finding fixed or logged in open_questions.
+
+- [ ] **N1. `Http` grant and allowlist.** `--http name=host[:methods]`; refuse any other host and IP literals unless granted.
+  Done: tests against a local server for an allowed and a refused host.
+
+- [ ] **N2. Redirects and DNS.** Recheck the allowlist on every redirect; pin DNS per run; cap response size.
+  Done: a redirect to an ungranted host is refused; tests for the pin and the cap.
+
+- [ ] **M1. MCP tool.** Serves `primer` (language.md) and `check` (the guest export).
+  Done: an MCP client gets the primer and structured diagnostics for a bad program.
