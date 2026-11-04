@@ -129,8 +129,14 @@ Order: enums and `Result` first, because capability methods return `Result<_, Io
   - Lexer: unterminated string gives "add a closing `\"`"; integer too large gives "Int is 64-bit: at most 9223372036854775807".
   Done: every existing rejection test asserts its hint; `closest` has its own tests; no `Diag` is built with `None` hint except where this list says "otherwise no hint".
 
-- [ ] **6. Option, Result and `?`.** Built-in generic enums `Some`, `None`, `Ok`, `Err`. `?` with matching error types only. `None` takes its type from the declared or expected type.
-  Done: `?` propagates through two calls; `?` on a `Result` inside an `Option` function is rejected.
+- [ ] **6. Option, Result and `?`.** Checker and interpreter; the parser change is only `?` as a postfix operator (`ExprKind::Try`), binding like `.` and `[]`.
+  - Types: `Ty::Option(Box<Ty>)`, `Ty::Result(Box<Ty>, Box<Ty>)`, resolved from `Option<T>` and `Result<T, E>`; wrong arity of type arguments is an error. `Display` prints them as written. This is the shape `List<T>` and `Map<K, V>` reuse.
+  - Values: `Some`, `None`, `Ok`, `Err` are `Value::Enum` with enum names `Option` and `Result` and variant indexes `None 0, Some 1` and `Ok 0, Err 1`. No new `Value` variant. Users cannot declare types named `Option` or `Result`.
+  - Constructors are bare names: `Some(e)`, `None`, `Ok(e)`, `Err(e)`. Patterns: `Some(x)`, `None`, `Ok(x)`, `Err(e)`, and `Option::Some(x)` etc.
+  - Expected types: `expr` takes `expected: Option<&Ty>`, passed down from a `let` type annotation, a parameter type at a call, a struct field or payload type, a return type (`return e` and the body's tail), and both `if` and `match` branches. `None` needs an expected `Option<T>`; `Ok(e)` needs an expected `Result<T, E>` and checks `e: T`; `Err(e)` likewise checks `e: E`. `Some(e)` without an expected type is `Option<type of e>`. Without an expected type, `None`, `Ok` and `Err` are errors with hint "add a type: `let x: Option<Int> = None;`". No inference beyond this.
+  - `e?`: on `Option<T>` inside a function returning `Option<_>`, or on `Result<T, E>` inside a function returning `Result<_, E>` with the same `E`, it has type `T` and returns `None` or `Err(e)` early. Any other combination is rejected with language.md's message and hint. No conversion between error types.
+  - `==` stays scalar-only.
+  Done: `?` propagates through two calls on both types; `?` on `Result` in an `Option` function and on mismatched error types is rejected with hints; `None` without a type is rejected with its hint; `let x: Option<Int> = None;`, `return None;` and `Ok(())` in `-> Result<(), E>` are accepted; a `match` on `Option` and on `Result` runs.
 
 - [ ] **7. `Bytes`.** The type, `Str.to_bytes()`, `Bytes.to_str()` with invalid UTF-8 a runtime error, `Bytes.len()`. Needed by capability methods.
   Done: round-trip and invalid UTF-8 tests.
