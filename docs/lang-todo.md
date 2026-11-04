@@ -210,8 +210,12 @@ Order: enums and `Result` first, because capability methods return `Result<_, Io
   - The loop body is `()`; `for` and `while` are statements with type `()`.
   Done: sum of a list; a range loop; `break` and `continue` in both loop kinds; nested loops where `break` leaves only the inner loop; changing `xs` inside `for x in xs` does not change the iteration; `break` outside a loop is rejected with its hint.
 
-- [ ] **12. Map.** `Map<K, V>` with `Int` or `Str` keys, `Map::new()` (a path call), `get`, `insert`, `remove`, `keys` in key order. Use `BTreeMap`.
-  Done: a word-count function runs; `keys()` returns sorted keys; changing a value read with `get` leaves the map unchanged.
+- [ ] **12. Map.** Checker and interpreter; `Map::new()` already parses as a call on a path.
+  - `Ty::Map(Box<Ty>, Box<Ty>)` from `Map<K, V>`; `K` must be `Int` or `Str` ("Map keys must be Int or Str"). `Value::Map(BTreeMap<Key, Value>)` with `enum Key { Int(i64), Str(String) }`, so iteration is in key order. `Value` must stay 64 bytes; box the map if it does not fit.
+  - `Map::new()` needs an expected `Map<K, V>`, like `[]`; hint "add a type: `let m: Map<Str, Int> = Map::new();`".
+  - Methods: `get(K) -> Option<V>`, `insert(K, V)` and `remove(K)` on a place (like `push`; `insert` replaces an existing value), `len() -> Int`, `keys() -> List<K>` in key order.
+  - `Program::fits` gains the `Map` case. `Map` of a capability is rejected by the existing type rule; add a test.
+  Done: a word-count function (`for w in words { .. insert(w, n + 1) }`) runs; `keys()` returns sorted keys for both key types; `get` on a missing key is `None`; changing a value read with `get` leaves the map unchanged; `Map<Bool, Int>` and `Map<Str, Dir>` are rejected with hints.
 
 - [ ] **13. Remaining built-ins.** The other `Str`, `Int` and `List` methods in language.md.
   Done: one test per method.
