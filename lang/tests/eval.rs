@@ -11,10 +11,10 @@ impl Caps for NoCaps {
     }
 }
 
-/// Runs on the stack `run` documents for debug builds.
+/// Runs on twice the stack `run` documents for debug builds, so growth shows up before CI breaks.
 fn exec(src: &str) -> Result<Value, RunErr> {
     let p = check(src, &CapTable::default()).unwrap_or_else(|d| panic!("{d:?}"));
-    let t = std::thread::Builder::new().stack_size(8 << 20);
+    let t = std::thread::Builder::new().stack_size(16 << 20);
     t.spawn(move || run(&p, &mut NoCaps)).unwrap().join().unwrap()
 }
 

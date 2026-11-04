@@ -88,7 +88,7 @@ enum Step<'a> {
 }
 
 /// Evaluates `main`. Recursion is capped at `MAX_DEPTH` nested expressions, which needs
-/// about 6 MB of stack in debug builds and 3 MB in release. Callers provide that stack.
+/// up to 8 MB of stack in debug builds and 3 MB in release. Callers provide that stack.
 pub fn run(p: &Program, caps: &mut dyn Caps) -> Result<Value, RunErr> {
     let main = &p.funcs["main"];
     let mut locals = Vec::new();
@@ -252,6 +252,7 @@ impl Interp<'_> {
         Ok(slot)
     }
 
+    #[inline(never)]
     fn assign(&mut self, target: &Expr, op: &str, value: &Expr, span: Span) -> Result<(), Box<Stop>> {
         let (root, steps) = self.path(target)?;
         let mut v = self.expr(value)?;
@@ -273,6 +274,7 @@ impl Interp<'_> {
     }
 
     /// Runs `name` over `iter`; a list is the value it had when the loop started.
+    #[inline(never)]
     fn for_stmt(&mut self, name: &str, iter: &Iter, body: &Block) -> Result<(), Box<Stop>> {
         let items: Box<dyn Iterator<Item = Value>> = match iter {
             Iter::List(e) => {
@@ -363,6 +365,7 @@ impl Interp<'_> {
         exprs.iter().map(|x| self.expr(x)).collect()
     }
 
+    #[inline(never)]
     fn index(&mut self, base: &Expr, index: &Expr, span: Span) -> Res {
         let (Value::List(mut vals), Value::Int(i)) = (self.expr(base)?, self.expr(index)?) else {
             unreachable!("checked index");
@@ -378,6 +381,7 @@ impl Interp<'_> {
 
     /// `push`, `insert` and `remove` change their receiver in place; the checker only allows
     /// them on a place. Other built-in methods work on the value; capability methods go to the host.
+    #[inline(never)]
     fn method(&mut self, recv: &Expr, name: &str, args: &[Expr], span: Span) -> Res {
         // A capability could have its own `push`, so only a receiver that is not a capability
         // takes this path.
@@ -454,6 +458,7 @@ impl Interp<'_> {
         })
     }
 
+    #[inline(never)]
     fn field(&mut self, base: &Expr, field: &str) -> Res {
         let Value::Struct(s, mut vals) = self.expr(base)? else {
             unreachable!("checked field");
@@ -462,6 +467,7 @@ impl Interp<'_> {
     }
 
     /// Fields are evaluated in source order and stored in declaration order.
+    #[inline(never)]
     fn struct_lit(&mut self, name: &str, inits: &[(String, Expr)]) -> Res {
         let mut vals = vec![Value::Unit; inits.len()];
         for (field, x) in inits {
@@ -470,6 +476,7 @@ impl Interp<'_> {
         Ok(Value::Struct(name.to_string(), vals))
     }
 
+    #[inline(never)]
     fn variant(&self, en: &str, v: &str, payload: Vec<Value>) -> Value {
         let i = variant_index(self.enums, en, v).expect("checked variant");
         Value::Enum(en.to_string(), i, payload)
@@ -493,6 +500,7 @@ impl Interp<'_> {
     }
 
     /// The first arm whose pattern matches runs, with its bindings as locals.
+    #[inline(never)]
     fn match_expr(&mut self, scrut: &Expr, arms: &[Arm]) -> Res {
         let v = self.expr(scrut)?;
         for arm in arms {

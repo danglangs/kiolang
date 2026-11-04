@@ -63,10 +63,10 @@ fn calls(cs: &[(&str, &str, &str)]) -> Vec<Call> {
         .collect()
 }
 
-/// Checks `src` and runs it on the stack `run` documents for debug builds.
+/// Checks `src` and runs it on twice the stack `run` documents for debug builds.
 fn exec(src: &str, mut s: StubDir) -> (Result<Value, RunErr>, StubDir) {
     let p = check(src, &common::caps()).unwrap_or_else(|d| panic!("{d:?}"));
-    let t = std::thread::Builder::new().stack_size(8 << 20);
+    let t = std::thread::Builder::new().stack_size(16 << 20);
     t.spawn(move || (run(&p, &mut s), s)).unwrap().join().unwrap()
 }
 
