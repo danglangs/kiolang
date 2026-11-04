@@ -191,8 +191,24 @@ Order: enums and `Result` first, because capability methods return `Result<_, Io
   - The runner prints the report after a successful check, before running.
   Done: tests for the example above; a two-level helper chain; mutual recursion passing a capability back and forth (terminates, both get the union); an unused capability parameter (omitted, `none` if it was the only one); a method in an untaken branch (still reported); the README example's report matches exactly.
 
-- [ ] **11. Lists and loops.** `List<T>`, `[a, b]`, `[]` with declared type, indexing, index assignment `xs[i] = v` (nested: `xs[i].f = v`), `len`, `push`, `for x in list`, `for i in 0..n`, `break`, `continue`.
-  Done: an out-of-bounds runtime error. Copy tests: after `b = a`, a change to either leaves the other unchanged, for nested lists, structs holding lists and function arguments; changing `xs` inside `for x in xs` does not change the iteration. Capability escape tests for `List<Dir>` and `[input, out]`.
+- [ ] **11a. Lists.** Parser, checker and interpreter.
+  - Parser: list literal `[a, b, ..]` and `[]` as `ExprKind::List(Vec<Expr>)` (trailing comma allowed). Indexing and index assignment already parse.
+  - `Ty::List(Box<Ty>)` from `List<T>`; `Value::List(Vec<Value>)`. `Value` stays 64 bytes.
+  - `[]` needs an expected `List<T>` (same rule as `None`, same hint style: "add a type: `let xs: List<Int> = [];`"). `[a, ..]` takes its element type from the expected type if any, else from the first element; every element must have it.
+  - `xs[i]`: `xs: List<T>`, `i: Int`, type `T`. Out of bounds (including negative) is the runtime error "index 5 out of bounds for length 3".
+  - Assignment targets: a place is a `let mut` local followed by any chain of `.f` and `[i]` (`xs[i] = v`, `xs[i].f = v`, `p.items[0] = v`). Extend the checker's `place` and eval's `assign` path walk; the index is evaluated before the value.
+  - Methods: `List.len() -> Int`; `xs.push(v)` on a place, with `v: T`, returning `()`. `push` on a non-place (e.g. `f().push(1)`) is rejected: "`push` changes a list; call it on a `let mut` variable".
+  - `==` stays scalar-only, so lists are not comparable yet.
+  - Capabilities: `List<Dir>` is rejected by the type rule and `[input, out]` by the expression rule, with no new code; add tests.
+  Done: literal, indexing, nested index-field assignment, `push`, `len`, out-of-bounds (with span), `[]` without a type rejected with its hint; copy tests (`b = a` then changing either leaves the other unchanged, for nested lists, a struct holding a list, and a list argument changed in a callee); `List<Dir>` and `[input, out]` rejected.
+
+- [ ] **11b. Loops.** Parser, checker and interpreter.
+  - `for x in e { .. }` where `e: List<T>`; `x: T` is bound per iteration, not `mut`. Iteration is over the value of `e` when the loop starts, so changing the list inside the body does not change the iteration.
+  - `for i in a..b { .. }` with `a, b: Int`; `i` takes `a, a+1, .., b-1`; empty if `a >= b`. `..` only in this position; elsewhere it is a parse error with hint "ranges are only for `for` loops".
+  - `break` and `continue` as statements, inside `while` and `for` only. Outside a loop: "`break` outside a loop", hint "use `return` to leave a function". No labels, no `break value`.
+  - Eval: `Stop` gains `Break` and `Continue`; loops catch them, function calls never see them (the checker guarantees it).
+  - The loop body is `()`; `for` and `while` are statements with type `()`.
+  Done: sum of a list; a range loop; `break` and `continue` in both loop kinds; nested loops where `break` leaves only the inner loop; changing `xs` inside `for x in xs` does not change the iteration; `break` outside a loop is rejected with its hint.
 
 - [ ] **12. Map.** `Map<K, V>` with `Int` or `Str` keys, `Map::new()` (a path call), `get`, `insert`, `remove`, `keys` in key order. Use `BTreeMap`.
   Done: a word-count function runs; `keys()` returns sorted keys; changing a value read with `get` leaves the map unchanged.
