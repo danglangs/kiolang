@@ -534,12 +534,32 @@ fn method(caps: &CapTable, recv: &Ty, name: &str) -> Option<(Vec<Ty>, Ty)> {
         (Ty::Map(k, v), "insert") => Some((vec![(**k).clone(), (**v).clone()], Ty::Unit)),
         (Ty::Map(k, _), "remove") => Some((vec![(**k).clone()], Ty::Unit)),
         (Ty::Str, "to_bytes") => Some((vec![], Ty::Bytes)),
+        (Ty::Str, "split") => Some((vec![Ty::Str], Ty::List(Box::new(Ty::Str)))),
+        (Ty::Str, "lines") => Some((vec![], Ty::List(Box::new(Ty::Str)))),
+        (Ty::Str, "trim") => Some((vec![], Ty::Str)),
+        (Ty::Str, "contains") | (Ty::Str, "starts_with") => Some((vec![Ty::Str], Ty::Bool)),
+        (Ty::Str, "parse_int") => Some((vec![], Ty::Option(Box::new(Ty::Int)))),
         _ => None,
     }
 }
 
 /// Every built-in method name, so hints can list the ones `method` accepts on a type.
-const METHODS: &[&str] = &["get", "insert", "keys", "len", "push", "remove", "to_bytes", "to_str"];
+const METHODS: &[&str] = &[
+    "contains",
+    "get",
+    "insert",
+    "keys",
+    "len",
+    "lines",
+    "parse_int",
+    "push",
+    "remove",
+    "split",
+    "starts_with",
+    "to_bytes",
+    "to_str",
+    "trim",
+];
 
 fn cap_methods<'a>(caps: &'a CapTable, name: &str) -> &'a [(String, Vec<Ty>, Ty)] {
     caps.caps.iter().find(|c| c.name == name).map_or(&[], |c| &c.methods)

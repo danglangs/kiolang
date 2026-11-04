@@ -413,6 +413,31 @@ impl Interp<'_> {
             (Value::Int(n), "to_str") => Value::Str(n.to_string()),
             (Value::Str(s), "len") => Value::Int(s.len() as i64),
             (Value::Str(s), "to_bytes") => Value::Bytes(s.into_bytes()),
+            (Value::Str(s), "split") => {
+                let Value::Str(sep) = vals.remove(0) else {
+                    unreachable!("checked argument");
+                };
+                if sep.is_empty() {
+                    return Err(fail(span, "`split` needs a non-empty separator"));
+                }
+                Value::List(s.split(&sep).map(|p| Value::Str(p.to_string())).collect())
+            }
+            (Value::Str(s), "lines") => Value::List(s.lines().map(|l| Value::Str(l.to_string())).collect()),
+            (Value::Str(s), "trim") => Value::Str(s.trim().to_string()),
+            (Value::Str(s), "contains" | "starts_with") => {
+                let Value::Str(arg) = vals.remove(0) else {
+                    unreachable!("checked argument");
+                };
+                Value::Bool(if name == "contains" {
+                    s.contains(&arg)
+                } else {
+                    s.starts_with(&arg)
+                })
+            }
+            (Value::Str(s), "parse_int") => match s.parse::<i64>() {
+                Ok(n) => self.constructor("Some", vec![Value::Int(n)]),
+                Err(_) => self.constructor("None", vec![]),
+            },
             (Value::List(v), "len") => Value::Int(v.len() as i64),
             (Value::Map(m), "len") => Value::Int(m.len() as i64),
             (Value::Map(m), "keys") => Value::List(m.keys().map(Key::to_value).collect()),

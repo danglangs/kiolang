@@ -574,3 +574,54 @@ fn maps_are_copied() {
                fn main() -> Int { let m: Map<Int, Int> = Map::new(); put(m) * 10 + m.len() }";
     assert_eq!(int(src), Value::Int(10));
 }
+
+fn strs(xs: &[&str]) -> Value {
+    Value::List(xs.iter().map(|s| Value::Str(s.to_string())).collect())
+}
+
+#[test]
+fn str_split() {
+    assert_eq!(
+        int("fn main() -> List<Str> { \"a,b,,c\".split(\",\") }"),
+        strs(&["a", "b", "", "c"])
+    );
+    assert_eq!(int("fn main() -> List<Str> { \"\".split(\",\") }"), strs(&[""]));
+    let src = "fn main() -> List<Str> { \"abc\".split(\"\") }";
+    fails(src, "`split` needs a non-empty separator");
+    let e = exec(src).unwrap_err();
+    assert_eq!(&src[e.span.start..e.span.end], "\"abc\".split(\"\")");
+}
+
+#[test]
+fn str_lines() {
+    assert_eq!(
+        int("fn main() -> List<Str> { \"a\r\nb\n\nc\n\".lines() }"),
+        strs(&["a", "b", "", "c"])
+    );
+    assert_eq!(int("fn main() -> List<Str> { \"\".lines() }"), strs(&[]));
+}
+
+#[test]
+fn str_trim_contains_starts_with() {
+    assert_eq!(
+        int("fn main() -> Str { \" \\t a b\\n\".trim() }"),
+        Value::Str("a b".into())
+    );
+    let src =
+        "fn main() -> Bool { \"hello\".contains(\"ell\") && !\"hello\".contains(\"x\") && \"hello\".contains(\"\") }";
+    assert_eq!(int(src), Value::Bool(true));
+    let src = "fn main() -> Bool { \"hello\".starts_with(\"he\") && !\"hello\".starts_with(\"el\") }";
+    assert_eq!(int(src), Value::Bool(true));
+}
+
+#[test]
+fn str_parse_int() {
+    let parse = |s: &str| int(&format!("fn main() -> Option<Int> {{ \"{s}\".parse_int() }}"));
+    assert_eq!(parse("42"), some(Value::Int(42)));
+    assert_eq!(parse("-7"), some(Value::Int(-7)));
+    assert_eq!(parse("+7"), some(Value::Int(7)));
+    for bad in ["", "-", "+", "1.5", " 1", "1 ", "0x1", "9223372036854775808"] {
+        assert_eq!(parse(bad), none(), "{bad:?}");
+    }
+    assert_eq!(parse("-9223372036854775808"), some(Value::Int(i64::MIN)));
+}

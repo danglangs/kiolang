@@ -217,7 +217,7 @@ Order: enums and `Result` first, because capability methods return `Result<_, Io
   - `Program::fits` gains the `Map` case. `Map` of a capability is rejected by the existing type rule; add a test.
   Done: a word-count function (`for w in words { .. insert(w, n + 1) }`) runs; `keys()` returns sorted keys for both key types; `get` on a missing key is `None`; changing a value read with `get` leaves the map unchanged; `Map<Bool, Int>` and `Map<Str, Dir>` are rejected with hints.
 
-- [ ] **13. Remaining built-ins.** Checker method table and eval only.
+- [x] **13. Remaining built-ins.** Checker method table and eval only.
   - `Str.split(Str) -> List<Str>`, as Rust's `str::split`; an empty separator is the runtime error "`split` needs a non-empty separator".
   - `Str.lines() -> List<Str>`, as Rust's `str::lines` (`\n` or `\r\n`, no trailing empty line).
   - `Str.trim() -> Str`, as Rust's `str::trim`.

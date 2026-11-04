@@ -17,6 +17,7 @@ git clone https://github.com/danglangs/kiolang && cd kiolang
 cargo run -p lang --example run -- examples/fib.kio      # Int(6765)
 cargo run -p lang --example run -- examples/points.kio   # Int(25)
 cargo run -p lang --example run -- examples/sum.kio      # Int(-2)
+cargo run -p lang --example run -- examples/words.kio    # Int(3)
 ```
 
 Write your own as `hello.kio`. `main` takes no parameters and its return value is printed:

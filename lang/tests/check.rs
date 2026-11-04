@@ -676,7 +676,12 @@ fn methods() {
     let (msg, at) = reject("fn main() { \"a\".size(); }");
     assert_eq!((msg.as_str(), at.as_str()), ("no method `size` on Str", "\"a\".size()"));
     assert_eq!(hint("fn main() { \"a\".lenn(); }"), "did you mean `len`?");
-    assert_eq!(hint("fn main() { \"a\".zzzzzz(); }"), "Str has: len, to_bytes");
+    assert_eq!(
+        hint("fn main() { \"a\".zzzzzz(); }"),
+        "Str has: contains, len, lines, parse_int, split, starts_with, to_bytes, trim"
+    );
+    ok("fn main() { let a: List<Str> = \"a\".split(\",\"); let b: List<Str> = \"a\".lines(); let c: Str = \"a\".trim(); let d: Bool = \"a\".contains(\"a\") && \"a\".starts_with(\"a\"); let e: Option<Int> = \"1\".parse_int(); }");
+    assert_eq!(reject("fn main() { \"a\".split(1); }").0, "expected Str, found Int");
     assert_eq!(hint("fn main() { 1.zzzzzz(); }"), "Int has: to_str");
     assert_eq!(hint("fn main() { true.len(); }"), "Bool has no methods");
     let src = "fn main() { \"a\".len(1); }";

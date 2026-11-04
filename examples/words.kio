@@ -1,0 +1,13 @@
+fn count(words: List<Str>) -> Map<Str, Int> {
+    let mut m: Map<Str, Int> = Map::new();
+    for w in words {
+        let n = match m.get(w) { Some(n) => n, None => 0 };
+        m.insert(w, n + 1);
+    }
+    m
+}
+
+fn main() -> Int {
+    let counts = count("the cat and the hat and the bat".split(" "));
+    match counts.get("the") { Some(n) => n, None => 0 }
+}
