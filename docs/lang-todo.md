@@ -59,7 +59,7 @@ Each task covers lexing, parsing, checking and evaluating its constructs, unless
   - Nesting deeper than 64 (blocks plus expressions) is a `Diag`, so hostile input cannot overflow the Rust stack.
   Done: one parse test per bullet, asserting tree shape; a precedence test (`1 + 2 * 3 == 7 && !b`); one rejection test per rejected item, checking span and message; a 65-deep nesting test on the default test stack.
 
-- [ ] **3. Checker and interpreter core.** `check.rs` and `eval.rs`; `check` and `run` re-exported from `lib.rs`.
+- [x] **3. Checker and interpreter core.** `check.rs` and `eval.rs`; `check` and `run` re-exported from `lib.rs`.
   - Types: `Int`, `Bool`, `Str`, `()`. Any other type name is an error until its task.
   - Functions: collect all signatures first, so call order in the file does not matter. Duplicate function or parameter names are errors. `main` must exist and take no parameters in this task; any return type.
   - Scopes: one per block. `let` may shadow. A `let` with a type checks the initializer against it.
@@ -70,30 +70,45 @@ Each task covers lexing, parsing, checking and evaluating its constructs, unless
   - Calls: the callee is a function name; arity and argument types must match. Field access, indexing and method calls are errors until their tasks.
   - `check` reports at most one `Diag` per function and keeps checking the rest, in source order.
   - `Program` holds the checked functions; its fields are private. `CapTable` and the `Caps` trait exist but are empty.
-  - `run` evaluates `main` and returns its `Value` (`Int`, `Bool`, `Str`, `Unit`). Runtime errors are `RunErr { span, msg }`: overflow, including `i64::MIN / -1` and `-i64::MIN`, division or remainder by zero, and call depth over 1_000.
-  Done: `fib(20)` returns 6765; a mutual-recursion test; a test where `false && 1 / 0 == 0` does not error; overflow, zero-division and depth runtime tests (depth 1_000 succeeds on the default test stack in a debug build, 1_001 fails). Rejection tests, checking span and message: unknown name, unknown function, wrong arity, type mismatch, non-`Bool` condition, missing return, `if` branches of different types, assignment to a non-`mut` local, duplicate function.
+  - `run` evaluates `main` and returns its `Value` (`Int`, `Bool`, `Str`, `Unit`). Runtime errors are `RunErr { span, msg }`: overflow, including `i64::MIN / -1` and `-i64::MIN`, division or remainder by zero, and evaluation depth over 5_000 nested expressions, which bounds stack use for any program.
+  Done: `fib(20)` returns 6765; a mutual-recursion test; a test where `false && 1 / 0 == 0` does not error; overflow, zero-division and depth runtime tests (1_000 recursive calls succeed; deep recursion and maximal nesting stop with an error on an 8 MB stack). Rejection tests, checking span and message: unknown name, unknown function, wrong arity, type mismatch, non-`Bool` condition, missing return, `if` branches of different types, assignment to a non-`mut` local, duplicate function.
 
-- [ ] **4. Structs and enums.** Declarations, struct literals (not allowed in `if`, `while` or `match` heads, as in Rust), paths such as `Status::Paid`, field access, field assignment `x.f = v` on `mut` locals, enum variants with payloads, exhaustive `match` with one-level patterns.
-  Done: a function matching on an enum with payloads runs. Rejection tests for unknown field, missing field and non-exhaustive match.
+Tasks 4 onward are outlines. Each gets a pinned spec, like tasks 1 to 3, before it is handed off. A task that spans parse, check and eval and grows large is split by pass.
 
-- [ ] **5. Option, Result and `?`.** `Some`, `None`, `Ok`, `Err` as built-in enums. `?` with matching error types only. `None` takes its type from the declared or expected type.
-  Done: `?` propagates through two calls. `?` on a `Result` inside an `Option` function is rejected.
+- [ ] **4. Structs.** Declarations, struct literals (not in `if` or `while` heads, as in Rust), field access, field assignment `x.f = v` on `mut` locals. Turn `Ty` into a non-`Copy` enum with `Display`.
+  Done: unknown field, missing field and duplicate field are rejected; a struct copy test.
 
-- [ ] **6. Lists, loops, Bytes.** `List<T>`, `[a, b]`, `[]` with declared type, indexing, index assignment `xs[i] = v` (nested: `xs[i].f = v`), `for x in list`, `for i in 0..n`, `break`, `continue`, and the `Str`, `Bytes`, `Int` and `List` built-ins in language.md. Copy tests: after `b = a`, a change to either leaves the other unchanged, for nested lists, structs holding lists and function arguments. Changing `xs` inside `for x in xs` does not change the iteration.
-  Done: tests per built-in, an out-of-bounds runtime error, and a copy test.
+- [ ] **5. Enums and `match`.** Variants with payloads, paths such as `Status::Paid`, exhaustive `match` with one-level patterns, `match` arms as statements.
+  Done: a function matching on an enum with payloads runs; non-exhaustive match is rejected.
 
-- [ ] **7. Map.** `Map<K, V>` with `Int` or `Str` keys, `Map::new()` (a path call), `get`, `insert`, `remove`, `keys` in key order. Use `BTreeMap`. Copy test: changing a value read with `get` leaves the map unchanged.
-  Done: a word-count function runs and `keys()` returns sorted keys.
+- [ ] **6. Option, Result and `?`.** Built-in generic enums `Some`, `None`, `Ok`, `Err`. `?` with matching error types only. `None` takes its type from the declared or expected type.
+  Done: `?` propagates through two calls; `?` on a `Result` inside an `Option` function is rejected.
 
-- [ ] **8. Capabilities.** `CapTable`: capability types, each with methods and signatures, built by hand in tests for `Dir`, `Http`, `IoErr` and `HttpErr` as in language.md. Enforce checker rules 1 to 3. `Caps::call(&mut self, cap: &str, method: &str, args: Vec<Value>) -> Value`, where `cap` is the name of `main`'s parameter. Add an in-memory `StubDir` for tests.
-  Done: a helper reads stub bytes through a passed `Dir`. One rejection test per escape in rule 1, including `Option<Dir>`, plus a forged-construction test. A rejected program records zero stub calls.
+- [ ] **7. Lists and loops.** `List<T>`, `[a, b]`, `[]` with declared type, indexing, index assignment `xs[i] = v` (nested: `xs[i].f = v`), `len`, `push`, `for x in list`, `for i in 0..n`, `break`, `continue`.
+  Done: an out-of-bounds runtime error. Copy tests: after `b = a`, a change to either leaves the other unchanged, for nested lists, structs holding lists and function arguments; changing `xs` inside `for x in xs` does not change the iteration.
 
-- [ ] **9. Authority report.** As specified in language.md: map each helper's capability parameters back to the caller's arguments, and iterate until nothing changes so recursion terminates. Sort lines by function name.
+- [ ] **8. Str, Bytes and Int built-ins.** The methods in language.md's built-ins table, and the `Bytes` type.
+  Done: one test per method, and invalid UTF-8 in `to_str` is a runtime error.
+
+- [ ] **9. Map.** `Map<K, V>` with `Int` or `Str` keys, `Map::new()` (a path call), `get`, `insert`, `remove`, `keys` in key order. Use `BTreeMap`.
+  Done: a word-count function runs; `keys()` returns sorted keys; changing a value read with `get` leaves the map unchanged.
+
+- [ ] **10. Capability types.** `CapTable`: capability types with method signatures, built by hand in tests for `Dir`, `Http`, `IoErr` and `HttpErr` as in language.md. `main` takes capability parameters. Checker rules 1 to 3, with one worked accept or reject example per rule in the spec.
+  Done: one rejection test per escape in rule 1, including `Option<Dir>`, plus a forged-construction test.
+
+- [ ] **11. Capability calls.** `Caps::call(&mut self, cap: &str, method: &str, args: Vec<Value>) -> Value`, where `cap` is the name of `main`'s parameter that reaches the call through helpers. An in-memory `StubDir` for tests.
+  Done: a helper reads stub bytes through a passed `Dir`; a rejected program records zero stub calls.
+
+- [ ] **12. Authority report.** As specified in language.md: map each helper's capability parameters back to the caller's arguments, and iterate until nothing changes so recursion terminates. Sort lines by function name. The spec gets worked examples before handoff.
   Done: report tests for direct calls, a two-level helper chain, mutual recursion, and a pure function (`none`).
 
-- [ ] **10. Primer end to end.** The one-screen program in language.md checks, prints the documented report and runs against `StubDir`. Add the Rust-ism rejection tests: `&str`, `String`, `Vec`, `.iter().map(|x| ..)`, `impl`, `let x: f64`.
+- [ ] **13. Primer end to end.** The one-screen program in language.md checks, prints the documented report and runs against `StubDir`. Rust-ism rejection tests: `&str`, `String`, `Vec`, `.iter().map(|x| ..)`, `impl`, `let x: f64`.
   Done: those tests pass.
 
 ## Later, not in `lang`
 
 Generating the `CapTable` from `caps.wit` (a `guest` build script using `wit-parser`), `guest`, `host` and the MCP `check` tool.
+
+`guest` must measure the interpreter's stack at the depth budget on `wasm32` (about 4 MB natively in release), then set Wasmtime `max_wasm_stack` and the linker `-z stack-size` to cover it. A stack overflow must trap, never corrupt memory.
+
+Optimization, when speed or the compiler needs it: replace the tree-walker with a bytecode VM, as Lua, CPython and Wasm engines do. Functions compile to flat instructions run by a loop; kio call frames live in a heap `Vec`, so Rust stack use no longer grows with recursion, and the depth budget becomes a plain call limit.
