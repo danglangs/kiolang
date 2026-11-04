@@ -59,8 +59,19 @@ Each task covers lexing, parsing, checking and evaluating its constructs, unless
   - Nesting deeper than 64 (blocks plus expressions) is a `Diag`, so hostile input cannot overflow the Rust stack.
   Done: one parse test per bullet, asserting tree shape; a precedence test (`1 + 2 * 3 == 7 && !b`); one rejection test per rejected item, checking span and message; a 65-deep nesting test on the default test stack.
 
-- [ ] **3. Checker and interpreter core.** `Int`, `Bool`, `Str`, `()`. Name resolution, operator types, call arity and types, `mut` required for assignment, every path returns the declared type. Evaluation with runtime errors for overflow, division by zero and call depth over 10_000. `CapTable` and `Caps` exist but stay empty.
-  Done: a recursive `fib` checks and runs. Rejection tests for unknown name, type mismatch, missing return, and assignment to a non-`mut` local.
+- [ ] **3. Checker and interpreter core.** `check.rs` and `eval.rs`; `check` and `run` re-exported from `lib.rs`.
+  - Types: `Int`, `Bool`, `Str`, `()`. Any other type name is an error until its task.
+  - Functions: collect all signatures first, so call order in the file does not matter. Duplicate function or parameter names are errors. `main` must exist and take no parameters in this task; any return type.
+  - Scopes: one per block. `let` may shadow. A `let` with a type checks the initializer against it.
+  - Assignment: target is a name only (fields and indexes come later); it must be `let mut`. `x += e` means `x = x + e`.
+  - Operators: `+ - * / %` and unary `-` on `Int`; `+` on `Str`; `== !=` on two values of the same scalar type; `< <= > >=` on `Int`; `&& || !` on `Bool`, with `&&` and `||` short-circuiting.
+  - `if` and `while` conditions are `Bool`. `if` without `else` has type `()`. Both branches of `if`/`else` have the same type.
+  - Return paths: a block's type is its tail's type, or `()` without a tail. A block that ends in `return`, or in an `if`/`else` whose branches both end in `return`, never falls through and matches any type. `return e` and the body must match the declared type.
+  - Calls: the callee is a function name; arity and argument types must match. Field access, indexing and method calls are errors until their tasks.
+  - `check` reports at most one `Diag` per function and keeps checking the rest, in source order.
+  - `Program` holds the checked functions; its fields are private. `CapTable` and the `Caps` trait exist but are empty.
+  - `run` evaluates `main` and returns its `Value` (`Int`, `Bool`, `Str`, `Unit`). Runtime errors are `RunErr { span, msg }`: overflow, including `i64::MIN / -1` and `-i64::MIN`, division or remainder by zero, and call depth over 1_000.
+  Done: `fib(20)` returns 6765; a mutual-recursion test; a test where `false && 1 / 0 == 0` does not error; overflow, zero-division and depth runtime tests (depth 1_000 succeeds on the default test stack in a debug build, 1_001 fails). Rejection tests, checking span and message: unknown name, unknown function, wrong arity, type mismatch, non-`Bool` condition, missing return, `if` branches of different types, assignment to a non-`mut` local, duplicate function.
 
 - [ ] **4. Structs and enums.** Declarations, struct literals (not allowed in `if`, `while` or `match` heads, as in Rust), paths such as `Status::Paid`, field access, field assignment `x.f = v` on `mut` locals, enum variants with payloads, exhaustive `match` with one-level patterns.
   Done: a function matching on an enum with payloads runs. Rejection tests for unknown field, missing field and non-exhaustive match.
