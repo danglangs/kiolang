@@ -186,3 +186,86 @@ fn arguments_are_copied() {
                fn main() -> Int { let p = P { a: 0, b: Q { c: 1 } }; let r = set(p); p.b.c * 10 + r.b.c }";
     assert_eq!(p_main(src), Value::Int(15));
 }
+
+const S: &str = "enum S { Done, Due(Int), Pair(Int, Str) } ";
+
+fn s_main(body: &str) -> Value {
+    int(&format!("{S}{body}"))
+}
+
+#[test]
+fn enum_values() {
+    let v = s_main("fn main() -> S { S::Pair(3, \"x\") }");
+    assert_eq!(
+        v,
+        Value::Enum("S".into(), 2, vec![Value::Int(3), Value::Str("x".into())])
+    );
+    assert_eq!(s_main("fn main() -> S { S::Done }"), Value::Enum("S".into(), 0, vec![]));
+    let v = s_main("fn main() -> S { S::Due(1 + 1) }");
+    assert_eq!(v, Value::Enum("S".into(), 1, vec![Value::Int(2)]));
+}
+
+#[test]
+fn match_on_enum_with_payloads() {
+    let src = "fn f(s: S) -> Int {
+                   match s { S::Done => 0, Due(n) => n, S::Pair(a, _) => a * 10 }
+               }
+               fn main() -> Int { f(S::Done) + f(S::Due(4)) + f(S::Pair(2, \"q\")) }";
+    assert_eq!(s_main(src), Value::Int(24));
+}
+
+#[test]
+fn bare_variant_and_catch_all_patterns() {
+    let src = "fn f(s: S) -> Int { match s { Done => 1, other => match other { Due(_) => 2, _ => 3 } } }
+               fn main() -> Int { f(S::Done) * 100 + f(S::Due(0)) * 10 + f(S::Pair(0, \"\")) }";
+    assert_eq!(s_main(src), Value::Int(123));
+}
+
+#[test]
+fn match_literals_in_order() {
+    let src = "fn f(n: Int) -> Str { match n { 0 => \"zero\", -1 => \"neg\", x => \"other\" } }
+               fn g(b: Bool) -> Int { match b { true => 1, false => 0 } }
+               fn h(t: Str) -> Int { match t { \"a\" => 1, _ => 2 } }
+               fn main() -> Str { f(0) + f(-1) + f(5) }";
+    assert_eq!(s_main(src), Value::Str("zeronegother".into()));
+    assert_eq!(
+        s_main("fn g(b: Bool) -> Int { match b { true => 1, false => 0 } } fn main() -> Int { g(false) }"),
+        Value::Int(0)
+    );
+    assert_eq!(
+        s_main("fn main() -> Int { match \"b\" { \"a\" => 1, _ => 2 } }"),
+        Value::Int(2)
+    );
+}
+
+#[test]
+fn arm_bindings_are_scoped_to_the_arm() {
+    let src = "fn main() -> Int {
+                   let x = 100;
+                   let r = match S::Pair(1, \"a\") { S::Pair(x, _) => x + 1, _ => 0 };
+                   let y = match 5 { n => n };
+                   r + x + y
+               }";
+    assert_eq!(s_main(src), Value::Int(107));
+}
+
+#[test]
+fn match_with_return_arm() {
+    let src = "fn f(s: S) -> Int { let n = match s { Due(n) => n, _ => { return 0; } }; n + 1 }
+               fn main() -> Int { f(S::Due(4)) * 10 + f(S::Done) }";
+    assert_eq!(s_main(src), Value::Int(50));
+}
+
+#[test]
+fn enums_are_copied() {
+    let src = "struct W { s: S }
+               fn main() -> Int {
+                   let a = W { s: S::Due(1) };
+                   let mut b = a;
+                   b.s = S::Due(2);
+                   let x = match a.s { Due(n) => n, _ => 0 };
+                   let y = match b.s { Due(n) => n, _ => 0 };
+                   x * 10 + y
+               }";
+    assert_eq!(s_main(src), Value::Int(12));
+}

@@ -4,5 +4,5 @@ Decisions taken without the owner, cheap to undo. Each: the question, what was c
 
 | # | Question | Chosen | Undo |
 |---|---|---|---|
-| 1 | Runtime depth limit | One evaluation-depth budget of 5_000 nested expressions (~2_000 recursive calls), not a call count | Raise the constant, or a bytecode VM turns it into a plain call limit |
+| 1 | Runtime depth limit | One evaluation-depth budget of 3_000 nested expressions (~1_400 recursive calls), not a call count. Cut from 5_000 when `Value` grew to 64 bytes with enums; measured 6 MB debug, 3 MB release | Raise the constant, or a bytecode VM turns it into a plain call limit |
 | 2 | Parser nesting limit | 64, so debug builds do not overflow | Raise the constant |

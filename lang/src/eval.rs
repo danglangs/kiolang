@@ -4,7 +4,7 @@ use crate::Span;
 use std::collections::HashMap;
 
 /// Bounds Rust recursion, and so stack use, for any program.
-const MAX_DEPTH: usize = 5_000;
+const MAX_DEPTH: usize = 3_000;
 
 /// Host capabilities. Empty until task 9.
 pub trait Caps {}
@@ -43,7 +43,7 @@ fn fail(span: Span, msg: &str) -> Box<Stop> {
 }
 
 /// Evaluates `main`. Recursion is capped at `MAX_DEPTH` nested expressions, which needs
-/// up to 8 MB of stack in debug builds and 4 MB in release. Callers provide that stack.
+/// about 6 MB of stack in debug builds and 3 MB in release. Callers provide that stack.
 pub fn run(p: &Program, _caps: &mut dyn Caps) -> Result<Value, RunErr> {
     let mut it = Interp {
         funcs: &p.funcs,

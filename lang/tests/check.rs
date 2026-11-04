@@ -168,7 +168,7 @@ fn accepts_structs() {
 #[test]
 fn struct_declaration_errors() {
     let (msg, at) = reject("struct A {} struct A {} fn main() {}");
-    assert_eq!((msg.as_str(), at.as_str()), ("duplicate struct `A`", "struct A {}"));
+    assert_eq!((msg.as_str(), at.as_str()), ("duplicate type `A`", "struct A {}"));
     let (msg, at) = reject("struct A { x: Int, x: Str } fn main() {}");
     assert_eq!((msg.as_str(), at.as_str()), ("duplicate field `x`", "x: Str"));
     let (_, at) = reject("struct A { x: B } fn main() {}");
@@ -243,4 +243,124 @@ fn struct_equality_is_rejected() {
 fn struct_type_mismatch() {
     let (msg, _) = reject_p("fn f(p: P) {} fn main() { f(Q { c: 1 }); }");
     assert_eq!(msg, "expected P, found Q");
+}
+
+const S: &str = "enum S { Done, Due(Int), Pair(Int, Str) } ";
+
+fn reject_s(body: &str) -> (String, String) {
+    reject(&format!("{S}{body}"))
+}
+
+#[test]
+fn accepts_enums() {
+    ok(&format!(
+        "{S}struct W {{ s: S }}
+         fn f(s: S) -> Int {{
+             match s {{ S::Done => 0, Due(n) => n, S::Pair(a, _) => a }}
+         }}
+         fn g(s: S) -> Int {{ match s {{ Done => 1, other => f(other) }} }}
+         fn h(n: Int, b: Bool, t: Str) -> Int {{
+             let a = match n {{ 0 => 1, -1 => 2, _ => match b {{ true => 3, false => 4 }} }};
+             a + match t {{ \"a\" => 1, _ => {{ return 0; }} }}
+         }}
+         fn main() {{ let w = W {{ s: S::Due(1) }}; f(w.s); g(S::Done); }}"
+    ));
+}
+
+#[test]
+fn enum_declaration_errors() {
+    let (msg, at) = reject("enum A { X } struct A {} fn main() {}");
+    assert_eq!((msg.as_str(), at.as_str()), ("duplicate type `A`", "struct A {}"));
+    let (msg, _) = reject("enum A { X } enum A { Y } fn main() {}");
+    assert_eq!(msg, "duplicate type `A`");
+    let (msg, at) = reject("enum A { X, X(Int) } fn main() {}");
+    assert_eq!((msg.as_str(), at.as_str()), ("duplicate variant `X`", "X(Int)"));
+    let (_, at) = reject("enum A { X(B) } fn main() {}");
+    assert_eq!(at, "B");
+}
+
+#[test]
+fn recursive_enums() {
+    let (msg, _) = reject("enum A { X(A) } fn main() {}");
+    assert_eq!(msg, "enum `A` contains itself");
+    let src = "enum A { X(S) } struct S { a: A } fn main() {}";
+    assert_eq!(check(src, &CapTable::default()).unwrap_err().len(), 2);
+    ok("enum A { X(B, B) } enum B { Y } fn main() {}");
+}
+
+#[test]
+fn variant_expression_errors() {
+    let (msg, at) = reject_s("fn main() { S::Nope; }");
+    assert_eq!((msg.as_str(), at.as_str()), ("unknown variant `S::Nope`", "S::Nope"));
+    reject_s("fn main() { T::Done; }");
+    let (msg, _) = reject_s("fn main() { S::Due; }");
+    assert_eq!(msg, "`S::Due` takes 1 arguments, found 0");
+    let (msg, _) = reject_s("fn main() { S::Done(1); }");
+    assert_eq!(msg, "`S::Done` takes 0 arguments, found 1");
+    let (msg, at) = reject_s("fn main() { S::Due(\"a\"); }");
+    assert_eq!((msg.as_str(), at.as_str()), ("expected Int, found Str", "\"a\""));
+    let (msg, _) = reject_s("fn f(s: S) {} fn main() { f(1); }");
+    assert_eq!(msg, "expected S, found Int");
+}
+
+#[test]
+fn enum_equality_is_rejected() {
+    let (msg, _) = reject_s("fn main() -> Bool { S::Done == S::Done }");
+    assert_eq!(msg, "`==` cannot be applied to S and S");
+}
+
+#[test]
+fn match_scrutinee_and_arm_types() {
+    let (msg, at) = reject_s("fn main() { match () { _ => 1 } }");
+    assert_eq!((msg.as_str(), at.as_str()), ("cannot match on ()", "()"));
+    let (msg, _) = reject_s("fn main() { match 1 { _ => 1, } match 1 { 1 => 1, _ => \"a\" }; }");
+    assert_eq!(msg, "`match` arms have different types: Int and Str");
+    ok("fn main() -> Int { match 1 { 1 => { return 1; } _ => 2 } }");
+}
+
+#[test]
+fn pattern_errors() {
+    let (msg, at) = reject_s("fn main() { match 1 { \"a\" => 1, _ => 1 }; }");
+    assert_eq!((msg.as_str(), at.as_str()), ("expected Int, found Str", "\"a\""));
+    reject_s("fn main() { match true { 1 => 1, _ => 1 }; }");
+    reject_s("fn main() { match 1 { S::Done => 1, _ => 1 }; }");
+    reject_s("fn main() { match S::Done { T::Done => 1, _ => 1 }; }");
+    let (msg, at) = reject_s("fn main() { match S::Done { S::Nope => 1, _ => 1 }; }");
+    assert_eq!((msg.as_str(), at.as_str()), ("unknown variant `S::Nope`", "S::Nope"));
+    reject_s("fn main() { match S::Done { Nope(x) => 1, _ => 1 }; }");
+    let (msg, at) = reject_s("fn main() { match S::Done { Pair(a) => 1, _ => 1 }; }");
+    assert_eq!(
+        (msg.as_str(), at.as_str()),
+        ("`S::Pair` has 2 values, found 1 bindings", "Pair(a)")
+    );
+    reject_s("fn main() { match S::Done { Done(x) => 1, _ => 1 }; }");
+    let (msg, _) = reject_s("fn main() { match S::Done { Due(n) => n + \"a\", _ => 1 }; }");
+    assert_eq!(msg, "`+` cannot be applied to Int and Str");
+    reject_s("fn main() { match S::Done { Due(n) => 1, _ => n }; }");
+}
+
+#[test]
+fn exhaustiveness() {
+    let (msg, at) = reject_s("fn main() { match S::Done { Done => 1, Due(_) => 2 }; }");
+    assert_eq!(
+        (msg.as_str(), at.as_str()),
+        ("non-exhaustive `match`: missing S::Pair", "S::Done")
+    );
+    let (msg, _) = reject_s("fn main() { match S::Done { Done => 1 }; }");
+    assert_eq!(msg, "non-exhaustive `match`: missing S::Due, S::Pair");
+    let (msg, _) = reject_s("fn main() { match true { true => 1 }; }");
+    assert_eq!(msg, "non-exhaustive `match`: missing false");
+    reject_s("fn main() { match 1 { 1 => 1 }; }");
+    reject_s("fn main() { match \"a\" { \"a\" => 1 }; }");
+    ok(&format!(
+        "{S}fn main() {{ match 1 {{ x => x }}; match S::Done {{ _ => 1 }}; }}"
+    ));
+}
+
+#[test]
+fn unreachable_arm() {
+    let (msg, at) = reject_s("fn main() { match 1 { _ => 1, 2 => 2 }; }");
+    assert_eq!((msg.as_str(), at.as_str()), ("unreachable arm", "2"));
+    reject_s("fn main() { match 1 { x => 1, _ => 2 }; }");
+    reject_s("fn main() { match S::Done { x => 1, Done => 2 }; }");
 }

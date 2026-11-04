@@ -70,7 +70,7 @@ Each task covers lexing, parsing, checking and evaluating its constructs, unless
   - Calls: the callee is a function name; arity and argument types must match. Field access, indexing and method calls are errors until their tasks.
   - `check` reports at most one `Diag` per function and keeps checking the rest, in source order.
   - `Program` holds the checked functions; its fields are private. `CapTable` and the `Caps` trait exist but are empty.
-  - `run` evaluates `main` and returns its `Value` (`Int`, `Bool`, `Str`, `Unit`). Runtime errors are `RunErr { span, msg }`: overflow, including `i64::MIN / -1` and `-i64::MIN`, division or remainder by zero, and evaluation depth over 5_000 nested expressions, which bounds stack use for any program.
+  - `run` evaluates `main` and returns its `Value` (`Int`, `Bool`, `Str`, `Unit`). Runtime errors are `RunErr { span, msg }`: overflow, including `i64::MIN / -1` and `-i64::MIN`, division or remainder by zero, and evaluation depth over 3_000 nested expressions, which bounds stack use for any program.
   Done: `fib(20)` returns 6765; a mutual-recursion test; a test where `false && 1 / 0 == 0` does not error; overflow, zero-division and depth runtime tests (1_000 recursive calls succeed; deep recursion and maximal nesting stop with an error on an 8 MB stack). Rejection tests, checking span and message: unknown name, unknown function, wrong arity, type mismatch, non-`Bool` condition, missing return, `if` branches of different types, assignment to a non-`mut` local, duplicate function.
 
 Tasks 4 onward are outlines. Each gets a pinned spec, like tasks 1 to 3, before it is handed off. A task that spans parse, check and eval and grows large is split by pass.
@@ -104,7 +104,7 @@ Order: enums and `Result` first, because capability methods return `Result<_, Io
   - `enum` and `match` stop being later-task keywords. The checker rejects enums, paths and `match` with "enums are not available yet" until 5b.
   Done: parse tests for a declaration, path, payload call, a `match` with every pattern kind, a block-bodied arm without `,`, and one rejection test per rejected form.
 
-- [ ] **5b. Enum types, values and `match`.** Checker and interpreter.
+- [x] **5b. Enum types, values and `match`.** Checker and interpreter.
   - Declarations: collected with structs, before signatures. Errors: duplicate type name (struct or enum), duplicate variant, unknown payload type. Enums join the recursive-type check: an enum whose payloads reach itself is rejected.
   - `Ty::Enum(String)`. `Value::Enum(String, usize, Vec<Value>)`: enum name, variant index in declaration order, payload values. Eval finds the index by name in the declaration kept in `Program`, as for structs.
   - Expressions: `E::A` for a variant without payload; `E::B(x, ..)` as a call on a path, with arity and payload types checked. A payload variant without arguments, or arguments to a variant without payload, is an error.
@@ -145,6 +145,6 @@ Order: enums and `Result` first, because capability methods return `Result<_, Io
 
 Generating the `CapTable` from `caps.wit` (a `guest` build script using `wit-parser`), `guest`, `host` and the MCP `check` tool.
 
-`guest` must measure the interpreter's stack at the depth budget on `wasm32` (about 4 MB natively in release), then set Wasmtime `max_wasm_stack` and the linker `-z stack-size` to cover it. A stack overflow must trap, never corrupt memory.
+`guest` must measure the interpreter's stack at the depth budget on `wasm32` (about 3 MB natively in release), then set Wasmtime `max_wasm_stack` and the linker `-z stack-size` to cover it. A stack overflow must trap, never corrupt memory.
 
 Optimization, when speed or the compiler needs it: replace the tree-walker with a bytecode VM, as Lua, CPython and Wasm engines do. Functions compile to flat instructions run by a loop; kio call frames live in a heap `Vec`, so Rust stack use no longer grows with recursion, and the depth budget becomes a plain call limit.
