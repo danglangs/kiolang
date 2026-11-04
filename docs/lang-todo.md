@@ -146,8 +146,24 @@ Order: enums and `Result` first, because capability methods return `Result<_, Io
   - The receiver is evaluated first, then the arguments left to right.
   Done: a `Str` to `Bytes` to `Str` round trip with non-ASCII text; `len` on both; unknown-method and arity rejection tests assert hints. Kio code cannot produce invalid UTF-8 yet, so that runtime test moves to task 9, where a stub `Dir` returns raw bytes.
 
-- [ ] **8. Capability types.** `CapTable`: capability types with method signatures, built by hand in tests for `Dir`, `Http`, `IoErr` and `HttpErr` as in language.md. `main` takes capability parameters. Checker rules 1 to 3, with one worked accept or reject example per rule in the spec.
-  Done: one rejection test per escape in rule 1, including `Option<Dir>` (`List<Dir>` and `[input, out]` move to task 11), plus a forged-construction test.
+- [ ] **8. Capability types.** Checker only; no eval change.
+  - `CapTable { caps: Vec<CapType> }`, `CapType { name, methods: Vec<(String, Vec<Ty>, Ty)> }`, plus the error enums it needs, `IoErr` and `HttpErr`, declared as ordinary enums the checker adds before user types. `CapTable::default()` stays empty. A test helper builds `Dir`, `Http`, `IoErr`, `HttpErr` as in language.md. `Ty::Cap(String)`.
+  - Rule 1, one rule for every escape: a capability-typed expression may appear only as a parameter name used directly as a method receiver (`d.read(p)`) or as a whole call argument (`helper(d)`). Anywhere else is an error at that expression. So these are rejected:
+    ```
+    let d = input;                         capability `input` bound to local `d`; hint: pass `input` directly instead
+    struct Job { dir: Dir }                capability type in a field; hint: capabilities are parameters only
+    enum E { A(Dir) }                      same, for a payload
+    fn pick(a: Dir) -> Dir                 cannot return `Dir` from `pick`; hint: capabilities are parameters only
+    fn f(x: Option<Dir>)                   capability nested in `Option<Dir>`; hint: take `Dir` as a parameter
+    (if c { a } else { b }).read("x")      capability used as a value; hint: call methods on the parameter itself
+    Some(d), Job { dir: d }, d == e        same
+    ```
+    The type rule covers fields, payloads, returns and nesting; the expression rule covers locals, branches and constructors. Parameters typed as a capability are the only capability values.
+  - Rule 2: there is no syntax that produces a capability. `Dir` as an expression, `Dir::new()`, `Dir {}` are unknown-name, unknown-variant or unknown-struct errors; add the hint "capabilities come only as parameters of `main`" when the name is a capability type.
+  - Rule 3: `main` takes only capability parameters, and returns `()` or `Result<(), E>`. Other parameter types: "`main` parameters must be capabilities, like `input: Dir`". This replaces "`main` takes no parameters yet".
+  - Method calls on a capability are typed from `CapTable`, exactly like task 7's built-in methods, with the same unknown-method and arity hints ("Dir has: read, create").
+  - Rule 1 also bans assignment to a capability parameter: parameters are never `mut`, so this already holds.
+  Done: one rejection test per line in the rule 1 table, asserting message and hint; rule 2 and rule 3 tests; accepted: `main(input: Dir, out: Dir)` passing both to a helper that calls `read` and `create`; a capability passed through two helpers.
 
 - [ ] **9. Capability calls.** `Caps::call(&mut self, cap: &str, method: &str, args: Vec<Value>) -> Value`, where `cap` is the name of `main`'s parameter that reaches the call through helpers. An in-memory `StubDir` for tests.
   Done: a helper reads stub bytes through a passed `Dir`; a rejected program records zero stub calls; `to_str` on invalid UTF-8 from the stub is the runtime error "invalid UTF-8".
