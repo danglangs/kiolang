@@ -9,7 +9,7 @@ Build the `lang` crate: parser, checker, authority report and interpreter for th
 - Minimal code: straightforward control flow, no speculative abstractions, no features beyond the task. A human reviews every line.
 - Comments only where the code cannot say it.
 - Tests in `lang/tests/`, using inline source strings. `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass, as CI runs them.
-- Unsupported syntax fails with a `Diag` naming the kio alternative, never a panic.
+- Errors teach, as rustc does: the exact span, what is wrong, and a hint with the fix or the kio alternative (`Dir has: read, create`, `declare it with `let mut``). Never a panic. Tests assert hints, not just messages.
 
 ## Layout
 

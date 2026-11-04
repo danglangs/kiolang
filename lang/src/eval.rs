@@ -17,6 +17,8 @@ pub enum Value {
     Unit,
     /// The struct's name and its field values in declaration order.
     Struct(String, Vec<Value>),
+    /// The enum's name, the variant's index in declaration order and its payload.
+    Enum(String, usize, Vec<Value>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +48,7 @@ pub fn run(p: &Program, _caps: &mut dyn Caps) -> Result<Value, RunErr> {
     let mut it = Interp {
         funcs: &p.funcs,
         structs: &p.structs,
+        enums: &p.enums,
         locals: Vec::new(),
         base: 0,
         depth: 0,
@@ -63,6 +66,7 @@ pub fn run(p: &Program, _caps: &mut dyn Caps) -> Result<Value, RunErr> {
 struct Interp<'a> {
     funcs: &'a HashMap<String, Fn>,
     structs: &'a HashMap<String, Struct>,
+    enums: &'a HashMap<String, Enum>,
     /// Locals of all running calls, innermost last; a block truncates it on exit.
     locals: Vec<(String, Value)>,
     /// Index of the running function's first local; callers' locals below it are invisible.
@@ -191,9 +195,9 @@ impl Interp<'_> {
             ExprKind::Call(callee, args) => self.call_expr(callee, args),
             ExprKind::Field(base, field) => self.field(base, field),
             ExprKind::StructLit(name, inits) => self.struct_lit(name, inits),
-            ExprKind::Method(..) | ExprKind::Index(..) | ExprKind::Path(..) | ExprKind::Match(..) => {
-                unreachable!("rejected by check")
-            }
+            ExprKind::Path(en, v) => Ok(self.variant(en, v, Vec::new())),
+            ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms),
+            ExprKind::Method(..) | ExprKind::Index(..) => unreachable!("rejected by check"),
         }
     }
 
@@ -213,9 +217,62 @@ impl Interp<'_> {
         Ok(Value::Struct(name.to_string(), vals))
     }
 
+    fn variant(&self, en: &str, v: &str, payload: Vec<Value>) -> Value {
+        let i = variant_index(self.enums, en, v).expect("checked variant");
+        Value::Enum(en.to_string(), i, payload)
+    }
+
+    /// The first arm whose pattern matches runs, with its bindings as locals.
+    fn match_expr(&mut self, scrut: &Expr, arms: &[Arm]) -> Res {
+        let v = self.expr(scrut)?;
+        for arm in arms {
+            let mark = self.locals.len();
+            if self.bind(&arm.pat, &v) {
+                let r = self.expr(&arm.body)?;
+                self.locals.truncate(mark);
+                return Ok(r);
+            }
+        }
+        unreachable!("checked exhaustive")
+    }
+
+    /// Whether `v` matches `p`; on a match, pushes the pattern's bindings.
+    fn bind(&mut self, p: &Pat, v: &Value) -> bool {
+        match (&p.kind, v) {
+            (PatKind::Wild, _) => true,
+            (PatKind::Int(a), Value::Int(b)) => a == b,
+            (PatKind::Str(a), Value::Str(b)) => a == b,
+            (PatKind::Bool(a), Value::Bool(b)) => a == b,
+            (PatKind::Name(n), _) => {
+                if let Value::Enum(en, i, _) = v {
+                    if let Some(j) = variant_index(self.enums, en, n) {
+                        return j == *i;
+                    }
+                }
+                self.locals.push((n.clone(), v.clone()));
+                true
+            }
+            (PatKind::Variant(_, name, names), Value::Enum(en, i, payload)) => {
+                if variant_index(self.enums, en, name) != Some(*i) {
+                    return false;
+                }
+                for (n, x) in names.iter().zip(payload) {
+                    self.locals.extend(n.clone().map(|n| (n, x.clone())));
+                }
+                true
+            }
+            _ => unreachable!("checked pattern"),
+        }
+    }
+
     fn call_expr(&mut self, callee: &Expr, args: &[Expr]) -> Res {
-        let ExprKind::Name(name) = &callee.kind else {
-            unreachable!("checked callee");
+        let name = match &callee.kind {
+            ExprKind::Name(name) => name,
+            ExprKind::Path(en, v) => {
+                let vals = args.iter().map(|a| self.expr(a)).collect::<Result<_, _>>()?;
+                return Ok(self.variant(en, v, vals));
+            }
+            _ => unreachable!("checked callee"),
         };
         let f = &self.funcs[name.as_str()];
         let caller = self.enter(f, args)?;
@@ -258,6 +315,10 @@ impl Interp<'_> {
 fn field_index(structs: &HashMap<String, Struct>, name: &str, field: &str) -> usize {
     let fields = &structs[name].fields;
     fields.iter().position(|f| f.name == field).expect("checked field")
+}
+
+fn variant_index(enums: &HashMap<String, Enum>, name: &str, variant: &str) -> Option<usize> {
+    enums[name].variants.iter().position(|v| v.name == variant)
 }
 
 /// A `return` ends the call with its value; errors keep unwinding.

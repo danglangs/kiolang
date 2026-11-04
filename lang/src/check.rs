@@ -13,6 +13,7 @@ pub struct CapTable {}
 pub struct Program {
     pub(crate) funcs: HashMap<String, Fn>,
     pub(crate) structs: HashMap<String, Struct>,
+    pub(crate) enums: HashMap<String, Enum>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -22,6 +23,7 @@ enum Ty {
     Str,
     Unit,
     Struct(String),
+    Enum(String),
     /// A block that always returns; it matches any type.
     Never,
 }
@@ -33,7 +35,7 @@ impl fmt::Display for Ty {
             Ty::Bool => f.write_str("Bool"),
             Ty::Str => f.write_str("Str"),
             Ty::Unit => f.write_str("()"),
-            Ty::Struct(name) => f.write_str(name),
+            Ty::Struct(name) | Ty::Enum(name) => f.write_str(name),
             Ty::Never => f.write_str("!"),
         }
     }
@@ -41,6 +43,18 @@ impl fmt::Display for Ty {
 
 /// Resolved field names and types of each struct, in declaration order.
 type Fields = HashMap<String, Vec<(String, Ty)>>;
+
+/// Resolved variant names and payload types of each enum, in declaration order.
+type Variants = HashMap<String, Vec<(String, Vec<Ty>)>>;
+
+/// How a `match` pattern counts toward exhaustiveness.
+#[derive(PartialEq)]
+enum Cover {
+    All,
+    Variant(usize),
+    Bool(bool),
+    Lit,
+}
 
 struct Sig {
     params: Vec<Ty>,
@@ -77,12 +91,12 @@ fn binary_ty(op: &str, l: &Ty, r: &Ty) -> Option<Ty> {
         ("+" | "-" | "*" | "/" | "%", Int, Int) => Some(Int),
         ("<" | "<=" | ">" | ">=", Int, Int) => Some(Bool),
         ("&&" | "||", Bool, Bool) => Some(Bool),
-        ("==" | "!=", a, b) if a == b && !matches!(a, Never | Struct(_)) => Some(Bool),
+        ("==" | "!=", a, b) if a == b && !matches!(a, Never | Struct(_) | Enum(_)) => Some(Bool),
         _ => None,
     }
 }
 
-fn resolve(t: &Type, structs: &HashMap<String, Struct>) -> Result<Ty, Diag> {
+fn resolve(t: &Type, structs: &HashMap<String, Struct>, enums: &HashMap<String, Enum>) -> Result<Ty, Diag> {
     match &t.kind {
         TypeKind::Unit => Ok(Ty::Unit),
         TypeKind::Named(n, args) if args.is_empty() => match n.as_str() {
@@ -90,6 +104,7 @@ fn resolve(t: &Type, structs: &HashMap<String, Struct>) -> Result<Ty, Diag> {
             "Bool" => Ok(Ty::Bool),
             "Str" => Ok(Ty::Str),
             _ if structs.contains_key(n) => Ok(Ty::Struct(n.clone())),
+            _ if enums.contains_key(n) => Ok(Ty::Enum(n.clone())),
             _ => Err(unknown_type(t)),
         },
         TypeKind::Named(..) => Err(unknown_type(t)),
@@ -100,11 +115,16 @@ fn unknown_type(t: &Type) -> Diag {
     err(
         t.span,
         "type is not available yet".to_string(),
-        Some("the types so far are Int, Bool, Str, () and your structs"),
+        Some("the types so far are Int, Bool, Str, () and your structs and enums"),
     )
 }
 
-fn signature(f: &Fn, sigs: &HashMap<String, Sig>, structs: &HashMap<String, Struct>) -> Result<Sig, Diag> {
+fn signature(
+    f: &Fn,
+    sigs: &HashMap<String, Sig>,
+    structs: &HashMap<String, Struct>,
+    enums: &HashMap<String, Enum>,
+) -> Result<Sig, Diag> {
     if sigs.contains_key(&f.name) {
         return Err(err(f.span, format!("duplicate function `{}`", f.name), None));
     }
@@ -116,32 +136,60 @@ fn signature(f: &Fn, sigs: &HashMap<String, Sig>, structs: &HashMap<String, Stru
         if f.params[..i].iter().any(|q| q.name == p.name) {
             return Err(err(p.span, format!("duplicate parameter `{}`", p.name), None));
         }
-        params.push(resolve(&p.ty, structs)?);
+        params.push(resolve(&p.ty, structs, enums)?);
     }
     Ok(Sig {
         params,
-        ret: resolve(&f.ret, structs)?,
+        ret: resolve(&f.ret, structs, enums)?,
     })
 }
 
-fn struct_fields(s: &Struct, structs: &HashMap<String, Struct>) -> Result<Vec<(String, Ty)>, Diag> {
+fn struct_fields(
+    s: &Struct,
+    structs: &HashMap<String, Struct>,
+    enums: &HashMap<String, Enum>,
+) -> Result<Vec<(String, Ty)>, Diag> {
     let mut fields: Vec<(String, Ty)> = Vec::new();
     for p in &s.fields {
         if fields.iter().any(|(name, _)| *name == p.name) {
             return Err(err(p.span, format!("duplicate field `{}`", p.name), None));
         }
-        fields.push((p.name.clone(), resolve(&p.ty, structs)?));
+        fields.push((p.name.clone(), resolve(&p.ty, structs, enums)?));
     }
     Ok(fields)
 }
 
-/// Whether `name` reaches itself through its field types.
-fn contains_itself(name: &str, fields: &Fields) -> bool {
+fn enum_variants(
+    e: &Enum,
+    structs: &HashMap<String, Struct>,
+    enums: &HashMap<String, Enum>,
+) -> Result<Vec<(String, Vec<Ty>)>, Diag> {
+    let mut variants: Vec<(String, Vec<Ty>)> = Vec::new();
+    for v in &e.variants {
+        if variants.iter().any(|(name, _)| *name == v.name) {
+            return Err(err(v.span, format!("duplicate variant `{}`", v.name), None));
+        }
+        let payload = v.fields.iter().map(|t| resolve(t, structs, enums));
+        variants.push((v.name.clone(), payload.collect::<Result<_, _>>()?));
+    }
+    Ok(variants)
+}
+
+/// The index and payload types of variant `v` of enum `en`.
+fn variant<'a>(variants: &'a Variants, en: &str, v: &str) -> Option<(usize, &'a [Ty])> {
+    let i = variants.get(en)?.iter().position(|(name, _)| name == v)?;
+    Some((i, &variants[en][i].1))
+}
+
+/// Whether `name` reaches itself through its field or payload types.
+fn contains_itself(name: &str, fields: &Fields, variants: &Variants) -> bool {
     let mut todo = vec![name];
     let mut seen = HashSet::new();
     while let Some(n) = todo.pop() {
-        for (_, ty) in fields.get(n).into_iter().flatten() {
-            if let Ty::Struct(m) = ty {
+        let of_struct = fields.get(n).into_iter().flatten().map(|(_, ty)| ty);
+        let of_enum = variants.get(n).into_iter().flatten().flat_map(|(_, tys)| tys);
+        for ty in of_struct.chain(of_enum) {
+            if let Ty::Struct(m) | Ty::Enum(m) = ty {
                 if m == name {
                     return true;
                 }
@@ -165,14 +213,21 @@ pub fn check(src: &str, _caps: &CapTable) -> Result<Program, Vec<Diag>> {
     let items = parse(src).map_err(|d| vec![d])?;
     let mut fns = Vec::new();
     let mut structs = HashMap::new();
+    let mut enums = HashMap::new();
     let mut order = Vec::new();
     let mut diags = Vec::new();
     for item in items {
         match item {
             Item::Fn(f) => fns.push(f),
-            Item::Enum(e) => diags.push(err(e.span, "enums are not available yet".to_string(), None)),
-            Item::Struct(s) if structs.contains_key(&s.name) => {
-                diags.push(err(s.span, format!("duplicate struct `{}`", s.name), None));
+            Item::Enum(e) if structs.contains_key(&e.name) || enums.contains_key(&e.name) => {
+                diags.push(err(e.span, format!("duplicate type `{}`", e.name), None));
+            }
+            Item::Enum(e) => {
+                order.push(e.name.clone());
+                enums.insert(e.name.clone(), e);
+            }
+            Item::Struct(s) if structs.contains_key(&s.name) || enums.contains_key(&s.name) => {
+                diags.push(err(s.span, format!("duplicate type `{}`", s.name), None));
             }
             Item::Struct(s) => {
                 order.push(s.name.clone());
@@ -181,20 +236,24 @@ pub fn check(src: &str, _caps: &CapTable) -> Result<Program, Vec<Diag>> {
         }
     }
 
-    // Structs before signatures, which may name them.
+    // Types before signatures, which may name them.
     let mut fields = Fields::new();
+    let mut variants = Variants::new();
     for name in &order {
-        match struct_fields(&structs[name], &structs) {
-            Ok(f) => {
-                fields.insert(name.clone(), f);
-            }
-            Err(d) => diags.push(d),
-        }
+        let resolved = match structs.get(name) {
+            Some(s) => struct_fields(s, &structs, &enums).map(|f| drop(fields.insert(name.clone(), f))),
+            None => enum_variants(&enums[name], &structs, &enums).map(|v| drop(variants.insert(name.clone(), v))),
+        };
+        diags.extend(resolved.err());
     }
     for name in &order {
-        if contains_itself(name, &fields) {
-            let msg = format!("struct `{name}` contains itself");
-            diags.push(err(structs[name].span, msg, Some("use indexes into a `List` instead")));
+        if contains_itself(name, &fields, &variants) {
+            let (kind, span) = match structs.get(name) {
+                Some(s) => ("struct", s.span),
+                None => ("enum", enums[name].span),
+            };
+            let msg = format!("{kind} `{name}` contains itself");
+            diags.push(err(span, msg, Some("use indexes into a `List` instead")));
         }
     }
     if !diags.is_empty() {
@@ -205,7 +264,7 @@ pub fn check(src: &str, _caps: &CapTable) -> Result<Program, Vec<Diag>> {
     let mut sigs = HashMap::new();
     let mut sig_errs = Vec::new();
     for f in &fns {
-        match signature(f, &sigs, &structs) {
+        match signature(f, &sigs, &structs, &enums) {
             Ok(sig) => {
                 sigs.insert(f.name.clone(), sig);
                 sig_errs.push(None);
@@ -218,7 +277,9 @@ pub fn check(src: &str, _caps: &CapTable) -> Result<Program, Vec<Diag>> {
         let mut c = Checker {
             sigs: &sigs,
             fields: &fields,
+            variants: &variants,
             structs: &structs,
+            enums: &enums,
             scopes: Vec::new(),
             ret: Ty::Unit,
         };
@@ -234,13 +295,16 @@ pub fn check(src: &str, _caps: &CapTable) -> Result<Program, Vec<Diag>> {
     Ok(Program {
         funcs: fns.into_iter().map(|f| (f.name.clone(), f)).collect(),
         structs,
+        enums,
     })
 }
 
 struct Checker<'a> {
     sigs: &'a HashMap<String, Sig>,
     fields: &'a Fields,
+    variants: &'a Variants,
     structs: &'a HashMap<String, Struct>,
+    enums: &'a HashMap<String, Enum>,
     scopes: Vec<HashMap<String, Local>>,
     /// Return type of the function being checked.
     ret: Ty,
@@ -299,7 +363,7 @@ impl Checker<'_> {
             } => {
                 let mut found = self.expr(init)?;
                 if let Some(t) = ty {
-                    let declared = resolve(t, self.structs)?;
+                    let declared = resolve(t, self.structs, self.enums)?;
                     want(init.span, &found, &declared)?;
                     found = declared;
                 } else if found == Ty::Never {
@@ -391,10 +455,119 @@ impl Checker<'_> {
             }
             ExprKind::Index(..) => Err(err(e.span, "indexing is not available yet".to_string(), None)),
             ExprKind::StructLit(name, inits) => self.struct_lit(e, name, inits),
-            ExprKind::Path(..) | ExprKind::Match(..) => {
-                Err(err(e.span, "enums are not available yet".to_string(), None))
+            ExprKind::Path(en, v) => self.variant_value(e, en, v, &[]),
+            ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms),
+        }
+    }
+
+    /// `E::V` or `E::V(args)`; arity and payload types must match the declaration.
+    fn variant_value(&mut self, e: &Expr, en: &str, v: &str, args: &[Expr]) -> Result<Ty, Diag> {
+        let Some((_, payload)) = variant(self.variants, en, v) else {
+            return Err(err(e.span, format!("unknown variant `{en}::{v}`"), None));
+        };
+        if args.len() != payload.len() {
+            let msg = format!("`{en}::{v}` takes {} arguments, found {}", payload.len(), args.len());
+            return Err(err(e.span, msg, None));
+        }
+        for (a, ty) in args.iter().zip(payload) {
+            want(a.span, &self.expr(a)?, ty)?;
+        }
+        Ok(Ty::Enum(en.to_string()))
+    }
+
+    fn match_expr(&mut self, scrut: &Expr, arms: &[Arm]) -> Result<Ty, Diag> {
+        let st = self.expr(scrut)?;
+        if !matches!(st, Ty::Int | Ty::Bool | Ty::Str | Ty::Enum(_)) {
+            return Err(err(scrut.span, format!("cannot match on {st}"), None));
+        }
+        let mut ty = Ty::Never;
+        let mut covers = Vec::new();
+        for arm in arms {
+            if covers.contains(&Cover::All) {
+                let hint = "an earlier arm matches everything";
+                return Err(err(arm.pat.span, "unreachable arm".to_string(), Some(hint)));
+            }
+            let (cover, binds) = self.pattern(&arm.pat, &st)?;
+            covers.push(cover);
+            let binds = binds.into_iter().map(|(name, ty)| (name, Local { ty, mutable: false }));
+            self.scopes.push(binds.collect());
+            let body = self.expr(&arm.body)?;
+            self.scopes.pop();
+            if ty == Ty::Never {
+                ty = body;
+            } else if body != Ty::Never && body != ty {
+                let msg = format!("`match` arms have different types: {ty} and {body}");
+                return Err(err(arm.body.span, msg, None));
             }
         }
+        let seen = |c: Cover| covers.contains(&c) || covers.contains(&Cover::All);
+        let missing: Vec<String> = match &st {
+            Ty::Enum(en) => (self.variants[en].iter().enumerate())
+                .filter(|(i, _)| !seen(Cover::Variant(*i)))
+                .map(|(_, (v, _))| format!("{en}::{v}"))
+                .collect(),
+            Ty::Bool => [true, false]
+                .into_iter()
+                .filter(|b| !seen(Cover::Bool(*b)))
+                .map(|b| b.to_string())
+                .collect(),
+            _ if !covers.contains(&Cover::All) => vec!["_".to_string()],
+            _ => Vec::new(),
+        };
+        if missing.is_empty() {
+            Ok(ty)
+        } else {
+            let msg = format!("non-exhaustive `match`: missing {}", missing.join(", "));
+            Err(err(scrut.span, msg, None))
+        }
+    }
+
+    /// What the pattern covers and the names it binds, typed against scrutinee type `st`.
+    fn pattern(&self, p: &Pat, st: &Ty) -> Result<(Cover, Vec<(String, Ty)>), Diag> {
+        let lit = |ty: Ty| want(p.span, &ty, st).map(|_| (Cover::Lit, Vec::new()));
+        let en = match st {
+            Ty::Enum(en) => en,
+            _ => "",
+        };
+        match &p.kind {
+            PatKind::Wild => Ok((Cover::All, Vec::new())),
+            PatKind::Int(_) => lit(Ty::Int),
+            PatKind::Str(_) => lit(Ty::Str),
+            PatKind::Bool(b) => want(p.span, &Ty::Bool, st).map(|_| (Cover::Bool(*b), Vec::new())),
+            PatKind::Name(n) => match variant(self.variants, en, n) {
+                Some(_) => self.variant_pattern(p, en, n, &[]),
+                None => Ok((Cover::All, vec![(n.clone(), st.clone())])),
+            },
+            PatKind::Variant(named, v, names) => {
+                if let Some(named) = named {
+                    want(p.span, &Ty::Enum(named.clone()), st)?;
+                }
+                self.variant_pattern(p, en, v, names)
+            }
+        }
+    }
+
+    fn variant_pattern(
+        &self,
+        p: &Pat,
+        en: &str,
+        v: &str,
+        names: &[Option<String>],
+    ) -> Result<(Cover, Vec<(String, Ty)>), Diag> {
+        let Some((i, payload)) = variant(self.variants, en, v) else {
+            return Err(err(p.span, format!("unknown variant `{en}::{v}`"), None));
+        };
+        if names.len() != payload.len() {
+            let msg = format!(
+                "`{en}::{v}` has {} values, found {} bindings",
+                payload.len(),
+                names.len()
+            );
+            return Err(err(p.span, msg, None));
+        }
+        let binds = names.iter().zip(payload);
+        let binds = binds.filter_map(|(name, ty)| Some((name.clone()?, ty.clone())));
+        Ok((Cover::Variant(i), binds.collect()))
     }
 
     /// The type of field `name` of a value of type `ty`.
@@ -457,8 +630,10 @@ impl Checker<'_> {
     }
 
     fn call(&mut self, e: &Expr, callee: &Expr, args: &[Expr]) -> Result<Ty, Diag> {
-        let ExprKind::Name(name) = &callee.kind else {
-            return Err(err(callee.span, "only functions can be called".to_string(), None));
+        let name = match &callee.kind {
+            ExprKind::Name(name) => name,
+            ExprKind::Path(en, v) => return self.variant_value(e, en, v, args),
+            _ => return Err(err(callee.span, "only functions can be called".to_string(), None)),
         };
         let sigs = self.sigs;
         let Some(sig) = sigs.get(name.as_str()) else {
