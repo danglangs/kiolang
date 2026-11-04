@@ -19,6 +19,12 @@ fn show(e: &Expr) -> String {
         ExprKind::Method(r, m, args) => format!("(.{m} {}{})", show(r), list(args)),
         ExprKind::Field(r, f) => format!("(. {} {f})", show(r)),
         ExprKind::Index(r, i) => format!("([] {} {})", show(r), show(i)),
+        ExprKind::StructLit(n, fields) => {
+            let fields = fields
+                .iter()
+                .fold(String::new(), |s, (f, v)| s + &format!(" {f}: {}", show(v)));
+            format!("(new {n}{fields})")
+        }
     }
 }
 
@@ -59,7 +65,7 @@ fn block(b: &Block) -> String {
 /// Parses `src` as the body of `fn f() { .. }` and renders it.
 fn body(src: &str) -> String {
     let items = parse(&format!("fn f() {{ {src} }}")).unwrap();
-    let Item::Fn(f) = &items[0];
+    let Item::Fn(f) = &items[0] else { panic!() };
     block(&f.body)
 }
 
@@ -76,7 +82,9 @@ fn fail(src: &str) -> lang::Diag {
 fn items() {
     let items = parse("fn add(a: Int, b: List<Map<Str, Int>>,) -> Int { a } fn nop() {}").unwrap();
     assert_eq!(items.len(), 2);
-    let (Item::Fn(add), Item::Fn(nop)) = (&items[0], &items[1]);
+    let (Item::Fn(add), Item::Fn(nop)) = (&items[0], &items[1]) else {
+        panic!()
+    };
     assert_eq!(add.name, "add");
     assert_eq!(add.params.len(), 2);
     assert_eq!(ty(&add.params[1].ty), "List<Map<Str,Int>>");
@@ -88,7 +96,9 @@ fn items() {
 
 #[test]
 fn types() {
-    let Item::Fn(f) = &parse("fn f(a: (), b: Option<()>) -> Result<(), IoErr> {}").unwrap()[0];
+    let Item::Fn(f) = &parse("fn f(a: (), b: Option<()>) -> Result<(), IoErr> {}").unwrap()[0] else {
+        panic!()
+    };
     assert_eq!(ty(&f.params[0].ty), "()");
     assert_eq!(ty(&f.params[1].ty), "Option<()>");
     assert_eq!(ty(&f.ret), "Result<(),IoErr>");
@@ -162,7 +172,7 @@ fn precedence() {
 #[test]
 fn spans() {
     let src = "fn f() { let x = 1 + 2; }";
-    let Item::Fn(f) = &parse(src).unwrap()[0];
+    let Item::Fn(f) = &parse(src).unwrap()[0] else { panic!() };
     let StmtKind::Let { init, .. } = &f.body.stmts[0].kind else {
         panic!()
     };
@@ -208,7 +218,6 @@ fn rejects_tuples() {
 
 #[test]
 fn rejects_later_features() {
-    rejected("struct S {}", "struct", "`struct` is not supported in kio", true);
     rejected("enum E {}", "enum", "`enum` is not supported in kio", true);
     rejected("fn f() { for x in y {} }", "for", "`for` is not supported in kio", true);
     rejected(
@@ -254,4 +263,53 @@ fn rejects_deep_nesting() {
     assert_eq!(fail(&blocks).msg, "nesting is too deep");
     let ok = format!("fn f() {{ {}1{} }}", "(".repeat(60), ")".repeat(60));
     assert!(parse(&ok).is_ok());
+}
+
+#[test]
+fn struct_items() {
+    let src = "struct P { x: Int, q: List<Int>, } struct E {} fn f() {}";
+    let items = parse(src).unwrap();
+    assert_eq!(items.len(), 3);
+    let (Item::Struct(p), Item::Struct(e)) = (&items[0], &items[1]) else {
+        panic!()
+    };
+    assert_eq!(p.name, "P");
+    assert_eq!(p.fields.len(), 2);
+    assert_eq!(p.fields[0].name, "x");
+    assert_eq!(ty(&p.fields[1].ty), "List<Int>");
+    assert_eq!(p.span, Span { start: 0, end: 34 });
+    assert!(e.fields.is_empty());
+}
+
+#[test]
+fn struct_literals() {
+    assert_eq!(expr("P { a: 1, b: Q { c: x }, }"), "(new P a: 1 b: (new Q c: x))");
+    assert_eq!(expr("P {}"), "(new P)");
+    assert_eq!(expr("a.b.c"), "(. (. a b) c)");
+    assert_eq!(expr("P { a: 1 }.a"), "(. (new P a: 1) a)");
+    assert_eq!(body("p = P { a: 1 };"), "{(= p (new P a: 1))}");
+}
+
+#[test]
+fn struct_literals_in_conditions() {
+    assert_eq!(expr("if x == P { 2 }"), "(if (== x P) {tail 2})");
+    assert_eq!(expr("if x == (P { a: 1 }) { 2 }"), "(if (== x (new P a: 1)) {tail 2})");
+    assert_eq!(body("while f(P { a: 1 }) {}"), "{(while (call f (new P a: 1)) {})}");
+    assert_eq!(
+        expr("if a { P { a: 1 } } else { Q {} }"),
+        "(if a {tail (new P a: 1)} {tail (new Q)})"
+    );
+    // A nested `if` in a condition must not lift the restriction for the rest of it.
+    assert_eq!(
+        expr("if if b { c } else { d } == P { 2 }"),
+        "(if (== (if b {tail c} {tail d}) P) {tail 2})"
+    );
+}
+
+#[test]
+fn rejects_struct_shorthand() {
+    let d = fail("fn f() { P { a } }");
+    assert_eq!(d.span, Span { start: 13, end: 14 });
+    assert_eq!(d.msg, "field shorthand is not supported");
+    assert_eq!(d.hint.as_deref(), Some("write `a: a`"));
 }

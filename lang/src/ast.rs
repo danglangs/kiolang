@@ -3,6 +3,7 @@ use crate::Span;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
     Fn(Fn),
+    Struct(Struct),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,6 +13,14 @@ pub struct Fn {
     /// `()` when the source has no `->`.
     pub ret: Type,
     pub body: Block,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Struct {
+    pub name: String,
+    /// Declared fields, which have the shape of parameters.
+    pub fields: Vec<Param>,
     pub span: Span,
 }
 
@@ -95,4 +104,6 @@ pub enum ExprKind {
     Method(Box<Expr>, String, Vec<Expr>),
     Field(Box<Expr>, String),
     Index(Box<Expr>, Box<Expr>),
+    /// `Name { f: e, .. }`, with fields in source order.
+    StructLit(String, Vec<(String, Expr)>),
 }

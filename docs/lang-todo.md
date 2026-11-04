@@ -75,7 +75,7 @@ Each task covers lexing, parsing, checking and evaluating its constructs, unless
 
 Tasks 4 onward are outlines. Each gets a pinned spec, like tasks 1 to 3, before it is handed off. A task that spans parse, check and eval and grows large is split by pass.
 
-- [ ] **4a. Struct syntax.** Parser only.
+- [x] **4a. Struct syntax.** Parser only.
   - Item `struct Name { f: T, .. }` (trailing comma allowed); `Item` gains a `Struct` variant. `parse` returns items in source order. Empty structs are allowed.
   - Literal `Name { f: e, .. }` as an `ExprKind::StructLit(name, Vec<(String, Expr)>)`. Field shorthand `Name { f }` is rejected with hint "write `f: f`".
   - A literal is not parsed directly in an `if` or `while` condition, as in Rust: `if x == P { a: 1 } { .. }` parses `P` as a name. Parenthesized, it is allowed.

@@ -172,7 +172,7 @@ impl Interp<'_> {
             ExprKind::If(cond, then, els) => self.if_expr(cond, then, els.as_deref()),
             ExprKind::Block(b) => self.block(b),
             ExprKind::Call(callee, args) => self.call_expr(callee, args),
-            ExprKind::Method(..) | ExprKind::Field(..) | ExprKind::Index(..) => {
+            ExprKind::Method(..) | ExprKind::Field(..) | ExprKind::Index(..) | ExprKind::StructLit(..) => {
                 unreachable!("rejected by check")
             }
         }

@@ -119,7 +119,13 @@ fn signature(f: &Fn, sigs: &HashMap<String, Sig>) -> Result<Sig, Diag> {
 /// Checks `src`. Reports at most one `Diag` per function, in source order.
 pub fn check(src: &str, _caps: &CapTable) -> Result<Program, Vec<Diag>> {
     let items = parse(src).map_err(|d| vec![d])?;
-    let fns: Vec<Fn> = items.into_iter().map(|Item::Fn(f)| f).collect();
+    let mut fns = Vec::new();
+    for item in items {
+        match item {
+            Item::Fn(f) => fns.push(f),
+            Item::Struct(s) => return Err(vec![err(s.span, "structs are not available yet".to_string(), None)]),
+        }
+    }
 
     // Signatures first, so call order in the file does not matter.
     let mut sigs = HashMap::new();
@@ -308,6 +314,7 @@ impl Checker<'_> {
             ExprKind::Method(..) => Err(err(e.span, "method calls are not available yet".to_string(), None)),
             ExprKind::Field(..) => Err(err(e.span, "field access is not available yet".to_string(), None)),
             ExprKind::Index(..) => Err(err(e.span, "indexing is not available yet".to_string(), None)),
+            ExprKind::StructLit(..) => Err(err(e.span, "structs are not available yet".to_string(), None)),
         }
     }
 

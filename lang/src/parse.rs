@@ -39,7 +39,7 @@ fn reserved_hint(word: &str) -> &'static str {
 /// Keywords that kio will support in a later task.
 fn later_hint(word: &str) -> Option<&'static str> {
     match word {
-        "struct" | "enum" => Some("user types are not available yet"),
+        "enum" => Some("user types are not available yet"),
         "for" => Some("use `while` for now"),
         "match" => Some("use `if` / `else if` for now"),
         "break" | "continue" => Some("use `return` or a `while` condition for now"),
@@ -52,6 +52,8 @@ struct Parser {
     pos: usize,
     /// Tree depth so far, capped at `MAX_DEPTH`.
     depth: usize,
+    /// Set in `if` and `while` conditions, where `{` starts the body, not a struct literal.
+    no_struct: bool,
 }
 
 pub fn parse(src: &str) -> Result<Vec<Item>, Diag> {
@@ -59,6 +61,7 @@ pub fn parse(src: &str) -> Result<Vec<Item>, Diag> {
         toks: lex(src)?,
         pos: 0,
         depth: 0,
+        no_struct: false,
     };
     let mut items = Vec::new();
     while p.pos < p.toks.len() {
@@ -164,6 +167,7 @@ impl Parser {
 
     /// Items up to the closing symbol, separated by commas, allowing a trailing comma.
     fn list<T>(&mut self, close: &str, item: fn(&mut Self) -> Result<T, Diag>) -> Result<Vec<T>, Diag> {
+        let outer = std::mem::replace(&mut self.no_struct, false);
         let mut out = Vec::new();
         while !self.at(close) {
             out.push(item(self)?);
@@ -172,11 +176,22 @@ impl Parser {
             }
         }
         self.expect(close)?;
+        self.no_struct = outer;
         Ok(out)
     }
 
     fn item(&mut self) -> Result<Item, Diag> {
         let start = self.span().start;
+        if self.eat_kw("struct") {
+            let name = self.ident()?;
+            self.expect("{")?;
+            let fields = self.list("}", Self::param)?;
+            return Ok(Item::Struct(Struct {
+                name,
+                fields,
+                span: self.since(start),
+            }));
+        }
         if !self.eat_kw("fn") {
             return Err(self.unexpected("`fn`"));
         }
@@ -243,6 +258,7 @@ impl Parser {
     fn block(&mut self) -> Result<Block, Diag> {
         let depth = self.depth;
         self.enter()?;
+        let outer = std::mem::replace(&mut self.no_struct, false);
         let start = self.span().start;
         self.expect("{")?;
         let mut stmts = Vec::new();
@@ -287,6 +303,7 @@ impl Parser {
             });
         }
         self.depth = depth;
+        self.no_struct = outer;
         Ok(Block {
             stmts,
             tail,
@@ -319,9 +336,16 @@ impl Parser {
 
     fn while_stmt(&mut self) -> Result<StmtKind, Diag> {
         self.pos += 1;
-        let cond = self.expr()?;
+        let cond = self.cond()?;
         let body = self.block()?;
         Ok(StmtKind::While { cond, body })
+    }
+
+    fn cond(&mut self) -> Result<Expr, Diag> {
+        let outer = std::mem::replace(&mut self.no_struct, true);
+        let e = self.expr()?;
+        self.no_struct = outer;
+        Ok(e)
     }
 
     fn expr(&mut self) -> Result<Expr, Diag> {
@@ -398,8 +422,10 @@ impl Parser {
                     ExprKind::Field(Box::new(e), name)
                 }
             } else if self.eat("[") {
+                let outer = std::mem::replace(&mut self.no_struct, false);
                 let index = self.expr()?;
                 self.expect("]")?;
+                self.no_struct = outer;
                 ExprKind::Index(Box::new(e), Box::new(index))
             } else {
                 break;
@@ -419,6 +445,11 @@ impl Parser {
         let kind = match self.peek() {
             Some(Kind::Int(n)) => ExprKind::Int(*n),
             Some(Kind::Str(s)) => ExprKind::Str(s.clone()),
+            Some(Kind::Ident(_))
+                if !self.no_struct && self.toks.get(self.pos + 1).is_some_and(|t| t.kind == Kind::Sym("{")) =>
+            {
+                return self.struct_lit();
+            }
             Some(Kind::Ident(name)) => ExprKind::Name(name.clone()),
             Some(Kind::Keyword(k)) if k == "true" => ExprKind::Bool(true),
             Some(Kind::Keyword(k)) if k == "false" => ExprKind::Bool(false),
@@ -437,6 +468,31 @@ impl Parser {
         Ok(Expr { kind, span })
     }
 
+    fn struct_lit(&mut self) -> Result<Expr, Diag> {
+        let start = self.span().start;
+        let name = self.ident()?;
+        self.pos += 1;
+        let fields = self.list("}", Self::field_init)?;
+        Ok(Expr {
+            kind: ExprKind::StructLit(name, fields),
+            span: self.since(start),
+        })
+    }
+
+    fn field_init(&mut self) -> Result<(String, Expr), Diag> {
+        let span = self.span();
+        let name = self.ident()?;
+        if !self.at(":") {
+            return Err(err(
+                span,
+                "field shorthand is not supported",
+                Some(&format!("write `{name}: {name}`")),
+            ));
+        }
+        self.pos += 1;
+        Ok((name, self.expr()?))
+    }
+
     /// `()` or `( e )`; the parentheses leave no node.
     fn paren(&mut self) -> Result<Expr, Diag> {
         let start = self.span().start;
@@ -447,7 +503,9 @@ impl Parser {
                 span: self.since(start),
             });
         }
+        let outer = std::mem::replace(&mut self.no_struct, false);
         let inner = self.expr()?;
+        self.no_struct = outer;
         if self.at(",") {
             return Err(err(self.span(), "kio has no tuples", Some("use a struct")));
         }
@@ -460,7 +518,7 @@ impl Parser {
         self.enter()?;
         let start = self.span().start;
         self.pos += 1;
-        let cond = self.expr()?;
+        let cond = self.cond()?;
         let then = self.block()?;
         let els = if !self.eat_kw("else") {
             None
