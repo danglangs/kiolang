@@ -89,7 +89,7 @@ Tasks 4 onward are outlines. Each gets a pinned spec, like tasks 1 to 3, before 
   - Field access `e.f` on a struct value. Error: no field `f` on that type, listing the fields.
   - Assignment target is a name or a chain of fields rooted at a `let mut` local: `p.a.b = v`. `+=` and `-=` work on fields too.
   - `==` and `!=` stay scalar-only.
-  - `Value::Struct(Vec<Value>)` in declaration order; the checker resolves field names to indexes, and eval receives the index, not the name. Store that resolution in `Program` alongside the AST, without interpreter state.
+  - `Value::Struct(String, Vec<Value>)`: struct name and field values in declaration order. `Program` keeps the struct declarations; eval finds a field's index by name in the declaration. No side tables. A bytecode VM can resolve indexes ahead of time later.
   - Copy semantics: `let b = a;` then changing `b.x` leaves `a.x` unchanged; a struct argument changed inside a callee leaves the caller's value unchanged.
   Done: tests for each error above, nested field read and write, and both copy tests.
 
