@@ -1,8 +1,10 @@
 # kio-lang
 
-A small capability-typed language for AI agents. A function can only touch the files and network named in its signature.
+A language for code that AI agents write, where a function can only touch what its signature names.
 
-The goal is a general-purpose systems language: near-native speed, memory safe without a garbage collector, and capability safe. v0 is a minimal start.
+Most languages today are not AI-safe: any line can read files, open sockets or start processes. Rust gives strong spatial and temporal memory safety, but any Rust function can still reach the network. Research such as [TACIT](https://arxiv.org/abs/2603.00991) and [Scala capture checking](https://docs.scala-lang.org/scala3/reference/experimental/cc.html) makes capabilities first-class.
+
+kio is a fresh language built around that idea, using Rust's ecosystem for speed and tooling. The goal is a general-purpose systems language: near-native speed, no garbage collector, memory and capability safe.
 
 **Status: early implementation. Progress: [docs/lang-todo.md](docs/lang-todo.md).**
 
