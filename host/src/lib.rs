@@ -19,6 +19,7 @@ struct MemDir {
 /// Store state. `calls` counts every capability import the guest made.
 pub struct State {
     pub calls: u32,
+    pub peak_memory: usize,
     /// Directories the guest has dropped, kept for inspection.
     closed: Vec<MemDir>,
     wasi: WasiCtx,
@@ -58,6 +59,7 @@ impl State {
             .build();
         State {
             calls: 0,
+            peak_memory: 0,
             closed: Vec::new(),
             wasi,
             table: ResourceTable::new(),
@@ -71,6 +73,17 @@ impl WasiView for State {
             ctx: &mut self.wasi,
             table: &mut self.table,
         }
+    }
+}
+
+/// Records peak memory; H3 turns this into the memory limit.
+impl wasmtime::ResourceLimiter for State {
+    fn memory_growing(&mut self, _: usize, desired: usize, _: Option<usize>) -> Result<bool> {
+        self.peak_memory = self.peak_memory.max(desired);
+        Ok(true)
+    }
+    fn table_growing(&mut self, _: usize, _: usize, _: Option<usize>) -> Result<bool> {
+        Ok(true)
     }
 }
 
@@ -130,13 +143,22 @@ pub struct Kio {
 }
 
 impl Kio {
+    /// 1 MB of Wasm stack: the deepest recursion the depth budget allows needs about 900 KB (G4).
     pub fn new() -> Result<Self> {
-        let engine = Engine::default();
+        Self::with_stack(1 << 20)
+    }
+
+    /// A guest with `bytes` of Wasm stack; running out traps, which the host reports as an error.
+    pub fn with_stack(bytes: usize) -> Result<Self> {
+        let mut config = wasmtime::Config::new();
+        config.max_wasm_stack(bytes);
+        let engine = Engine::new(&config)?;
         let component = Component::new(&engine, GUEST)?;
         let mut linker = Linker::new(&engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
         Guest::add_to_linker::<State, wasmtime::component::HasSelf<State>>(&mut linker, |s| s)?;
         let mut store = Store::new(&engine, State::new());
+        store.limiter(|s| s);
         let guest = Guest::instantiate(&mut store, &component, &linker)?;
         Ok(Kio { store, guest })
     }
@@ -144,6 +166,11 @@ impl Kio {
     /// Parse and check `source`: the report lines, or the diagnostics.
     pub fn check(&mut self, source: &str) -> Result<std::result::Result<Report, Vec<Diag>>> {
         self.guest.call_check(&mut self.store, source)
+    }
+
+    /// The most linear memory the guest has asked for, in bytes.
+    pub fn peak_memory(&self) -> usize {
+        self.store.data().peak_memory
     }
 
     /// Capability imports the guest has called so far.

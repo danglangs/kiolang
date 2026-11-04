@@ -32,8 +32,8 @@ host/    the kio binary: Wasmtime, cap-std, limits, host functions
   - Host: `dir` resources backed by an in-memory `BTreeMap<String, Vec<u8>>` in the store (H1 replaces this with cap-std). `read` of a missing file is `not-found`; `create` stores the bytes. Every call is counted. `Kio::run(source, dirs)` for tests.
   Done: examples/invoices.kio runs through the component with an in-memory `input` and `out` and `total.txt` holds `42`; a missing, duplicate or extra grant returns its diag and no import is called; a runtime error comes back as a diag with its span.
 
-- [ ] **G4. Measure the guest.** Wasm stack and memory at the depth budget and on the primer, release build. Sets the `--stack` default; updates design.md limits and open_questions #11; decides bytecode VM timing.
-  Done: numbers recorded.
+- [x] **G4. Measure the guest.** Wasm stack and memory at the depth budget and on the primer, release build. Sets the `--stack` default; updates design.md limits and open_questions #11; decides bytecode VM timing.
+  Done: numbers recorded. Wasm stack: under 32 KB for the primer, about 900 KB at the depth budget, so `--stack` is 1 MB. Linear memory: 1.1 MB for a trivial program, 1.3 MB at the depth budget, 1.5 MB for the primer on 1,000 rows.
 
 - [ ] **H1. `kio run` with real directories.** `--dir name=path` opens each with cap-std; the `dir` resource reads and creates beneath its root. The README's Example and Try it sections merge into one real walkthrough.
   Done: examples/summarize.kio runs on files in a temp dir; `..`, absolute paths and outward symlinks return `invalid-path`; the README commands work as written.

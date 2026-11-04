@@ -90,7 +90,7 @@ Defaults per run; each can be overridden by a `kio run` flag. Exceeding one stop
 |---|---|---|---|
 | Fuel | 1 billion | `--fuel` | instructions, so infinite loops end |
 | Memory | 256 MB | `--memory` | guest linear memory |
-| Wasm stack | set from measurement | `--stack` | recursion |
+| Wasm stack | 1 MB | `--stack` | recursion; the deepest the depth budget allows needs about 900 KB |
 | Wall clock | 10 s | `--timeout` | slow hosts and long runs |
 | Host calls | 10,000 | `--calls` | capability calls |
 | I/O | 100 MB total, 10 MB per read | `--io` | bytes read and written |

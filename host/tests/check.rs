@@ -110,3 +110,11 @@ fn runtime_error_has_span() {
     assert!(diags[0].end > diags[0].start);
     assert!(diags[0].hint.is_none());
 }
+
+/// G4: on the default stack the deepest recursion stops with the depth error, never a trap.
+#[test]
+fn depth_budget_fits_the_default_stack() {
+    let src = "fn down(n: Int) -> Int { if n == 0 { 0 } else { down(n - 1) } } fn main() -> Int { down(100000) }";
+    let diags = Kio::new().unwrap().run(src, vec![]).unwrap().unwrap_err();
+    assert_eq!(diags[0].message, "evaluation is too deep");
+}
