@@ -40,6 +40,19 @@ pub struct Program {
 }
 
 impl Program {
+    /// Name and capability type of each `main` parameter, in order. The host uses it to
+    /// validate grants before running.
+    pub fn main_params(&self) -> Vec<(String, String)> {
+        let params = &self.funcs["main"].params;
+        params
+            .iter()
+            .filter_map(|p| match &p.ty.kind {
+                TypeKind::Named(ty, _) => Some((p.name.clone(), ty.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub(crate) fn is_cap(&self, ty: &str) -> bool {
         self.cap_methods.keys().any(|(c, _)| c == ty)
     }

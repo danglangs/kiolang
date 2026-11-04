@@ -1,4 +1,5 @@
-//! Runs the guest component under Wasmtime. G2: every capability import fails and is counted.
+//! Runs the guest component under Wasmtime. `dir` is in memory until H1; `http` imports fail. Every import is counted.
+use std::collections::BTreeMap;
 use std::time::Duration;
 use wasmtime::component::{Component, Linker, Resource, ResourceTable};
 use wasmtime::Result;
@@ -9,9 +10,17 @@ wasmtime::component::bindgen!({ world: "guest", path: "../caps.wit" });
 
 const GUEST: &[u8] = include_bytes!("../../target/guest/wasm32-wasip2/release/guest.wasm");
 
+/// An in-memory directory in the resource table.
+struct MemDir {
+    name: String,
+    files: BTreeMap<String, Vec<u8>>,
+}
+
 /// Store state. `calls` counts every capability import the guest made.
 pub struct State {
     pub calls: u32,
+    /// Directories the guest has dropped, kept for inspection.
+    closed: Vec<MemDir>,
     wasi: WasiCtx,
     table: ResourceTable,
 }
@@ -49,6 +58,7 @@ impl State {
             .build();
         State {
             calls: 0,
+            closed: Vec::new(),
             wasi,
             table: ResourceTable::new(),
         }
@@ -67,18 +77,37 @@ impl WasiView for State {
 impl kio::caps::fs::Host for State {}
 impl kio::caps::net::Host for State {}
 
+impl State {
+    /// The directory behind a guest handle; `None` for a handle that is not a live `MemDir`.
+    fn dir(&mut self, h: &Resource<kio::caps::fs::Dir>) -> Option<&mut MemDir> {
+        self.table.get_mut(&Resource::<MemDir>::new_borrow(h.rep())).ok()
+    }
+}
+
 impl kio::caps::fs::HostDir for State {
-    fn read(&mut self, _: Resource<kio::caps::fs::Dir>, _: String) -> Result<Vec<u8>, kio::caps::fs::IoErr> {
+    fn read(&mut self, d: Resource<kio::caps::fs::Dir>, path: String) -> Result<Vec<u8>, kio::caps::fs::IoErr> {
+        use kio::caps::fs::IoErr;
         self.calls += 1;
-        Err(kio::caps::fs::IoErr::Denied)
+        let dir = self.dir(&d).ok_or(IoErr::Denied)?;
+        dir.files.get(&path).cloned().ok_or(IoErr::NotFound)
     }
 
-    fn create(&mut self, _: Resource<kio::caps::fs::Dir>, _: String, _: Vec<u8>) -> Result<(), kio::caps::fs::IoErr> {
+    fn create(
+        &mut self,
+        d: Resource<kio::caps::fs::Dir>,
+        path: String,
+        data: Vec<u8>,
+    ) -> Result<(), kio::caps::fs::IoErr> {
         self.calls += 1;
-        Err(kio::caps::fs::IoErr::Denied)
+        let dir = self.dir(&d).ok_or(kio::caps::fs::IoErr::Denied)?;
+        dir.files.insert(path, data);
+        Ok(())
     }
 
-    fn drop(&mut self, _: Resource<kio::caps::fs::Dir>) -> Result<()> {
+    fn drop(&mut self, d: Resource<kio::caps::fs::Dir>) -> Result<()> {
+        if let Ok(dir) = self.table.delete(Resource::<MemDir>::new_own(d.rep())) {
+            self.closed.push(dir);
+        }
         Ok(())
     }
 }
@@ -120,5 +149,31 @@ impl Kio {
     /// Capability imports the guest has called so far.
     pub fn import_calls(&self) -> u32 {
         self.store.data().calls
+    }
+
+    /// Check `source` and run `main` with an in-memory directory granted for each `(name, files)`.
+    pub fn run(
+        &mut self,
+        source: &str,
+        dirs: Vec<(String, BTreeMap<String, Vec<u8>>)>,
+    ) -> Result<std::result::Result<(Report, String), Vec<Diag>>> {
+        let mut grants = Vec::new();
+        for (name, files) in dirs {
+            let h = self.store.data_mut().table.push(MemDir {
+                name: name.clone(),
+                files,
+            })?;
+            grants.push(DirGrant {
+                name,
+                dir: Resource::new_own(h.rep()),
+            });
+        }
+        self.guest.call_run(&mut self.store, source, &grants, &[])
+    }
+
+    /// Files of the dropped directory granted as `name`, once a run has finished.
+    pub fn files(&self, name: &str) -> Option<&BTreeMap<String, Vec<u8>>> {
+        let closed = &self.store.data().closed;
+        closed.iter().find(|d| d.name == name).map(|d| &d.files)
     }
 }
