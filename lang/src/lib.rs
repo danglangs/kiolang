@@ -3,9 +3,11 @@ pub mod check;
 pub mod eval;
 pub mod lex;
 pub mod parse;
+pub mod report;
 
 pub use check::{check, CapTable, Program};
 pub use eval::{run, Caps, RunErr, Value};
+pub use report::report;
 
 /// Byte offsets into the source, `start..end`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,5 +1,5 @@
 //! Temporary runner until the `kio` host exists: `cargo run -p lang --example run -- prog.kio`.
-use lang::{check, run, CapTable, Caps, Value};
+use lang::{check, report, run, CapTable, Caps, Value};
 
 struct NoCaps;
 impl Caps for NoCaps {
@@ -26,12 +26,15 @@ fn main() {
             }
             std::process::exit(1);
         }
-        Ok(p) => match run(&p, &mut NoCaps) {
-            Ok(v) => println!("{v:?}"),
-            Err(e) => {
-                eprintln!("{path}:{}: runtime error: {}", line(e.span.start), e.msg);
-                std::process::exit(1);
+        Ok(p) => {
+            println!("{}\n", report(&p));
+            match run(&p, &mut NoCaps) {
+                Ok(v) => println!("{v:?}"),
+                Err(e) => {
+                    eprintln!("{path}:{}: runtime error: {}", line(e.span.start), e.msg);
+                    std::process::exit(1);
+                }
             }
-        },
+        }
     }
 }

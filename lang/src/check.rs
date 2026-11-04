@@ -92,6 +92,8 @@ pub struct Program {
     pub(crate) funcs: HashMap<String, Fn>,
     pub(crate) structs: HashMap<String, Struct>,
     pub(crate) enums: HashMap<String, Enum>,
+    /// Names of the capability types, such as `Dir`.
+    pub(crate) caps: HashSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -648,6 +650,7 @@ pub fn check(src: &str, caps: &CapTable) -> Result<Program, Vec<Diag>> {
         funcs: fns.into_iter().map(|f| (f.name.clone(), f)).collect(),
         structs,
         enums,
+        caps: caps.caps.iter().map(|c| c.name.clone()).collect(),
     })
 }
 

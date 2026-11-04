@@ -110,10 +110,10 @@ The checker's capability table is generated from [caps.wit](../caps.wit). Today:
 One line per function: each capability parameter with the methods it may call, including through helpers and recursion. A capability passed to a helper is charged with the helper's calls. The report describes possible authority, not an execution trace.
 
 ```
-main       : input read, out create
-load       : d read
-parse_row  : none
-total      : none
+load      : d read
+main      : input read, out create
+parse_row : none
+total     : none
 ```
 
 ## Errors you will see

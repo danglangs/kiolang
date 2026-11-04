@@ -1,0 +1,10 @@
+// Pure computation: no Dir in the signature, so no I/O is possible.
+fn summarize(data: Bytes) -> Bytes {
+    let n = data.len();
+    n.to_str().to_bytes()
+}
+
+fn main(input: Dir, out: Dir) -> Result<(), IoErr> {
+    let data = input.read("invoices.csv")?;
+    out.create("summary.csv", summarize(data))
+}

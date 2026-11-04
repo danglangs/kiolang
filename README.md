@@ -52,7 +52,7 @@ b.kio:5: error: unknown name `cuont`
 
 Capabilities type-check, but the runner grants none, so a program that takes `input: Dir` stops with `no grant for \`input: Dir\``. Granting real directories comes with the `kio` host. Until then, `cargo test -p lang --test cap` runs capability programs against an in-memory directory.
 
-Run the test suite with `cargo test`.
+The runner prints the authority report before running. Run the test suite with `cargo test`.
 
 ## Why
 
@@ -71,18 +71,20 @@ A reviewer reads the signature of `main` and knows everything the program can ev
 
 The agent writes:
 
-```
+```rust
+// Pure computation: no Dir in the signature, so no I/O is possible.
 fn summarize(data: Bytes) -> Bytes {
-  // pure computation: no Dir in the signature, so no I/O is possible
+    let n = data.len();
+    n.to_str().to_bytes()
 }
 
 fn main(input: Dir, out: Dir) -> Result<(), IoErr> {
-  let data = input.read("invoices.csv")?;
-  out.create("summary.csv", summarize(data))
+    let data = input.read("invoices.csv")?;
+    out.create("summary.csv", summarize(data))
 }
 ```
 
-The operator runs it:
+This is [examples/summarize.kio](examples/summarize.kio). The operator runs it:
 
 ```
 kio run prog.kio --dir input=/srv/jobs/42/in --dir out=/srv/jobs/42/out
@@ -91,8 +93,8 @@ kio run prog.kio --dir input=/srv/jobs/42/in --dir out=/srv/jobs/42/out
 The checker reports:
 
 ```
-main       : input read, out create
-summarize  : none
+main      : input read, out create
+summarize : none
 ```
 
 Every path in the program is relative to one of the two granted directories. `..`, absolute paths and symlinks out are refused by the host.

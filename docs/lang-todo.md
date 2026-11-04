@@ -173,7 +173,7 @@ Order: enums and `Result` first, because capability methods return `Result<_, Io
   - The temporary runner keeps passing an empty `Caps`; a program asking for capabilities there fails with the no-grant error.
   Done: a helper reads stub bytes through a passed `Dir` and `main` writes a result with `create`; the stub records exactly those calls with the `main` parameter names; a rejected program records zero calls; a missing grant runs no code; `to_str` on invalid UTF-8 read from the stub is the runtime error "invalid UTF-8"; `?` on a stub `NotFound` propagates.
 
-- [ ] **10. Authority report.** `report.rs`: `pub fn report(p: &Program) -> String`. Reads only the checked AST in `Program`; no evaluation.
+- [x] **10. Authority report.** `report.rs`: `pub fn report(p: &Program) -> String`. Reads only the checked AST in `Program`; no evaluation.
   - For each function `f` and each capability parameter `d` of `f`, `uses(f, d)` is the set of method names reachable on `d`: every `d.m(..)` anywhere in `f`'s body (including untaken branches), plus `uses(g, e)` for every call `g(.., d, ..)` passing `d` as `g`'s parameter `e`.
   - Compute it as a fixed point: start every set empty, repeat over all functions until no set grows. This terminates because sets only grow and are bounded by the method names.
   - Output: one line per function, sorted by name, the name padded to the longest name plus one, then `: `, then `d m1 m2, e m3` with parameters in declaration order and methods sorted, or `none` when the function has no capability parameter or none is used. A parameter with no uses is omitted. Example:
