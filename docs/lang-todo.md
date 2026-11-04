@@ -138,14 +138,19 @@ Order: enums and `Result` first, because capability methods return `Result<_, Io
   - `==` stays scalar-only.
   Done: `?` propagates through two calls on both types; `?` on `Result` in an `Option` function and on mismatched error types is rejected with hints; `None` without a type is rejected with its hint; `let x: Option<Int> = None;`, `return None;` and `Ok(())` in `-> Result<(), E>` are accepted; a `match` on `Option` and on `Result` runs.
 
-- [ ] **7. `Bytes`.** The type, `Str.to_bytes()`, `Bytes.to_str()` with invalid UTF-8 a runtime error, `Bytes.len()`. Needed by capability methods.
-  Done: round-trip and invalid UTF-8 tests.
+- [ ] **7. Methods and `Bytes`.** Checker and interpreter; no parser change.
+  - Built-in methods: one table in `check.rs`, `fn method(recv: &Ty, name: &str) -> Option<(Vec<Ty>, Ty)>`, giving parameter and return types. Eval dispatches on `(value, name)` in one `match`. Task 8's capability methods are typed the same way, from `CapTable`.
+  - This task's methods: `Int.to_str() -> Str`, `Str.len() -> Int` (bytes), `Str.to_bytes() -> Bytes`, `Bytes.len() -> Int`, `Bytes.to_str() -> Str`. Invalid UTF-8 in `to_str` is the runtime error "invalid UTF-8".
+  - `Ty::Bytes`, `Value::Bytes(Vec<u8>)`. No `Bytes` literal. `==` works on `Bytes`.
+  - Errors with hints: unknown method lists the type's methods ("Str has: len, to_bytes"), with "did you mean"; wrong arity shows the signature; methods on a type with none: "Bool has no methods".
+  - The receiver is evaluated first, then the arguments left to right.
+  Done: a `Str` to `Bytes` to `Str` round trip with non-ASCII text; `len` on both; unknown-method and arity rejection tests assert hints. Kio code cannot produce invalid UTF-8 yet, so that runtime test moves to task 9, where a stub `Dir` returns raw bytes.
 
 - [ ] **8. Capability types.** `CapTable`: capability types with method signatures, built by hand in tests for `Dir`, `Http`, `IoErr` and `HttpErr` as in language.md. `main` takes capability parameters. Checker rules 1 to 3, with one worked accept or reject example per rule in the spec.
   Done: one rejection test per escape in rule 1, including `Option<Dir>` (`List<Dir>` and `[input, out]` move to task 11), plus a forged-construction test.
 
 - [ ] **9. Capability calls.** `Caps::call(&mut self, cap: &str, method: &str, args: Vec<Value>) -> Value`, where `cap` is the name of `main`'s parameter that reaches the call through helpers. An in-memory `StubDir` for tests.
-  Done: a helper reads stub bytes through a passed `Dir`; a rejected program records zero stub calls.
+  Done: a helper reads stub bytes through a passed `Dir`; a rejected program records zero stub calls; `to_str` on invalid UTF-8 from the stub is the runtime error "invalid UTF-8".
 
 - [ ] **10. Authority report.** As specified in language.md: map each helper's capability parameters back to the caller's arguments, and iterate until nothing changes so recursion terminates. Sort lines by function name. The spec gets worked examples before handoff.
   Done: report tests for direct calls, a two-level helper chain, mutual recursion, and a pure function (`none`).
