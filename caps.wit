@@ -29,9 +29,18 @@ world guest {
   use fs.{dir};
   use net.{http};
 
-  // Parse and check. Returns the authority report or the errors. Needs no handles.
-  export check: func(source: string) -> result<string, string>;
+  // A checker or runtime error: byte span into the source, message and an optional fix.
+  record diag { start: u32, end: u32, message: string, hint: option<string> }
+  // The authority report, one line per function.
+  record report { lines: list<string> }
+  // A grant binds a handle to the `main` parameter of the same name.
+  record dir-grant { name: string, dir: borrow<dir> }
+  record http-grant { name: string, http: borrow<http> }
 
-  // Check, then evaluate main with the given handles bound by parameter name.
-  export run: func(source: string, dirs: list<borrow<dir>>, https: list<borrow<http>>) -> result<_, string>;
+  // Parse and check. Needs no handles.
+  export check: func(source: string) -> result<report, list<diag>>;
+
+  // Check, then run `main` with each grant bound to its parameter by name; a missing or
+  // mistyped grant is an error before any code runs. Ok holds the report and main's value, printed.
+  export run: func(source: string, dirs: list<dir-grant>, https: list<http-grant>) -> result<tuple<report, string>, list<diag>>;
 }

@@ -61,16 +61,16 @@ kio run prog.kio --dir input=/srv/jobs/42/in --dir out=/srv/jobs/42/out
 |---|---|---|
 | 1 | Host opens each granted directory with cap-std and builds the handle table `{0: input, 1: out}` | host, native |
 | 2 | Host instantiates the guest with fuel, memory and epoch limits, and binds the WIT imports to its host functions | Wasmtime |
-| 3 | Host calls `run(source, [0, 1])` | wall crossed, into the guest |
-| 4 | Guest parses and checks against the embedded capability table. On reject it returns the errors. No I/O has happened. | guest |
-| 5 | Guest checks that `main`'s cap parameters match the grants by name and kind | guest |
+| 3 | Host calls `run(source, [{input, 0}, {out, 1}], [])` | wall crossed, into the guest |
+| 4 | Guest parses and checks against the embedded capability table. On reject it returns the diagnostics. No I/O has happened. | guest |
+| 5 | Guest binds each grant to the `main` parameter of the same name; a missing or mistyped grant is an error and no code runs | guest |
 | 6 | Interpreter starts `main` with `Cap(Dir, 0)` and `Cap(Dir, 1)` | guest |
 | 7 | On `input.read("invoices.csv")` the interpreter calls the import `dir.read(0, "invoices.csv")` | wall crossed, out of the guest |
 | 8 | Host looks up handle 0, checks its kind, charges the call quota, resolves the path beneath the root, enforces the size limit, reads, returns bytes | host, native |
 | 9 | Interpreter continues. Steps 7 and 8 repeat per capability call. | guest |
-| 10 | `main` returns. Host prints the exit status and the authority report, and drops the handle table. | host |
+| 10 | `main` returns. The guest returns the report and `main`'s value; the host prints both, sets the exit status and drops the handle table. | host |
 
-`kio check prog.kio` runs steps 3 to 5 only, with an empty handle table. The MCP tool calls the same export.
+`kio check prog.kio` calls the `check` export: steps 3 and 4 only, no handles. It returns the report or the diagnostics, with spans and hints. The MCP tool calls the same export.
 
 ## The host
 
@@ -81,6 +81,19 @@ kio run prog.kio --dir input=/srv/jobs/42/in --dir out=/srv/jobs/42/out
 **Http.** A grant names host and methods. The host checks the allowlist on the first request and on every redirect hop, refuses IP-literal hosts unless explicitly granted, and pins DNS resolution for the run. Response bodies are capped.
 
 **Limits.** Wasmtime fuel bounds instructions. Epoch interruption bounds wall-clock, because fuel does not tick while a host call waits on a slow server. Each host call also has its own timeout and the run has a host-call count and total I/O byte budget.
+
+## Limits
+
+Defaults per run; each can be overridden by a `kio run` flag. Exceeding one stops the run with an error naming the limit.
+
+| Limit | Default | Flag | Bounds |
+|---|---|---|---|
+| Fuel | 1 billion | `--fuel` | instructions, so infinite loops end |
+| Memory | 256 MB | `--memory` | guest linear memory |
+| Wasm stack | set from measurement | `--stack` | recursion |
+| Wall clock | 10 s | `--timeout` | slow hosts and long runs |
+| Host calls | 10,000 | `--calls` | capability calls |
+| I/O | 100 MB total, 10 MB per read | `--io` | bytes read and written |
 
 ## Why the checker runs in the guest
 
