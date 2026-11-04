@@ -4,7 +4,7 @@ A small capability-typed language for AI agents. A function can only touch the f
 
 The goal is a general-purpose systems language: near-native speed, memory safe without a garbage collector, and capability safe. v0 is a minimal start.
 
-**Status: early implementation. The `lang` lexer is done; progress is tracked in [docs/lang-todo.md](docs/lang-todo.md).**
+**Status: early implementation. Progress: [docs/lang-todo.md](docs/lang-todo.md).**
 
 ## Why
 
