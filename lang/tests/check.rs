@@ -1196,3 +1196,12 @@ fn rust_isms_are_rejected_with_the_kio_way() {
         assert_eq!((d.msg.as_str(), d.hint.as_deref()), (msg, Some(hint)), "{src}");
     }
 }
+
+/// H6: diagnostics stop at a fixed count, so output stays bounded for any source.
+#[test]
+fn diagnostics_are_capped() {
+    let src = "struct A {}\n".repeat(500) + "fn main() {}";
+    let diags = check(&src, &CapTable::default()).unwrap_err();
+    assert_eq!(diags.len(), lang::check::MAX_DIAGS + 1);
+    assert_eq!(diags.last().unwrap().msg, "399 more errors not shown");
+}

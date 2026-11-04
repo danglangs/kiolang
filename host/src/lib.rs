@@ -143,8 +143,11 @@ fn io_err(e: &io::Error) -> IoErr {
 }
 
 /// Empty paths and NUL bytes never reach cap-std.
+/// Longest path the host accepts, so path handling cannot cost unbounded host memory or time.
+const PATH_MAX: usize = 4096;
+
 fn check_path(path: &str) -> Result<(), IoErr> {
-    if path.is_empty() || path.contains('\0') {
+    if path.is_empty() || path.len() > PATH_MAX || path.contains('\0') {
         return Err(IoErr::InvalidPath);
     }
     Ok(())
@@ -310,7 +313,8 @@ impl Default for Limits {
     }
 }
 
-/// A fresh instance of the embedded guest.
+/// A fresh instance of the embedded guest, for one run: fuel, deadline, call and I/O counters
+/// are not reset, so make a new `Kio` per run.
 pub struct Kio {
     store: Store<State>,
     guest: Guest,
@@ -351,7 +355,11 @@ impl Kio {
         store.data_mut().io_limit = limits.io;
         store.limiter(|s| s);
         store.set_fuel(limits.fuel)?;
-        store.data_mut().deadline = Instant::now() + Duration::from_secs(limits.timeout_secs);
+        // A timeout too large to represent caps at a year rather than panicking.
+        let now = Instant::now();
+        let year = Duration::from_secs(365 * 24 * 3600);
+        let wait = Duration::from_secs(limits.timeout_secs).min(year);
+        store.data_mut().deadline = now.checked_add(wait).unwrap_or(now);
         store.set_epoch_deadline(limits.timeout_secs.saturating_mul(10));
         store.epoch_deadline_trap();
         let guest = Guest::instantiate(&mut store, &component, &linker)?;

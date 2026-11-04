@@ -416,3 +416,27 @@ fn failed_write_removes_the_file() {
     assert_eq!(out.value, DENIED);
     assert!(!t.path().join("f").exists());
 }
+
+/// H6: a huge `--timeout` is capped, never a panic.
+#[test]
+fn huge_timeout_does_not_panic() {
+    let limits = Limits {
+        timeout_secs: u64::MAX,
+        ..Limits::default()
+    };
+    let out = Kio::new(limits).unwrap().run("fn main() -> Int { 1 }", vec![]).unwrap();
+    assert_eq!(out.unwrap().value, "Int(1)");
+}
+
+/// H6: a path longer than the host accepts is refused before any work, so it costs no host memory.
+#[test]
+fn overlong_path_is_invalid() {
+    let (_t, d) = dir(&[]);
+    let src = "fn main(d: Dir) -> Result<Bytes, IoErr> { let mut s = \"a/\"; let mut i = 0; while i < 12 { s = s + s; i = i + 1; } d.read(s) }";
+    let out = Kio::new(Limits::default())
+        .unwrap()
+        .run(src, vec![("d".into(), d)])
+        .unwrap()
+        .unwrap();
+    assert_eq!(out.value, r#"Enum("Result", 1, [Enum("IoErr", 3, [])])"#);
+}

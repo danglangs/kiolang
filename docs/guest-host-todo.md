@@ -65,7 +65,7 @@ host/    the kio binary: Wasmtime, cap-std, limits, host functions
 - [x] **H5. Host-call deadlines.** A blocked host call must not outlive the run's deadline. Run each `Dir` call on a worker thread and wait at most the time left before the deadline; on expiry stop the run ("timed out after N s"). The worker finishes in the background and its result is discarded. Resolves #19 before any server.
   Done: a read on a path that blocks (a FIFO with no writer) stops the run at the timeout; normal runs are unaffected.
 
-- [ ] **H6. Adversarial host review.** An independent agent attacks the host: path escapes, symlink races, forged and wrong-kind handles, quota bypasses, deadline bypasses, panics in host functions.
+- [x] **H6. Adversarial host review.** An independent agent attacks the host: path escapes, symlink races, forged and wrong-kind handles, quota bypasses, deadline bypasses, panics in host functions.
   Done: every finding fixed or logged in open_questions.
 
 - [ ] **N1. `Http` grant and allowlist.** `--http name=host[:methods]`; refuse any other host and IP literals unless granted.

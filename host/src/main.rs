@@ -91,9 +91,13 @@ fn run(path: &str, flags: &[&str]) -> i32 {
 }
 
 fn print_diags(path: &str, src: &str, diags: Vec<Diag>) -> i32 {
+    // Byte offset of each line start, computed once: per-diag scans are quadratic in the source.
+    let starts: Vec<usize> = std::iter::once(0)
+        .chain(src.match_indices('\n').map(|(i, _)| i + 1))
+        .collect();
     for d in diags {
-        // The guest is untrusted: a bad offset gives line 1, never a panic.
-        let line = src.get(..d.start as usize).map_or(1, |s| s.lines().count().max(1));
+        // The guest is untrusted: any offset maps to some line, never a panic.
+        let line = starts.partition_point(|&s| s <= d.start as usize).max(1);
         eprintln!("{path}:{line}: error: {}", d.message);
         if let Some(h) = d.hint {
             eprintln!("  hint: {h}");

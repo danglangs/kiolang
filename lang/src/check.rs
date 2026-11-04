@@ -573,8 +573,23 @@ fn no_field(span: Span, field: &str, ty: &str, decl: &[(String, Ty)]) -> Diag {
     err(span, format!("no field `{field}` on {ty}"), Some(&hint))
 }
 
+/// At most this many diagnostics are reported, so a hostile source cannot make output unbounded.
+pub const MAX_DIAGS: usize = 100;
+
 /// Checks `src`. Reports at most one `Diag` per function, in source order.
 pub fn check(src: &str, caps: &CapTable) -> Result<Program, Vec<Diag>> {
+    check_all(src, caps).map_err(|mut diags| {
+        if diags.len() > MAX_DIAGS {
+            let more = diags.len() - MAX_DIAGS;
+            diags.truncate(MAX_DIAGS);
+            let msg = format!("{more} more errors not shown");
+            diags.push(err(Span { start: 0, end: 0 }, msg, Some("fix the errors above first")));
+        }
+        diags
+    })
+}
+
+fn check_all(src: &str, caps: &CapTable) -> Result<Program, Vec<Diag>> {
     let items = parse(src).map_err(|d| vec![d])?;
     let mut fns = Vec::new();
     let mut structs = HashMap::new();
