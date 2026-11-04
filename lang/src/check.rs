@@ -358,11 +358,20 @@ fn resolve(
 }
 
 fn unknown_type(t: &Type) -> Diag {
-    err(
-        t.span,
-        "type is not available yet".to_string(),
-        Some("the types so far are Int, Bool, Str, Bytes, (), Option, Result, List, Map and your structs and enums"),
-    )
+    let TypeKind::Named(name, _) = &t.kind else {
+        unreachable!("only named types can be unknown");
+    };
+    // Rust names agents reach for, mapped to the kio type.
+    let hint = match name.as_str() {
+        "String" | "str" | "char" => "use `Str`".to_string(),
+        "Vec" => "use `List<T>`".to_string(),
+        "HashMap" | "BTreeMap" => "use `Map<K, V>`".to_string(),
+        "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" => "use `Int`".to_string(),
+        "f32" | "f64" => "kio has no floats; use `Int`, e.g. cents".to_string(),
+        "bool" => "use `Bool`".to_string(),
+        _ => "types are Int, Bool, Str, Bytes, (), Option, Result, List, Map and your structs and enums".to_string(),
+    };
+    err(t.span, format!("unknown type `{name}`"), Some(&hint))
 }
 
 /// Where a type is written, for the type-level half of rule 1.

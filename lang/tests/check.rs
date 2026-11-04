@@ -1153,3 +1153,46 @@ fn maps_cannot_hold_capabilities() {
     let (msg, _, _) = reject_cap("fn main(d: Dir) { let m: Map<Str, Dir> = Map::new(); }");
     assert_eq!(msg, "capability nested in `Map<Str, Dir>`");
 }
+
+/// What an agent fluent in Rust writes first; each error names the kio way.
+#[test]
+fn rust_isms_are_rejected_with_the_kio_way() {
+    let cases = [
+        (
+            "fn f(s: &str) {} fn main() {}",
+            "kio has no references",
+            "pass by value; use `Str` instead of `&str`",
+        ),
+        ("fn f(s: String) {} fn main() {}", "unknown type `String`", "use `Str`"),
+        (
+            "fn f(v: Vec<Int>) {} fn main() {}",
+            "unknown type `Vec`",
+            "use `List<T>`",
+        ),
+        (
+            "fn f(m: HashMap<Str, Int>) {} fn main() {}",
+            "unknown type `HashMap`",
+            "use `Map<K, V>`",
+        ),
+        ("fn f(n: i32) {} fn main() {}", "unknown type `i32`", "use `Int`"),
+        (
+            "fn main() { let x: f64 = 1; }",
+            "unknown type `f64`",
+            "kio has no floats; use `Int`, e.g. cents",
+        ),
+        (
+            "fn main() { let ys = [1].iter().map(|x| x + 1); }",
+            "kio has no closures",
+            "use a `for` loop",
+        ),
+        (
+            "impl Row {} fn main() {}",
+            "`impl` is not supported in kio",
+            "kio has no traits or `impl`; use free functions",
+        ),
+    ];
+    for (src, msg, hint) in cases {
+        let d = &check(src, &CapTable::default()).expect_err(src)[0];
+        assert_eq!((d.msg.as_str(), d.hint.as_deref()), (msg, Some(hint)), "{src}");
+    }
+}

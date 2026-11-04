@@ -6,7 +6,7 @@ Most languages today are not AI-safe: any line can read files, open sockets or s
 
 kio is a fresh language built around that idea, using Rust's ecosystem for speed and tooling. The goal is a general-purpose systems language: near-native speed, no garbage collector, memory and capability safe.
 
-**Status: early implementation. Progress: [docs/lang-todo.md](docs/lang-todo.md).**
+**Status: the `lang` crate is complete for v0: it checks, reports and interprets the primer natively. Sandboxing (`guest`, `host`) is next. Progress: [docs/lang-todo.md](docs/lang-todo.md).**
 
 ## Try it
 
@@ -51,7 +51,7 @@ b.kio:5: error: unknown name `cuont`
   hint: did you mean `count`?
 ```
 
-Capabilities type-check, but the runner grants none, so a program that takes `input: Dir` stops with `no grant for \`input: Dir\``. Granting real directories comes with the `kio` host. Until then, `cargo test -p lang --test cap` runs capability programs against an in-memory directory.
+Capabilities type-check, but the runner grants none, so a program that takes `input: Dir` stops with `no grant for \`input: Dir\``. Granting real directories comes with the `kio` host. Until then, `cargo test -p lang --test cap` runs capability programs, including the primer's [examples/invoices.kio](examples/invoices.kio), against an in-memory directory.
 
 The runner prints the authority report before running. Run the test suite with `cargo test`.
 
@@ -135,8 +135,8 @@ Three crates:
 
 Steps:
 
-1. Parser, checker and authority report natively, with accept/reject tests (G1, G2).
-2. Interpreter natively, with stub host functions.
+1. Done: parser, checker and authority report natively, with accept/reject tests (G1, G2).
+2. Done: interpreter natively, with stub host functions.
 3. Capability table generated from `caps.wit`, real host functions (G3, G4).
 4. Guest built for `wasm32`, running in Wasmtime with limits (G5).
 5. Adversarial suite: path escapes, disallowed hosts, redirects, forged handles, runaway loops, slow servers.

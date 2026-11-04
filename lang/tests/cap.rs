@@ -166,3 +166,24 @@ fn receiver_is_evaluated_before_arguments() {
     r.unwrap();
     assert_eq!(s.calls, calls(&[("d", "read", "key"), ("d", "read", "val")]));
 }
+
+/// The primer in docs/language.md, end to end: it checks, reports as documented, and runs.
+#[test]
+fn primer_end_to_end() {
+    let src = include_str!("../../examples/invoices.kio");
+    let p = check(src, &common::caps()).unwrap_or_else(|d| panic!("{d:?}"));
+    let report = "load      : d read\nmain      : input read, out create\nparse_row : none\ntotal     : none";
+    assert_eq!(lang::report(&p), report);
+    assert!(
+        include_str!("../../docs/language.md").contains(report),
+        "language.md shows this report"
+    );
+    let csv: &[u8] = b"alice,30\nbob,12\nnot a row\ncarol,x\n";
+    let (r, s) = exec(src, stub(&[("input", &[("invoices.csv", csv)]), ("out", &[])]));
+    assert_eq!(r.unwrap(), Value::Enum("Result".into(), 0, vec![Value::Unit]));
+    assert_eq!(s.files["out"]["total.txt"], b"42");
+    assert_eq!(
+        s.calls,
+        calls(&[("input", "read", "invoices.csv"), ("out", "create", "total.txt")])
+    );
+}

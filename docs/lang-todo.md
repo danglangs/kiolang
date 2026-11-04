@@ -227,7 +227,7 @@ Order: enums and `Result` first, because capability methods return `Result<_, Io
   - Check language.md's built-ins table matches what exists after this task, and fix the table, not the code, if they differ.
   Done: one test per method, including the edge cases above; `examples/words.kio`, a word count using `split`, `Map` and `for`, runs and is listed in the README.
 
-- [ ] **14. Primer end to end.** The one-screen program in language.md checks, prints the documented report and runs against `StubDir`. Rust-ism rejection tests: `&str`, `String`, `Vec`, `.iter().map(|x| ..)`, `impl`, `let x: f64`.
+- [x] **14. Primer end to end.** The one-screen program in language.md checks, prints the documented report and runs against `StubDir`. Rust-ism rejection tests: `&str`, `String`, `Vec`, `.iter().map(|x| ..)`, `impl`, `let x: f64`.
   Done: those tests pass.
 
 ## Later, not in `lang`

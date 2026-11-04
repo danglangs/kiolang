@@ -1,0 +1,30 @@
+struct Row { name: Str, amount: Int }
+
+fn parse_row(line: Str) -> Option<Row> {
+  let parts = line.split(",");
+  if parts.len() != 2 { return None; }
+  Some(Row { name: parts[0], amount: parts[1].parse_int()? })
+}
+
+fn total(rows: List<Row>) -> Int {
+  let mut sum = 0;
+  for r in rows { sum = sum + r.amount; }
+  sum
+}
+
+fn load(d: Dir, name: Str) -> Result<List<Row>, IoErr> {
+  let text = d.read(name)?.to_str();
+  let mut rows: List<Row> = [];
+  for line in text.lines() {
+    match parse_row(line) {
+      Some(r) => rows.push(r),
+      None => {}
+    }
+  }
+  Ok(rows)
+}
+
+fn main(input: Dir, out: Dir) -> Result<(), IoErr> {
+  let rows = load(input, "invoices.csv")?;
+  out.create("total.txt", total(rows).to_str().to_bytes())
+}
