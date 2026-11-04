@@ -1030,3 +1030,121 @@ fn lists_cannot_hold_capabilities() {
         )
     );
 }
+
+#[test]
+fn map_types_and_new() {
+    ok("fn f(m: Map<Str, List<Int>>) -> Int { m.len() } fn main() { let m: Map<Int, Int> = Map::new(); }");
+    ok("fn main() -> Map<Str, Int> { Map::new() }");
+    let (msg, at) = reject("fn main() { let m = Map::new(); }");
+    assert_eq!(
+        (msg.as_str(), at.as_str()),
+        ("cannot tell the type of `Map::new()`", "Map::new()")
+    );
+    assert_eq!(
+        hint("fn main() { let m = Map::new(); }"),
+        "add a type: `let m: Map<Str, Int> = Map::new();`"
+    );
+    let (msg, at) = reject("fn main() { let x: Int = Map::new(); }");
+    assert_eq!((msg.as_str(), at.as_str()), ("expected Int, found a Map", "Map::new()"));
+    assert_eq!(
+        hint("fn main() { let x: Int = Map::new(); }"),
+        "`Map::new()` makes a `Map<K, V>`"
+    );
+    let src = "fn main() { let m: Map<Str, Int> = Map::new(1); }";
+    assert_eq!(reject(src).0, "`Map::new` takes 0 arguments, found 1");
+    assert_eq!(hint(src), "write `Map::new()`");
+    for src in ["fn main() { Map::get(1); }", "fn main() { let x = Map::new; }"] {
+        assert_eq!(hint(src), "the only Map function is `Map::new()`", "{src}");
+    }
+    assert_eq!(hint("fn f(m: Map<Int>) {} fn main() {}"), "write `Map<K, V>`");
+    assert!(hint("fn f(x: Foo) {} fn main() {}").contains("Map"));
+    assert_eq!(
+        reject("struct Map { a: Int } fn main() {}").0,
+        "`Map` is a built-in type"
+    );
+}
+
+#[test]
+fn map_keys_must_be_int_or_str() {
+    for src in [
+        "fn f(m: Map<Bool, Int>) {} fn main() {}",
+        "struct K { a: Int } fn f(m: Map<K, Int>) {} fn main() {}",
+        "fn f(m: Map<List<Int>, Int>) {} fn main() {}",
+    ] {
+        assert!(reject(src).0.ends_with("cannot be a Map key"), "{src}");
+        assert_eq!(hint(src), "Map keys must be Int or Str", "{src}");
+    }
+    let (msg, at) = reject("fn f(m: Map<Bool, Int>) {} fn main() {}");
+    assert_eq!((msg.as_str(), at.as_str()), ("`Bool` cannot be a Map key", "Bool"));
+    ok("fn f(m: Map<Int, Map<Str, Int>>) {} fn main() {}");
+}
+
+#[test]
+fn map_methods() {
+    let m = "fn main() { let mut m: Map<Str, Int> = Map::new(); ";
+    ok(&format!(
+        "{m}m.insert(\"a\", 1); m.remove(\"a\"); let n: Int = m.len(); let k: List<Str> = m.keys(); let g: Option<Int> = m.get(\"a\"); }}"
+    ));
+    ok("struct S { m: Map<Int, Int> } fn main() { let mut s = S { m: Map::new() }; s.m.insert(1, 2); }");
+    ok("fn main() { let xs: List<Map<Int, Int>> = [Map::new()]; }");
+    let src = format!("{m}m.insert(1, 1); }}");
+    assert_eq!(reject(&src).0, "expected Str, found Int");
+    let src = format!("{m}m.insert(\"a\", \"b\"); }}");
+    assert_eq!(reject(&src).0, "expected Int, found Str");
+    let src = format!("{m}m.get(1); }}");
+    assert_eq!(reject(&src).0, "expected Str, found Int");
+    let src = format!("{m}m.insert(\"a\"); }}");
+    assert_eq!(reject(&src).0, "`insert` takes 2 arguments, found 1");
+    assert_eq!(
+        hint(&src),
+        "`Map<Str, Int>.insert` is declared as `insert(Str, Int) -> ()`"
+    );
+    assert_eq!(hint(&format!("{m}m.inser(\"a\", 1); }}")), "did you mean `insert`?");
+    assert_eq!(
+        hint(&format!("{m}m.push(1); }}")),
+        "Map<Str, Int> has: get, insert, keys, len, remove"
+    );
+    let src = format!("{m}let x: Int = m.get(\"a\"); }}");
+    assert_eq!(reject(&src).0, "expected Int, found Option<Int>");
+    let (msg, _) = reject(&format!("{m}m == m; }}"));
+    assert_eq!(msg, "`==` cannot be applied to Map<Str, Int> and Map<Str, Int>");
+}
+
+#[test]
+fn map_insert_and_remove_need_a_mut_place() {
+    let f = "fn f() -> Map<Int, Int> { Map::new() } ";
+    for (call, verb, to) in [("insert(1, 2)", "insert", "to"), ("remove(1)", "remove", "from")] {
+        let src = format!("{f}fn main() {{ f().{call}; }}");
+        let (msg, at) = reject(&src);
+        assert_eq!(
+            (msg, at.as_str()),
+            (format!("cannot `{verb}` {to} this expression"), "f()")
+        );
+        assert_eq!(
+            hint(&src),
+            format!("`{verb}` changes a map; call it on a `let mut` variable")
+        );
+        let src = format!("fn main() {{ let m: Map<Int, Int> = Map::new(); m.{call}; }}");
+        assert_eq!(reject(&src).0, format!("cannot `{verb}` {to} `m`, it is not `mut`"));
+        assert_eq!(hint(&src), "declare it with `let mut`");
+    }
+    assert_eq!(
+        hint("fn main() { let xs = [1]; xs.push(2); }"),
+        "declare it with `let mut`"
+    );
+}
+
+#[test]
+fn maps_cannot_hold_capabilities() {
+    let (msg, hint, at) = reject_cap("fn f(m: Map<Str, Dir>) {} fn main(d: Dir) {}");
+    assert_eq!(
+        (msg.as_str(), hint.as_str(), at.as_str()),
+        (
+            "capability nested in `Map<Str, Dir>`",
+            "take `Dir` as a parameter",
+            "Map<Str, Dir>"
+        )
+    );
+    let (msg, _, _) = reject_cap("fn main(d: Dir) { let m: Map<Str, Dir> = Map::new(); }");
+    assert_eq!(msg, "capability nested in `Map<Str, Dir>`");
+}

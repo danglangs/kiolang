@@ -210,7 +210,7 @@ Order: enums and `Result` first, because capability methods return `Result<_, Io
   - The loop body is `()`; `for` and `while` are statements with type `()`.
   Done: sum of a list; a range loop; `break` and `continue` in both loop kinds; nested loops where `break` leaves only the inner loop; changing `xs` inside `for x in xs` does not change the iteration; `break` outside a loop is rejected with its hint.
 
-- [ ] **12. Map.** Checker and interpreter; `Map::new()` already parses as a call on a path.
+- [x] **12. Map.** Checker and interpreter; `Map::new()` already parses as a call on a path.
   - `Ty::Map(Box<Ty>, Box<Ty>)` from `Map<K, V>`; `K` must be `Int` or `Str` ("Map keys must be Int or Str"). `Value::Map(BTreeMap<Key, Value>)` with `enum Key { Int(i64), Str(String) }`, so iteration is in key order. `Value` must stay 64 bytes; box the map if it does not fit.
   - `Map::new()` needs an expected `Map<K, V>`, like `[]`; hint "add a type: `let m: Map<Str, Int> = Map::new();`".
   - Methods: `get(K) -> Option<V>`, `insert(K, V)` and `remove(K)` on a place (like `push`; `insert` replaces an existing value), `len() -> Int`, `keys() -> List<K>` in key order.

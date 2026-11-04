@@ -6,7 +6,7 @@ pub mod parse;
 pub mod report;
 
 pub use check::{check, CapTable, Program};
-pub use eval::{run, Caps, RunErr, Value};
+pub use eval::{run, Caps, Key, RunErr, Value};
 pub use report::report;
 
 /// Byte offsets into the source, `start..end`.

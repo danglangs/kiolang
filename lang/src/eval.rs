@@ -1,7 +1,7 @@
 use crate::ast::*;
 use crate::check::{builtin, Program};
 use crate::Span;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Bounds Rust recursion, and so stack use, for any program.
 const MAX_DEPTH: usize = 3_000;
@@ -23,12 +23,38 @@ pub enum Value {
     Bytes(Vec<u8>),
     Unit,
     List(Vec<Value>),
+    /// Ordered by key, so `keys()` and iteration are deterministic.
+    Map(BTreeMap<Key, Value>),
     /// The struct's name and its field values in declaration order.
     Struct(String, Vec<Value>),
     /// The enum's name, the variant's index in declaration order and its payload.
     Enum(String, usize, Vec<Value>),
     /// A capability, named by the `main` parameter it came from.
     Cap(String),
+}
+
+/// A `Map` key: an `Int` or a `Str`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Key {
+    Int(i64),
+    Str(String),
+}
+
+impl Key {
+    fn from_value(v: Value) -> Key {
+        match v {
+            Value::Int(n) => Key::Int(n),
+            Value::Str(s) => Key::Str(s),
+            _ => unreachable!("checked key"),
+        }
+    }
+
+    pub(crate) fn to_value(&self) -> Value {
+        match self {
+            Key::Int(n) => Value::Int(*n),
+            Key::Str(s) => Value::Str(s.clone()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -350,24 +376,31 @@ impl Interp<'_> {
         }
     }
 
-    /// `push` changes its receiver in place; the checker only allows it on a place.
-    /// Other built-in methods take no arguments; capability methods go to the host.
+    /// `push`, `insert` and `remove` change their receiver in place; the checker only allows
+    /// them on a place. Other built-in methods work on the value; capability methods go to the host.
     fn method(&mut self, recv: &Expr, name: &str, args: &[Expr], span: Span) -> Res {
-        // `push` on a list changes it in place. A capability could have its own `push`, so only
-        // a receiver that is not a capability takes this path.
+        // A capability could have its own `push`, so only a receiver that is not a capability
+        // takes this path.
         let on_cap = matches!(&recv.kind, ExprKind::Name(n) if matches!(self.lookup(n), Value::Cap(_)));
-        if name == "push" && !on_cap {
+        if matches!(name, "push" | "insert" | "remove") && !on_cap {
             let (root, steps) = self.path(recv)?;
-            let item = self.expr(&args[0])?;
-            let Value::List(vals) = self.slot(root, steps)? else {
-                unreachable!("checked push");
-            };
-            vals.push(item);
+            let mut args = self.values(args)?.into_iter();
+            let (a, b) = (args.next(), args.next());
+            match (self.slot(root, steps)?, name, a, b) {
+                (Value::List(vals), "push", Some(item), _) => vals.push(item),
+                (Value::Map(map), "insert", Some(k), Some(v)) => {
+                    map.insert(Key::from_value(k), v);
+                }
+                (Value::Map(map), "remove", Some(k), _) => {
+                    map.remove(&Key::from_value(k));
+                }
+                _ => unreachable!("checked mutation"),
+            }
             return Ok(Value::Unit);
         }
         let recv = self.expr(recv)?;
+        let mut vals = self.values(args)?;
         if let Value::Cap(cap) = recv {
-            let vals = args.iter().map(|a| self.expr(a)).collect::<Result<_, _>>()?;
             let v = self.caps.call(&cap, name, vals).map_err(|msg| fail(span, &msg))?;
             // The host is trusted code but checked anyway: a value of the wrong type stops the run.
             let ty = &self.program.cap_methods[&(self.cap_type(&cap), name.to_string())];
@@ -381,6 +414,12 @@ impl Interp<'_> {
             (Value::Str(s), "len") => Value::Int(s.len() as i64),
             (Value::Str(s), "to_bytes") => Value::Bytes(s.into_bytes()),
             (Value::List(v), "len") => Value::Int(v.len() as i64),
+            (Value::Map(m), "len") => Value::Int(m.len() as i64),
+            (Value::Map(m), "keys") => Value::List(m.keys().map(Key::to_value).collect()),
+            (Value::Map(m), "get") => match m.get(&Key::from_value(vals.remove(0))) {
+                Some(v) => self.constructor("Some", vec![v.clone()]),
+                None => self.constructor("None", vec![]),
+            },
             (Value::Bytes(b), "len") => Value::Int(b.len() as i64),
             (Value::Bytes(b), "to_str") => match String::from_utf8(b) {
                 Ok(s) => Value::Str(s),
@@ -478,6 +517,7 @@ impl Interp<'_> {
                 return Ok(self.constructor(name, vals));
             }
             ExprKind::Name(name) => name,
+            ExprKind::Path(en, _) if en == "Map" => return Ok(Value::Map(BTreeMap::new())),
             ExprKind::Path(en, v) => {
                 let vals = args.iter().map(|a| self.expr(a)).collect::<Result<_, _>>()?;
                 return Ok(self.variant(en, v, vals));

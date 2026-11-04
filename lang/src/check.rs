@@ -110,6 +110,9 @@ impl Program {
             (Value::Int(_), Ty::Int) | (Value::Bool(_), Ty::Bool) | (Value::Unit, Ty::Unit) => true,
             (Value::Str(_), Ty::Str) | (Value::Bytes(_), Ty::Bytes) => true,
             (Value::List(vals), Ty::List(t)) => vals.iter().all(|v| self.fits(v, t)),
+            (Value::Map(m), Ty::Map(k, t)) => m
+                .iter()
+                .all(|(key, v)| self.fits(&key.to_value(), k) && self.fits(v, t)),
             (Value::Enum(en, i, vals), Ty::Result(ok, e)) if en == "Result" && vals.len() == 1 => match i {
                 0 => self.fits(&vals[0], ok),
                 1 => self.fits(&vals[0], e),
@@ -138,6 +141,7 @@ pub enum Ty {
     Option(Box<Ty>),
     Result(Box<Ty>, Box<Ty>),
     List(Box<Ty>),
+    Map(Box<Ty>, Box<Ty>),
     /// A capability, which only a parameter can hold.
     Cap(String),
     /// A block that always returns; it matches any type.
@@ -156,6 +160,7 @@ impl fmt::Display for Ty {
             Ty::Option(t) => write!(f, "Option<{t}>"),
             Ty::Result(t, e) => write!(f, "Result<{t}, {e}>"),
             Ty::List(t) => write!(f, "List<{t}>"),
+            Ty::Map(k, v) => write!(f, "Map<{k}, {v}>"),
             Ty::Never => f.write_str("!"),
         }
     }
@@ -297,7 +302,7 @@ fn binary_ty(op: &str, l: &Ty, r: &Ty) -> Option<Ty> {
             if a == b
                 && !matches!(
                     a,
-                    Never | Cap(_) | Struct(_) | Enum(_) | Option(_) | Result(..) | List(_)
+                    Never | Cap(_) | Struct(_) | Enum(_) | Option(_) | Result(..) | List(_) | Map(..)
                 ) =>
         {
             Some(Bool)
@@ -321,10 +326,20 @@ fn resolve(
                 Ok(Ty::Result(Box::new(a), Box::new(b)))
             }
             ("List", [a]) => Ok(Ty::List(Box::new(resolve(a, caps, structs, enums)?))),
-            ("Option" | "Result" | "List", _) => {
+            ("Map", [k, v]) => {
+                let key = resolve(k, caps, structs, enums)?;
+                if !matches!(key, Ty::Int | Ty::Str) {
+                    let msg = format!("`{key}` cannot be a Map key");
+                    return Err(err(k.span, msg, Some("Map keys must be Int or Str")));
+                }
+                let v = resolve(v, caps, structs, enums)?;
+                Ok(Ty::Map(Box::new(key), Box::new(v)))
+            }
+            ("Option" | "Result" | "List" | "Map", _) => {
                 let (count, hint) = match n.as_str() {
                     "Option" => (1, "write `Option<T>`"),
                     "Result" => (2, "write `Result<T, E>`"),
+                    "Map" => (2, "write `Map<K, V>`"),
                     _ => (1, "write `List<T>`"),
                 };
                 let msg = format!("`{n}` takes {count} type arguments, found {}", args.len());
@@ -346,7 +361,7 @@ fn unknown_type(t: &Type) -> Diag {
     err(
         t.span,
         "type is not available yet".to_string(),
-        Some("the types so far are Int, Bool, Str, Bytes, (), Option, Result, List and your structs and enums"),
+        Some("the types so far are Int, Bool, Str, Bytes, (), Option, Result, List, Map and your structs and enums"),
     )
 }
 
@@ -365,7 +380,7 @@ fn cap_in(ty: &Ty) -> Option<&str> {
     match ty {
         Ty::Cap(c) => Some(c),
         Ty::Option(t) | Ty::List(t) => cap_in(t),
-        Ty::Result(t, e) => cap_in(t).or_else(|| cap_in(e)),
+        Ty::Result(t, e) | Ty::Map(t, e) => cap_in(t).or_else(|| cap_in(e)),
         _ => None,
     }
 }
@@ -513,13 +528,18 @@ fn method(caps: &CapTable, recv: &Ty, name: &str) -> Option<(Vec<Ty>, Ty)> {
         (Ty::Int, "to_str") | (Ty::Bytes, "to_str") => Some((vec![], Ty::Str)),
         (Ty::Str, "len") | (Ty::Bytes, "len") | (Ty::List(_), "len") => Some((vec![], Ty::Int)),
         (Ty::List(t), "push") => Some((vec![(**t).clone()], Ty::Unit)),
+        (Ty::Map(..), "len") => Some((vec![], Ty::Int)),
+        (Ty::Map(k, _), "keys") => Some((vec![], Ty::List(k.clone()))),
+        (Ty::Map(k, v), "get") => Some((vec![(**k).clone()], Ty::Option(v.clone()))),
+        (Ty::Map(k, v), "insert") => Some((vec![(**k).clone(), (**v).clone()], Ty::Unit)),
+        (Ty::Map(k, _), "remove") => Some((vec![(**k).clone()], Ty::Unit)),
         (Ty::Str, "to_bytes") => Some((vec![], Ty::Bytes)),
         _ => None,
     }
 }
 
 /// Every built-in method name, so hints can list the ones `method` accepts on a type.
-const METHODS: &[&str] = &["len", "push", "to_bytes", "to_str"];
+const METHODS: &[&str] = &["get", "insert", "keys", "len", "push", "remove", "to_bytes", "to_str"];
 
 fn cap_methods<'a>(caps: &'a CapTable, name: &str) -> &'a [(String, Vec<Ty>, Ty)] {
     caps.caps.iter().find(|c| c.name == name).map_or(&[], |c| &c.methods)
@@ -541,7 +561,7 @@ fn named(ty: &Ty) -> Vec<&str> {
     match ty {
         Ty::Struct(n) | Ty::Enum(n) => vec![n],
         Ty::Option(t) | Ty::List(t) => named(t),
-        Ty::Result(t, e) => [named(t), named(e)].concat(),
+        Ty::Result(t, e) | Ty::Map(t, e) => [named(t), named(e)].concat(),
         _ => Vec::new(),
     }
 }
@@ -584,7 +604,7 @@ pub fn check(src: &str, caps: &CapTable) -> Result<Program, Vec<Diag>> {
         enums.insert(e.name.clone(), e.clone());
     }
     let reserved = |n: &str| {
-        matches!(n, "Option" | "Result")
+        matches!(n, "Option" | "Result" | "Map")
             || caps.enums.iter().any(|e| e.name == n)
             || caps.caps.iter().any(|c| c.name == n)
     };
@@ -766,6 +786,7 @@ impl Checker<'_> {
             _ if self.is_cap(en) => NO_CAP_SYNTAX.to_string(),
             ("Option", _) => suggest(v, &["None", "Some"], "variants"),
             ("Result", _) => suggest(v, &["Ok", "Err"], "variants"),
+            ("Map", _) => "the only Map function is `Map::new()`".to_string(),
             (_, Some(vs)) => suggest(v, &vs.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), "variants"),
             _ => suggest(en, &sorted_keys(self.enums), "enums"),
         };
@@ -1011,8 +1032,11 @@ impl Checker<'_> {
 
     fn method_call(&mut self, e: &Expr, recv: &Expr, name: &str, args: &[Expr]) -> Result<Ty, Diag> {
         let recv_ty = self.operand(recv, None)?;
-        if name == "push" && matches!(recv_ty, Ty::List(_)) {
-            self.push_target(recv)?;
+        if matches!(
+            (&recv_ty, name),
+            (Ty::List(_), "push") | (Ty::Map(..), "insert" | "remove")
+        ) {
+            self.mutation_target(recv, name, &recv_ty)?;
         }
         let Some((params, ret)) = method(self.caps, &recv_ty, name) else {
             let names = method_names(self.caps, &recv_ty);
@@ -1079,6 +1103,29 @@ impl Checker<'_> {
             want_expr(&args[0], &self.expr(&args[0], Some(t))?, t)?;
         }
         Ok(expected.expect("matched above").clone())
+    }
+
+    /// `Map::new()`, which takes its type from `expected`.
+    fn map_new(&self, e: &Expr, args: &[Expr], expected: Option<&Ty>) -> Result<Ty, Diag> {
+        if !args.is_empty() {
+            let msg = format!("`Map::new` takes 0 arguments, found {}", args.len());
+            return Err(err(e.span, msg, Some("write `Map::new()`")));
+        }
+        match expected {
+            Some(t @ Ty::Map(..)) => Ok(t.clone()),
+            Some(t) => {
+                let msg = format!("expected {t}, found a Map");
+                Err(err(e.span, msg, Some("`Map::new()` makes a `Map<K, V>`")))
+            }
+            None => {
+                let hint = "add a type: `let m: Map<Str, Int> = Map::new();`";
+                Err(err(
+                    e.span,
+                    "cannot tell the type of `Map::new()`".to_string(),
+                    Some(hint),
+                ))
+            }
+        }
     }
 
     /// `x?`: the value of an `Option` or `Result`, or an early return of the `None` or `Err`.
@@ -1309,22 +1356,28 @@ impl Checker<'_> {
         }
     }
 
-    /// `push` changes its list, so the receiver must be a place rooted at a `let mut` local.
-    fn push_target(&mut self, recv: &Expr) -> Result<(), Diag> {
+    /// `push`, `insert` and `remove` change their receiver, so it must be a place rooted at a
+    /// `let mut` local.
+    fn mutation_target(&mut self, recv: &Expr, method: &str, recv_ty: &Ty) -> Result<(), Diag> {
+        let (noun, to) = match (recv_ty, method) {
+            (Ty::List(_), _) => ("list", "to"),
+            (_, "remove") => ("map", "from"),
+            _ => ("map", "to"),
+        };
         let mut root = recv;
         while let ExprKind::Field(base, _) | ExprKind::Index(base, _) = &root.kind {
             root = base;
         }
         let ExprKind::Name(name) = &root.kind else {
-            let hint = "`push` changes a list; call it on a `let mut` variable";
+            let hint = format!("`{method}` changes a {noun}; call it on a `let mut` variable");
             return Err(err(
                 recv.span,
-                "cannot `push` to this expression".to_string(),
-                Some(hint),
+                format!("cannot `{method}` {to} this expression"),
+                Some(&hint),
             ));
         };
         if !self.lookup(name).is_some_and(|l| l.mutable) {
-            let msg = format!("cannot `push` to `{name}`, it is not `mut`");
+            let msg = format!("cannot `{method}` {to} `{name}`, it is not `mut`");
             return Err(err(root.span, msg, Some("declare it with `let mut`")));
         }
         Ok(())
@@ -1334,6 +1387,7 @@ impl Checker<'_> {
         let name = match &callee.kind {
             ExprKind::Name(name) if builtin(name).is_some() => return self.constructor(e, name, args, expected),
             ExprKind::Name(name) => name,
+            ExprKind::Path(en, v) if en == "Map" && v == "new" => return self.map_new(e, args, expected),
             ExprKind::Path(en, v) => return self.variant_value(e, en, v, args),
             _ => {
                 let hint = "call a function by name, like `f(x)`";

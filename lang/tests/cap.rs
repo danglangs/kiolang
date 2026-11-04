@@ -157,3 +157,12 @@ fn host_value_of_wrong_payload_type_stops_the_run() {
     let (r, _) = exec(src, stub(&[("d", &[])]));
     assert_eq!(r.unwrap_err().msg, "host returned a malformed value for `read`");
 }
+
+#[test]
+fn receiver_is_evaluated_before_arguments() {
+    let src = "fn n(d: Dir, p: Str) -> Int { d.read(p); 1 }
+               fn main(d: Dir) { let mut m: Map<Int, Int> = Map::new(); m.insert(n(d, \"key\"), n(d, \"val\")); }";
+    let (r, s) = exec(src, stub(&[("d", &[])]));
+    r.unwrap();
+    assert_eq!(s.calls, calls(&[("d", "read", "key"), ("d", "read", "val")]));
+}

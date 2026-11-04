@@ -480,3 +480,97 @@ fn list_argument_changed_in_callee() {
                }";
     assert_eq!(int(src), Value::Int(100 + 10 + 2 + 2000));
 }
+
+#[test]
+fn word_count() {
+    let src = "fn count(words: List<Str>) -> Map<Str, Int> {
+                   let mut m: Map<Str, Int> = Map::new();
+                   for w in words {
+                       let n = match m.get(w) { Some(n) => n, None => 0 };
+                       m.insert(w, n + 1);
+                   }
+                   m
+               }
+               fn main() -> Int {
+                   let m = count([\"b\", \"a\", \"b\", \"b\"]);
+                   let a = match m.get(\"a\") { Some(n) => n, None => 0 };
+                   let b = match m.get(\"b\") { Some(n) => n, None => 0 };
+                   a * 10 + b * 100 + m.len()
+               }";
+    assert_eq!(int(src), Value::Int(10 + 300 + 2));
+}
+
+#[test]
+fn map_keys_are_sorted() {
+    let src = "fn main() -> List<Str> {
+                   let mut m: Map<Str, Int> = Map::new();
+                   m.insert(\"b\", 1); m.insert(\"a\", 2); m.insert(\"c\", 3);
+                   m.keys()
+               }";
+    let strs = ["a", "b", "c"].map(|s| Value::Str(s.to_string()));
+    assert_eq!(int(src), Value::List(strs.to_vec()));
+    let src = "fn main() -> List<Int> {
+                   let mut m: Map<Int, Str> = Map::new();
+                   m.insert(3, \"x\"); m.insert(-1, \"y\"); m.insert(2, \"z\");
+                   m.keys()
+               }";
+    assert_eq!(int(src), Value::List([-1, 2, 3].map(Value::Int).to_vec()));
+}
+
+#[test]
+fn map_get_insert_remove() {
+    let src = "fn main() -> Int {
+                   let mut m: Map<Int, Int> = Map::new();
+                   m.insert(1, 10);
+                   m.insert(1, 20);
+                   m.insert(2, 5);
+                   m.remove(2);
+                   m.remove(9);
+                   match m.get(1) { Some(v) => v + m.len() * 1000, None => 0 }
+               }";
+    assert_eq!(int(src), Value::Int(1020));
+    let src = "fn main() -> Bool { let m: Map<Str, Int> = Map::new(); match m.get(\"x\") { Some(_) => false, None => true } }";
+    assert_eq!(int(src), Value::Bool(true));
+}
+
+#[test]
+fn map_in_nested_places() {
+    let src = "struct S { m: Map<Str, List<Int>> }
+               fn main() -> Int {
+                   let mut s = S { m: Map::new() };
+                   s.m.insert(\"a\", [1]);
+                   let mut xs = [s];
+                   xs[0].m.insert(\"b\", []);
+                   xs[0].m.remove(\"a\");
+                   xs[0].m.len() * 10 + xs[0].m.keys().len()
+               }";
+    assert_eq!(int(src), Value::Int(11));
+}
+
+#[test]
+fn maps_are_copied() {
+    let src = "fn main() -> Int {
+                   let mut a: Map<Int, Int> = Map::new();
+                   a.insert(1, 1);
+                   let mut b = a;
+                   b.insert(2, 2);
+                   a.insert(1, 7);
+                   let x = match a.get(1) { Some(v) => v, None => 0 };
+                   let y = match b.get(1) { Some(v) => v, None => 0 };
+                   x * 100 + y * 10 + a.len() * 1000 + b.len() * 10000
+               }";
+    assert_eq!(int(src), Value::Int(700 + 10 + 1000 + 20000));
+    // A value read with `get` is a copy.
+    let src = "fn main() -> Int {
+                   let mut m: Map<Int, List<Int>> = Map::new();
+                   m.insert(1, [1]);
+                   let mut xs: List<Int> = match m.get(1) { Some(v) => v, None => [] };
+                   xs.push(2);
+                   xs[0] = 9;
+                   match m.get(1) { Some(v) => v[0] * 10 + v.len(), None => 0 }
+               }";
+    assert_eq!(int(src), Value::Int(11));
+    let src = "fn put(m: Map<Int, Int>) -> Int { let mut n = m; n.insert(5, 5); n.len() }
+               fn main() -> Int { let m: Map<Int, Int> = Map::new(); put(m) * 10 + m.len() }";
+    assert_eq!(int(src), Value::Int(10));
+}
