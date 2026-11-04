@@ -44,8 +44,11 @@ host/    the kio binary: Wasmtime, cap-std, limits, host functions
   - README: the Example and Try it sections merge into one walkthrough using `kio run --dir` on examples/summarize.kio with a real `invoices.csv`.
   Done: summarize.kio and invoices.kio run on files in a temp dir and write their output; `../x`, `/etc/passwd`, a symlink to outside, an empty path and an existing target for `create` each return the right error and leave the filesystem unchanged; the README commands work as written.
 
-- [ ] **H2. Fuel and wall clock.** Wasmtime fuel and epoch interruption, defaults and flags from design.md.
-  Done: an infinite loop stops with an error naming fuel; a sleeping host call stops on the timeout.
+- [ ] **H2. Fuel and wall clock.**
+  - `Config::consume_fuel(true)` and `epoch_interruption(true)`. Each run sets its fuel (`--fuel`, default 1 billion) and an epoch deadline of `--timeout` seconds (default 10). One background thread per process increments the engine epoch every 100 ms; the deadline is `timeout * 10` ticks and traps when reached.
+  - Out of fuel prints "out of fuel (limit 1000000000; raise it with --fuel)"; the deadline prints "timed out after 10 s (raise it with --timeout)". Both exit 1. Flags take positive integers; anything else is a usage error, exit 2.
+  - `Kio::new` takes a `Limits { fuel, timeout_secs, stack }` struct with `Default` matching design.md; `with_stack` becomes a field.
+  Done: `while true {}` stops with the fuel error; a host function that sleeps past a 1 s timeout (a test-only `Caps` hook, or a test dir on a slow path if simpler) stops with the timeout error; examples still run within the defaults; both flags work from the CLI.
 
 - [ ] **H3. Memory and stack.** Wasmtime memory limit and `max_wasm_stack`.
   Done: a program allocating without bound and one recursing past the stack each stop with an error naming the limit.
