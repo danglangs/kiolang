@@ -33,6 +33,8 @@ world guest {
   record diag { start: u32, end: u32, message: string, hint: option<string> }
   // The authority report, one line per function.
   record report { lines: list<string> }
+  // What a run produced: the report, main's value printed, and whether main returned `Err`.
+  record outcome { report: report, value: string, failed: bool }
   // A grant binds a handle to the `main` parameter of the same name. The guest owns it for one run;
   // `borrow` would be tighter but hits a wit-bindgen 0.63 codegen bug inside a list of records.
   record dir-grant { name: string, dir: dir }
@@ -42,6 +44,6 @@ world guest {
   export check: func(source: string) -> result<report, list<diag>>;
 
   // Check, then run `main` with each grant bound to its parameter by name; a missing or
-  // mistyped grant is an error before any code runs. Ok holds the report and main's value, printed.
-  export run: func(source: string, dirs: list<dir-grant>, https: list<http-grant>) -> result<tuple<report, string>, list<diag>>;
+  // mistyped grant is an error before any code runs.
+  export run: func(source: string, dirs: list<dir-grant>, https: list<http-grant>) -> result<outcome, list<diag>>;
 }

@@ -33,9 +33,9 @@ host/    the kio binary: Wasmtime, cap-std, limits, host functions
   Done: examples/invoices.kio runs through the component with an in-memory `input` and `out` and `total.txt` holds `42`; a missing, duplicate or extra grant returns its diag and no import is called; a runtime error comes back as a diag with its span.
 
 - [x] **G4. Measure the guest.** Wasm stack and memory at the depth budget and on the primer, release build. Sets the `--stack` default; updates design.md limits and open_questions #11; decides bytecode VM timing.
-  Done: numbers recorded. Wasm stack: under 32 KB for the primer, about 900 KB at the depth budget, so `--stack` is 1 MB. Linear memory: 1.1 MB for a trivial program, 1.3 MB at the depth budget, 1.5 MB for the primer on 1,000 rows.
+  Done: numbers recorded. Wasm stack: under 32 KB for the primer, about 900 KB at the depth budget in a release host and over 1 MB in a debug one, so `--stack` is 2 MB. Linear memory: 1.1 MB for a trivial program, 1.3 MB at the depth budget, 1.5 MB for the primer on 1,000 rows.
 
-- [ ] **H1. `kio run` with real directories.**
+- [x] **H1. `kio run` with real directories.**
   - `kio run prog.kio --dir name=path ..`: each `--dir` opens `path` once with `cap_std::fs::Dir::open_ambient_dir` (the only ambient call in the host), granted as `name`. A path that does not exist or is not a directory is an error before the guest starts.
   - `dir.read` and `dir.create` go through that `cap_std::fs::Dir`, which refuses `..`, absolute paths and symlinks leading outside it. Empty paths and NUL bytes are `invalid-path` before cap-std is called. Escapes are `invalid-path`, missing files `not-found`, permission errors `denied`.
   - `create` fails with `denied` if the file exists: no overwrites. A missing parent directory is `not-found`.

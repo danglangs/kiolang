@@ -12,8 +12,10 @@ path = "src/main.rs"
 path = "src/lib.rs"
 
 [dependencies]
+cap-std = "4"
 wasmtime = "50"
 wasmtime-wasi = "50"
 
 [dev-dependencies]
 lang = { path = "../lang" }
+tempfile = "3"

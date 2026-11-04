@@ -1,5 +1,8 @@
-//! Runs the guest component under Wasmtime. `dir` is in memory until H1; `http` imports fail. Every import is counted.
-use std::collections::BTreeMap;
+//! Runs the guest component under Wasmtime. `dir` is backed by cap-std; `http` imports fail. Every import is counted.
+use cap_std::ambient_authority;
+use cap_std::fs::{Dir as RealDir, OpenOptions};
+use std::io::{self, Write};
+use std::path::Path;
 use std::time::Duration;
 use wasmtime::component::{Component, Linker, Resource, ResourceTable};
 use wasmtime::Result;
@@ -10,18 +13,18 @@ wasmtime::component::bindgen!({ world: "guest", path: "../caps.wit" });
 
 const GUEST: &[u8] = include_bytes!("../../target/guest/wasm32-wasip2/release/guest.wasm");
 
-/// An in-memory directory in the resource table.
-struct MemDir {
-    name: String,
-    files: BTreeMap<String, Vec<u8>>,
+/// A granted directory in the resource table. Every guest path goes through it.
+struct Granted(RealDir);
+
+/// Open a directory to grant: the host's only ambient filesystem call, made once per `--dir`.
+pub fn open_dir(path: &Path) -> io::Result<RealDir> {
+    RealDir::open_ambient_dir(path, ambient_authority())
 }
 
 /// Store state. `calls` counts every capability import the guest made.
 pub struct State {
     pub calls: u32,
     pub peak_memory: usize,
-    /// Directories the guest has dropped, kept for inspection.
-    closed: Vec<MemDir>,
     wasi: WasiCtx,
     table: ResourceTable,
 }
@@ -60,7 +63,6 @@ impl State {
         State {
             calls: 0,
             peak_memory: 0,
-            closed: Vec::new(),
             wasi,
             table: ResourceTable::new(),
         }
@@ -87,40 +89,61 @@ impl wasmtime::ResourceLimiter for State {
     }
 }
 
+use kio::caps::fs::IoErr;
+
 impl kio::caps::fs::Host for State {}
 impl kio::caps::net::Host for State {}
 
+/// Map a cap-std error. cap-std reports an escape as a custom `PermissionDenied`; a real OS
+/// permission error has no inner error. Anything unexpected is `denied`.
+fn io_err(e: &io::Error) -> IoErr {
+    match e.kind() {
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => IoErr::NotFound,
+        io::ErrorKind::PermissionDenied if e.get_ref().is_some() => IoErr::InvalidPath,
+        _ => IoErr::Denied,
+    }
+}
+
+/// Empty paths and NUL bytes never reach cap-std.
+fn check_path(path: &str) -> Result<(), IoErr> {
+    if path.is_empty() || path.contains('\0') {
+        return Err(IoErr::InvalidPath);
+    }
+    Ok(())
+}
+
 impl State {
-    /// The directory behind a guest handle; `None` for a handle that is not a live `MemDir`.
-    fn dir(&mut self, h: &Resource<kio::caps::fs::Dir>) -> Option<&mut MemDir> {
-        self.table.get_mut(&Resource::<MemDir>::new_borrow(h.rep())).ok()
+    /// The directory behind a guest handle; `None` for a handle that is not a live `Granted`.
+    fn dir(&mut self, h: &Resource<kio::caps::fs::Dir>) -> Option<&RealDir> {
+        let g = self.table.get(&Resource::<Granted>::new_borrow(h.rep())).ok()?;
+        Some(&g.0)
     }
 }
 
 impl kio::caps::fs::HostDir for State {
-    fn read(&mut self, d: Resource<kio::caps::fs::Dir>, path: String) -> Result<Vec<u8>, kio::caps::fs::IoErr> {
-        use kio::caps::fs::IoErr;
+    fn read(&mut self, d: Resource<kio::caps::fs::Dir>, path: String) -> Result<Vec<u8>, IoErr> {
         self.calls += 1;
+        check_path(&path)?;
         let dir = self.dir(&d).ok_or(IoErr::Denied)?;
-        dir.files.get(&path).cloned().ok_or(IoErr::NotFound)
+        dir.read(&path).map_err(|e| io_err(&e))
     }
 
-    fn create(
-        &mut self,
-        d: Resource<kio::caps::fs::Dir>,
-        path: String,
-        data: Vec<u8>,
-    ) -> Result<(), kio::caps::fs::IoErr> {
+    fn create(&mut self, d: Resource<kio::caps::fs::Dir>, path: String, data: Vec<u8>) -> Result<(), IoErr> {
         self.calls += 1;
-        let dir = self.dir(&d).ok_or(kio::caps::fs::IoErr::Denied)?;
-        dir.files.insert(path, data);
-        Ok(())
+        check_path(&path)?;
+        let dir = self.dir(&d).ok_or(IoErr::Denied)?;
+        // `create_new` fails if the path exists, in the same call that creates it.
+        let mut opts = OpenOptions::new();
+        opts.write(true).create_new(true);
+        let mut file = dir.open_with(&path, &opts).map_err(|e| match e.kind() {
+            io::ErrorKind::AlreadyExists => IoErr::Denied,
+            _ => io_err(&e),
+        })?;
+        file.write_all(&data).map_err(|e| io_err(&e))
     }
 
     fn drop(&mut self, d: Resource<kio::caps::fs::Dir>) -> Result<()> {
-        if let Ok(dir) = self.table.delete(Resource::<MemDir>::new_own(d.rep())) {
-            self.closed.push(dir);
-        }
+        let _ = self.table.delete(Resource::<Granted>::new_own(d.rep()));
         Ok(())
     }
 }
@@ -143,9 +166,10 @@ pub struct Kio {
 }
 
 impl Kio {
-    /// 1 MB of Wasm stack: the deepest recursion the depth budget allows needs about 900 KB (G4).
+    /// 2 MB of Wasm stack: the deepest recursion the depth budget allows needs about 900 KB in a
+    /// release host and more in a debug one (G4), so this leaves room in both.
     pub fn new() -> Result<Self> {
-        Self::with_stack(1 << 20)
+        Self::with_stack(2 << 20)
     }
 
     /// A guest with `bytes` of Wasm stack; running out traps, which the host reports as an error.
@@ -178,29 +202,20 @@ impl Kio {
         self.store.data().calls
     }
 
-    /// Check `source` and run `main` with an in-memory directory granted for each `(name, files)`.
+    /// Check `source` and run `main` with `dirs` granted by name.
     pub fn run(
         &mut self,
         source: &str,
-        dirs: Vec<(String, BTreeMap<String, Vec<u8>>)>,
-    ) -> Result<std::result::Result<(Report, String), Vec<Diag>>> {
+        dirs: Vec<(String, RealDir)>,
+    ) -> Result<std::result::Result<Outcome, Vec<Diag>>> {
         let mut grants = Vec::new();
-        for (name, files) in dirs {
-            let h = self.store.data_mut().table.push(MemDir {
-                name: name.clone(),
-                files,
-            })?;
+        for (name, dir) in dirs {
+            let h = self.store.data_mut().table.push(Granted(dir))?;
             grants.push(DirGrant {
                 name,
                 dir: Resource::new_own(h.rep()),
             });
         }
         self.guest.call_run(&mut self.store, source, &grants, &[])
-    }
-
-    /// Files of the dropped directory granted as `name`, once a run has finished.
-    pub fn files(&self, name: &str) -> Option<&BTreeMap<String, Vec<u8>>> {
-        let closed = &self.store.data().closed;
-        closed.iter().find(|d| d.name == name).map(|d| &d.files)
     }
 }

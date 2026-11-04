@@ -18,7 +18,7 @@ impl Guest for Component {
         }
     }
 
-    fn run(source: String, dirs: Vec<DirGrant>, https: Vec<HttpGrant>) -> Result<(Report, String), Vec<Diag>> {
+    fn run(source: String, dirs: Vec<DirGrant>, https: Vec<HttpGrant>) -> Result<Outcome, Vec<Diag>> {
         let program =
             lang::check(&source, &CapTable::v0()).map_err(|ds| ds.into_iter().map(diag).collect::<Vec<_>>())?;
         let mut grants = Grants(BTreeMap::new());
@@ -43,12 +43,13 @@ impl Guest for Component {
             return Err(errs);
         }
         match lang::run(&program, &mut grants) {
-            Ok(v) => Ok((
-                Report {
+            Ok(v) => Ok(Outcome {
+                report: Report {
                     lines: lang::report(&program).lines().map(String::from).collect(),
                 },
-                format!("{v:?}"),
-            )),
+                failed: matches!(&v, Value::Enum(en, 1, _) if en == "Result"),
+                value: format!("{v:?}"),
+            }),
             Err(e) => Err(vec![Diag {
                 start: e.span.start as u32,
                 end: e.span.end as u32,

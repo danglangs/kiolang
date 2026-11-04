@@ -6,72 +6,21 @@ Most languages today are not AI-safe: any line can read files, open sockets or s
 
 kio is a fresh language built around that idea, using Rust's ecosystem for speed and tooling. The goal is a general-purpose systems language: near-native speed, no garbage collector, memory and capability safe.
 
-**Status: the `lang` crate is complete for v0: it checks, reports and interprets the primer natively. Sandboxing (`guest`, `host`) is next. Progress: [docs/guest-host-todo.md](docs/guest-host-todo.md).**
+**Status: `kio check` and `kio run` work on real directories inside the Wasm sandbox. Limits and the network are next. Progress: [docs/guest-host-todo.md](docs/guest-host-todo.md).**
 
 ## Try it
 
-`kio check` checks a program inside the Wasm sandbox and prints its authority report; `kio run` comes next, so for now a temporary native runner runs programs. The language has `Int`, `Bool`, `Str`, `Bytes`, `List`, `Map`, structs, enums with `match`, `Option`, `Result` and `?`, `Dir` and `Http` capabilities, functions, `let`, `if`, `while`, `for`, `break`, `continue` and recursion. Requires Rust via rustup, with `rustup target add wasm32-wasip2`.
+Requires Rust via rustup, with `rustup target add wasm32-wasip2`.
 
 ```
 git clone https://github.com/danglangs/kiolang && cd kiolang
-cargo run -p host -- check examples/summarize.kio      # the authority report, from the sandbox
-cargo run -p lang --example run -- examples/fib.kio      # Int(6765)
-cargo run -p lang --example run -- examples/points.kio   # Int(25)
-cargo run -p lang --example run -- examples/sum.kio      # Int(-2)
-cargo run -p lang --example run -- examples/words.kio    # Int(3)
+mkdir -p examples/out
+cargo run -p host -- check examples/summarize.kio
+cargo run -p host -- run examples/summarize.kio --dir input=examples/in --dir out=examples/out
+cat examples/out/summary.csv
 ```
 
-Write your own as `hello.kio`. `main` takes no parameters and its return value is printed:
-
-```rust
-struct Point { x: Int, y: Int }
-
-fn dist2(a: Point, b: Point) -> Int {
-    let dx = a.x - b.x;
-    let dy = a.y - b.y;
-    dx * dx + dy * dy
-}
-
-fn main() -> Int {
-    let mut p = Point { x: 1, y: 2 };
-    p.x += 3;
-    dist2(p, Point { x: 0, y: 5 })
-}
-```
-
-```
-cargo run -p lang --example run -- hello.kio             # Int(25)
-```
-
-Mistakes are caught before anything runs, with a hint at the fix:
-
-```
-a.kio:3: error: cannot assign to `x`, it is not `mut`
-  hint: declare it with `let mut`
-b.kio:5: error: unknown name `cuont`
-  hint: did you mean `count`?
-```
-
-Capabilities type-check, but the runner grants none, so a program that takes `input: Dir` stops with `no grant for \`input: Dir\``. Granting real directories comes with the `kio` host. Until then, `cargo test -p lang --test cap` runs capability programs, including the primer's [examples/invoices.kio](examples/invoices.kio), against an in-memory directory.
-
-The runner prints the authority report before running. Run the test suite with `cargo test`.
-
-## Why
-
-Agents write code faster than people can review it. In most languages any line can open a file or a socket, so reviewing for safety means reading every line.
-
-kio-lang makes authority declarative:
-
-- There is no ambient I/O. Files and network exist only as **capability values** the host hands to `main`.
-- A function with no capability parameter cannot do I/O. The checker rejects the attempt at compile time, including through helpers.
-- The program names roles. The operator binds them to real directories and hosts, per run.
-- Programs run inside a Wasm sandbox whose only exits are a short list of host functions. If the checker has a bug, the sandbox still holds.
-
-A reviewer reads the signature of `main` and knows everything the program can ever touch. Because there is no ambient clock or randomness, a run is also deterministic given its inputs, so a replay reproduces a bug exactly.
-
-## Example
-
-The agent writes:
+The agent wrote [examples/summarize.kio](examples/summarize.kio):
 
 ```rust
 // Pure computation: no Dir in the signature, so no I/O is possible.
@@ -86,20 +35,38 @@ fn main(input: Dir, out: Dir) -> Result<(), IoErr> {
 }
 ```
 
-This is [examples/summarize.kio](examples/summarize.kio). The operator runs it:
-
-```
-kio run prog.kio --dir input=/srv/jobs/42/in --dir out=/srv/jobs/42/out
-```
-
-The checker reports:
+`check` prints the authority report, from inside the Wasm sandbox:
 
 ```
 main      : input read, out create
 summarize : none
 ```
 
-Every path in the program is relative to one of the two granted directories. `..`, absolute paths and symlinks out are refused by the host.
+`run` prints the report, then `main`'s value, and `out/summary.csv` holds the byte count of `input/invoices.csv`. Every path in the program is relative to one granted directory: `..`, absolute paths and symlinks out are refused by the host, and `create` never overwrites, so run it again after `rm examples/out/summary.csv`.
+
+Mistakes are caught before anything runs, with a hint at the fix:
+
+```
+a.kio:3: error: cannot assign to `x`, it is not `mut`
+  hint: declare it with `let mut`
+b.kio:5: error: unknown name `cuont`
+  hint: did you mean `count`?
+```
+
+The language has `Int`, `Bool`, `Str`, `Bytes`, `List`, `Map`, structs, enums with `match`, `Option`, `Result` and `?`, `Dir` and `Http` capabilities, functions, `let`, `if`, `while`, `for`, `break`, `continue` and recursion; see [docs/language.md](docs/language.md). Pure programs also run natively with `cargo run -p lang --example run -- examples/fib.kio`. Run the test suite with `cargo test`.
+
+## Why
+
+Agents write code faster than people can review it. In most languages any line can open a file or a socket, so reviewing for safety means reading every line.
+
+kio-lang makes authority declarative:
+
+- There is no ambient I/O. Files and network exist only as **capability values** the host hands to `main`.
+- A function with no capability parameter cannot do I/O. The checker rejects the attempt at compile time, including through helpers.
+- The program names roles. The operator binds them to real directories and hosts, per run.
+- Programs run inside a Wasm sandbox whose only exits are a short list of host functions. If the checker has a bug, the sandbox still holds.
+
+A reviewer reads the signature of `main` and knows everything the program can ever touch. Because there is no ambient clock or randomness, a run is also deterministic given its inputs, so a replay reproduces a bug exactly.
 
 ## Threat model
 

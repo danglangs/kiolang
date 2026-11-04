@@ -1,6 +1,5 @@
 use host::Kio;
 use lang::{check, CapTable};
-use std::collections::BTreeMap;
 
 #[test]
 fn summarize_reports_two_lines() {
@@ -36,41 +35,134 @@ fn check_is_deterministic_across_instances() {
     assert_eq!(run(), run());
 }
 
-type Dirs = Vec<(String, BTreeMap<String, Vec<u8>>)>;
-
-fn dir(name: &str, files: &[(&str, &[u8])]) -> (String, BTreeMap<String, Vec<u8>>) {
-    let files = files.iter().map(|(p, b)| (p.to_string(), b.to_vec()));
-    (name.to_string(), files.collect())
+/// A temp directory with `files`, opened as a grant.
+fn dir(files: &[(&str, &[u8])]) -> (tempfile::TempDir, cap_std::fs::Dir) {
+    let t = tempfile::tempdir().unwrap();
+    for (p, b) in files {
+        std::fs::write(t.path().join(p), b).unwrap();
+    }
+    let d = host::open_dir(t.path()).unwrap();
+    (t, d)
 }
 
 fn invoices() -> String {
     std::fs::read_to_string("../examples/invoices.kio").unwrap()
 }
 
-fn grants() -> Dirs {
-    vec![dir("input", &[("invoices.csv", b"a,40\nb,2\nbad\n")]), dir("out", &[])]
-}
-
 #[test]
 fn invoices_writes_total() {
+    let (_i, input) = dir(&[("invoices.csv", b"a,40\nb,2\nbad\n")]);
+    let (out_t, out) = dir(&[]);
     let mut kio = Kio::new().unwrap();
-    let (report, value) = kio.run(&invoices(), grants()).unwrap().unwrap();
-    assert_eq!(report.lines.len(), 4);
-    assert_eq!(value, r#"Enum("Result", 0, [Unit])"#);
-    assert_eq!(kio.files("out").unwrap()["total.txt"], b"42");
+    let grants = vec![("input".to_string(), input), ("out".to_string(), out)];
+    let out = kio.run(&invoices(), grants).unwrap().unwrap();
+    assert_eq!(out.report.lines.len(), 4);
+    assert_eq!(out.value, r#"Enum("Result", 0, [Unit])"#);
+    assert!(!out.failed);
+    assert_eq!(std::fs::read(out_t.path().join("total.txt")).unwrap(), b"42");
     assert_eq!(kio.import_calls(), 2);
 }
 
 #[test]
-fn missing_file_is_not_found() {
-    let src = "fn main(d: Dir) -> Result<Bytes, IoErr> { d.read(\"x\") }";
-    let mut kio = Kio::new().unwrap();
-    let (_, value) = kio.run(src, vec![dir("d", &[])]).unwrap().unwrap();
-    assert_eq!(value, r#"Enum("Result", 1, [Enum("IoErr", 0, [])])"#);
-    assert_eq!(kio.import_calls(), 1);
+fn summarize_writes_summary() {
+    let src = std::fs::read_to_string("../examples/summarize.kio").unwrap();
+    let (_i, input) = dir(&[("invoices.csv", b"12345")]);
+    let (out_t, out) = dir(&[]);
+    let grants = vec![("input".to_string(), input), ("out".to_string(), out)];
+    Kio::new().unwrap().run(&src, grants).unwrap().unwrap();
+    assert_eq!(std::fs::read(out_t.path().join("summary.csv")).unwrap(), b"5");
 }
 
-fn rejected(grants: Dirs, message: &str, hint: &str) {
+/// Run `main(d: Dir)` as `body` on `d` and return the printed value.
+fn on(d: cap_std::fs::Dir, body: &str) -> String {
+    let src = format!(
+        "fn main(d: Dir) -> Result<{}, IoErr> {{ {body} }}",
+        if body.contains("create") { "()" } else { "Bytes" }
+    );
+    Kio::new()
+        .unwrap()
+        .run(&src, vec![("d".into(), d)])
+        .unwrap()
+        .unwrap()
+        .value
+}
+
+const NOT_FOUND: &str = r#"Enum("Result", 1, [Enum("IoErr", 0, [])])"#;
+const DENIED: &str = r#"Enum("Result", 1, [Enum("IoErr", 1, [])])"#;
+const INVALID: &str = r#"Enum("Result", 1, [Enum("IoErr", 3, [])])"#;
+
+#[test]
+fn read_errors() {
+    let (t, d) = dir(&[("a", b"x")]);
+    std::fs::write(t.path().join("secret"), "s").unwrap();
+    std::fs::create_dir_all(t.path().join("sub/in")).unwrap();
+    let read = |p: &str| {
+        let d = host::open_dir(&t.path().join("sub")).unwrap();
+        on(d, &format!("d.read(\"{p}\")"))
+    };
+    assert_eq!(on(d, "d.read(\"missing\")"), NOT_FOUND);
+    assert_eq!(read("../secret"), INVALID);
+    assert_eq!(read("/etc/passwd"), INVALID);
+    assert_eq!(read("in/../../secret"), INVALID);
+    assert_eq!(read(""), INVALID);
+    assert_eq!(read("a\u{0}b"), INVALID);
+    assert_eq!(read("no/such/file"), NOT_FOUND);
+}
+
+#[test]
+fn symlinks_out_are_refused() {
+    let outer = tempfile::tempdir().unwrap();
+    std::fs::write(outer.path().join("secret"), "s").unwrap();
+    std::fs::create_dir(outer.path().join("outside")).unwrap();
+    let root = outer.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    use std::os::unix::fs::symlink;
+    symlink(outer.path().join("secret"), root.join("file")).unwrap();
+    symlink(outer.path().join("outside"), root.join("dir")).unwrap();
+    symlink("../secret", root.join("rel")).unwrap();
+    symlink("/etc/passwd", root.join("abs")).unwrap();
+    let d = || host::open_dir(&root).unwrap();
+    for p in ["file", "rel", "abs", "dir/x"] {
+        assert_eq!(on(d(), &format!("d.read(\"{p}\")")), INVALID, "{p}");
+    }
+    assert_eq!(on(d(), "d.create(\"dir/new\", \"x\".to_bytes())"), INVALID);
+    assert_eq!(on(d(), "d.create(\"file\", \"x\".to_bytes())"), DENIED);
+    assert_eq!(std::fs::read(outer.path().join("secret")).unwrap(), b"s");
+    assert_eq!(std::fs::read_dir(outer.path().join("outside")).unwrap().count(), 0);
+}
+
+#[test]
+fn create_errors_leave_filesystem_unchanged() {
+    let outer = tempfile::tempdir().unwrap();
+    let root = outer.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("old"), "keep").unwrap();
+    std::fs::create_dir(root.join("in")).unwrap();
+    let d = || host::open_dir(&root).unwrap();
+    let ok = r#"Enum("Result", 0, [Unit])"#;
+    assert_eq!(on(d(), "d.create(\"old\", \"new\".to_bytes())"), DENIED);
+    assert_eq!(std::fs::read(root.join("old")).unwrap(), b"keep");
+    for p in ["../x", "/tmp/kio-x", "", "in/../../x"] {
+        assert_eq!(on(d(), &format!("d.create(\"{p}\", \"x\".to_bytes())")), INVALID, "{p}");
+    }
+    assert_eq!(on(d(), "d.create(\"nodir/x\", \"x\".to_bytes())"), NOT_FOUND);
+    assert!(!outer.path().join("x").exists() && !root.join("nodir").exists());
+    assert_eq!(on(d(), "d.create(\"new\", \"x\".to_bytes())"), ok);
+    assert_eq!(std::fs::read(root.join("new")).unwrap(), b"x");
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 3);
+}
+
+#[test]
+fn open_dir_refuses_missing_and_files() {
+    let t = tempfile::tempdir().unwrap();
+    std::fs::write(t.path().join("f"), "x").unwrap();
+    assert!(host::open_dir(&t.path().join("nope")).is_err());
+    assert!(host::open_dir(&t.path().join("f")).is_err());
+}
+
+fn rejected(names: &[&str], message: &str, hint: &str) {
+    let ts: Vec<_> = names.iter().map(|_| dir(&[])).collect();
+    let grants = names.iter().zip(ts).map(|(n, (_t, d))| (n.to_string(), d)).collect();
     let mut kio = Kio::new().unwrap();
     let diags = kio.run(&invoices(), grants).unwrap().unwrap_err();
     assert_eq!(diags.len(), 1);
@@ -81,22 +173,27 @@ fn rejected(grants: Dirs, message: &str, hint: &str) {
 
 #[test]
 fn duplicate_grant() {
-    let mut g = grants();
-    g.push(dir("out", &[]));
-    rejected(g, "grant `out` is given more than once", "one name");
+    rejected(
+        &["input", "out", "out"],
+        "grant `out` is given more than once",
+        "one name",
+    );
 }
 
 #[test]
 fn extra_grant() {
-    let mut g = grants();
-    g.push(dir("extra", &[]));
-    rejected(g, "grant `extra` is not a parameter of `main`", "input, out");
+    rejected(
+        &["input", "out", "extra"],
+        "grant `extra` is not a parameter of `main`",
+        "input, out",
+    );
 }
 
 #[test]
 fn missing_grant_is_no_grant_error() {
+    let (_t, d) = dir(&[]);
     let mut kio = Kio::new().unwrap();
-    let diags = kio.run(&invoices(), vec![dir("input", &[])]).unwrap().unwrap_err();
+    let diags = kio.run(&invoices(), vec![("input".into(), d)]).unwrap().unwrap_err();
     assert_eq!(diags[0].message, "no grant for `out: Dir`");
     assert_eq!(kio.import_calls(), 0);
 }
@@ -104,17 +201,43 @@ fn missing_grant_is_no_grant_error() {
 #[test]
 fn runtime_error_has_span() {
     let src = "fn main(d: Dir) -> Int {\n    let xs: List<Int> = [];\n    xs[1]\n}\n";
-    let mut kio = Kio::new().unwrap();
-    let diags = kio.run(src, vec![dir("d", &[])]).unwrap().unwrap_err();
+    let (_t, d) = dir(&[]);
+    let diags = Kio::new()
+        .unwrap()
+        .run(src, vec![("d".into(), d)])
+        .unwrap()
+        .unwrap_err();
     assert_eq!(diags.len(), 1);
     assert!(diags[0].end > diags[0].start);
     assert!(diags[0].hint.is_none());
 }
 
-/// G4: on the default stack the deepest recursion stops with the depth error, never a trap.
+/// G4: on the default stack the deepest recursion stops with the depth error, never a trap,
+/// in debug and release builds of the host.
 #[test]
 fn depth_budget_fits_the_default_stack() {
     let src = "fn down(n: Int) -> Int { if n == 0 { 0 } else { down(n - 1) } } fn main() -> Int { down(100000) }";
     let diags = Kio::new().unwrap().run(src, vec![]).unwrap().unwrap_err();
     assert_eq!(diags[0].message, "evaluation is too deep");
+}
+
+#[test]
+fn small_stack_traps_with_stack_overflow() {
+    let src = "fn down(n: Int) -> Int { if n == 0 { 0 } else { down(n - 1) } } fn main() -> Int { down(1000) }";
+    let err = Kio::with_stack(64 << 10).unwrap().run(src, vec![]).unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<wasmtime::Trap>(),
+        Some(&wasmtime::Trap::StackOverflow)
+    );
+}
+
+/// `main` returning `Err` is a failed run: the host exits nonzero and still shows the value.
+#[test]
+fn main_err_marks_the_run_failed() {
+    let (_i, input) = dir(&[("invoices.csv", b"a,1\n")]);
+    let (_o, out) = dir(&[("total.txt", b"old")]);
+    let grants = vec![("input".to_string(), input), ("out".to_string(), out)];
+    let out = Kio::new().unwrap().run(&invoices(), grants).unwrap().unwrap();
+    assert!(out.failed);
+    assert_eq!(out.value, r#"Enum("Result", 1, [Enum("IoErr", 1, [])])"#);
 }
