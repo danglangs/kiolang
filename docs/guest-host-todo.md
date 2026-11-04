@@ -35,8 +35,14 @@ host/    the kio binary: Wasmtime, cap-std, limits, host functions
 - [x] **G4. Measure the guest.** Wasm stack and memory at the depth budget and on the primer, release build. Sets the `--stack` default; updates design.md limits and open_questions #11; decides bytecode VM timing.
   Done: numbers recorded. Wasm stack: under 32 KB for the primer, about 900 KB at the depth budget, so `--stack` is 1 MB. Linear memory: 1.1 MB for a trivial program, 1.3 MB at the depth budget, 1.5 MB for the primer on 1,000 rows.
 
-- [ ] **H1. `kio run` with real directories.** `--dir name=path` opens each with cap-std; the `dir` resource reads and creates beneath its root. The README's Example and Try it sections merge into one real walkthrough.
-  Done: examples/summarize.kio runs on files in a temp dir; `..`, absolute paths and outward symlinks return `invalid-path`; the README commands work as written.
+- [ ] **H1. `kio run` with real directories.**
+  - `kio run prog.kio --dir name=path ..`: each `--dir` opens `path` once with `cap_std::fs::Dir::open_ambient_dir` (the only ambient call in the host), granted as `name`. A path that does not exist or is not a directory is an error before the guest starts.
+  - `dir.read` and `dir.create` go through that `cap_std::fs::Dir`, which refuses `..`, absolute paths and symlinks leading outside it. Empty paths and NUL bytes are `invalid-path` before cap-std is called. Escapes are `invalid-path`, missing files `not-found`, permission errors `denied`.
+  - `create` fails with `denied` if the file exists: no overwrites. A missing parent directory is `not-found`.
+  - Output: the report, then `main`'s value; diags as in `kio check`, exit 1. A stack-overflow trap prints "stack overflow", exit 1.
+  - Replace G3's in-memory backend with cap-std; host tests use temp directories (`tempfile` as a dev-dependency).
+  - README: the Example and Try it sections merge into one walkthrough using `kio run --dir` on examples/summarize.kio with a real `invoices.csv`.
+  Done: summarize.kio and invoices.kio run on files in a temp dir and write their output; `../x`, `/etc/passwd`, a symlink to outside, an empty path and an existing target for `create` each return the right error and leave the filesystem unchanged; the README commands work as written.
 
 - [ ] **H2. Fuel and wall clock.** Wasmtime fuel and epoch interruption, defaults and flags from design.md.
   Done: an infinite loop stops with an error naming fuel; a sleeping host call stops on the timeout.

@@ -20,3 +20,4 @@ Decisions taken without the owner, cheap to undo. Each: the question, what was c
 | 14 | How the host gets the guest bytes | `host/build.rs` builds the guest into `target/guest` and embeds it, so one `cargo build` gives a self-contained `kio` | Build the guest as a separate CI step and load the file at runtime |
 | 15 | WASI imported by Rust std in the guest | Linked with nothing granted: no preopens, env, args, network or stdio; frozen clocks and a fixed random seed so runs are deterministic. kio code cannot reach WASI | Build the guest without std WASI imports (no_std or a custom target) to remove them entirely |
 | 16 | A grant that matches no `main` parameter | Error before any code runs, like a missing grant, so an operator typo (`--dir inptu=..`) is caught | Allow and ignore unused grants |
+| 17 | `Dir.create` on an existing file | Fails with `denied`: no overwrites | Add an explicit `write` method later, or a grant flag allowing overwrite |
