@@ -25,8 +25,12 @@ host/    the kio binary: Wasmtime, cap-std, limits, host functions
 - [x] **G2. `kio check` through Wasmtime.** `host` crate, binary `kio`. `host/build.rs` runs `cargo build -p guest --target wasm32-wasip2 --release --target-dir target/guest` (its own target dir, so it does not wait on the outer build's lock) with `rerun-if-changed` on `guest/`, `lang/src/` and `caps.wit`; the host embeds the result with `include_bytes!`. `bindgen!` on world `guest`; `fs` and `net` import implementations return an error and record that they were called. `kio check prog.kio` prints the report, or each diag as `path:line: error: msg` and `  hint: ..`, exit 1.
   Done: tests call the export on examples/summarize.kio (two report lines) and on a program with an unknown name (diag identical to `lang::check`'s); no import is called.
 
-- [ ] **G3. Guest `run` with an in-memory host.** Guest: implement `lang::Caps` by forwarding to the imports, mapping each `main` parameter name to its grant's handle (#7). Host tests: an in-memory `dir` resource.
-  Done: examples/invoices.kio runs through the component and returns the report and `main`'s value; a missing grant returns the no-grant diag and no import is called.
+- [ ] **G3. Guest `run` with an in-memory host.**
+  - Guest: `run(source, dirs, https)` checks, then calls `lang::run` with a `Caps` that holds each grant by name. `has(name, ty)` is true when a grant of that kind has that name. `call` converts `Value` arguments to WIT types (`Str` to `string`, `Bytes` to `list<u8>`), calls the import on that grant's handle, and converts the result back to `Value::Enum("Result", ..)`, with `IoErr` and `HttpErr` cases by declaration index (`Status(u16)` as `Int`).
+  - Grant errors before any code runs, each a diag with a hint: a duplicate grant name; a grant that matches no `main` parameter ("grant `x` is not a parameter of `main`"). A missing grant is `lang::run`'s existing no-grant error.
+  - Ok result: the report lines and `main`'s value printed with `{:?}`. A `RunErr` becomes one diag with its span and no hint.
+  - Host: `dir` resources backed by an in-memory `BTreeMap<String, Vec<u8>>` in the store (H1 replaces this with cap-std). `read` of a missing file is `not-found`; `create` stores the bytes. Every call is counted. `Kio::run(source, dirs)` for tests.
+  Done: examples/invoices.kio runs through the component with an in-memory `input` and `out` and `total.txt` holds `42`; a missing, duplicate or extra grant returns its diag and no import is called; a runtime error comes back as a diag with its span.
 
 - [ ] **G4. Measure the guest.** Wasm stack and memory at the depth budget and on the primer, release build. Sets the `--stack` default; updates design.md limits and open_questions #11; decides bytecode VM timing.
   Done: numbers recorded.
