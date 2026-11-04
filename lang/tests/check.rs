@@ -146,3 +146,101 @@ fn one_diag_per_function_in_source_order() {
 fn parse_errors_surface() {
     reject("fn main( {");
 }
+
+const P: &str = "struct P { a: Int, b: Q } struct Q { c: Int } ";
+
+fn reject_p(body: &str) -> (String, String) {
+    reject(&format!("{P}{body}"))
+}
+
+#[test]
+fn accepts_structs() {
+    ok(&format!(
+        "{P}fn f(p: P) -> Q {{ p.b }}
+         fn main() -> Int {{
+             let mut p = P {{ b: Q {{ c: 1 }}, a: 2 }};
+             p.b.c += p.a; p.a = f(p).c; p.a
+         }}"
+    ));
+    ok("struct E {} fn main() { let e = E {}; }");
+}
+
+#[test]
+fn struct_declaration_errors() {
+    let (msg, at) = reject("struct A {} struct A {} fn main() {}");
+    assert_eq!((msg.as_str(), at.as_str()), ("duplicate struct `A`", "struct A {}"));
+    let (msg, at) = reject("struct A { x: Int, x: Str } fn main() {}");
+    assert_eq!((msg.as_str(), at.as_str()), ("duplicate field `x`", "x: Str"));
+    let (_, at) = reject("struct A { x: B } fn main() {}");
+    assert_eq!(at, "B");
+}
+
+#[test]
+fn recursive_structs() {
+    let (msg, at) = reject("struct A { a: A } fn main() {}");
+    assert_eq!(
+        (msg.as_str(), at.as_str()),
+        ("struct `A` contains itself", "struct A { a: A }")
+    );
+    // Each struct on the cycle is reported.
+    let src = "struct A { b: B } struct B { a: A } fn main() {}";
+    assert_eq!(check(src, &CapTable::default()).unwrap_err().len(), 2);
+    // Sharing a struct is not recursion.
+    ok("struct A { x: C, y: C } struct C {} fn main() {}");
+}
+
+#[test]
+fn struct_literal_errors() {
+    let (msg, at) = reject_p("fn main() { Z { a: 1 }; }");
+    assert_eq!((msg.as_str(), at.as_str()), ("unknown struct `Z`", "Z { a: 1 }"));
+    let (msg, at) = reject_p("fn main() { Q { d: 1, c: 1 }; }");
+    assert_eq!((msg.as_str(), at.as_str()), ("no field `d` on Q", "1"));
+    let (msg, at) = reject_p("fn main() { P { a: 1 }; }");
+    assert_eq!((msg.as_str(), at.as_str()), ("missing field `b` in `P`", "P { a: 1 }"));
+    let (msg, at) = reject_p("fn main() { Q { c: 1, c: 2 }; }");
+    assert_eq!((msg.as_str(), at.as_str()), ("duplicate field `c`", "2"));
+    let (msg, at) = reject_p("fn main() { Q { c: true }; }");
+    assert_eq!((msg.as_str(), at.as_str()), ("expected Int, found Bool", "true"));
+    reject_p("fn main() { P { a: 1, b: 2 }; }");
+}
+
+#[test]
+fn field_access_errors() {
+    let (msg, at) = reject_p("fn main() { let p = P { a: 1, b: Q { c: 1 } }; p.z; }");
+    assert_eq!((msg.as_str(), at.as_str()), ("no field `z` on P", "p.z"));
+    let diags = check(
+        &format!("{P}fn main() {{ let q = Q {{ c: 1 }}; q.z; }}"),
+        &CapTable::default(),
+    )
+    .unwrap_err();
+    assert_eq!(diags[0].hint.as_deref(), Some("fields: c"));
+    let (msg, _) = reject_p("fn main() { let x = 1; x.f; }");
+    assert_eq!(msg, "no field `f` on Int");
+}
+
+#[test]
+fn field_assignment_errors() {
+    let (msg, at) = reject_p("fn main() { let q = Q { c: 1 }; q.c = 2; }");
+    assert_eq!(
+        (msg.as_str(), at.as_str()),
+        ("cannot assign to `q`, it is not `mut`", "q")
+    );
+    reject_p("fn f(q: Q) { q.c = 1; } fn main() {}");
+    let (msg, _) = reject_p("fn main() { let mut q = Q { c: 1 }; q.c = true; }");
+    assert_eq!(msg, "expected Int, found Bool");
+    reject_p("fn main() { let mut q = Q { c: 1 }; q.z = 1; }");
+    reject_p("fn main() { let mut q = Q { c: 1 }; q.c += \"a\"; }");
+    reject_p("fn main() { let mut p = P { a: 1, b: Q { c: 1 } }; p.b += 1; }");
+}
+
+#[test]
+fn struct_equality_is_rejected() {
+    let (msg, _) = reject_p("fn main() -> Bool { Q { c: 1 } == Q { c: 1 } }");
+    assert_eq!(msg, "`==` cannot be applied to Q and Q");
+}
+
+#[test]
+fn struct_type_mismatch() {
+    let (msg, _) = reject_p("fn f(p: P) {} fn main() { f(Q { c: 1 }); }");
+    assert_eq!(msg, "expected P, found Q");
+}

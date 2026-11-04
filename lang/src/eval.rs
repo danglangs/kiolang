@@ -15,6 +15,8 @@ pub enum Value {
     Bool(bool),
     Str(String),
     Unit,
+    /// The struct's name and its field values in declaration order.
+    Struct(String, Vec<Value>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +45,7 @@ fn fail(span: Span, msg: &str) -> Box<Stop> {
 pub fn run(p: &Program, _caps: &mut dyn Caps) -> Result<Value, RunErr> {
     let mut it = Interp {
         funcs: &p.funcs,
+        structs: &p.structs,
         locals: Vec::new(),
         base: 0,
         depth: 0,
@@ -59,6 +62,7 @@ pub fn run(p: &Program, _caps: &mut dyn Caps) -> Result<Value, RunErr> {
 
 struct Interp<'a> {
     funcs: &'a HashMap<String, Fn>,
+    structs: &'a HashMap<String, Struct>,
     /// Locals of all running calls, innermost last; a block truncates it on exit.
     locals: Vec<(String, Value)>,
     /// Index of the running function's first local; callers' locals below it are invisible.
@@ -133,15 +137,28 @@ impl Interp<'_> {
     }
 
     fn assign(&mut self, target: &Expr, op: &str, value: &Expr, span: Span) -> Result<(), Box<Stop>> {
-        let ExprKind::Name(name) = &target.kind else {
+        let mut path = Vec::new();
+        let mut root = target;
+        while let ExprKind::Field(base, field) = &root.kind {
+            path.push(field.as_str());
+            root = base;
+        }
+        let ExprKind::Name(name) = &root.kind else {
             unreachable!("checked target");
         };
         let mut v = self.expr(value)?;
-        if op != "=" {
-            let old = self.lookup(name).clone();
-            v = binary(&op[..1], old, v, span)?;
+        let structs = self.structs;
+        let mut slot = self.lookup(name);
+        for field in path.into_iter().rev() {
+            let Value::Struct(s, vals) = slot else {
+                unreachable!("checked field");
+            };
+            slot = &mut vals[field_index(structs, s, field)];
         }
-        *self.lookup(name) = v;
+        if op != "=" {
+            v = binary(&op[..1], slot.clone(), v, span)?;
+        }
+        *slot = v;
         Ok(())
     }
 
@@ -172,10 +189,26 @@ impl Interp<'_> {
             ExprKind::If(cond, then, els) => self.if_expr(cond, then, els.as_deref()),
             ExprKind::Block(b) => self.block(b),
             ExprKind::Call(callee, args) => self.call_expr(callee, args),
-            ExprKind::Method(..) | ExprKind::Field(..) | ExprKind::Index(..) | ExprKind::StructLit(..) => {
-                unreachable!("rejected by check")
-            }
+            ExprKind::Field(base, field) => self.field(base, field),
+            ExprKind::StructLit(name, inits) => self.struct_lit(name, inits),
+            ExprKind::Method(..) | ExprKind::Index(..) => unreachable!("rejected by check"),
         }
+    }
+
+    fn field(&mut self, base: &Expr, field: &str) -> Res {
+        let Value::Struct(s, mut vals) = self.expr(base)? else {
+            unreachable!("checked field");
+        };
+        Ok(vals.swap_remove(field_index(self.structs, &s, field)))
+    }
+
+    /// Fields are evaluated in source order and stored in declaration order.
+    fn struct_lit(&mut self, name: &str, inits: &[(String, Expr)]) -> Res {
+        let mut vals = vec![Value::Unit; inits.len()];
+        for (field, x) in inits {
+            vals[field_index(self.structs, name, field)] = self.expr(x)?;
+        }
+        Ok(Value::Struct(name.to_string(), vals))
     }
 
     fn call_expr(&mut self, callee: &Expr, args: &[Expr]) -> Res {
@@ -218,6 +251,11 @@ impl Interp<'_> {
             Some(_) => unreachable!("else is a block or if"),
         }
     }
+}
+
+fn field_index(structs: &HashMap<String, Struct>, name: &str, field: &str) -> usize {
+    let fields = &structs[name].fields;
+    fields.iter().position(|f| f.name == field).expect("checked field")
 }
 
 /// A `return` ends the call with its value; errors keep unwinding.

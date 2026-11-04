@@ -82,7 +82,7 @@ Tasks 4 onward are outlines. Each gets a pinned spec, like tasks 1 to 3, before 
   - `struct` stops being a later-task keyword.
   Done: parse tests for a declaration, a literal with nested literal, a field chain `a.b.c`, a literal in parentheses in an `if` head, and rejection of shorthand.
 
-- [ ] **4b. Struct types and values.** Checker and interpreter.
+- [x] **4b. Struct types and values.** Checker and interpreter.
   - `Ty` becomes a non-`Copy` enum with `Ty::Struct(String)` and `Display` instead of `name()`.
   - Collect struct declarations before signatures. Errors: duplicate struct, duplicate field, unknown field type, a struct that contains itself directly or through other structs (no recursive types; use indexes into a `List` later).
   - Literal: every field exactly once, each with its declared type. Errors: unknown struct, unknown field, missing field (name it), duplicate field.

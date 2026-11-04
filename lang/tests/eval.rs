@@ -134,3 +134,55 @@ fn evaluation_depth() {
         format!("fn down(n: Int) -> Int {{ if n == 0 {{ 0 }} else {{ {e} }} }} fn main() -> Int {{ down(100000) }}");
     fails(&nested, "evaluation is too deep");
 }
+
+const P: &str = "struct P { a: Int, b: Q } struct Q { c: Int } ";
+
+fn p_main(body: &str) -> Value {
+    int(&format!("{P}{body}"))
+}
+
+#[test]
+fn struct_value_and_field_read() {
+    let v = p_main("fn main() -> Q { let p = P { b: Q { c: 7 }, a: 1 }; p.b }");
+    assert_eq!(v, Value::Struct("Q".into(), vec![Value::Int(7)]));
+    let v = p_main("fn main() -> P { P { b: Q { c: 7 }, a: 1 } }");
+    let q = Value::Struct("Q".into(), vec![Value::Int(7)]);
+    assert_eq!(v, Value::Struct("P".into(), vec![Value::Int(1), q]));
+    assert_eq!(
+        p_main("fn main() -> Int { P { a: 1, b: Q { c: 7 } }.b.c }"),
+        Value::Int(7)
+    );
+}
+
+#[test]
+fn field_assignment() {
+    let src = "fn main() -> Int {
+        let mut p = P { a: 1, b: Q { c: 2 } };
+        p.b.c = 10; p.b.c += 5; p.a -= 4;
+        p.a + p.b.c
+    }";
+    assert_eq!(p_main(src), Value::Int(12));
+    fails(
+        &format!("{P}fn main() {{ let mut q = Q {{ c: 9223372036854775807 }}; q.c += 1; }}"),
+        "Int overflow",
+    );
+}
+
+#[test]
+fn let_copies_structs() {
+    let src = "fn main() -> Int {
+        let a = Q { c: 1 }; let mut b = a; b.c = 2;
+        a.c * 10 + b.c
+    }";
+    assert_eq!(p_main(src), Value::Int(12));
+}
+
+#[test]
+fn arguments_are_copied() {
+    let src = "fn bump(mut_q: Q) -> Int { let mut q = mut_q; q.c += 1; q.c }
+               fn main() -> Int { let q = Q { c: 1 }; bump(q) * 10 + q.c }";
+    assert_eq!(p_main(src), Value::Int(21));
+    let src = "fn set(p: P) -> P { let mut p = p; p.b.c = 5; p }
+               fn main() -> Int { let p = P { a: 0, b: Q { c: 1 } }; let r = set(p); p.b.c * 10 + r.b.c }";
+    assert_eq!(p_main(src), Value::Int(15));
+}
