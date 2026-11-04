@@ -53,8 +53,14 @@ host/    the kio binary: Wasmtime, cap-std, limits, host functions
 - [x] **H3. Memory and stack.** Wasmtime memory limit and `max_wasm_stack`.
   Done: a program allocating without bound and one recursing past the stack each stop with an error naming the limit.
 
-- [ ] **H4. Host-call and I/O quotas.** Call count, total bytes and per-read size, enforced in the host functions.
-  Done: one test per quota.
+- [ ] **H4. Host-call and I/O quotas.**
+  - Bindgen with trappable imports, so a host function can stop the run (`wasmtime::Result<Result<T, IoErr>>`).
+  - `--calls n` (default 10,000): the call that exceeds it stops the run: "too many host calls (limit 10000; raise it with --calls)".
+  - `--io mb` (default 100): total bytes read plus written; the call that exceeds it stops the run: "too much I/O (limit 100 MB; raise it with --io)".
+  - Per read: 10 MB, fixed. A larger file returns `too-large` to the program (read through `take(cap + 1)`, so a growing file cannot slip past). This also bounds how long a `Dir` call runs; per-call timeouts come with `Http` in N1.
+  - `create`: if writing fails after the file is created, remove it, so a retry is not refused as an overwrite.
+  - Stopped runs are explained by `Kio::explain` like the other limits.
+  Done: one test per quota (calls, total I/O, per-read `too-large` handled by the program); a failed write leaves no file (simulate with a test-hooks failure); flags work from the CLI.
 
 - [ ] **H5. Adversarial host review.** An independent agent attacks the host: path escapes, symlink races, forged and wrong-kind handles, quota bypasses, panics in host functions.
   Done: every finding fixed or logged in open_questions.
