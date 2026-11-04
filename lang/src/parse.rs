@@ -279,6 +279,13 @@ impl Parser {
         } else {
             let name = self.ident()?;
             let args = if self.eat("<") {
+                if self.at(">") {
+                    return Err(err(
+                        self.span(),
+                        "empty type arguments",
+                        Some(&format!("write `{name}` without `<>`")),
+                    ));
+                }
                 self.list(">", Self::ty)?
             } else {
                 Vec::new()

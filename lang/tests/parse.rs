@@ -459,3 +459,12 @@ fn try_operator() {
     assert_eq!(expr("a.b?.c"), "(. (? (. a b)) c)");
     assert_eq!(expr("-x?"), "(- (? x))");
 }
+
+#[test]
+fn rejects_empty_type_arguments() {
+    let d = fail("fn f(d: Dir<>) {}");
+    assert_eq!(
+        (d.msg.as_str(), d.hint.as_deref()),
+        ("empty type arguments", Some("write `Dir` without `<>`"))
+    );
+}
