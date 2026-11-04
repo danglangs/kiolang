@@ -34,6 +34,8 @@ const SYMBOLS: &[&str] = &[
     ":", ".", "=", "+", "-", "*", "/", "%", "<", ">", "!", "?",
 ];
 
+const HINT_STR: &str = "add a closing `\"`";
+
 fn err(start: usize, end: usize, msg: &str, hint: Option<&str>) -> Diag {
     Diag {
         span: Span { start, end },
@@ -86,7 +88,10 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diag> {
                 }
                 match src[start..i].parse::<i64>() {
                     Ok(n) => Kind::Int(n),
-                    Err(_) => return Err(err(start, i, "integer literal does not fit in `Int` (i64)", None)),
+                    Err(_) => {
+                        let hint = "Int is 64-bit: at most 9223372036854775807";
+                        return Err(err(start, i, "integer literal does not fit in `Int` (i64)", Some(hint)));
+                    }
                 }
             }
             b'A'..=b'Z' | b'a'..=b'z' | b'_' => {
@@ -108,14 +113,14 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diag> {
                 i += 1;
                 loop {
                     let Some(ch) = chars.next() else {
-                        return Err(err(start, src.len(), "unterminated string", None));
+                        return Err(err(start, src.len(), "unterminated string", Some(HINT_STR)));
                     };
                     i += ch.len_utf8();
                     match ch {
                         '"' => break,
                         '\\' => {
                             let Some(esc) = chars.next() else {
-                                return Err(err(start, src.len(), "unterminated string", None));
+                                return Err(err(start, src.len(), "unterminated string", Some(HINT_STR)));
                             };
                             i += esc.len_utf8();
                             match esc {
@@ -151,7 +156,8 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diag> {
                 None => {
                     let ch = src[i..].chars().next().unwrap_or(' ');
                     let msg = format!("unexpected character `{ch}`");
-                    return Err(err(i, i + ch.len_utf8(), &msg, None));
+                    let hint = "remove it, or put it inside a string";
+                    return Err(err(i, i + ch.len_utf8(), &msg, Some(hint)));
                 }
             },
         };

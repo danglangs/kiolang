@@ -56,6 +56,7 @@ fn int_too_large() {
     let d = lex("9223372036854775808").unwrap_err();
     assert_eq!(d.span, Span { start: 0, end: 19 });
     assert!(d.msg.contains("does not fit"));
+    assert_eq!(d.hint.as_deref(), Some("Int is 64-bit: at most 9223372036854775807"));
 }
 
 #[test]
@@ -84,8 +85,10 @@ fn unterminated_string() {
     let d = lex("let s = \"abc").unwrap_err();
     assert_eq!(d.span, Span { start: 8, end: 12 });
     assert_eq!(d.msg, "unterminated string");
+    assert_eq!(d.hint.as_deref(), Some("add a closing `\"`"));
     let d = lex("\"abc\\").unwrap_err();
     assert_eq!(d.msg, "unterminated string");
+    assert_eq!(d.hint.as_deref(), Some("add a closing `\"`"));
 }
 
 #[test]
@@ -184,6 +187,7 @@ fn rejects_block_comment() {
 
 #[test]
 fn rejects_other_character() {
-    rejects("a @ b", (2, 3), "unexpected character `@`", None);
-    rejects("a é", (2, 4), "unexpected character `é`", None);
+    let hint = Some("remove it, or put it inside a string");
+    rejects("a @ b", (2, 3), "unexpected character `@`", hint);
+    rejects("a é", (2, 4), "unexpected character `é`", hint);
 }

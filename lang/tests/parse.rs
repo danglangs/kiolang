@@ -206,6 +206,11 @@ fn spans() {
 }
 
 fn rejected(src: &str, text: &str, msg: &str, hint: bool) {
+    rejected_with(src, text, msg, hint.then_some(""));
+}
+
+/// Like `rejected`, but a `Some` hint must equal the given text; `Some("")` accepts any hint.
+fn rejected_with(src: &str, text: &str, msg: &str, hint: Option<&str>) {
     let d = fail(src);
     let start = src.find(text).unwrap();
     assert_eq!(
@@ -217,7 +222,10 @@ fn rejected(src: &str, text: &str, msg: &str, hint: bool) {
         "{src}"
     );
     assert_eq!(d.msg, msg, "{src}");
-    assert_eq!(d.hint.is_some(), hint, "{src}");
+    match hint {
+        Some("") => assert!(d.hint.is_some(), "{src}"),
+        _ => assert_eq!(d.hint.as_deref(), hint, "{src}"),
+    }
 }
 
 #[test]
@@ -263,10 +271,12 @@ fn rejects_chained_comparison() {
 
 #[test]
 fn rejects_syntax_errors() {
-    rejected("fn f() { let x = 1 }", "}", "expected `;`", false);
+    rejected_with("fn f() { let x = 1 }", "}", "expected `;`", Some("add `;`"));
     rejected("fn f() { 1 = 2; }", "1", "cannot assign to this expression", true);
-    rejected("fn f() { a b }", "b", "expected `;` or `}`", false);
-    assert_eq!(fail("fn f() {").msg, "expected `}`");
+    rejected_with("fn f() { a b }", "b", "expected `;` or `}`", Some("add `;`"));
+    let d = fail("fn f() {");
+    assert_eq!(d.msg, "expected `}`");
+    assert_eq!(d.hint.as_deref(), Some("a `{` is not closed"));
     assert_eq!(fail("fn f() { 1 + }").msg, "expected an expression");
     assert_eq!(fail("fn f() { \"x }").msg, "unterminated string");
 }
@@ -397,7 +407,7 @@ fn rejects_enum_syntax() {
     assert_eq!(d.span, Span { start: 11, end: 12 });
     assert_eq!(d.msg, "struct-like variants are not supported");
     assert!(d.hint.is_some());
-    rejected("enum E { A(Int }", "}", "expected `)`", false);
+    rejected_with("enum E { A(Int }", "}", "expected `)`", Some("a `(` is not closed"));
 }
 
 #[test]
@@ -434,5 +444,10 @@ fn rejects_match_syntax() {
         true,
     );
     rejected("fn f() { match x { 1 + 2 => 1 } }", "+", "expected `=>`", false);
-    rejected("fn f() { match x { a => 1 b => 2 } }", "b", "expected `}`", false);
+    rejected_with(
+        "fn f() { match x { a => 1 b => 2 } }",
+        "b",
+        "expected `}`",
+        Some("a `{` is not closed"),
+    );
 }

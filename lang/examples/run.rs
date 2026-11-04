@@ -12,6 +12,9 @@ fn main() {
         Err(diags) => {
             for d in diags {
                 eprintln!("{path}:{}: error: {}", line(d.span.start), d.msg);
+                if let Some(h) = d.hint {
+                    eprintln!("  hint: {h}");
+                }
             }
             std::process::exit(1);
         }

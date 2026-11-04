@@ -57,6 +57,8 @@ enum Cover {
 }
 
 struct Sig {
+    /// The declaration as written, like `fn f(a: Int, b: Str)`, for hints.
+    decl: String,
     params: Vec<Ty>,
     ret: Ty,
 }
@@ -81,6 +83,80 @@ fn want(span: Span, found: &Ty, expected: &Ty) -> Result<(), Diag> {
         let msg = format!("expected {expected}, found {found}");
         Err(err(span, msg, None))
     }
+}
+
+/// Like `want` at the span of `e`; hints at a stray `;` when `e` is a block that ends in an expression statement.
+fn want_expr(e: &Expr, found: &Ty, expected: &Ty) -> Result<(), Diag> {
+    want(e.span, found, expected).map_err(|mut d| {
+        if let ExprKind::Block(Block { stmts, tail: None, .. }) = &e.kind {
+            let ends_in_expr = stmts.last().is_some_and(|s| matches!(s.kind, StmtKind::Expr(_)));
+            if ends_in_expr && *found == Ty::Unit {
+                d.hint = Some("remove the trailing `;` to return the value".to_string());
+            }
+        }
+        d
+    })
+}
+
+/// Edits to turn `a` into `b`, counting a swap of neighbours as one (`cuont` -> `count`).
+fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut d = vec![vec![0; b.len() + 1]; a.len() + 1];
+    for i in 0..=a.len() {
+        for j in 0..=b.len() {
+            d[i][j] = if i == 0 || j == 0 {
+                i + j
+            } else {
+                let sub = d[i - 1][j - 1] + usize::from(a[i - 1] != b[j - 1]);
+                let swap = if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                    d[i - 2][j - 2] + 1
+                } else {
+                    usize::MAX
+                };
+                sub.min(d[i - 1][j] + 1).min(d[i][j - 1] + 1).min(swap)
+            };
+        }
+    }
+    d[a.len()][b.len()]
+}
+
+/// The candidate nearest to `name`, within a third of its length (at least 1 edit); ties go to the first by name.
+pub fn closest<'a>(name: &str, candidates: &[&'a str]) -> Option<&'a str> {
+    let limit = 1.max(name.chars().count() / 3);
+    let near = candidates.iter().map(|c| (edit_distance(name, c), *c));
+    near.filter(|(d, _)| *d <= limit).min().map(|(_, c)| c)
+}
+
+/// "did you mean `x`?", or a list of the `kind` that exist.
+fn suggest(name: &str, candidates: &[&str], kind: &str) -> String {
+    match closest(name, candidates) {
+        Some(c) => format!("did you mean `{c}`?"),
+        None if candidates.is_empty() => format!("no {kind} are declared"),
+        None => format!("{kind}: {}", candidates.join(", ")),
+    }
+}
+
+/// "`E::V` holds (Int, Str)", for the hint on a wrong payload count.
+fn holds(en: &str, v: &str, payload: &[Ty]) -> String {
+    let tys: Vec<_> = payload.iter().map(Ty::to_string).collect();
+    format!("`{en}::{v}` holds ({})", tys.join(", "))
+}
+
+fn sorted_keys<V>(m: &HashMap<String, V>) -> Vec<&str> {
+    let mut keys: Vec<_> = m.keys().map(String::as_str).collect();
+    keys.sort();
+    keys
+}
+
+/// What an operator accepts, for the hint on `cannot be applied to`.
+fn op_hint(op: &str) -> String {
+    let accepts = match op {
+        "+" => "two Int or two Str",
+        "-" | "*" | "/" | "%" | "<" | "<=" | ">" | ">=" => "two Int",
+        "&&" | "||" => "two Bool",
+        _ => "two Int, two Bool or two Str",
+    };
+    format!("`{op}` works on {accepts}")
 }
 
 /// The result type of `l op r`, or `None` if the operator does not apply.
@@ -126,19 +202,29 @@ fn signature(
     enums: &HashMap<String, Enum>,
 ) -> Result<Sig, Diag> {
     if sigs.contains_key(&f.name) {
-        return Err(err(f.span, format!("duplicate function `{}`", f.name), None));
+        let msg = format!("duplicate function `{}`", f.name);
+        return Err(err(f.span, msg, Some("rename one of them")));
     }
     if f.name == "main" && !f.params.is_empty() {
-        return Err(err(f.span, "`main` takes no parameters yet".to_string(), None));
+        let hint = "capabilities come later; remove the parameters";
+        return Err(err(f.span, "`main` takes no parameters yet".to_string(), Some(hint)));
     }
     let mut params = Vec::new();
     for (i, p) in f.params.iter().enumerate() {
         if f.params[..i].iter().any(|q| q.name == p.name) {
-            return Err(err(p.span, format!("duplicate parameter `{}`", p.name), None));
+            let msg = format!("duplicate parameter `{}`", p.name);
+            return Err(err(p.span, msg, Some("rename one of them")));
         }
         params.push(resolve(&p.ty, structs, enums)?);
     }
+    let typed: Vec<_> = f
+        .params
+        .iter()
+        .zip(&params)
+        .map(|(p, ty)| format!("{}: {ty}", p.name))
+        .collect();
     Ok(Sig {
+        decl: format!("fn {}({})", f.name, typed.join(", ")),
         params,
         ret: resolve(&f.ret, structs, enums)?,
     })
@@ -152,7 +238,8 @@ fn struct_fields(
     let mut fields: Vec<(String, Ty)> = Vec::new();
     for p in &s.fields {
         if fields.iter().any(|(name, _)| *name == p.name) {
-            return Err(err(p.span, format!("duplicate field `{}`", p.name), None));
+            let msg = format!("duplicate field `{}`", p.name);
+            return Err(err(p.span, msg, Some("rename one of them")));
         }
         fields.push((p.name.clone(), resolve(&p.ty, structs, enums)?));
     }
@@ -167,7 +254,8 @@ fn enum_variants(
     let mut variants: Vec<(String, Vec<Ty>)> = Vec::new();
     for v in &e.variants {
         if variants.iter().any(|(name, _)| *name == v.name) {
-            return Err(err(v.span, format!("duplicate variant `{}`", v.name), None));
+            let msg = format!("duplicate variant `{}`", v.name);
+            return Err(err(v.span, msg, Some("rename one of them")));
         }
         let payload = v.fields.iter().map(|t| resolve(t, structs, enums));
         variants.push((v.name.clone(), payload.collect::<Result<_, _>>()?));
@@ -204,7 +292,7 @@ fn contains_itself(name: &str, fields: &Fields, variants: &Variants) -> bool {
 
 fn no_field(span: Span, field: &str, ty: &str, decl: &[(String, Ty)]) -> Diag {
     let names: Vec<_> = decl.iter().map(|(n, _)| n.as_str()).collect();
-    let hint = format!("fields: {}", names.join(", "));
+    let hint = suggest(field, &names, "fields");
     err(span, format!("no field `{field}` on {ty}"), Some(&hint))
 }
 
@@ -220,14 +308,22 @@ pub fn check(src: &str, _caps: &CapTable) -> Result<Program, Vec<Diag>> {
         match item {
             Item::Fn(f) => fns.push(f),
             Item::Enum(e) if structs.contains_key(&e.name) || enums.contains_key(&e.name) => {
-                diags.push(err(e.span, format!("duplicate type `{}`", e.name), None));
+                diags.push(err(
+                    e.span,
+                    format!("duplicate type `{}`", e.name),
+                    Some("rename one of them"),
+                ));
             }
             Item::Enum(e) => {
                 order.push(e.name.clone());
                 enums.insert(e.name.clone(), e);
             }
             Item::Struct(s) if structs.contains_key(&s.name) || enums.contains_key(&s.name) => {
-                diags.push(err(s.span, format!("duplicate type `{}`", s.name), None));
+                diags.push(err(
+                    s.span,
+                    format!("duplicate type `{}`", s.name),
+                    Some("rename one of them"),
+                ));
             }
             Item::Struct(s) => {
                 order.push(s.name.clone());
@@ -287,7 +383,8 @@ pub fn check(src: &str, _caps: &CapTable) -> Result<Program, Vec<Diag>> {
     }
     if !fns.iter().any(|f| f.name == "main") {
         let none = Span { start: 0, end: 0 };
-        diags.push(err(none, "no `main` function".to_string(), None));
+        let hint = "add `fn main() { .. }`";
+        diags.push(err(none, "no `main` function".to_string(), Some(hint)));
     }
     if !diags.is_empty() {
         return Err(diags);
@@ -328,10 +425,36 @@ impl Checker<'_> {
         let found = self.block(&f.body)?;
         if f.body.tail.is_none() && found == Ty::Unit && sig.ret != Ty::Unit {
             let msg = format!("missing return: `{}` must return {}", f.name, sig.ret);
-            return Err(err(f.body.span, msg, Some("end the body with a value or `return`")));
+            let ends_in_expr = f.body.stmts.last().is_some_and(|s| matches!(s.kind, StmtKind::Expr(_)));
+            let hint = if ends_in_expr {
+                "remove the trailing `;` to return the value"
+            } else {
+                "end the body with a value or `return`"
+            };
+            return Err(err(f.body.span, msg, Some(hint)));
         }
-        let span = f.body.tail.as_ref().map_or(f.body.span, |t| t.span);
-        want(span, &found, &sig.ret)
+        match &f.body.tail {
+            Some(t) => want_expr(t, &found, &sig.ret),
+            None => want(f.body.span, &found, &sig.ret),
+        }
+    }
+
+    fn unknown_name(&self, span: Span, name: &str) -> Diag {
+        let mut names: Vec<_> = self.scopes.iter().flat_map(|s| s.keys().map(String::as_str)).collect();
+        names.sort();
+        let hint = match closest(name, &names) {
+            Some(c) => format!("did you mean `{c}`?"),
+            None => "declare it with `let`".to_string(),
+        };
+        err(span, format!("unknown name `{name}`"), Some(&hint))
+    }
+
+    fn unknown_variant(&self, span: Span, en: &str, v: &str) -> Diag {
+        let hint = match self.variants.get(en) {
+            Some(vs) => suggest(v, &vs.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), "variants"),
+            None => suggest(en, &sorted_keys(self.enums), "enums"),
+        };
+        err(span, format!("unknown variant `{en}::{v}`"), Some(&hint))
     }
 
     fn lookup(&mut self, name: &str) -> Option<&mut Local> {
@@ -364,7 +487,7 @@ impl Checker<'_> {
                 let mut found = self.expr(init)?;
                 if let Some(t) = ty {
                     let declared = resolve(t, self.structs, self.enums)?;
-                    want(init.span, &found, &declared)?;
+                    want_expr(init, &found, &declared)?;
                     found = declared;
                 } else if found == Ty::Never {
                     found = Ty::Unit;
@@ -380,10 +503,10 @@ impl Checker<'_> {
                 let found = self.expr(value)?;
                 let ty = self.place(target)?;
                 if *op == "=" {
-                    want(value.span, &found, &ty)?;
+                    want_expr(value, &found, &ty)?;
                 } else if binary_ty(&op[..1], &ty, &found) != Some(ty.clone()) {
                     let msg = format!("`{op}` cannot be applied to {ty} and {found}");
-                    return Err(err(s.span, msg, None));
+                    return Err(err(s.span, msg, Some(&op_hint(&op[..1]))));
                 }
                 Ok(Ty::Unit)
             }
@@ -392,11 +515,14 @@ impl Checker<'_> {
                     Some(e) => self.expr(e)?,
                     None => Ty::Unit,
                 };
-                want(value.as_ref().map_or(s.span, |e| e.span), &found, &self.ret)?;
+                match value {
+                    Some(e) => want_expr(e, &found, &self.ret)?,
+                    None => want(s.span, &found, &self.ret)?,
+                }
                 Ok(Ty::Never)
             }
             StmtKind::While { cond, body } => {
-                want(cond.span, &self.expr(cond)?, &Ty::Bool)?;
+                want_expr(cond, &self.expr(cond)?, &Ty::Bool)?;
                 want(body.span, &self.block(body)?, &Ty::Unit)?;
                 Ok(Ty::Unit)
             }
@@ -415,22 +541,22 @@ impl Checker<'_> {
             ExprKind::Unit => Ok(Ty::Unit),
             ExprKind::Name(name) => match self.lookup(name) {
                 Some(local) => Ok(local.ty.clone()),
-                None => Err(err(e.span, format!("unknown name `{name}`"), None)),
+                None => Err(self.unknown_name(e.span, name)),
             },
             ExprKind::Unary(op, x) => {
                 let want_ty = if *op == "-" { Ty::Int } else { Ty::Bool };
-                want(x.span, &self.expr(x)?, &want_ty)?;
+                want_expr(x, &self.expr(x)?, &want_ty)?;
                 Ok(want_ty)
             }
             ExprKind::Binary(op, a, b) => {
                 let (l, r) = (self.expr(a)?, self.expr(b)?);
                 binary_ty(op, &l, &r).ok_or_else(|| {
                     let msg = format!("`{op}` cannot be applied to {l} and {r}");
-                    err(e.span, msg, None)
+                    err(e.span, msg, Some(&op_hint(op)))
                 })
             }
             ExprKind::If(cond, then, els) => {
-                want(cond.span, &self.expr(cond)?, &Ty::Bool)?;
+                want_expr(cond, &self.expr(cond)?, &Ty::Bool)?;
                 let t = self.block(then)?;
                 let Some(els) = els else {
                     want(then.span, &t, &Ty::Unit)?;
@@ -443,17 +569,27 @@ impl Checker<'_> {
                     Ok(t)
                 } else {
                     let msg = format!("`if` branches have different types: {t} and {f}");
-                    Err(err(e.span, msg, None))
+                    Err(err(e.span, msg, Some("every branch must have the same type")))
                 }
             }
             ExprKind::Block(b) => self.block(b),
             ExprKind::Call(callee, args) => self.call(e, callee, args),
-            ExprKind::Method(..) => Err(err(e.span, "method calls are not available yet".to_string(), None)),
+            ExprKind::Method(..) => {
+                let hint = "call a function instead, like `f(x)`";
+                Err(err(
+                    e.span,
+                    "method calls are not available yet".to_string(),
+                    Some(hint),
+                ))
+            }
             ExprKind::Field(base, name) => {
                 let ty = self.expr(base)?;
                 self.field(&ty, name, e.span)
             }
-            ExprKind::Index(..) => Err(err(e.span, "indexing is not available yet".to_string(), None)),
+            ExprKind::Index(..) => {
+                let hint = "indexing comes with `List`, later";
+                Err(err(e.span, "indexing is not available yet".to_string(), Some(hint)))
+            }
             ExprKind::StructLit(name, inits) => self.struct_lit(e, name, inits),
             ExprKind::Path(en, v) => self.variant_value(e, en, v, &[]),
             ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms),
@@ -463,14 +599,14 @@ impl Checker<'_> {
     /// `E::V` or `E::V(args)`; arity and payload types must match the declaration.
     fn variant_value(&mut self, e: &Expr, en: &str, v: &str, args: &[Expr]) -> Result<Ty, Diag> {
         let Some((_, payload)) = variant(self.variants, en, v) else {
-            return Err(err(e.span, format!("unknown variant `{en}::{v}`"), None));
+            return Err(self.unknown_variant(e.span, en, v));
         };
         if args.len() != payload.len() {
             let msg = format!("`{en}::{v}` takes {} arguments, found {}", payload.len(), args.len());
-            return Err(err(e.span, msg, None));
+            return Err(err(e.span, msg, Some(&holds(en, v, payload))));
         }
         for (a, ty) in args.iter().zip(payload) {
-            want(a.span, &self.expr(a)?, ty)?;
+            want_expr(a, &self.expr(a)?, ty)?;
         }
         Ok(Ty::Enum(en.to_string()))
     }
@@ -478,7 +614,8 @@ impl Checker<'_> {
     fn match_expr(&mut self, scrut: &Expr, arms: &[Arm]) -> Result<Ty, Diag> {
         let st = self.expr(scrut)?;
         if !matches!(st, Ty::Int | Ty::Bool | Ty::Str | Ty::Enum(_)) {
-            return Err(err(scrut.span, format!("cannot match on {st}"), None));
+            let hint = "match works on Int, Bool, Str and enums";
+            return Err(err(scrut.span, format!("cannot match on {st}"), Some(hint)));
         }
         let mut ty = Ty::Never;
         let mut covers = Vec::new();
@@ -497,7 +634,7 @@ impl Checker<'_> {
                 ty = body;
             } else if body != Ty::Never && body != ty {
                 let msg = format!("`match` arms have different types: {ty} and {body}");
-                return Err(err(arm.body.span, msg, None));
+                return Err(err(arm.body.span, msg, Some("every branch must have the same type")));
             }
         }
         let seen = |c: Cover| covers.contains(&c) || covers.contains(&Cover::All);
@@ -518,7 +655,8 @@ impl Checker<'_> {
             Ok(ty)
         } else {
             let msg = format!("non-exhaustive `match`: missing {}", missing.join(", "));
-            Err(err(scrut.span, msg, None))
+            let hint = "add arms for the missing cases, or `_ => ..`";
+            Err(err(scrut.span, msg, Some(hint)))
         }
     }
 
@@ -555,7 +693,7 @@ impl Checker<'_> {
         names: &[Option<String>],
     ) -> Result<(Cover, Vec<(String, Ty)>), Diag> {
         let Some((i, payload)) = variant(self.variants, en, v) else {
-            return Err(err(p.span, format!("unknown variant `{en}::{v}`"), None));
+            return Err(self.unknown_variant(p.span, en, v));
         };
         if names.len() != payload.len() {
             let msg = format!(
@@ -563,7 +701,7 @@ impl Checker<'_> {
                 payload.len(),
                 names.len()
             );
-            return Err(err(p.span, msg, None));
+            return Err(err(p.span, msg, Some(&holds(en, v, payload))));
         }
         let binds = names.iter().zip(payload);
         let binds = binds.filter_map(|(name, ty)| Some((name.clone()?, ty.clone())));
@@ -573,7 +711,8 @@ impl Checker<'_> {
     /// The type of field `name` of a value of type `ty`.
     fn field(&self, ty: &Ty, name: &str, span: Span) -> Result<Ty, Diag> {
         let Ty::Struct(s) = ty else {
-            return Err(err(span, format!("no field `{name}` on {ty}"), None));
+            let hint = "only structs have fields";
+            return Err(err(span, format!("no field `{name}` on {ty}"), Some(hint)));
         };
         let decl = &self.fields[s.as_str()];
         match decl.iter().find(|(n, _)| n == name) {
@@ -585,7 +724,8 @@ impl Checker<'_> {
     fn struct_lit(&mut self, e: &Expr, name: &str, inits: &[(String, Expr)]) -> Result<Ty, Diag> {
         let fields = self.fields;
         let Some(decl) = fields.get(name) else {
-            return Err(err(e.span, format!("unknown struct `{name}`"), None));
+            let hint = suggest(name, &sorted_keys(self.structs), "structs");
+            return Err(err(e.span, format!("unknown struct `{name}`"), Some(&hint)));
         };
         let mut seen = Vec::new();
         for (f, x) in inits {
@@ -593,13 +733,18 @@ impl Checker<'_> {
                 return Err(no_field(x.span, f, name, decl));
             };
             if seen.contains(&f) {
-                return Err(err(x.span, format!("duplicate field `{f}`"), None));
+                return Err(err(
+                    x.span,
+                    format!("duplicate field `{f}`"),
+                    Some("remove one of them"),
+                ));
             }
             seen.push(f);
-            want(x.span, &self.expr(x)?, ty)?;
+            want_expr(x, &self.expr(x)?, ty)?;
         }
         if let Some((missing, _)) = decl.iter().find(|(n, _)| !seen.contains(&n)) {
-            return Err(err(e.span, format!("missing field `{missing}` in `{name}`"), None));
+            let msg = format!("missing field `{missing}` in `{name}`");
+            return Err(err(e.span, msg, Some(&format!("add `{missing}: ..`"))));
         }
         Ok(Ty::Struct(name.to_string()))
     }
@@ -609,7 +754,7 @@ impl Checker<'_> {
         match &target.kind {
             ExprKind::Name(name) => {
                 let Some(local) = self.lookup(name) else {
-                    return Err(err(target.span, format!("unknown name `{name}`"), None));
+                    return Err(self.unknown_name(target.span, name));
                 };
                 if !local.mutable {
                     let msg = format!("cannot assign to `{name}`, it is not `mut`");
@@ -624,7 +769,7 @@ impl Checker<'_> {
             _ => Err(err(
                 target.span,
                 "assigning to indexes is not available yet".to_string(),
-                None,
+                Some("assign to a name or a field"),
             )),
         }
     }
@@ -633,18 +778,23 @@ impl Checker<'_> {
         let name = match &callee.kind {
             ExprKind::Name(name) => name,
             ExprKind::Path(en, v) => return self.variant_value(e, en, v, args),
-            _ => return Err(err(callee.span, "only functions can be called".to_string(), None)),
+            _ => {
+                let hint = "call a function by name, like `f(x)`";
+                return Err(err(callee.span, "only functions can be called".to_string(), Some(hint)));
+            }
         };
         let sigs = self.sigs;
         let Some(sig) = sigs.get(name.as_str()) else {
-            return Err(err(callee.span, format!("unknown function `{name}`"), None));
+            let hint = suggest(name, &sorted_keys(sigs), "functions");
+            return Err(err(callee.span, format!("unknown function `{name}`"), Some(&hint)));
         };
         if args.len() != sig.params.len() {
             let msg = format!("`{name}` takes {} arguments, found {}", sig.params.len(), args.len());
-            return Err(err(e.span, msg, None));
+            let hint = format!("`{name}` is declared as `{}`", sig.decl);
+            return Err(err(e.span, msg, Some(&hint)));
         }
         for (a, param) in args.iter().zip(&sig.params) {
-            want(a.span, &self.expr(a)?, param)?;
+            want_expr(a, &self.expr(a)?, param)?;
         }
         Ok(sig.ret.clone())
     }

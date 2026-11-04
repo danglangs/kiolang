@@ -114,7 +114,7 @@ Order: enums and `Result` first, because capability methods return `Result<_, Io
   - `==` stays scalar-only.
   Done: a function matching an enum with payloads runs; bare variant patterns; tests for each error above, including non-exhaustive (naming the missing variant) and unreachable arm; enum copy test.
 
-- [ ] **5c. Errors that teach.** Add a hint to every `Diag` that lacks one; no new features. Wording below; keep each hint one line.
+- [x] **5c. Errors that teach.** Add a hint to every `Diag` that lacks one; no new features. Wording below; keep each hint one line.
   - `unknown name`, `unknown function`, `unknown struct`, `unknown variant`, `no field`: "did you mean `x`?" naming the closest in-scope candidate by edit distance (at most 2 edits, or a third of the length); otherwise list what exists ("fields: a, b", "variants: A, B", or "declare it with `let`" for names). One small `closest(name, candidates)` helper in `check.rs`.
   - Duplicates (function, parameter, field, variant, type): "first defined here" is not expressible with one span, so the hint says "rename one of them".
   - `expected T, found U`: when one side is `()` and the other is not, hint "remove the trailing `;` to return the value" if the found `()` comes from a block whose last statement is an expression statement; otherwise no hint.

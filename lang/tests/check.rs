@@ -1,3 +1,4 @@
+use lang::check::closest;
 use lang::{check, CapTable};
 
 /// Checks `src` and returns the single diagnostic's text and the source it points at.
@@ -213,7 +214,7 @@ fn field_access_errors() {
         &CapTable::default(),
     )
     .unwrap_err();
-    assert_eq!(diags[0].hint.as_deref(), Some("fields: c"));
+    assert_eq!(diags[0].hint.as_deref(), Some("did you mean `c`?"));
     let (msg, _) = reject_p("fn main() { let x = 1; x.f; }");
     assert_eq!(msg, "no field `f` on Int");
 }
@@ -363,4 +364,158 @@ fn unreachable_arm() {
     assert_eq!((msg.as_str(), at.as_str()), ("unreachable arm", "2"));
     reject_s("fn main() { match 1 { x => 1, _ => 2 }; }");
     reject_s("fn main() { match S::Done { x => 1, Done => 2 }; }");
+}
+
+/// The hint of the single diagnostic for `src`.
+#[track_caller]
+fn hint(src: &str) -> String {
+    let diags = check(src, &CapTable::default()).expect_err("should be rejected");
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    diags[0].hint.clone().unwrap_or_else(|| panic!("no hint for {src}"))
+}
+
+#[track_caller]
+fn no_hint(src: &str) {
+    let diags = check(src, &CapTable::default()).expect_err("should be rejected");
+    assert_eq!(diags[0].hint, None, "{src}");
+}
+
+#[test]
+fn closest_picks_near_names() {
+    assert_eq!(closest("lenght", &["length", "width"]), Some("length"));
+    assert_eq!(closest("x", &["y"]), Some("y"));
+    assert_eq!(closest("count", &["total", "sum"]), None);
+    assert_eq!(closest("abcdef", &["abcxyz"]), None);
+    assert_eq!(closest("abcdefghi", &["abcdefxyz"]), Some("abcdefxyz"));
+    assert_eq!(closest("a", &[]), None);
+    assert_eq!(closest("é", &["e"]), Some("e"));
+    assert_eq!(closest("cuont", &["count", "total"]), Some("count"));
+}
+
+#[test]
+fn hint_for_trailing_semicolon() {
+    let src = "fn total() -> Int { let a = 1; a + 2; } fn main() {}";
+    assert_eq!(hint(src), "remove the trailing `;` to return the value");
+}
+
+#[test]
+fn hints_for_unknown_things() {
+    assert_eq!(
+        hint("fn main() -> Int { let total = 1; totl }"),
+        "did you mean `total`?"
+    );
+    assert_eq!(hint("fn main() -> Int { zzzzzz }"), "declare it with `let`");
+    assert_eq!(hint("fn main() { let x = 1; xx = 2; }"), "did you mean `x`?");
+    assert_eq!(hint("fn helper() {} fn main() { helpr(); }"), "did you mean `helper`?");
+    assert_eq!(hint("fn alpha() {} fn main() { zzzzzz(); }"), "functions: alpha, main");
+    let p = "struct Point { x: Int } ";
+    assert_eq!(
+        hint(&format!("{p}fn main() {{ Pint {{ x: 1 }}; }}")),
+        "did you mean `Point`?"
+    );
+    assert_eq!(
+        hint(&format!("{p}fn main() {{ Zzzzzz {{ x: 1 }}; }}")),
+        "structs: Point"
+    );
+    assert_eq!(hint(&format!("{p}fn main() {{ Point {{ yyyyyy: 1 }}; }}")), "fields: x");
+    assert_eq!(
+        hint(&format!("{p}fn main() {{ Point {{ xx: 1 }}; }}")),
+        "did you mean `x`?"
+    );
+    assert_eq!(hint("fn main() { 1.f; }"), "only structs have fields");
+    let e = "enum Color { Red, Green } ";
+    assert_eq!(
+        hint(&format!("{e}fn main() {{ Color::Gren; }}")),
+        "did you mean `Green`?"
+    );
+    assert_eq!(
+        hint(&format!("{e}fn main() {{ Color::Blue; }}")),
+        "variants: Red, Green"
+    );
+    assert_eq!(hint(&format!("{e}fn main() {{ Colr::Red; }}")), "did you mean `Color`?");
+    let m = "fn main() { match Color::Red { Blue(x) => 1, _ => 2 }; }";
+    assert_eq!(hint(&format!("{e}{m}")), "variants: Red, Green");
+}
+
+#[test]
+fn hints_for_duplicates() {
+    for src in [
+        "fn f() {} fn f() {} fn main() {}",
+        "fn f(a: Int, a: Int) {} fn main() {}",
+        "struct A { x: Int, x: Int } fn main() {}",
+        "enum A { X, X } fn main() {}",
+        "struct A {} enum A {} fn main() {}",
+    ] {
+        assert_eq!(hint(src), "rename one of them", "{src}");
+    }
+    let src = "struct Q { c: Int } fn main() { Q { c: 1, c: 2 }; }";
+    assert_eq!(hint(src), "remove one of them");
+}
+
+#[test]
+fn hint_for_stray_semicolon() {
+    let stray = "remove the trailing `;` to return the value";
+    assert_eq!(hint("fn main() { let x: Int = { 1; }; }"), stray);
+    assert_eq!(hint("fn f(a: Int) {} fn main() { f({ 1; }); }"), stray);
+    assert_eq!(
+        hint("fn main() -> Int { if true { 1; } else { 2 } }"),
+        "every branch must have the same type"
+    );
+    no_hint("fn main() { let x: Int = { let y = 1; }; }");
+    no_hint("fn main() { let x: Int = { }; }");
+    no_hint("fn main() { let x: Int = true; }");
+    no_hint("fn f() {} fn main() { let x: Int = f(); }");
+}
+
+#[test]
+fn hints_for_calls_and_operators() {
+    let f = "fn f(a: Int, b: Str) {} ";
+    assert_eq!(
+        hint(&format!("{f}fn main() {{ f(1); }}")),
+        "`f` is declared as `fn f(a: Int, b: Str)`"
+    );
+    assert_eq!(hint("fn g() {} fn main() { g(1); }"), "`g` is declared as `fn g()`");
+    let s = "enum S { Done, Pair(Int, Str) } ";
+    assert_eq!(
+        hint(&format!("{s}fn main() {{ S::Pair(1); }}")),
+        "`S::Pair` holds (Int, Str)"
+    );
+    assert_eq!(hint(&format!("{s}fn main() {{ S::Done(1); }}")), "`S::Done` holds ()");
+    let pat = "fn main() { match S::Done { Pair(a) => 1, _ => 2 }; }";
+    assert_eq!(hint(&format!("{s}{pat}")), "`S::Pair` holds (Int, Str)");
+    assert_eq!(hint("fn main() -> Int { 1 + true }"), "`+` works on two Int or two Str");
+    assert_eq!(hint("fn main() -> Int { 1 - \"a\" }"), "`-` works on two Int");
+    assert_eq!(hint("fn main() -> Bool { 1 && 2 }"), "`&&` works on two Bool");
+    assert_eq!(
+        hint("fn main() -> Bool { 1 == true }"),
+        "`==` works on two Int, two Bool or two Str"
+    );
+    assert_eq!(
+        hint("fn main() { let mut x = true; x += 1; }"),
+        "`+` works on two Int or two Str"
+    );
+    assert_eq!(hint("fn main() { 1(2); }"), "call a function by name, like `f(x)`");
+}
+
+#[test]
+fn hints_for_declarations_and_match() {
+    assert_eq!(hint("fn f() {}"), "add `fn main() { .. }`");
+    assert_eq!(
+        hint("fn main(a: Int) {}"),
+        "capabilities come later; remove the parameters"
+    );
+    let q = "struct P { a: Int, b: Int } ";
+    assert_eq!(hint(&format!("{q}fn main() {{ P {{ a: 1 }}; }}")), "add `b: ..`");
+    assert_eq!(
+        hint("fn main() { match () { _ => 1 }; }"),
+        "match works on Int, Bool, Str and enums"
+    );
+    let cases = "add arms for the missing cases, or `_ => ..`";
+    assert_eq!(hint("fn main() { match 1 { 1 => 1 }; }"), cases);
+    let diff = "fn main() { match 1 { 1 => 1, _ => \"a\" }; }";
+    assert_eq!(hint(diff), "every branch must have the same type");
+    assert_eq!(
+        hint("fn main() { if true { 1 } else { \"a\" }; }"),
+        "every branch must have the same type"
+    );
 }

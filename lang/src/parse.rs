@@ -45,6 +45,16 @@ fn later_hint(word: &str) -> Option<&'static str> {
     }
 }
 
+/// A hint for the expected tokens whose fix is clear.
+fn expected_hint(expected: &str) -> Option<&'static str> {
+    match expected {
+        "`;`" | "`;` or `}`" => Some("add `;`"),
+        "`}`" => Some("a `{` is not closed"),
+        "`)`" => Some("a `(` is not closed"),
+        _ => None,
+    }
+}
+
 struct Parser {
     toks: Vec<Token>,
     pos: usize,
@@ -159,7 +169,7 @@ impl Parser {
         };
         match rejected {
             Some((w, hint)) => err(span, &format!("`{w}` is not supported in kio"), Some(hint)),
-            None => err(span, &format!("expected {expected}"), None),
+            None => err(span, &format!("expected {expected}"), expected_hint(expected)),
         }
     }
 
