@@ -10,10 +10,11 @@ kio is a fresh language built around that idea, using Rust's ecosystem for speed
 
 ## Try it
 
-There is no `kio` command yet; a temporary runner checks and runs a `.kio` file. Today the language has `Int`, `Bool`, `Str`, `Bytes`, `List`, `Map`, structs, enums with `match`, `Option`, `Result` and `?`, `Dir` and `Http` capabilities, functions, `let`, `if`, `while`, `for`, `break`, `continue` and recursion. Requires Rust (stable).
+`kio check` checks a program inside the Wasm sandbox and prints its authority report; `kio run` comes next, so for now a temporary native runner runs programs. The language has `Int`, `Bool`, `Str`, `Bytes`, `List`, `Map`, structs, enums with `match`, `Option`, `Result` and `?`, `Dir` and `Http` capabilities, functions, `let`, `if`, `while`, `for`, `break`, `continue` and recursion. Requires Rust via rustup, with `rustup target add wasm32-wasip2`.
 
 ```
 git clone https://github.com/danglangs/kiolang && cd kiolang
+cargo run -p host -- check examples/summarize.kio      # the authority report, from the sandbox
 cargo run -p lang --example run -- examples/fib.kio      # Int(6765)
 cargo run -p lang --example run -- examples/points.kio   # Int(25)
 cargo run -p lang --example run -- examples/sum.kio      # Int(-2)

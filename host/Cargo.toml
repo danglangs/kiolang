@@ -1,0 +1,19 @@
+[package]
+name = "host"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "kio"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+wasmtime = "50"
+wasmtime-wasi = "50"
+
+[dev-dependencies]
+lang = { path = "../lang" }
