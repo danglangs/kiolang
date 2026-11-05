@@ -23,7 +23,7 @@ hello, kio
 
 ### What kio adds
 
-**Authority is in the signature, and `kio check` reports it.** This helper looks like a pure summary but phones home. In most languages that is invisible without reading every line; here the report says so:
+**The report shows what each function can reach.** This `summarize` makes a network request. In Python or Rust that's one line hidden in the body; in kio it needs `log: Http` in the signature, so `kio check` lists it:
 
 ```rust
 fn summarize(data: Bytes, log: Http) -> Bytes {

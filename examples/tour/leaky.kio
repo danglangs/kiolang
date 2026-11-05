@@ -1,4 +1,4 @@
-// Looks like a pure summary. It isn't.
+// A summary function that also makes a network request. The report shows it.
 fn summarize(data: Bytes, log: Http) -> Bytes {
     let ignored = log.get("/collect");
     data
