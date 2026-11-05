@@ -155,8 +155,12 @@ Each changes `caps.wit` or the language. Recommendation first, then the alternat
   Done: parse tests for each form; `use` is rejected with hint "write the full path, like `web::text`".
 - [x] **W4b. Modules in the checker and interpreter.** `[parallel]` After W4a. v0 is flat: a module is one file, only the root file may declare `mod`, so there are no nested modules and no cycles. Items in a module are visible outside it only if `pub`; the root's own items need no `pub`. Function, struct and enum names are resolved per module; `web::text` calls `web.kio`'s `text`. `Span` gains `file: u32` (0 is the root). The report names module functions `web::text`.
   Done: a two-file program runs natively; calling a non-`pub` function, `mod` outside the root, an unknown module, and a duplicate `mod` are each rejected with a hint; a diag in `web.kio` carries its file.
-- [ ] **W4c. Files through the API and host.** After W4b. `lang::check_files(&[(name, source)])` with the root first, and `check(src)` as its one-file case. caps.wit's `check` and `run` take `list<record file { name: string, source: string }>` (security-review event). The host reads `name.kio` beside the root file for each `mod name;`, and prints diags as `web.kio:line`.
-  Done: `kio run app.kio` with `mod web;` runs; a diag inside `web.kio` prints `web.kio:3`; a `mod` naming a missing file is a clean error.
+- [ ] **W4c. Files through the API and host.** After W4b.
+  - caps.wit: `record file { name: string, source: string }`; `check` and `run` take `files: list<file>` (root first) in place of `source: string`. `diag` gains `file: u32`. Security-review event.
+  - Guest: calls `lang::check_files`.
+  - Host: reads the root file, then for each `mod name;` found by a cheap scan, `name.kio` in the same directory, through the host's own filesystem access (this is operator input, like the root file, not a guest capability). A missing module file is a clean error naming it, exit 2. Diags print `web.kio:3: error: ..` using the diag's `file`.
+  - `examples/web/app.kio` and `examples/web/web.kio`: a two-file pure example (no capabilities) that `kio run` executes.
+  Done: `kio run examples/web/app.kio` runs; a diag inside `web.kio` prints `web.kio:LINE`; a `mod` naming a missing file is a clean error; `kio check` works on both; capgen drift passes.
 
 - [x] **W5. `Incoming` and `Outgoing` capabilities.** Delivered by W1: both are checked like `Dir` (parameters only), a second `send` is `already-sent`, and the report lists their methods.
 - [x] **W6. Guest serve path.** Delivered by W1: the host grants `incoming` and `outgoing` for one request through the existing `run` export (`Kio::run_web`), tested in host/tests/web.rs.
