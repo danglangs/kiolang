@@ -181,8 +181,15 @@ Each changes `caps.wit` or the language. Recommendation first, then the alternat
   Done: tests pass under `kio run`; an example app serves a page, a JSON route with a path parameter and files from a granted `Dir`, and its README shows the report.
 - [ ] **W10. Benchmark.** After W9. Requests/s and p50/p99 for the example app, with time split into instantiate, check and handle. Decides decision 5's snapshot, the bytecode VM, and copy-on-write values: v0 copies `req`, body included, into every helper call.
   Done: numbers and the decisions they force recorded in open_questions.
-- [ ] **W11. Adversarial serve review.** After W8. As H5: header and response splitting, oversized and malformed requests, slow clients, path escapes through `file`.
-  Done: every finding fixed or logged in open_questions.
+- [x] **W11. Adversarial serve review.** 47 attacks: no smuggling or desync, no response splitting, no cross-request leaks, no host panics, no per-request limit bypass. Fixed in W11b.
+- [ ] **W11b. Fix the review's findings.** Host only.
+  1. Connection lifetime: a hard 60 s cap per connection (`ListenLimits::lifetime`), enforced by dropping the connection future, so a client that never reads its responses cannot hold a slot or buffered response forever.
+  2. `--audit` with `--listen`: refused at startup, before the log file is created, with hint "per-request audit logging is not supported yet; drop --audit".
+  3. `--http` with `--listen`: refused at startup the same way (hint "Http grants under --listen are not supported yet").
+  4. `Outgoing.send` accepts status 200..=599 only; 1xx is `invalid`.
+  5. `Dir.read` and `Dir.create` refuse anything that is not a regular file: open with `O_NONBLOCK` (cap-std `OpenOptionsExt::custom_flags`), then check `metadata().is_file()`, else `denied`. A FIFO in a granted dir then cannot block a worker, which closes the worse-than-stated part of #19.
+  Done: one test per item (a non-reading client's connection is closed at the lifetime cap with a small test value; both flag combinations exit 2 with their hint and leave no file; status 101 is `invalid`; reading a FIFO is `denied` at once); all existing tests pass.
+
 
 ## Later, driven by kio-web
 
