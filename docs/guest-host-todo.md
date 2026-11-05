@@ -68,8 +68,13 @@ host/    the kio binary: Wasmtime, cap-std, limits, host functions
 - [x] **H6. Adversarial host review.** An independent agent attacks the host: path escapes, symlink races, forged and wrong-kind handles, quota bypasses, deadline bypasses, panics in host functions.
   Done: every finding fixed or logged in open_questions.
 
-- [ ] **N1. `Http` grant and allowlist.** `--http name=host[:methods]`; refuse any other host and IP literals unless granted.
-  Done: tests against a local server for an allowed and a refused host.
+- [ ] **N1. `Http` grant and allowlist.**
+  - `kio run .. --http name=host` grants an `Http` capability for one host, HTTPS only; `--http name=http://host:port` allows plain HTTP for local testing. One host per grant.
+  - `Http.get(path)`: `path` must start with `/`; the host builds `scheme://host[:port]path` itself, so a program cannot name another host. Anything else is `denied`.
+  - Client: `ureq` 3 with redirects off (N2 follows them), a 10 s per-request timeout bounded by the run deadline (as H5), response bodies read through the 10 MB per-read cap and charged to `--io`; non-2xx is `status(code)`; timeouts are `timeout`.
+  - IP-literal hosts are refused unless granted literally (`--http name=127.0.0.1:8080`).
+  - Grants by name as for `Dir` (duplicates, extras, missing all refused).
+  Done: tests against a local `std::net::TcpListener` server: a granted GET returns the body; `get("//evil.com/x")`, `get("http://evil.com")` and a path without `/` are denied; a 404 is `status(404)`; a server that never answers stops at the timeout; a body over the cap is `too-large`.
 
 - [ ] **N2. Redirects and DNS.** Recheck the allowlist on every redirect; pin DNS per run; cap response size.
   Done: a redirect to an ungranted host is refused; tests for the pin and the cap.
