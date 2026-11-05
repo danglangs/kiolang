@@ -937,6 +937,16 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
         }
     }
 
+    // `main`'s capability parameters, so a helper that uses one it was not given gets a hint.
+    let main_caps: Vec<(String, String)> = (fns.iter())
+        .filter(|(m, f)| m.is_empty() && f.name == "main")
+        .flat_map(|(_, f)| f.params.iter())
+        .filter_map(|p| match &p.ty.kind {
+            TypeKind::Named(t, _) if caps.caps.iter().any(|c| c.name == *t) => Some((p.name.clone(), t.clone())),
+            _ => None,
+        })
+        .collect();
+
     for ((module, f), sig_err) in fns.iter().zip(sig_errs) {
         let mut c = Checker {
             caps,
@@ -949,6 +959,7 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
             scopes: Vec::new(),
             ret: Ty::Unit,
             loops: 0,
+            main_caps: &main_caps,
         };
         diags.extend(sig_err.or_else(|| c.function(f).err()));
     }
@@ -991,6 +1002,8 @@ struct Checker<'a> {
     ret: Ty,
     /// Loops enclosing the statement being checked.
     loops: usize,
+    /// Name and type of each capability parameter of `main`.
+    main_caps: &'a [(String, String)],
 }
 
 impl Checker<'_> {
@@ -1028,8 +1041,13 @@ impl Checker<'_> {
     fn unknown_name(&self, span: Span, name: &str) -> Diag {
         let mut names: Vec<_> = self.scopes.iter().flat_map(|s| s.keys().map(String::as_str)).collect();
         names.sort();
+        let main_cap = self.main_caps.iter().find(|(n, _)| n == name);
         let hint = match closest(name, &names) {
             _ if self.is_cap(name) => NO_CAP_SYNTAX.to_string(),
+            _ if main_cap.is_some() => {
+                let (n, t) = main_cap.unwrap();
+                format!("`{n}` is a capability of `main`; take it as a parameter, `{n}: {t}`, and pass it in")
+            }
             Some(c) => format!("did you mean `{c}`?"),
             None => "declare it with `let`".to_string(),
         };

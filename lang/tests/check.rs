@@ -1241,3 +1241,15 @@ fn type_names_start_uppercase() {
         assert_eq!(d.hint.as_deref(), Some(format!("rename it `{fixed}`").as_str()));
     }
 }
+
+/// A helper using a capability it was not given is told how to receive it.
+#[test]
+fn hint_to_pass_a_capability_in() {
+    let src = "fn f() -> Int { let r = log.get(\"/x\"); 1 } fn main(log: Http) -> Int { f() }";
+    let d = &check(src, &CapTable::v0()).unwrap_err()[0];
+    assert_eq!(d.msg, "unknown name `log`");
+    assert_eq!(
+        d.hint.as_deref(),
+        Some("`log` is a capability of `main`; take it as a parameter, `log: Http`, and pass it in")
+    );
+}
