@@ -247,6 +247,14 @@ impl Interp<'_> {
                         None => return Err(fail(span, &format!("index {i} out of bounds for length {len}"))),
                     }
                 }
+                // A byte is not a `Value`: bounds-check and stay on the `Bytes`, which `read` indexes.
+                (Step::Index(i, span), slot @ Value::Bytes(_)) => {
+                    let Value::Bytes(b) = &*slot else { unreachable!() };
+                    if usize::try_from(i).map_or(true, |i| i >= b.len()) {
+                        return Err(fail(span, &format!("index {i} out of bounds for length {}", b.len())));
+                    }
+                    slot
+                }
                 _ => unreachable!("checked place"),
             };
         }
@@ -307,6 +315,10 @@ impl Interp<'_> {
         let Some((root, steps)) = self.walk(e, self.depth - 1, &[])? else {
             return Ok(None);
         };
+        let (last, parents) = steps.split_last().expect("a field or index has a step");
+        if let (Step::Index(i, _), Value::Bytes(b)) = (*last, self.slot(root, parents)?) {
+            return Ok(Some(Value::Int(i64::from(b[i as usize]))));
+        }
         Ok(Some(self.slot(root, &steps)?.clone()))
     }
 
@@ -431,16 +443,22 @@ impl Interp<'_> {
 
     #[inline(never)]
     fn index(&mut self, base: &Expr, index: &Expr, span: Span) -> Res {
-        let (Value::List(mut vals), Value::Int(i)) = (self.expr(base)?, self.expr(index)?) else {
+        let (base, Value::Int(i)) = (self.expr(base)?, self.expr(index)?) else {
             unreachable!("checked index");
         };
-        match usize::try_from(i).ok().filter(|&i| i < vals.len()) {
-            Some(i) => Ok(vals.swap_remove(i)),
-            None => Err(fail(
-                span,
-                &format!("index {i} out of bounds for length {}", vals.len()),
-            )),
-        }
+        let len = match &base {
+            Value::List(vals) => vals.len(),
+            Value::Bytes(b) => b.len(),
+            _ => unreachable!("checked index"),
+        };
+        let Some(at) = usize::try_from(i).ok().filter(|&i| i < len) else {
+            return Err(fail(span, &format!("index {i} out of bounds for length {len}")));
+        };
+        Ok(match base {
+            Value::List(mut vals) => vals.swap_remove(at),
+            Value::Bytes(b) => Value::Int(i64::from(b[at])),
+            _ => unreachable!("checked index"),
+        })
     }
 
     /// `push`, `insert` and `remove` change their receiver in place; the checker only allows
@@ -456,6 +474,10 @@ impl Interp<'_> {
             let (a, b) = (args.next(), args.next());
             match (self.slot(root, &steps)?, name, a, b) {
                 (Value::List(vals), "push", Some(item), _) => vals.push(item),
+                (Value::Bytes(b), "push", Some(Value::Int(n)), _) => match u8::try_from(n) {
+                    Ok(n) => b.push(n),
+                    Err(_) => return Err(fail(span, &format!("byte {n} out of range 0..=255"))),
+                },
                 (Value::Map(map), "insert", Some(k), Some(v)) => {
                     map.insert(Key::from_value(k), v);
                 }
@@ -709,6 +731,13 @@ fn builtin_method(recv: &Value, name: &str, mut args: Vec<Value>, span: Span) ->
             Ok(s) => Value::Str(s),
             Err(_) => return Err(fail(span, "invalid UTF-8")),
         },
+        (Value::Enum(en, i, payload), "unwrap_or") if en == "Option" => {
+            if builtin("Some") == Some((en.as_str(), *i)) {
+                payload[0].clone()
+            } else {
+                args.remove(0)
+            }
+        }
         _ => unreachable!("checked method"),
     })
 }

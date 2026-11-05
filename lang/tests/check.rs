@@ -956,7 +956,10 @@ fn list_indexing() {
     assert_eq!((msg.as_str(), at.as_str()), ("expected Int, found Bool", "true"));
     let (msg, at) = reject("fn main() { let x = 1; x[0]; }");
     assert_eq!((msg.as_str(), at.as_str()), ("cannot index Int", "x[0]"));
-    assert_eq!(hint("fn main() { let x = 1; x[0]; }"), "only a List can be indexed");
+    assert_eq!(
+        hint("fn main() { let x = 1; x[0]; }"),
+        "only a List or Bytes can be indexed"
+    );
     reject("fn main() { let x: Int = [1][0] + [\"a\"][0]; }");
     let (msg, _) = reject("fn main() { let x = [1, 2]; x == x; }");
     assert_eq!(msg, "`==` cannot be applied to List<Int> and List<Int>");
@@ -1204,4 +1207,24 @@ fn diagnostics_are_capped() {
     let diags = check(&src, &CapTable::default()).unwrap_err();
     assert_eq!(diags.len(), lang::check::MAX_DIAGS + 1);
     assert_eq!(diags.last().unwrap().msg, "399 more errors not shown");
+}
+
+#[test]
+fn bytes_and_option_methods() {
+    ok("fn main() { let mut b = \"a\".to_bytes(); b.push(b[0] + 1); }");
+    ok("fn main() -> Int { Some(1).unwrap_or(2) }");
+    assert_eq!(
+        hint("fn main() { let mut b = \"a\".to_bytes(); b[0] = 1; }"),
+        "use `push`, or build new Bytes"
+    );
+    assert_eq!(
+        hint("fn main() { let b = \"a\".to_bytes(); b.push(1); }"),
+        "declare it with `let mut`"
+    );
+    let (msg, at) = reject("fn main() -> Int { Some(1).unwrap_or(\"x\") }");
+    assert_eq!((msg.as_str(), at.as_str()), ("expected Int, found Str", "\"x\""));
+    assert_eq!(
+        hint("fn main() -> Int { Some(1).unwrap_or(\"x\") }"),
+        "`Option<Int>.unwrap_or` is declared as `unwrap_or(Int) -> Int`"
+    );
 }

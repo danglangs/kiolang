@@ -642,3 +642,78 @@ fn reads_in_place() {
                let a = [xs.len(), { xs.push(0); 0 }]; a[0] }";
     assert_eq!(int(src), Value::Int(2));
 }
+
+const JSON_STR: &str = "fn json_str(s: Str) -> Str {
+    let b = s.to_bytes();
+    let mut out = \"\\\"\".to_bytes();
+    for i in 0..b.len() {
+        let c = b[i];
+        if c == 34 || c == 92 { out.push(92); }
+        out.push(c);
+    }
+    out.push(34);
+    out.to_str()
+}";
+
+#[test]
+fn bytes_json_str() {
+    let src = format!("{JSON_STR} fn main() -> Str {{ json_str(\"a\\\"b\\\\c\") }}");
+    assert_eq!(int(&src), Value::Str("\"a\\\"b\\\\c\"".to_string()));
+}
+
+#[test]
+fn bytes_percent_decode() {
+    let src = "fn hex(c: Int) -> Int { if c >= 65 { c - 55 } else { c - 48 } }
+        fn decode(s: Str) -> Str {
+            let b = s.to_bytes();
+            let mut out = \"\".to_bytes();
+            let mut i = 0;
+            while i < b.len() {
+                if b[i] == 37 && i + 2 < b.len() {
+                    out.push(hex(b[i + 1]) * 16 + hex(b[i + 2]));
+                    i += 3;
+                } else {
+                    out.push(b[i]);
+                    i += 1;
+                }
+            }
+            out.to_str()
+        }
+        fn main() -> Str { decode(\"%41b%42\") }";
+    assert_eq!(int(src), Value::Str("AbB".to_string()));
+}
+
+#[test]
+fn bytes_errors() {
+    fails(
+        "fn main() { let mut b = \"\".to_bytes(); b.push(256); }",
+        "byte 256 out of range 0..=255",
+    );
+    fails(
+        "fn main() { let mut b = \"\".to_bytes(); b.push(0 - 1); }",
+        "byte -1 out of range 0..=255",
+    );
+    let src = "fn main() -> Int { let b = \"ab\".to_bytes(); b[2] }";
+    let e = exec(src).unwrap_err();
+    assert_eq!(e.msg, "index 2 out of bounds for length 2");
+    assert_eq!(&src[e.span.start..e.span.end], "b[2]");
+    fails(
+        "fn main() -> Int { \"ab\".to_bytes()[0 - 1] }",
+        "index -1 out of bounds for length 2",
+    );
+    fails(
+        "fn main() -> Int { let xs = [\"a\".to_bytes()]; xs[0][1] }",
+        "index 1 out of bounds for length 1",
+    );
+}
+
+#[test]
+fn option_unwrap_or() {
+    assert_eq!(int("fn main() -> Int { Some(3).unwrap_or(9) }"), Value::Int(3));
+    assert_eq!(
+        int("fn main() -> Int { \"x\".parse_int().unwrap_or(9) }"),
+        Value::Int(9)
+    );
+    let src = "fn main() -> Str { let m: Map<Str, Str> = Map::new(); m.get(\"k\").unwrap_or(\"d\") }";
+    assert_eq!(int(src), Value::Str("d".to_string()));
+}

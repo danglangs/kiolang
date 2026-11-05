@@ -490,6 +490,8 @@ fn method(caps: &CapTable, recv: &Ty, name: &str) -> Option<(Vec<Ty>, Ty)> {
         (Ty::Int, "to_str") | (Ty::Bytes, "to_str") => Some((vec![], Ty::Str)),
         (Ty::Str, "len") | (Ty::Bytes, "len") | (Ty::List(_), "len") => Some((vec![], Ty::Int)),
         (Ty::List(t), "push") => Some((vec![(**t).clone()], Ty::Unit)),
+        (Ty::Bytes, "push") => Some((vec![Ty::Int], Ty::Unit)),
+        (Ty::Option(t), "unwrap_or") => Some((vec![(**t).clone()], (**t).clone())),
         (Ty::Map(..), "len") => Some((vec![], Ty::Int)),
         (Ty::Map(k, _), "keys") => Some((vec![], Ty::List(k.clone()))),
         (Ty::Map(k, v), "get") => Some((vec![(**k).clone()], Ty::Option(v.clone()))),
@@ -503,6 +505,12 @@ fn method(caps: &CapTable, recv: &Ty, name: &str) -> Option<(Vec<Ty>, Ty)> {
         (Ty::Str, "parse_int") => Some((vec![], Ty::Option(Box::new(Ty::Int)))),
         _ => None,
     }
+}
+
+/// How a method is declared, as a hint for a call that does not fit.
+fn declared(recv: &Ty, name: &str, params: &[Ty], ret: &Ty) -> String {
+    let tys: Vec<_> = params.iter().map(Ty::to_string).collect();
+    format!("`{recv}.{name}` is declared as `{name}({}) -> {ret}`", tys.join(", "))
 }
 
 /// Every built-in method name, so hints can list the ones `method` accepts on a type.
@@ -521,6 +529,7 @@ const METHODS: &[&str] = &[
     "to_bytes",
     "to_str",
     "trim",
+    "unwrap_or",
 ];
 
 fn cap_methods<'a>(caps: &'a CapTable, name: &str) -> &'a [(String, Vec<Ty>, Ty)] {
@@ -992,17 +1001,18 @@ impl Checker<'_> {
         self.expr(e, expected)
     }
 
-    /// The element type of list type `ty`, with `index` checked as an `Int`.
+    /// The element type of list or bytes type `ty`, with `index` checked as an `Int`.
     fn element(&mut self, ty: &Ty, index: &Expr, span: Span) -> Result<Ty, Diag> {
-        let Ty::List(t) = ty else {
-            return Err(err(
-                span,
-                format!("cannot index {ty}"),
-                Some("only a List can be indexed"),
-            ));
+        let elem = match ty {
+            Ty::List(t) => (**t).clone(),
+            Ty::Bytes => Ty::Int,
+            _ => {
+                let hint = "only a List or Bytes can be indexed";
+                return Err(err(span, format!("cannot index {ty}"), Some(hint)));
+            }
         };
         want_expr(index, &self.expr(index, None)?, &Ty::Int)?;
-        Ok((**t).clone())
+        Ok(elem)
     }
 
     /// `[a, b]`: the elements share the expected element type, else the first one's.
@@ -1031,7 +1041,7 @@ impl Checker<'_> {
         let recv_ty = self.operand(recv, None)?;
         if matches!(
             (&recv_ty, name),
-            (Ty::List(_), "push") | (Ty::Map(..), "insert" | "remove")
+            (Ty::List(_) | Ty::Bytes, "push") | (Ty::Map(..), "insert" | "remove")
         ) {
             self.mutation_target(recv, name, &recv_ty)?;
         }
@@ -1046,15 +1056,16 @@ impl Checker<'_> {
         };
         if args.len() != params.len() {
             let msg = format!("`{name}` takes {} arguments, found {}", params.len(), args.len());
-            let tys: Vec<_> = params.iter().map(Ty::to_string).collect();
-            let hint = format!(
-                "`{recv_ty}.{name}` is declared as `{name}({}) -> {ret}`",
-                tys.join(", ")
-            );
-            return Err(err(e.span, msg, Some(&hint)));
+            return Err(err(e.span, msg, Some(&declared(&recv_ty, name, &params, &ret))));
         }
         for (a, param) in args.iter().zip(&params) {
-            want_expr(a, &self.expr(a, Some(param))?, param)?;
+            let found = self.expr(a, Some(param))?;
+            want_expr(a, &found, param).map_err(|mut d| {
+                if !matches!(recv_ty, Ty::Cap(_)) {
+                    d.hint.get_or_insert_with(|| declared(&recv_ty, name, &params, &ret));
+                }
+                d
+            })?;
         }
         Ok(ret)
     }
@@ -1343,6 +1354,10 @@ impl Checker<'_> {
             }
             ExprKind::Index(base, index) => {
                 let ty = self.place(base)?;
+                if ty == Ty::Bytes {
+                    let hint = "use `push`, or build new Bytes";
+                    return Err(err(target.span, "cannot assign to a byte".to_string(), Some(hint)));
+                }
                 self.element(&ty, index, target.span)
             }
             _ => Err(err(
@@ -1358,6 +1373,7 @@ impl Checker<'_> {
     fn mutation_target(&mut self, recv: &Expr, method: &str, recv_ty: &Ty) -> Result<(), Diag> {
         let (noun, to) = match (recv_ty, method) {
             (Ty::List(_), _) => ("list", "to"),
+            (Ty::Bytes, _) => ("bytes", "to"),
             (_, "remove") => ("map", "from"),
             _ => ("map", "to"),
         };

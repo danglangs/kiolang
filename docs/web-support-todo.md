@@ -120,9 +120,9 @@ Each changes `caps.wit` or the language. Recommendation first, then the alternat
 
 - [ ] **W1. Records in caps.wit.** `[parallel]` capgen maps a WIT `record` to a kio struct declared in every program (`header` to `Header`, `u16` to `Int`, `list<u8>` to `Bytes`); add decision 2's `web` interface. A user struct with the same name is an error. Security-review event.
   Done: `Header { name: "a", value: "b" }` checks with no declaration; a duplicate user `struct Request` is rejected with a hint; CI's capgen drift check passes.
-- [ ] **W2. `Bytes` index and push.** `[parallel]` `b[i] -> Int` (0-255); `push(Int)` on a `let mut` `Bytes`, runtime error outside 0-255. Out-of-bounds index is the existing runtime error.
+- [x] **W2. `Bytes` index and push.** `[parallel]` `b[i] -> Int` (0-255); `push(Int)` on a `let mut` `Bytes`, runtime error outside 0-255. Out-of-bounds index is the existing runtime error.
   Done: `json_str` from the sketch and a percent-decoder run in tests; push of 256 and index past the end each stop with their error.
-- [ ] **W3. `Option.unwrap_or(T)`.** `[parallel]`
+- [x] **W3. `Option.unwrap_or(T)`.** `[parallel]`
   Done: tests for `Some` and `None`, and a type-mismatch rejection with a hint.
 - [ ] **W4. Modules.** `[parallel]` Decision 6. Split by pass: parse (`mod`, `pub`, `a::b`), resolve and check (unknown module, private item, cycles), then the API change to a file list.
   Done: a two-file program runs; a diag in `web.kio` prints `web.kio:line`; calling a non-`pub` function and a `mod` cycle are each rejected with a hint; the report names functions as `web::file`.
