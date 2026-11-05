@@ -1,4 +1,4 @@
-use host::listen::ListenLimits;
+use kio_host::listen::ListenLimits;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
@@ -128,8 +128,8 @@ fn guest_framing_headers_are_dropped() {
 /// W8: serve a one-file app in this process with small limits; returns the port.
 mod limits {
     use super::*;
-    use host::listen::{serve_with, ListenLimits};
-    use host::{open_dir, Limits, Server};
+    use kio_host::listen::{serve_with, ListenLimits};
+    use kio_host::{open_dir, Limits, Server};
     use std::time::Duration;
 
     /// `/pipe` reads a path the `test-hooks` build blocks on (until the 2 s deadline); any other path answers 200.

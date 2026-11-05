@@ -1,6 +1,6 @@
 mod mcp;
 
-use host::{listen, open_dir, Diag, Kio, Limits, Origin, Server};
+use kio_host::{listen, open_dir, Diag, Kio, Limits, Origin, Server};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

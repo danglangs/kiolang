@@ -2,7 +2,7 @@
 //! never run: running needs grants, and grants are the operator's decision (open question 31).
 
 use crate::locate;
-use host::{Kio, Limits};
+use kio_host::{Kio, Limits};
 use serde_json::{json, Value};
 use std::io::BufRead;
 

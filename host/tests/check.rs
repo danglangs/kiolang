@@ -1,4 +1,4 @@
-use host::{Kio, Limits};
+use kio_host::{Kio, Limits};
 use lang::{check, CapTable};
 
 #[test]
@@ -41,7 +41,7 @@ fn dir(files: &[(&str, &[u8])]) -> (tempfile::TempDir, cap_std::fs::Dir) {
     for (p, b) in files {
         std::fs::write(t.path().join(p), b).unwrap();
     }
-    let d = host::open_dir(t.path()).unwrap();
+    let d = kio_host::open_dir(t.path()).unwrap();
     (t, d)
 }
 
@@ -97,7 +97,7 @@ fn read_errors() {
     std::fs::write(t.path().join("secret"), "s").unwrap();
     std::fs::create_dir_all(t.path().join("sub/in")).unwrap();
     let read = |p: &str| {
-        let d = host::open_dir(&t.path().join("sub")).unwrap();
+        let d = kio_host::open_dir(&t.path().join("sub")).unwrap();
         on(d, &format!("d.read(\"{p}\")"))
     };
     assert_eq!(on(d, "d.read(\"missing\")"), NOT_FOUND);
@@ -121,7 +121,7 @@ fn symlinks_out_are_refused() {
     symlink(outer.path().join("outside"), root.join("dir")).unwrap();
     symlink("../secret", root.join("rel")).unwrap();
     symlink("/etc/passwd", root.join("abs")).unwrap();
-    let d = || host::open_dir(&root).unwrap();
+    let d = || kio_host::open_dir(&root).unwrap();
     for p in ["file", "rel", "abs", "dir/x"] {
         assert_eq!(on(d(), &format!("d.read(\"{p}\")")), INVALID, "{p}");
     }
@@ -138,7 +138,7 @@ fn create_errors_leave_filesystem_unchanged() {
     std::fs::create_dir(&root).unwrap();
     std::fs::write(root.join("old"), "keep").unwrap();
     std::fs::create_dir(root.join("in")).unwrap();
-    let d = || host::open_dir(&root).unwrap();
+    let d = || kio_host::open_dir(&root).unwrap();
     let ok = "Ok(())";
     assert_eq!(on(d(), "d.create(\"old\", \"new\".to_bytes())"), DENIED);
     assert_eq!(std::fs::read(root.join("old")).unwrap(), b"keep");
@@ -156,8 +156,8 @@ fn create_errors_leave_filesystem_unchanged() {
 fn open_dir_refuses_missing_and_files() {
     let t = tempfile::tempdir().unwrap();
     std::fs::write(t.path().join("f"), "x").unwrap();
-    assert!(host::open_dir(&t.path().join("nope")).is_err());
-    assert!(host::open_dir(&t.path().join("f")).is_err());
+    assert!(kio_host::open_dir(&t.path().join("nope")).is_err());
+    assert!(kio_host::open_dir(&t.path().join("f")).is_err());
 }
 
 fn rejected(names: &[&str], message: &str, hint: &str) {
@@ -488,7 +488,7 @@ fn serve() -> String {
 /// Run `main(h: Http)` with `body` on the server at `grant`; the printed value.
 fn get(grant: &str, body: &str, limits: Limits) -> String {
     let src = format!("fn main(h: Http) -> Result<Bytes, HttpErr> {{ {body} }}");
-    let origin = host::Origin::parse(grant).unwrap();
+    let origin = kio_host::Origin::parse(grant).unwrap();
     let mut kio = Kio::new(limits).unwrap();
     kio.run_with(&src, vec![], vec![("h".into(), origin)])
         .unwrap()
@@ -523,7 +523,7 @@ fn http_redirects() {
     let calls = |path: &str| {
         let src = format!("fn main(h: Http) -> Int {{ let r = h.get(\"{path}\"); 0 }}");
         let mut kio = Kio::new(l).unwrap();
-        let origin = host::Origin::parse(&g).unwrap();
+        let origin = kio_host::Origin::parse(&g).unwrap();
         kio.run_with(&src, vec![], vec![("h".into(), origin)]).unwrap().unwrap();
         kio.import_calls()
     };
@@ -536,19 +536,19 @@ fn http_redirects() {
 fn http_dns_is_pinned_and_filtered() {
     let g = serve().replace("127.0.0.1", "localhost");
     let src = "fn main(h: Http) -> Int { let a = h.get(\"/ok\"); let b = h.get(\"/same\"); 0 }";
-    let run = |origin: host::Origin| {
+    let run = |origin: kio_host::Origin| {
         Kio::new(Limits::default())
             .unwrap()
             .run_with(src, vec![], vec![("h".into(), origin)])
             .unwrap()
             .unwrap();
     };
-    let mut origin = host::Origin::parse(&g).unwrap();
+    let mut origin = kio_host::Origin::parse(&g).unwrap();
     origin.allow_private_addrs();
     run(origin.clone());
     assert_eq!(origin.lookups(), 1);
     // Without the allowance, `localhost` has no usable address: denied, and still looked up once.
-    let origin = host::Origin::parse(&g).unwrap();
+    let origin = kio_host::Origin::parse(&g).unwrap();
     run(origin.clone());
     assert_eq!(origin.lookups(), 1);
     assert_eq!(get(&g, "h.get(\"/ok\")", Limits::default()), HTTP_DENIED);
@@ -582,7 +582,7 @@ fn http_quotas_and_timeout() {
     let src = "fn main(h: Http) -> Int { let r = h.get(\"/ok\"); let s = h.get(\"/ok\"); 0 }";
     let run = |limits| {
         let mut kio = Kio::new(limits).unwrap();
-        let o = host::Origin::parse(&g).unwrap();
+        let o = kio_host::Origin::parse(&g).unwrap();
         let err = kio.run_with(src, vec![], vec![("h".into(), o)]);
         (kio, err)
     };
@@ -612,7 +612,7 @@ fn http_quotas_and_timeout() {
     };
     let src = "fn main(h: Http) -> Int { let r = h.get(\"/hang\"); 0 }";
     let mut kio = Kio::new(limits).unwrap();
-    let o = host::Origin::parse(&g).unwrap();
+    let o = kio_host::Origin::parse(&g).unwrap();
     let start = std::time::Instant::now();
     // The request timeout and the deadline coincide: either stops the run, or `timeout` reaches the program.
     match kio.run_with(src, vec![], vec![("h".into(), o)]) {
@@ -648,7 +648,7 @@ fn http_slow_server_is_timeout() {
 /// N1: grants are strict, as for `Dir`.
 #[test]
 fn http_grant_rules() {
-    let o = || host::Origin::parse("http://127.0.0.1:1").unwrap();
+    let o = || kio_host::Origin::parse("http://127.0.0.1:1").unwrap();
     let src = "fn main(h: Http) -> Int { 1 }";
     let run = |names: &[&str]| {
         let grants = names.iter().map(|n| (n.to_string(), o())).collect();
@@ -673,7 +673,7 @@ fn origin_parse() {
         "http://[::1]:80",
         "127.0.0.1",
     ] {
-        assert!(host::Origin::parse(ok).is_ok(), "{ok}");
+        assert!(kio_host::Origin::parse(ok).is_ok(), "{ok}");
     }
     for bad in [
         "",
@@ -693,7 +693,7 @@ fn origin_parse() {
         "[::1",
         "[zz]:80",
     ] {
-        assert!(host::Origin::parse(bad).is_err(), "{bad}");
+        assert!(kio_host::Origin::parse(bad).is_err(), "{bad}");
     }
 }
 

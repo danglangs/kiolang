@@ -1,4 +1,4 @@
-use host::{Kio, Limits};
+use kio_host::{Kio, Limits};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
@@ -37,8 +37,8 @@ fn primer(limits: Limits, out_files: &[&str], hide: Option<(&str, &str)>) -> (Lo
         std::fs::write(b.path().join(f), "old").unwrap();
     }
     let dirs = vec![
-        ("input".to_string(), host::open_dir(a.path()).unwrap()),
-        ("out".to_string(), host::open_dir(b.path()).unwrap()),
+        ("input".to_string(), kio_host::open_dir(a.path()).unwrap()),
+        ("out".to_string(), kio_host::open_dir(b.path()).unwrap()),
     ];
     let log = Log::default();
     let mut kio = Kio::new(limits).unwrap();
@@ -123,8 +123,8 @@ fn report_check_holds_without_a_log() {
     let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     std::fs::write(a.path().join("invoices.csv"), "a,1\n").unwrap();
     let dirs = vec![
-        ("input".to_string(), host::open_dir(a.path()).unwrap()),
-        ("out".to_string(), host::open_dir(b.path()).unwrap()),
+        ("input".to_string(), kio_host::open_dir(a.path()).unwrap()),
+        ("out".to_string(), kio_host::open_dir(b.path()).unwrap()),
     ];
     let mut kio = Kio::new(Limits::default()).unwrap();
     kio.hide_from_report("input", "read");

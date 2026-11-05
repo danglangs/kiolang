@@ -718,26 +718,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
-name = "host"
-version = "0.1.0"
-dependencies = [
- "cap-std",
- "host",
- "http-body-util",
- "hyper",
- "hyper-util",
- "lang",
- "rustix",
- "serde_json",
- "tempfile",
- "tokio",
- "ureq",
- "url",
- "wasmtime",
- "wasmtime-wasi",
-]
-
-[[package]]
 name = "http"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1019,6 +999,26 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "kio"
+version = "0.1.0"
+dependencies = [
+ "cap-std",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "kio",
+ "lang",
+ "rustix",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "ureq",
+ "url",
+ "wasmtime",
+ "wasmtime-wasi",
 ]
 
 [[package]]

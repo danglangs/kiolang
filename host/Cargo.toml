@@ -1,5 +1,5 @@
 [package]
-name = "host"
+name = "kio"
 version = "0.1.0"
 edition = "2021"
 publish = false
@@ -9,6 +9,7 @@ name = "kio"
 path = "src/main.rs"
 
 [lib]
+name = "kio_host"
 path = "src/lib.rs"
 
 [features]
@@ -33,5 +34,5 @@ wasmtime-wasi = "50"
 wasmtime = "50"
 
 [dev-dependencies]
-host = { path = ".", features = ["test-hooks"] }
+kio = { path = ".", features = ["test-hooks"] }
 tempfile = "3"

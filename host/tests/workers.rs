@@ -1,6 +1,6 @@
 //! H5/W8: detached host-call workers are capped. Own test binary: the cap is process-wide.
 
-use host::{open_dir, Kio, Limits};
+use kio_host::{open_dir, Kio, Limits};
 
 /// 64 reads blocked (the `pipe` test hook) each leave a detached worker; the next host call,
 /// even one that would not block, is refused as a timeout.

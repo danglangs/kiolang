@@ -1,4 +1,4 @@
-use host::{open_dir, Limits, Request, Server};
+use kio_host::{open_dir, Limits, Request, Server};
 use std::time::Instant;
 
 fn get(target: &str) -> Request {

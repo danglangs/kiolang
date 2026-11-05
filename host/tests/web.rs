@@ -1,4 +1,4 @@
-use host::{Kio, Limits, Request, Response};
+use kio_host::{Kio, Limits, Request, Response};
 
 const ECHO: &str = r#"fn main(req: Incoming, res: Outgoing) -> Result<(), WebErr> {
     let names: List<Str> = ["content-type"];

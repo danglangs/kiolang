@@ -1,4 +1,4 @@
-use host::{Kio, Limits};
+use kio_host::{Kio, Limits};
 use std::process::Command;
 
 fn files(web: &str) -> Vec<(String, String)> {
