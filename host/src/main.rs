@@ -1,4 +1,6 @@
-use host::{open_dir, Diag, Kio, Limits, Origin};
+mod listen;
+
+use host::{open_dir, Diag, Kio, Limits, Origin, Server};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -6,7 +8,7 @@ fn main() {
         ["check", path] => std::process::exit(check(path)),
         ["run", path, ref flags @ ..] => std::process::exit(run(path, flags)),
         _ => eprintln!(
-            "usage: kio check <prog.kio>\n       kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log]"
+            "usage: kio check <prog.kio>\n       kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr]"
         ),
     }
     std::process::exit(2);
@@ -59,8 +61,13 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     };
     let mut dirs = Vec::new();
     let mut https = Vec::new();
-    let mut limits = Limits::default();
+    let mut limits = if flags.contains(&"--listen") {
+        Limits::web()
+    } else {
+        Limits::default()
+    };
     let mut audit = None;
+    let mut listen = None;
     let mut dir_paths = Vec::new();
     for pair in flags.chunks(2) {
         let (name, dir) = match pair {
@@ -95,12 +102,19 @@ fn run(path: &str, flags: &[&str]) -> i32 {
                 }
                 continue;
             }
+            ["--listen", spec] => {
+                match spec.parse::<std::net::SocketAddr>() {
+                    Ok(a) => listen = Some(a),
+                    Err(e) => return fail(format!("--listen {spec}: {e}; expected ip:port")),
+                }
+                continue;
+            }
             ["--dir", spec] => match spec.split_once('=') {
                 Some(nd) => nd,
                 None => return fail(format!("--dir {spec}: expected name=path")),
             },
             _ => return fail(
-                "usage: kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log]"
+                "usage: kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr]"
                     .into(),
             ),
         };
@@ -111,6 +125,22 @@ fn run(path: &str, flags: &[&str]) -> i32 {
             }
             Err(e) => return fail(format!("--dir {name}={dir}: {e}")),
         }
+    }
+    // A program that fails to check is reported by the run below.
+    let serves = lang::check_files(
+        &files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect::<Vec<_>>(),
+        &lang::CapTable::v0(),
+    )
+    .is_ok_and(|p| {
+        p.main_params()
+            .iter()
+            .any(|(_, ty)| ty == "Incoming" || ty == "Outgoing")
+    });
+    match (listen, serves) {
+        (Some(addr), true) => return serve(files, dirs, addr, limits),
+        (None, true) => return fail("main takes Incoming/Outgoing but there is no address\n  hint: add `--listen 127.0.0.1:8080`".into()),
+        (Some(_), false) => return fail("--listen needs a `main` that takes Incoming and Outgoing\n  hint: add `req: Incoming, res: Outgoing` to main, or drop --listen".into()),
+        (None, false) => {}
     }
     let mut kio = match Kio::new(limits) {
         Ok(k) => k,
@@ -134,6 +164,24 @@ fn run(path: &str, flags: &[&str]) -> i32 {
             i32::from(out.failed)
         }
         Ok(Err(diags)) => print_diags(&files, diags),
+    }
+}
+
+/// `run --listen`: check once, print the report, then answer requests until Ctrl-C.
+fn serve(
+    files: Vec<(String, String)>,
+    dirs: Vec<(String, cap_std::fs::Dir)>,
+    addr: std::net::SocketAddr,
+    limits: Limits,
+) -> i32 {
+    let server = match Server::new(files.clone(), limits) {
+        Err(e) => return fail(format!("{e:#}")),
+        Ok(Err(diags)) => return print_diags(&files, diags),
+        Ok(Ok(s)) => s,
+    };
+    match listen::serve(server, dirs, addr) {
+        Ok(()) => 0,
+        Err(e) => fail(e),
     }
 }
 

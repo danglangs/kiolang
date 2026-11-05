@@ -6,7 +6,7 @@ Most languages today are not AI-safe: any line can read files, open sockets or s
 
 kio is a fresh language built around that idea, using Rust's ecosystem for speed and tooling. The goal is a general-purpose systems language: near-native speed, no garbage collector, memory and capability safe.
 
-**Status: `kio check` and `kio run` work inside the Wasm sandbox with real directories, one granted HTTP host per `--http`, and every limit enforced (G1 to G5). The MCP tool and kio-web are next. Progress: [docs/guest-host-todo.md](docs/guest-host-todo.md).**
+**Status: `kio check` and `kio run` work inside the Wasm sandbox with real directories, one granted HTTP host per `--http`, and every limit enforced (G1 to G5). `kio run --listen` serves HTTP, one fresh sandbox per request. Next: limits for slow clients, kio-web and the MCP tool. Progress: [docs/guest-host-todo.md](docs/guest-host-todo.md).**
 
 ## Try it
 
@@ -18,6 +18,15 @@ mkdir -p examples/out
 cargo run -p host -- check examples/summarize.kio
 cargo run -p host -- run examples/summarize.kio --dir input=examples/in --dir out=examples/out
 cat examples/out/summary.csv
+```
+
+To serve HTTP instead (the program's `main` takes `Incoming` and `Outgoing`; there is no default address):
+
+```
+mkdir -p examples/serve/public
+cargo run -p host -- run examples/serve/app.kio --dir public=examples/serve/public --listen 127.0.0.1:8080
+curl http://127.0.0.1:8080/hello/kio
+{"hello": "kio"}
 ```
 
 The agent wrote [examples/summarize.kio](examples/summarize.kio):
@@ -115,7 +124,7 @@ Steps:
 4. Done: guest built for `wasm32`, running in Wasmtime with limits (G5).
 5. Done: adversarial reviews of the capability rules and the host (path escapes, forged handles, runaway loops, blocked calls). `Http` refuses other hosts, off-origin redirects and private addresses.
 6. Done: an audit log of every host call. Next: an MCP tool that serves the primer and runs `check`.
-7. Next: `kio run --listen` and kio-web, a web framework written in kio ([docs/web-support-todo.md](docs/web-support-todo.md)).
+7. Done: `kio run --listen`, one fresh sandbox per request (about 0.5 ms each). Next: slow-client limits, and kio-web, a web framework written in kio ([docs/web-support-todo.md](docs/web-support-todo.md)).
 8. Later: copy-on-write values and a lowering step, then attenuation and a compiler to Wasm.
 
 v0 has no closures, globals, reflection or `unsafe`. Capabilities are parameters only. See [docs/language.md](docs/language.md).

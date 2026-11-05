@@ -17,7 +17,11 @@ test-hooks = []
 
 [dependencies]
 cap-std = "4"
+http-body-util = "0.1.5"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
 lang = { path = "../lang" }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "macros", "signal", "sync", "time"] }
 ureq = "3"
 url = "2"
 wasmtime = "50"
