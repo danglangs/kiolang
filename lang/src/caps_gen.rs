@@ -3,7 +3,11 @@ use crate::ast::*;
 use crate::check::{CapTable, CapType, Ty};
 use crate::Span;
 pub fn v0() -> CapTable {
-    let at = Span { start: 0, end: 0 };
+    let at = Span {
+        start: 0,
+        end: 0,
+        file: 0,
+    };
     let ty = |n: &str| Type {
         kind: TypeKind::Named(n.into(), vec![]),
         span: at,

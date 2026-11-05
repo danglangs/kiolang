@@ -1,6 +1,7 @@
 use crate::ast::*;
-use crate::check::{builtin, Program};
+use crate::check::{builtin, key, module_of, Program};
 use crate::Span;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 
 /// Bounds Rust recursion, and so stack use, for any program.
@@ -111,6 +112,7 @@ pub fn run(p: &Program, caps: &mut dyn Caps) -> Result<Value, RunErr> {
         structs: &p.structs,
         enums: &p.enums,
         caps,
+        module: "",
         locals,
         base: 0,
         depth: 0,
@@ -130,6 +132,8 @@ struct Interp<'a> {
     structs: &'a HashMap<String, Struct>,
     enums: &'a HashMap<String, Enum>,
     caps: &'a mut dyn Caps,
+    /// Module of the running function; "" for the root.
+    module: &'a str,
     /// Locals of all running calls, innermost last; a block truncates it on exit.
     locals: Vec<(String, Value)>,
     /// Index of the running function's first local; callers' locals below it are invisible.
@@ -415,9 +419,13 @@ impl Interp<'_> {
                 Some(v) => Ok(v),
                 None => self.field(base, field),
             },
-            ExprKind::StructLit(name, inits) => self.struct_lit(name, inits),
-            ExprKind::Path(en, v) => Ok(self.variant(en, v, Vec::new())),
-            ExprKind::Module(..) => unreachable!("modules are rejected by the checker"),
+            ExprKind::StructLit(name, inits) => self.struct_lit(&key(self.module, name), inits),
+            ExprKind::Path(en, v) => Ok(self.variant(&self.enum_key(en), v, Vec::new())),
+            ExprKind::Module(m, inner) => match &inner.kind {
+                ExprKind::StructLit(name, inits) => self.struct_lit(&format!("{m}::{name}"), inits),
+                ExprKind::Path(en, v) => Ok(self.variant(&format!("{m}::{en}"), v, Vec::new())),
+                _ => unreachable!("checked module path"),
+            },
             ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms),
             ExprKind::Try(x) => self.try_expr(x),
             ExprKind::Method(recv, name, args) => self.method(recv, name, args, e.span),
@@ -435,6 +443,16 @@ impl Interp<'_> {
         match param.map(|p| &p.ty.kind) {
             Some(TypeKind::Named(ty, _)) => ty.clone(),
             _ => unreachable!("Value::Cap names a main parameter"),
+        }
+    }
+
+    /// The key of enum `en` as written in the running module; built-in enums keep their name.
+    fn enum_key(&self, en: &str) -> String {
+        let k = key(self.module, en).into_owned();
+        if self.enums.contains_key(&k) {
+            k
+        } else {
+            en.to_string()
         }
     }
 
@@ -579,6 +597,7 @@ impl Interp<'_> {
                 self.locals.push((n.clone(), v.clone()));
                 true
             }
+            (PatKind::Module(_, inner), _) => self.bind(inner, v),
             (PatKind::Variant(_, name, names), Value::Enum(en, i, payload)) => {
                 if variant_index(self.enums, en, name) != Some(*i) {
                     return false;
@@ -593,22 +612,33 @@ impl Interp<'_> {
     }
 
     fn call_expr(&mut self, callee: &Expr, args: &[Expr]) -> Res {
-        let name = match &callee.kind {
+        let k = match &callee.kind {
             ExprKind::Name(name) if builtin(name).is_some() => {
                 let vals = args.iter().map(|a| self.expr(a)).collect::<Result<_, _>>()?;
                 return Ok(constructor(name, vals));
             }
-            ExprKind::Name(name) => name,
+            ExprKind::Name(name) => key(self.module, name),
             ExprKind::Path(en, _) if en == "Map" => return Ok(Value::Map(BTreeMap::new())),
             ExprKind::Path(en, v) => {
                 let vals = args.iter().map(|a| self.expr(a)).collect::<Result<_, _>>()?;
-                return Ok(self.variant(en, v, vals));
+                return Ok(self.variant(&self.enum_key(en), v, vals));
             }
+            ExprKind::Module(m, inner) => match &inner.kind {
+                ExprKind::Name(name) => Cow::Owned(format!("{m}::{name}")),
+                ExprKind::Path(en, v) => {
+                    let vals = args.iter().map(|a| self.expr(a)).collect::<Result<_, _>>()?;
+                    return Ok(self.variant(&format!("{m}::{en}"), v, vals));
+                }
+                _ => unreachable!("checked callee"),
+            },
             _ => unreachable!("checked callee"),
         };
-        let f = &self.funcs[name.as_str()];
+        let funcs = self.funcs;
+        let (k, f) = funcs.get_key_value(&*k).expect("checked function");
         let caller = self.enter(f, args)?;
+        let module = std::mem::replace(&mut self.module, module_of(k));
         let result = self.block(&f.body);
+        self.module = module;
         self.leave(caller);
         returned(result)
     }

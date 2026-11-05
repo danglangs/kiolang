@@ -51,14 +51,31 @@ struct Parser {
     depth: usize,
     /// Set in `if`, `while` and `for` heads, where `{` starts the body, not a struct literal.
     no_struct: bool,
+    /// Index of the source file, stamped on every span.
+    file: u32,
 }
 
 pub fn parse(src: &str) -> Result<Vec<Item>, Diag> {
+    parse_file(src, 0)
+}
+
+/// Like `parse`, for source file number `file`.
+pub fn parse_file(src: &str, file: u32) -> Result<Vec<Item>, Diag> {
+    let at = |mut s: Span| {
+        s.file = file;
+        s
+    };
+    let mut toks = lex(src).map_err(|mut d| {
+        d.span = at(d.span);
+        d
+    })?;
+    toks.iter_mut().for_each(|t| t.span = at(t.span));
     let mut p = Parser {
-        toks: lex(src)?,
+        toks,
         pos: 0,
         depth: 0,
         no_struct: false,
+        file,
     };
     let mut items = Vec::new();
     while p.pos < p.toks.len() {
@@ -136,7 +153,11 @@ impl Parser {
             Some(t) => t.span,
             None => {
                 let end = self.toks.last().map_or(0, |t| t.span.end);
-                Span { start: end, end }
+                Span {
+                    start: end,
+                    end,
+                    file: self.file,
+                }
             }
         }
     }
@@ -150,6 +171,7 @@ impl Parser {
         Span {
             start,
             end: self.prev_end(),
+            file: self.file,
         }
     }
 
@@ -232,7 +254,11 @@ impl Parser {
             let end = self.prev_end();
             Type {
                 kind: TypeKind::Unit,
-                span: Span { start: end, end },
+                span: Span {
+                    start: end,
+                    end,
+                    file: self.file,
+                },
             }
         };
         let body = self.block()?;
@@ -463,6 +489,7 @@ impl Parser {
                 span: Span {
                     start: lhs.span.start,
                     end: rhs.span.end,
+                    file: self.file,
                 },
                 kind: ExprKind::Binary(op, Box::new(lhs), Box::new(rhs)),
             };
@@ -492,6 +519,7 @@ impl Parser {
             span: Span {
                 start,
                 end: operand.span.end,
+                file: self.file,
             },
             kind: ExprKind::Unary(op, Box::new(operand)),
         })

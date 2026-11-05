@@ -55,7 +55,14 @@ fn int_literals() {
 #[test]
 fn int_too_large() {
     let d = lex("9223372036854775808").unwrap_err();
-    assert_eq!(d.span, Span { start: 0, end: 19 });
+    assert_eq!(
+        d.span,
+        Span {
+            start: 0,
+            end: 19,
+            file: 0
+        }
+    );
     assert!(d.msg.contains("does not fit"));
     assert_eq!(d.hint.as_deref(), Some("Int is 64-bit: at most 9223372036854775807"));
 }
@@ -76,7 +83,14 @@ fn str_literals() {
 #[test]
 fn bad_escape() {
     let d = lex(r#""a\qb""#).unwrap_err();
-    assert_eq!(d.span, Span { start: 2, end: 4 });
+    assert_eq!(
+        d.span,
+        Span {
+            start: 2,
+            end: 4,
+            file: 0
+        }
+    );
     assert_eq!(d.msg, "unknown escape `\\q`");
     assert!(d.hint.is_some());
 }
@@ -84,7 +98,14 @@ fn bad_escape() {
 #[test]
 fn unterminated_string() {
     let d = lex("let s = \"abc").unwrap_err();
-    assert_eq!(d.span, Span { start: 8, end: 12 });
+    assert_eq!(
+        d.span,
+        Span {
+            start: 8,
+            end: 12,
+            file: 0
+        }
+    );
     assert_eq!(d.msg, "unterminated string");
     assert_eq!(d.hint.as_deref(), Some("add a closing `\"`"));
     let d = lex("\"abc\\").unwrap_err();
@@ -129,7 +150,14 @@ fn range_is_int_dotdot_ident() {
 #[test]
 fn float_is_error() {
     let d = lex("1.5").unwrap_err();
-    assert_eq!(d.span, Span { start: 0, end: 2 });
+    assert_eq!(
+        d.span,
+        Span {
+            start: 0,
+            end: 2,
+            file: 0
+        }
+    );
     assert_eq!(d.msg, "kio has no floats");
     assert_eq!(d.hint.as_deref(), Some("use `Int`"));
 }
@@ -143,8 +171,22 @@ fn whitespace_and_comments() {
 #[test]
 fn spans_are_byte_offsets() {
     let toks = lex("\"é\" x").unwrap();
-    assert_eq!(toks[0].span, Span { start: 0, end: 4 });
-    assert_eq!(toks[1].span, Span { start: 5, end: 6 });
+    assert_eq!(
+        toks[0].span,
+        Span {
+            start: 0,
+            end: 4,
+            file: 0
+        }
+    );
+    assert_eq!(
+        toks[1].span,
+        Span {
+            start: 5,
+            end: 6,
+            file: 0
+        }
+    );
 }
 
 #[track_caller]
@@ -154,7 +196,8 @@ fn rejects(src: &str, span: (usize, usize), msg: &str, hint: Option<&str>) {
         d.span,
         Span {
             start: span.0,
-            end: span.1
+            end: span.1,
+            file: 0
         }
     );
     assert_eq!(d.msg, msg);

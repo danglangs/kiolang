@@ -127,7 +127,14 @@ fn items() {
     assert_eq!(add.params.len(), 2);
     assert_eq!(ty(&add.params[1].ty), "List<Map<Str,Int>>");
     assert_eq!(ty(&add.ret), "Int");
-    assert_eq!(add.span, Span { start: 0, end: 52 });
+    assert_eq!(
+        add.span,
+        Span {
+            start: 0,
+            end: 52,
+            file: 0
+        }
+    );
     assert_eq!(ty(&nop.ret), "()");
     assert_eq!(parse("").unwrap(), []);
 }
@@ -214,9 +221,30 @@ fn spans() {
     let StmtKind::Let { init, .. } = &f.body.stmts[0].kind else {
         panic!()
     };
-    assert_eq!(init.span, Span { start: 17, end: 22 });
-    assert_eq!(f.body.stmts[0].span, Span { start: 9, end: 23 });
-    assert_eq!(f.body.span, Span { start: 7, end: 25 });
+    assert_eq!(
+        init.span,
+        Span {
+            start: 17,
+            end: 22,
+            file: 0
+        }
+    );
+    assert_eq!(
+        f.body.stmts[0].span,
+        Span {
+            start: 9,
+            end: 23,
+            file: 0
+        }
+    );
+    assert_eq!(
+        f.body.span,
+        Span {
+            start: 7,
+            end: 25,
+            file: 0
+        }
+    );
 }
 
 fn rejected(src: &str, text: &str, msg: &str, hint: bool) {
@@ -231,7 +259,8 @@ fn rejected_with(src: &str, text: &str, msg: &str, hint: Option<&str>) {
         d.span,
         Span {
             start,
-            end: start + text.len()
+            end: start + text.len(),
+            file: 0
         },
         "{src}"
     );
@@ -307,7 +336,14 @@ fn rejects_trailing_tokens() {
 #[test]
 fn rejects_chained_comparison() {
     let d = fail("fn f() { a < b < c }");
-    assert_eq!(d.span, Span { start: 15, end: 16 });
+    assert_eq!(
+        d.span,
+        Span {
+            start: 15,
+            end: 16,
+            file: 0
+        }
+    );
     assert_eq!(d.msg, "comparisons cannot be chained");
     assert!(d.hint.is_some());
     assert!(parse("fn f() { a < b && b < c }").is_ok());
@@ -348,7 +384,14 @@ fn struct_items() {
     assert_eq!(p.fields.len(), 2);
     assert_eq!(p.fields[0].name, "x");
     assert_eq!(ty(&p.fields[1].ty), "List<Int>");
-    assert_eq!(p.span, Span { start: 0, end: 34 });
+    assert_eq!(
+        p.span,
+        Span {
+            start: 0,
+            end: 34,
+            file: 0
+        }
+    );
     assert!(e.fields.is_empty());
 }
 
@@ -380,7 +423,14 @@ fn struct_literals_in_conditions() {
 #[test]
 fn rejects_struct_shorthand() {
     let d = fail("fn f() { P { a } }");
-    assert_eq!(d.span, Span { start: 13, end: 14 });
+    assert_eq!(
+        d.span,
+        Span {
+            start: 13,
+            end: 14,
+            file: 0
+        }
+    );
     assert_eq!(d.msg, "field shorthand is not supported");
     assert_eq!(d.hint.as_deref(), Some("write `a: a`"));
 }
@@ -394,8 +444,22 @@ fn enum_items() {
     let shape: Vec<_> = e.variants.iter().map(|v| (v.name.as_str(), v.fields.len())).collect();
     assert_eq!(shape, [("A", 0), ("B", 2), ("C", 0)]);
     assert_eq!(ty(&e.variants[1].fields[1]), "List<Str>");
-    assert_eq!(e.variants[1].span, Span { start: 12, end: 29 });
-    assert_eq!(e.span, Span { start: 0, end: 36 });
+    assert_eq!(
+        e.variants[1].span,
+        Span {
+            start: 12,
+            end: 29,
+            file: 0
+        }
+    );
+    assert_eq!(
+        e.span,
+        Span {
+            start: 0,
+            end: 36,
+            file: 0
+        }
+    );
     let Item::Enum(e) = &items[1] else { panic!() };
     assert!(e.variants.is_empty());
 }
@@ -448,7 +512,14 @@ fn match_scrutinee_is_a_condition() {
 #[test]
 fn rejects_enum_syntax() {
     let d = fail("enum E { A { f: Int } }");
-    assert_eq!(d.span, Span { start: 11, end: 12 });
+    assert_eq!(
+        d.span,
+        Span {
+            start: 11,
+            end: 12,
+            file: 0
+        }
+    );
     assert_eq!(d.msg, "struct-like variants are not supported");
     assert!(d.hint.is_some());
     rejected_with("enum E { A(Int }", "}", "expected `)`", Some("a `(` is not closed"));
@@ -515,7 +586,17 @@ fn rejects_empty_type_arguments() {
 #[test]
 fn module_items() {
     let items = parse("mod web; pub fn f() {} pub struct S {} pub enum E {} fn g() {} struct T {}").unwrap();
-    assert_eq!(items[0], Item::Mod("web".into(), Span { start: 0, end: 8 }));
+    assert_eq!(
+        items[0],
+        Item::Mod(
+            "web".into(),
+            Span {
+                start: 0,
+                end: 8,
+                file: 0
+            }
+        )
+    );
     let public = |i: &Item| match i {
         Item::Fn(f) => f.public,
         Item::Struct(s) => s.public,
@@ -526,7 +607,14 @@ fn module_items() {
     assert_eq!(flags, [true, true, true, false, false]);
     // A pub item's span starts at `pub`.
     let Item::Fn(f) = &items[1] else { panic!() };
-    assert_eq!(f.span, Span { start: 9, end: 22 });
+    assert_eq!(
+        f.span,
+        Span {
+            start: 9,
+            end: 22,
+            file: 0
+        }
+    );
 }
 
 #[test]

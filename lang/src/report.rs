@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::check::Program;
+use crate::check::{key, module_of, Program};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Methods reachable on each capability parameter, keyed by (function, parameter).
@@ -10,16 +10,16 @@ type Uses = BTreeMap<(String, String), BTreeSet<String>>;
 pub fn report(p: &Program) -> String {
     let is_cap = |d: &Param| matches!(&d.ty.kind, TypeKind::Named(n, a) if a.is_empty() && p.is_cap(n));
     let mut uses = Uses::new();
-    for f in p.funcs.values() {
+    for (name, f) in &p.funcs {
         for d in f.params.iter().filter(|d| is_cap(d)) {
-            uses.insert((f.name.clone(), d.name.clone()), BTreeSet::new());
+            uses.insert((name.clone(), d.name.clone()), BTreeSet::new());
         }
     }
     // Sets only grow and are bounded by the method names, so this stops.
     let mut grown = true;
     while grown {
         grown = false;
-        for f in p.funcs.values() {
+        for (name, f) in &p.funcs {
             let mut found = Vec::new();
             // Rule 1: a capability is only a parameter name, as a receiver or a whole argument.
             // A name that is not a capability parameter finds no entry in `uses` and is skipped.
@@ -31,8 +31,15 @@ pub fn report(p: &Program) -> String {
                 }
                 ExprKind::Call(callee, args) => {
                     // `Some(x)` and the like are calls on names that are not functions.
-                    let ExprKind::Name(g) = &callee.kind else { return };
-                    let Some(g_fn) = p.funcs.get(g) else { return };
+                    let g = match &callee.kind {
+                        ExprKind::Name(g) => key(module_of(name), g).into_owned(),
+                        ExprKind::Module(m, inner) => match &inner.kind {
+                            ExprKind::Name(g) => format!("{m}::{g}"),
+                            _ => return,
+                        },
+                        _ => return,
+                    };
+                    let Some(g_fn) = p.funcs.get(&g) else { return };
                     for (arg, param) in args.iter().zip(&g_fn.params) {
                         if let (ExprKind::Name(d), Some(ms)) = (&arg.kind, uses.get(&(g.clone(), param.name.clone()))) {
                             found.extend(ms.iter().map(|m| (d.clone(), m.clone())));
@@ -42,7 +49,7 @@ pub fn report(p: &Program) -> String {
                 _ => {}
             });
             for (d, m) in found {
-                if let Some(set) = uses.get_mut(&(f.name.clone(), d)) {
+                if let Some(set) = uses.get_mut(&(name.clone(), d)) {
                     grown |= set.insert(m);
                 }
             }

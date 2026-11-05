@@ -6,15 +6,16 @@ pub mod lex;
 pub mod parse;
 pub mod report;
 
-pub use check::{check, CapTable, Program};
+pub use check::{check, check_files, CapTable, Program};
 pub use eval::{run, Caps, Key, RunErr, Value};
 pub use report::report;
 
-/// Byte offsets into the source, `start..end`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Byte offsets `start..end` into source file number `file`; 0 is the root.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Span {
     pub start: usize,
     pub end: usize,
+    pub file: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

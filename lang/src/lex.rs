@@ -38,7 +38,7 @@ const HINT_STR: &str = "add a closing `\"`";
 
 fn err(start: usize, end: usize, msg: &str, hint: Option<&str>) -> Diag {
     Diag {
-        span: Span { start, end },
+        span: Span { start, end, file: 0 },
         msg: msg.to_string(),
         hint: hint.map(str::to_string),
     }
@@ -144,7 +144,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diag> {
                 }
                 tokens.push(Token {
                     kind: Kind::Str(text),
-                    span: Span { start, end: i },
+                    span: Span { start, end: i, file: 0 },
                 });
                 continue;
             }
@@ -163,7 +163,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diag> {
         };
         tokens.push(Token {
             kind,
-            span: Span { start, end: i },
+            span: Span { start, end: i, file: 0 },
         });
     }
     Ok(tokens)

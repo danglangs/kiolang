@@ -95,7 +95,7 @@ fn main() -> Result<()> {
         "// Generated from caps.wit by tools/capgen. Do not edit.\n\
          use crate::ast::*;\nuse crate::check::{{CapTable, CapType, Ty}};\nuse crate::Span;\n\
          pub fn v0() -> CapTable {{\n\
-         let at = Span {{ start: 0, end: 0 }};\n\
+         let at = Span {{ start: 0, end: 0, file: 0 }};\n\
          let ty = |n: &str| Type {{ kind: TypeKind::Named(n.into(), vec![]), span: at }};\n\
          let case = |n: &str, fields: Vec<Type>| Variant {{ name: n.into(), fields, span: at }};\n\
          let method = |n: &str, params, ret| (n.to_string(), params, ret);\n\

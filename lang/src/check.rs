@@ -1,7 +1,8 @@
 use crate::ast::*;
 use crate::eval::Value;
-use crate::parse::parse;
+use crate::parse::parse_file;
 use crate::{Diag, Span};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -30,6 +31,7 @@ pub struct CapType {
 /// A program that passed `check`. Only `check` builds one.
 #[derive(Debug)]
 pub struct Program {
+    /// Items are keyed by `key`: `f` in the root, `web::f` in module `web`.
     pub(crate) funcs: HashMap<String, Fn>,
     pub(crate) structs: HashMap<String, Struct>,
     pub(crate) enums: HashMap<String, Enum>,
@@ -119,6 +121,86 @@ impl fmt::Display for Ty {
     }
 }
 
+/// The key of item `name` in `module`: the name itself in the root (module ""), else `web::name`.
+pub(crate) fn key<'a>(module: &str, name: &'a str) -> Cow<'a, str> {
+    if module.is_empty() {
+        Cow::Borrowed(name)
+    } else {
+        Cow::Owned(format!("{module}::{name}"))
+    }
+}
+
+/// The module of a `key`; "" for the root.
+pub(crate) fn module_of(key: &str) -> &str {
+    key.rsplit_once("::").map_or("", |(m, _)| m)
+}
+
+/// The name of a `key` without its module.
+fn bare(key: &str) -> &str {
+    key.rsplit_once("::").map_or(key, |(_, n)| n)
+}
+
+/// Names that user types may not take: built-in types, capabilities and their error enums.
+fn reserved(caps: &CapTable, name: &str) -> bool {
+    matches!(name, "Option" | "Result" | "Map")
+        || caps.enums.iter().any(|e| e.name == name)
+        || caps.caps.iter().any(|c| c.name == name)
+}
+
+/// The module being checked and the modules the root declares.
+#[derive(Clone, Copy)]
+struct Scope<'a> {
+    module: &'a str,
+    mods: &'a HashSet<String>,
+}
+
+impl Scope<'_> {
+    /// The key of a type `name` as written in this module; built-in types are visible everywhere.
+    fn own(&self, caps: &CapTable, name: &str) -> String {
+        if reserved(caps, name) {
+            name.to_string()
+        } else {
+            key(self.module, name).into_owned()
+        }
+    }
+
+    /// The key of `name` in module `m`, as written `m::name`. Only the root may write it.
+    fn member(&self, m: &str, name: &str, span: Span) -> Result<String, Diag> {
+        if !self.module.is_empty() {
+            let msg = format!("module `{}` cannot use `{m}::{name}`", self.module);
+            let hint = "a module can only use its own items; pass what it needs as arguments";
+            return Err(err(span, msg, Some(hint)));
+        }
+        if !self.mods.contains(m) {
+            let hint = format!("declare it with `mod {m};` in the root file");
+            return Err(err(span, format!("unknown module `{m}`"), Some(&hint)));
+        }
+        Ok(format!("{m}::{name}"))
+    }
+}
+
+/// Hint for a name that exists only in the root, used from a module.
+const ROOT_ITEM: &str = "a module cannot use the root's items; define it in this module or pass values as arguments";
+
+/// Rejects use of private item `key` through `module::`. `kw` is `fn`, `struct` or `enum`.
+fn check_public(key: &str, public: bool, kw: &str, span: Span) -> Result<(), Diag> {
+    if public {
+        return Ok(());
+    }
+    let (module, name) = (module_of(key), bare(key));
+    let hint = format!("mark it `pub {kw} {name}` in {module}.kio");
+    Err(err(span, format!("`{name}` is private to `{module}`"), Some(&hint)))
+}
+
+/// `web::web::f` and the like: a path names one module.
+fn nested_path(span: Span) -> Diag {
+    err(
+        span,
+        "a path has one module".to_string(),
+        Some("write `web::f`, not `web::web::f`"),
+    )
+}
+
 /// Hint for rule 2: no expression produces a capability.
 const NO_CAP_SYNTAX: &str = "capabilities come only as parameters of `main`";
 
@@ -141,6 +223,7 @@ enum Cover {
 }
 
 struct Sig {
+    public: bool,
     /// The declaration as written, like `fn f(a: Int, b: Str)`, for hints.
     decl: String,
     params: Vec<Ty>,
@@ -226,10 +309,11 @@ fn holds(en: &str, v: &str, payload: &[Ty]) -> String {
     format!("`{en}::{v}` holds ({})", tys.join(", "))
 }
 
-fn sorted_keys<V>(m: &HashMap<String, V>) -> Vec<&str> {
-    let mut keys: Vec<_> = m.keys().map(String::as_str).collect();
-    keys.sort();
-    keys
+/// The names of the items in `module`, sorted.
+fn sorted_names<'a, V>(m: &'a HashMap<String, V>, module: &str) -> Vec<&'a str> {
+    let mut names: Vec<_> = m.keys().filter(|k| module_of(k) == module).map(|k| bare(k)).collect();
+    names.sort();
+    names
 }
 
 /// What an operator accepts, for the hint on `cannot be applied to`.
@@ -269,24 +353,47 @@ fn resolve(
     caps: &CapTable,
     structs: &HashMap<String, Struct>,
     enums: &HashMap<String, Enum>,
+    scope: Scope,
 ) -> Result<Ty, Diag> {
     match &t.kind {
         TypeKind::Unit => Ok(Ty::Unit),
-        TypeKind::Module(..) => Err(no_modules(t.span)),
+        TypeKind::Module(m, inner) => {
+            let TypeKind::Named(n, _) = &inner.kind else {
+                return Err(nested_path(t.span));
+            };
+            let k = scope.member(m, n, t.span)?;
+            if let Some(s) = structs.get(&k) {
+                check_public(&k, s.public, "struct", t.span)?;
+                return Ok(Ty::Struct(k));
+            }
+            if let Some(e) = enums.get(&k) {
+                check_public(&k, e.public, "enum", t.span)?;
+                return Ok(Ty::Enum(k));
+            }
+            let names = [sorted_names(structs, m), sorted_names(enums, m)].concat();
+            Err(err(
+                t.span,
+                format!("unknown type `{k}`"),
+                Some(&suggest(n, &names, "types")),
+            ))
+        }
         TypeKind::Named(n, args) => match (n.as_str(), args.as_slice()) {
-            ("Option", [a]) => Ok(Ty::Option(Box::new(resolve(a, caps, structs, enums)?))),
+            ("Option", [a]) => Ok(Ty::Option(Box::new(resolve(a, caps, structs, enums, scope)?))),
             ("Result", [a, b]) => {
-                let (a, b) = (resolve(a, caps, structs, enums)?, resolve(b, caps, structs, enums)?);
+                let (a, b) = (
+                    resolve(a, caps, structs, enums, scope)?,
+                    resolve(b, caps, structs, enums, scope)?,
+                );
                 Ok(Ty::Result(Box::new(a), Box::new(b)))
             }
-            ("List", [a]) => Ok(Ty::List(Box::new(resolve(a, caps, structs, enums)?))),
+            ("List", [a]) => Ok(Ty::List(Box::new(resolve(a, caps, structs, enums, scope)?))),
             ("Map", [k, v]) => {
-                let key = resolve(k, caps, structs, enums)?;
+                let key = resolve(k, caps, structs, enums, scope)?;
                 if !matches!(key, Ty::Int | Ty::Str) {
                     let msg = format!("`{key}` cannot be a Map key");
                     return Err(err(k.span, msg, Some("Map keys must be Int or Str")));
                 }
-                let v = resolve(v, caps, structs, enums)?;
+                let v = resolve(v, caps, structs, enums, scope)?;
                 Ok(Ty::Map(Box::new(key), Box::new(v)))
             }
             ("Option" | "Result" | "List" | "Map", _) => {
@@ -303,20 +410,24 @@ fn resolve(
             ("Bool", []) => Ok(Ty::Bool),
             ("Str", []) => Ok(Ty::Str),
             ("Bytes", []) => Ok(Ty::Bytes),
-            (_, []) if structs.contains_key(n) => Ok(Ty::Struct(n.clone())),
-            (_, []) if enums.contains_key(n) => Ok(Ty::Enum(n.clone())),
             (_, []) if caps.caps.iter().any(|c| c.name == *n) => Ok(Ty::Cap(n.clone())),
+            (_, []) => {
+                let k = scope.own(caps, n);
+                if structs.contains_key(&k) {
+                    return Ok(Ty::Struct(k));
+                }
+                if enums.contains_key(&k) {
+                    return Ok(Ty::Enum(k));
+                }
+                let mut d = unknown_type(t);
+                if !scope.module.is_empty() && (structs.contains_key(n) || enums.contains_key(n)) {
+                    d.hint = Some(ROOT_ITEM.to_string());
+                }
+                Err(d)
+            }
             _ => Err(unknown_type(t)),
         },
     }
-}
-
-fn no_modules(span: Span) -> Diag {
-    err(
-        span,
-        "modules are not available yet".to_string(),
-        Some("keep the code in one file"),
-    )
 }
 
 fn unknown_type(t: &Type) -> Diag {
@@ -382,8 +493,9 @@ fn signature(
     caps: &CapTable,
     structs: &HashMap<String, Struct>,
     enums: &HashMap<String, Enum>,
+    scope: Scope,
 ) -> Result<Sig, Diag> {
-    if sigs.contains_key(&f.name) {
+    if sigs.contains_key(&*key(scope.module, &f.name)) {
         let msg = format!("duplicate function `{}`", f.name);
         return Err(err(f.span, msg, Some("rename one of them")));
     }
@@ -394,9 +506,9 @@ fn signature(
             let msg = format!("duplicate parameter `{}`", p.name);
             return Err(err(p.span, msg, Some("rename one of them")));
         }
-        let ty = resolve(&p.ty, caps, structs, enums)?;
+        let ty = resolve(&p.ty, caps, structs, enums, scope)?;
         cap_type_ok(&ty, p.ty.span, Place::Param)?;
-        if f.name == "main" && !matches!(ty, Ty::Cap(_)) {
+        if scope.module.is_empty() && f.name == "main" && !matches!(ty, Ty::Cap(_)) {
             let msg = format!("`main` parameter `{}` is not a capability", p.name);
             let hint = "`main` parameters must be capabilities, like `input: Dir`";
             return Err(err(p.span, msg, Some(hint)));
@@ -409,9 +521,10 @@ fn signature(
         .zip(&params)
         .map(|(p, ty)| format!("{}: {ty}", p.name))
         .collect();
-    let ret = resolve(&f.ret, caps, structs, enums)?;
+    let ret = resolve(&f.ret, caps, structs, enums, scope)?;
     cap_type_ok(&ret, f.ret.span, Place::Return(&f.name))?;
     Ok(Sig {
+        public: f.public,
         decl: format!("fn {}({})", f.name, typed.join(", ")),
         params,
         ret,
@@ -423,6 +536,7 @@ fn struct_fields(
     caps: &CapTable,
     structs: &HashMap<String, Struct>,
     enums: &HashMap<String, Enum>,
+    scope: Scope,
 ) -> Result<Vec<(String, Ty)>, Diag> {
     let mut fields: Vec<(String, Ty)> = Vec::new();
     for p in &s.fields {
@@ -430,7 +544,7 @@ fn struct_fields(
             let msg = format!("duplicate field `{}`", p.name);
             return Err(err(p.span, msg, Some("rename one of them")));
         }
-        let ty = resolve(&p.ty, caps, structs, enums)?;
+        let ty = resolve(&p.ty, caps, structs, enums, scope)?;
         cap_type_ok(&ty, p.ty.span, Place::Field)?;
         fields.push((p.name.clone(), ty));
     }
@@ -442,6 +556,7 @@ fn enum_variants(
     caps: &CapTable,
     structs: &HashMap<String, Struct>,
     enums: &HashMap<String, Enum>,
+    scope: Scope,
 ) -> Result<Vec<(String, Vec<Ty>)>, Diag> {
     let mut variants: Vec<(String, Vec<Ty>)> = Vec::new();
     for v in &e.variants {
@@ -451,7 +566,7 @@ fn enum_variants(
         }
         let mut payload = Vec::new();
         for t in &v.fields {
-            let ty = resolve(t, caps, structs, enums)?;
+            let ty = resolve(t, caps, structs, enums, scope)?;
             cap_type_ok(&ty, t.span, Place::Payload)?;
             payload.push(ty);
         }
@@ -594,82 +709,133 @@ fn no_field(span: Span, field: &str, ty: &str, decl: &[(String, Ty)]) -> Diag {
 /// At most this many diagnostics are reported, so a hostile source cannot make output unbounded.
 pub const MAX_DIAGS: usize = 100;
 
-/// Checks `src`. Reports at most one `Diag` per function, in source order.
+/// Checks `src` as a one-file program.
 pub fn check(src: &str, caps: &CapTable) -> Result<Program, Vec<Diag>> {
-    check_all(src, caps).map_err(|mut diags| {
+    check_files(&[("main", src)], caps)
+}
+
+/// Checks a program of `(name, source)` files. `files[0]` is the root; every other file is the
+/// module named by its name without `.kio`, which the root must declare once with `mod name;`.
+/// Reports at most one `Diag` per function, in source order.
+pub fn check_files(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Diag>> {
+    check_all(files, caps).map_err(|mut diags| {
         if diags.len() > MAX_DIAGS {
             let more = diags.len() - MAX_DIAGS;
             diags.truncate(MAX_DIAGS);
             let msg = format!("{more} more errors not shown");
-            diags.push(err(Span { start: 0, end: 0 }, msg, Some("fix the errors above first")));
+            diags.push(err(Span::default(), msg, Some("fix the errors above first")));
         }
         diags
     })
 }
 
-fn check_all(src: &str, caps: &CapTable) -> Result<Program, Vec<Diag>> {
-    let items = parse(src).map_err(|d| vec![d])?;
+/// Checks that `mod` appears only in the root and that modules and files match one to one.
+fn declared_modules(names: &[&str], parsed: &[Vec<Item>]) -> Result<HashSet<String>, Vec<Diag>> {
+    let root = names[0];
+    let mut mods = HashSet::new();
+    let mut diags = Vec::new();
+    for (i, items) in parsed.iter().enumerate() {
+        for item in items {
+            let Item::Mod(m, span) = item else { continue };
+            if i != 0 {
+                let msg = "`mod` is only allowed in the root file".to_string();
+                diags.push(err(*span, msg, Some(&format!("declare `mod {m};` in {root}.kio"))));
+            } else if !names[1..].contains(&m.as_str()) {
+                let hint = format!("add a file named {m}.kio");
+                diags.push(err(*span, format!("unknown module `{m}`"), Some(&hint)));
+            } else if !mods.insert(m.clone()) {
+                let msg = format!("duplicate `mod {m};`");
+                diags.push(err(*span, msg, Some("declare each module once")));
+            }
+        }
+    }
+    for (i, n) in names.iter().enumerate().skip(1) {
+        let at = Span {
+            file: i as u32,
+            ..Span::default()
+        };
+        if names[1..i].contains(n) {
+            let msg = format!("duplicate file for module `{n}`");
+            diags.push(err(at, msg, Some("give each file its own name")));
+        } else if !mods.contains(*n) {
+            let msg = format!("module `{n}` is never declared");
+            diags.push(err(at, msg, Some(&format!("add `mod {n};` to {root}.kio"))));
+        }
+    }
+    if diags.is_empty() {
+        Ok(mods)
+    } else {
+        Err(diags)
+    }
+}
+
+fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Diag>> {
+    let names: Vec<&str> = files.iter().map(|(n, _)| n.strip_suffix(".kio").unwrap_or(n)).collect();
+    let mut parsed = Vec::new();
+    let mut diags = Vec::new();
+    for (i, (_, src)) in files.iter().enumerate() {
+        match parse_file(src, i as u32) {
+            Ok(items) => parsed.push(items),
+            Err(d) => diags.push(d),
+        }
+    }
+    if !diags.is_empty() {
+        return Err(diags);
+    }
+    let mods = declared_modules(&names, &parsed)?;
+
     let mut fns = Vec::new();
     let mut structs = HashMap::new();
     let mut enums = HashMap::new();
     let mut order = Vec::new();
-    let mut diags = Vec::new();
     for e in &caps.enums {
         order.push(e.name.clone());
         enums.insert(e.name.clone(), e.clone());
     }
-    let reserved = |n: &str| {
-        matches!(n, "Option" | "Result" | "Map")
-            || caps.enums.iter().any(|e| e.name == n)
-            || caps.caps.iter().any(|c| c.name == n)
-    };
-    for item in items {
-        let declared = match &item {
-            Item::Struct(s) => Some((s.name.as_str(), s.span)),
-            Item::Enum(e) => Some((e.name.as_str(), e.span)),
-            Item::Fn(_) => None,
-            Item::Mod(_, span) => {
-                diags.push(no_modules(*span));
+    for (i, items) in parsed.into_iter().enumerate() {
+        let module = if i == 0 { "" } else { names[i] };
+        for item in items {
+            let declared = match &item {
+                Item::Struct(s) => Some((s.name.as_str(), s.span)),
+                Item::Enum(e) => Some((e.name.as_str(), e.span)),
+                Item::Fn(_) | Item::Mod(..) => None,
+            };
+            if let Some((name, span)) = declared.filter(|(n, _)| reserved(caps, n)) {
+                let msg = format!("`{name}` is a built-in type");
+                diags.push(err(span, msg, Some("rename your type")));
                 continue;
             }
-        };
-        if let Some((name, span)) = declared.filter(|(n, _)| reserved(n)) {
-            let msg = format!("`{name}` is a built-in type");
-            diags.push(err(span, msg, Some("rename your type")));
-            continue;
-        }
-        // `web::x` means module `web`, so a lowercase type name would be ambiguous in a path.
-        if let Some((name, span)) = declared.filter(|(n, _)| !n.starts_with(|c: char| c.is_ascii_uppercase())) {
-            let mut fixed = name.to_string();
-            fixed[..1].make_ascii_uppercase();
-            let msg = format!("type names start with an uppercase letter: `{name}`");
-            diags.push(err(span, msg, Some(&format!("rename it `{fixed}`"))));
-            continue;
-        }
-        match item {
-            Item::Mod(..) => unreachable!("rejected above"),
-            Item::Fn(f) => fns.push(f),
-            Item::Enum(e) if structs.contains_key(&e.name) || enums.contains_key(&e.name) => {
-                diags.push(err(
-                    e.span,
-                    format!("duplicate type `{}`", e.name),
-                    Some("rename one of them"),
-                ));
+            // `web::x` means module `web`, so a lowercase type name would be ambiguous in a path.
+            if let Some((name, span)) = declared.filter(|(n, _)| !n.starts_with(|c: char| c.is_ascii_uppercase())) {
+                let mut fixed = name.to_string();
+                fixed[..1].make_ascii_uppercase();
+                let msg = format!("type names start with an uppercase letter: `{name}`");
+                diags.push(err(span, msg, Some(&format!("rename it `{fixed}`"))));
+                continue;
             }
-            Item::Enum(e) => {
-                order.push(e.name.clone());
-                enums.insert(e.name.clone(), e);
-            }
-            Item::Struct(s) if structs.contains_key(&s.name) || enums.contains_key(&s.name) => {
-                diags.push(err(
-                    s.span,
-                    format!("duplicate type `{}`", s.name),
-                    Some("rename one of them"),
-                ));
-            }
-            Item::Struct(s) => {
-                order.push(s.name.clone());
-                structs.insert(s.name.clone(), s);
+            match item {
+                Item::Mod(..) => {}
+                Item::Fn(f) => fns.push((module, f)),
+                Item::Enum(e) => {
+                    let k = key(module, &e.name).into_owned();
+                    if structs.contains_key(&k) || enums.contains_key(&k) {
+                        let msg = format!("duplicate type `{}`", e.name);
+                        diags.push(err(e.span, msg, Some("rename one of them")));
+                    } else {
+                        order.push(k.clone());
+                        enums.insert(k, e);
+                    }
+                }
+                Item::Struct(s) => {
+                    let k = key(module, &s.name).into_owned();
+                    if structs.contains_key(&k) || enums.contains_key(&k) {
+                        let msg = format!("duplicate type `{}`", s.name);
+                        diags.push(err(s.span, msg, Some("rename one of them")));
+                    } else {
+                        order.push(k.clone());
+                        structs.insert(k, s);
+                    }
+                }
             }
         }
     }
@@ -678,9 +844,14 @@ fn check_all(src: &str, caps: &CapTable) -> Result<Program, Vec<Diag>> {
     let mut fields = Fields::new();
     let mut variants = Variants::new();
     for name in &order {
+        let scope = Scope {
+            module: module_of(name),
+            mods: &mods,
+        };
         let resolved = match structs.get(name) {
-            Some(s) => struct_fields(s, caps, &structs, &enums).map(|f| drop(fields.insert(name.clone(), f))),
-            None => enum_variants(&enums[name], caps, &structs, &enums).map(|v| drop(variants.insert(name.clone(), v))),
+            Some(s) => struct_fields(s, caps, &structs, &enums, scope).map(|f| drop(fields.insert(name.clone(), f))),
+            None => enum_variants(&enums[name], caps, &structs, &enums, scope)
+                .map(|v| drop(variants.insert(name.clone(), v))),
         };
         diags.extend(resolved.err());
     }
@@ -701,17 +872,18 @@ fn check_all(src: &str, caps: &CapTable) -> Result<Program, Vec<Diag>> {
     // Signatures first, so call order in the file does not matter.
     let mut sigs = HashMap::new();
     let mut sig_errs = Vec::new();
-    for f in &fns {
-        match signature(f, &sigs, caps, &structs, &enums) {
+    for (module, f) in &fns {
+        let scope = Scope { module, mods: &mods };
+        match signature(f, &sigs, caps, &structs, &enums, scope) {
             Ok(sig) => {
-                sigs.insert(f.name.clone(), sig);
+                sigs.insert(key(module, &f.name).into_owned(), sig);
                 sig_errs.push(None);
             }
             Err(d) => sig_errs.push(Some(d)),
         }
     }
 
-    for (f, sig_err) in fns.iter().zip(sig_errs) {
+    for ((module, f), sig_err) in fns.iter().zip(sig_errs) {
         let mut c = Checker {
             caps,
             sigs: &sigs,
@@ -719,22 +891,25 @@ fn check_all(src: &str, caps: &CapTable) -> Result<Program, Vec<Diag>> {
             variants: &variants,
             structs: &structs,
             enums: &enums,
+            home: Scope { module, mods: &mods },
             scopes: Vec::new(),
             ret: Ty::Unit,
             loops: 0,
         };
         diags.extend(sig_err.or_else(|| c.function(f).err()));
     }
-    if !fns.iter().any(|f| f.name == "main") {
-        let none = Span { start: 0, end: 0 };
+    if !fns.iter().any(|(m, f)| m.is_empty() && f.name == "main") {
         let hint = "add `fn main() { .. }`";
-        diags.push(err(none, "no `main` function".to_string(), Some(hint)));
+        diags.push(err(Span::default(), "no `main` function".to_string(), Some(hint)));
     }
     if !diags.is_empty() {
         return Err(diags);
     }
     Ok(Program {
-        funcs: fns.into_iter().map(|f| (f.name.clone(), f)).collect(),
+        funcs: fns
+            .into_iter()
+            .map(|(m, f)| (key(m, &f.name).into_owned(), f))
+            .collect(),
         structs,
         enums,
         variants,
@@ -755,6 +930,8 @@ struct Checker<'a> {
     variants: &'a Variants,
     structs: &'a HashMap<String, Struct>,
     enums: &'a HashMap<String, Enum>,
+    /// The module being checked.
+    home: Scope<'a>,
     scopes: Vec<HashMap<String, Local>>,
     /// Return type of the function being checked.
     ret: Ty,
@@ -764,7 +941,7 @@ struct Checker<'a> {
 
 impl Checker<'_> {
     fn function(&mut self, f: &Fn) -> Result<(), Diag> {
-        let sig = &self.sigs[f.name.as_str()];
+        let sig = &self.sigs[&*key(self.home.module, &f.name)];
         let params = f.params.iter().zip(&sig.params);
         let params = params.map(|(p, ty)| {
             (
@@ -816,7 +993,8 @@ impl Checker<'_> {
             ("Result", _) => suggest(v, &["Ok", "Err"], "variants"),
             ("Map", _) => "the only Map function is `Map::new()`".to_string(),
             (_, Some(vs)) => suggest(v, &vs.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), "variants"),
-            _ => suggest(en, &sorted_keys(self.enums), "enums"),
+            _ if !self.home.module.is_empty() && self.enums.contains_key(bare(en)) => ROOT_ITEM.to_string(),
+            _ => suggest(bare(en), &sorted_names(self.enums, module_of(en)), "enums"),
         };
         err(span, format!("unknown variant `{en}::{v}`"), Some(&hint))
     }
@@ -849,7 +1027,9 @@ impl Checker<'_> {
                 init,
             } => {
                 not_builtin(name, s.span)?;
-                let declared = ty.as_ref().map(|t| resolve(t, self.caps, self.structs, self.enums));
+                let declared = ty
+                    .as_ref()
+                    .map(|t| resolve(t, self.caps, self.structs, self.enums, self.home));
                 let declared = declared.transpose()?;
                 if let ExprKind::Name(from) = &init.kind {
                     if let Some(Local { ty: Ty::Cap(_), .. }) = self.lookup(from) {
@@ -1001,9 +1181,23 @@ impl Checker<'_> {
                 self.element(&ty, index, e.span)
             }
             ExprKind::List(items) => self.list_lit(e, items, expected),
-            ExprKind::StructLit(name, inits) => self.struct_lit(e, name, inits),
-            ExprKind::Path(en, v) => self.variant_value(e, en, v, &[]),
-            ExprKind::Module(..) => Err(no_modules(e.span)),
+            ExprKind::StructLit(name, inits) => self.struct_lit(e, &key(self.home.module, name), inits),
+            ExprKind::Path(en, v) => self.variant_value(e, &self.enum_key(en), v, &[]),
+            ExprKind::Module(m, inner) => match &inner.kind {
+                ExprKind::StructLit(name, inits) => {
+                    let k = self.home.member(m, name, e.span)?;
+                    if let Some(s) = self.structs.get(&k) {
+                        check_public(&k, s.public, "struct", e.span)?;
+                    }
+                    self.struct_lit(e, &k, inits)
+                }
+                ExprKind::Path(en, v) => self.module_variant(e, m, en, v, &[]),
+                ExprKind::Name(name) => {
+                    let msg = format!("`{m}::{name}` is not a value");
+                    Err(err(e.span, msg, Some(&format!("call it: `{m}::{name}(..)`"))))
+                }
+                _ => Err(nested_path(e.span)),
+            },
             ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms, expected),
             ExprKind::Try(x) => self.try_expr(e, x),
         }
@@ -1180,7 +1374,21 @@ impl Checker<'_> {
         }
     }
 
-    /// `E::V` or `E::V(args)`; arity and payload types must match the declaration.
+    /// The key of enum `en` as written in this module; built-in enums keep their name.
+    fn enum_key(&self, en: &str) -> String {
+        self.home.own(self.caps, en)
+    }
+
+    /// `m::E::V(args)`, which must name a public enum of module `m`.
+    fn module_variant(&mut self, e: &Expr, m: &str, en: &str, v: &str, args: &[Expr]) -> Result<Ty, Diag> {
+        let k = self.home.member(m, en, e.span)?;
+        if let Some(d) = self.enums.get(&k) {
+            check_public(&k, d.public, "enum", e.span)?;
+        }
+        self.variant_value(e, &k, v, args)
+    }
+
+    /// `E::V` or `E::V(args)`, with `en` the enum's key; arity and payload types must match the declaration.
     fn variant_value(&mut self, e: &Expr, en: &str, v: &str, args: &[Expr]) -> Result<Ty, Diag> {
         if builtin(v).is_some_and(|(b, _)| b == en) {
             let msg = format!("`{en}::{v}` cannot be written as a path");
@@ -1272,7 +1480,7 @@ impl Checker<'_> {
     /// What the pattern covers and the names it binds, typed against scrutinee type `st`.
     fn pattern(&self, p: &Pat, st: &Ty, shape: &Shape) -> Result<(Cover, Vec<(String, Ty)>), Diag> {
         let lit = |ty: Ty| want(p.span, &ty, st).map(|_| (Cover::Lit, Vec::new()));
-        let (en, vs) = (shape.0.as_str(), &shape.1);
+        let vs = &shape.1;
         match &p.kind {
             PatKind::Wild => Ok((Cover::All, Vec::new())),
             PatKind::Int(_) => lit(Ty::Int),
@@ -1282,14 +1490,36 @@ impl Checker<'_> {
                 Some(_) => self.variant_pattern(p, shape, n, &[]),
                 None => Ok((Cover::All, vec![(n.clone(), st.clone())])),
             },
-            PatKind::Module(..) => Err(no_modules(p.span)),
-            PatKind::Variant(named, v, names) => {
-                if named.as_deref().is_some_and(|n| n != en) {
-                    want(p.span, &Ty::Enum(named.clone().unwrap()), st)?;
+            PatKind::Module(m, inner) => {
+                let PatKind::Variant(Some(named), v, names) = &inner.kind else {
+                    let hint = "write `web::E::V`, naming the enum";
+                    return Err(err(p.span, "expected a module enum variant".to_string(), Some(hint)));
+                };
+                let k = self.home.member(m, named, p.span)?;
+                if let Some(d) = self.enums.get(&k) {
+                    check_public(&k, d.public, "enum", p.span)?;
                 }
-                self.variant_pattern(p, shape, v, names)
+                self.enum_pattern(p, st, shape, k, v, names)
             }
+            PatKind::Variant(Some(named), v, names) => self.enum_pattern(p, st, shape, self.enum_key(named), v, names),
+            PatKind::Variant(None, v, names) => self.variant_pattern(p, shape, v, names),
         }
+    }
+
+    /// `E::V(..)`, where enum key `k` must be the scrutinee's enum.
+    fn enum_pattern(
+        &self,
+        p: &Pat,
+        st: &Ty,
+        shape: &Shape,
+        k: String,
+        v: &str,
+        names: &[Option<String>],
+    ) -> Result<(Cover, Vec<(String, Ty)>), Diag> {
+        if k != shape.0 {
+            want(p.span, &Ty::Enum(k), st)?;
+        }
+        self.variant_pattern(p, shape, v, names)
     }
 
     fn variant_pattern(
@@ -1328,12 +1558,14 @@ impl Checker<'_> {
         }
     }
 
+    /// `Name { .. }`, with `name` the struct's key.
     fn struct_lit(&mut self, e: &Expr, name: &str, inits: &[(String, Expr)]) -> Result<Ty, Diag> {
         let fields = self.fields;
         let Some(decl) = fields.get(name) else {
             let hint = match self.is_cap(name) {
                 true => NO_CAP_SYNTAX.to_string(),
-                false => suggest(name, &sorted_keys(self.structs), "structs"),
+                false if !self.home.module.is_empty() && self.structs.contains_key(bare(name)) => ROOT_ITEM.to_string(),
+                false => suggest(bare(name), &sorted_names(self.structs, module_of(name)), "structs"),
             };
             return Err(err(e.span, format!("unknown struct `{name}`"), Some(&hint)));
         };
@@ -1421,22 +1653,37 @@ impl Checker<'_> {
     }
 
     fn call(&mut self, e: &Expr, callee: &Expr, args: &[Expr], expected: Option<&Ty>) -> Result<Ty, Diag> {
-        let name = match &callee.kind {
+        let (name, module) = match &callee.kind {
             ExprKind::Name(name) if builtin(name).is_some() => return self.constructor(e, name, args, expected),
-            ExprKind::Name(name) => name,
+            ExprKind::Name(name) => (name, None),
             ExprKind::Path(en, v) if en == "Map" && v == "new" => return self.map_new(e, args, expected),
-            ExprKind::Path(en, v) => return self.variant_value(e, en, v, args),
-            ExprKind::Module(..) => return Err(no_modules(callee.span)),
+            ExprKind::Path(en, v) => return self.variant_value(e, &self.enum_key(en), v, args),
+            ExprKind::Module(m, inner) => match &inner.kind {
+                ExprKind::Name(name) => (name, Some(m)),
+                ExprKind::Path(en, v) => return self.module_variant(e, m, en, v, args),
+                _ => return Err(nested_path(callee.span)),
+            },
             _ => {
                 let hint = "call a function by name, like `f(x)`";
                 return Err(err(callee.span, "only functions can be called".to_string(), Some(hint)));
             }
         };
-        let sigs = self.sigs;
-        let Some(sig) = sigs.get(name.as_str()) else {
-            let hint = suggest(name, &sorted_keys(sigs), "functions");
-            return Err(err(callee.span, format!("unknown function `{name}`"), Some(&hint)));
+        let k = match module {
+            Some(m) => self.home.member(m, name, callee.span)?,
+            None => key(self.home.module, name).into_owned(),
         };
+        let sigs = self.sigs;
+        let Some(sig) = sigs.get(&k) else {
+            let hint = if module.is_none() && !self.home.module.is_empty() && sigs.contains_key(name.as_str()) {
+                ROOT_ITEM.to_string()
+            } else {
+                suggest(name, &sorted_names(sigs, module_of(&k)), "functions")
+            };
+            return Err(err(callee.span, format!("unknown function `{k}`"), Some(&hint)));
+        };
+        if module.is_some() {
+            check_public(&k, sig.public, "fn", callee.span)?;
+        }
         if args.len() != sig.params.len() {
             let msg = format!("`{name}` takes {} arguments, found {}", sig.params.len(), args.len());
             let hint = format!("`{name}` is declared as `{}`", sig.decl);
