@@ -1,0 +1,150 @@
+// kio-web: a small web framework written in kio.
+// The host hands over raw request parts (`Incoming`) and takes raw response parts (`Outgoing`);
+// this file defines the types and helpers on top, as axum does over hyper.
+
+pub struct Header { name: Str, value: Str }
+pub struct Request { method: Str, path: Str, query: Str, headers: List<Header>, body: Bytes }
+pub struct Response { status: Int, headers: List<Header>, body: Bytes }
+
+// Build a Request from the raw parts.
+pub fn request(req: Incoming) -> Request {
+    let target = req.target().split("?");
+    let names = req.header_names();
+    let values = req.header_values();
+    let mut hs: List<Header> = [];
+    for i in 0..names.len() {
+        hs.push(Header { name: names[i], value: values[i] });
+    }
+    let query = if target.len() > 1 { target[1] } else { "" };
+    Request { method: req.method(), path: target[0], query: query, headers: hs, body: req.body() }
+}
+
+// Send a Response through the host.
+pub fn send(res: Outgoing, r: Response) -> Result<(), WebErr> {
+    let mut names: List<Str> = [];
+    let mut values: List<Str> = [];
+    for h in r.headers {
+        names.push(h.name);
+        values.push(h.value);
+    }
+    res.send(r.status, names, values, r.body)
+}
+
+pub fn respond(status: Int, ctype: Str, body: Bytes) -> Response {
+    let mut hs: List<Header> = [];
+    hs.push(Header { name: "content-type", value: ctype });
+    Response { status: status, headers: hs, body: body }
+}
+
+pub fn text(status: Int, s: Str) -> Response { respond(status, "text/plain; charset=utf-8", s.to_bytes()) }
+pub fn json(status: Int, s: Str) -> Response { respond(status, "application/json", s.to_bytes()) }
+pub fn not_found() -> Response { text(404, "not found") }
+
+// The value of header `name` (lowercase), if present.
+pub fn header(r: Request, name: Str) -> Option<Str> {
+    for h in r.headers {
+        if h.name == name { return Some(h.value); }
+    }
+    None
+}
+
+// Match `pattern` such as "/hello/:name"; Some(params) on a hit, keyed by ":name".
+pub fn route(r: Request, method: Str, pattern: Str) -> Option<Map<Str, Str>> {
+    if r.method != method { return None; }
+    let want = pattern.split("/");
+    let got = r.path.split("/");
+    if want.len() != got.len() { return None; }
+    let mut params: Map<Str, Str> = Map::new();
+    for i in 0..want.len() {
+        if want[i].starts_with(":") {
+            params.insert(want[i], got[i]);
+        } else if want[i] != got[i] {
+            return None;
+        }
+    }
+    Some(params)
+}
+
+// Query parameters, percent-decoded.
+pub fn query(r: Request) -> Map<Str, Str> {
+    let mut m: Map<Str, Str> = Map::new();
+    for pair in r.query.split("&") {
+        let kv = pair.split("=");
+        if kv.len() == 2 { m.insert(decode(kv[0]), decode(kv[1])); }
+    }
+    m
+}
+
+// Percent-decode `s`; `+` becomes a space. Malformed escapes are kept as written.
+pub fn decode(s: Str) -> Str {
+    let b = s.to_bytes();
+    let mut out = "".to_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c == 43 {
+            out.push(32);
+            i += 1;
+        } else if c == 37 {
+            match hex(b, i + 1) {
+                Some(v) => { out.push(v); i += 3; }
+                None => { out.push(c); i += 1; }
+            }
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    out.to_str()
+}
+
+// The byte encoded by the two hex digits at b[i], b[i + 1].
+fn hex(b: Bytes, i: Int) -> Option<Int> {
+    if i + 1 >= b.len() { return None; }
+    let hi = digit(b[i])?;
+    let lo = digit(b[i + 1])?;
+    Some(hi * 16 + lo)
+}
+
+fn digit(c: Int) -> Option<Int> {
+    if c >= 48 && c <= 57 { return Some(c - 48); }
+    if c >= 65 && c <= 70 { return Some(c - 55); }
+    if c >= 97 && c <= 102 { return Some(c - 87); }
+    None
+}
+
+// A JSON string literal for `s`, quotes and backslashes escaped.
+pub fn json_str(s: Str) -> Str {
+    let b = s.to_bytes();
+    let mut out = "\"".to_bytes();
+    for i in 0..b.len() {
+        let c = b[i];
+        if c == 34 || c == 92 { out.push(92); }
+        out.push(c);
+    }
+    out.push(34);
+    out.to_str()
+}
+
+// Serve file `name` from `files`.
+pub fn file(files: Dir, name: Str) -> Response {
+    match files.read(name) {
+        Ok(b) => respond(200, ctype(name), b),
+        Err(e) => match e {
+            IoErr::NotFound => not_found(),
+            _ => text(500, "read failed"),
+        },
+    }
+}
+
+fn ctype(name: Str) -> Str {
+    let parts = name.split(".");
+    match parts[parts.len() - 1] {
+        "html" => "text/html; charset=utf-8",
+        "css" => "text/css",
+        "js" => "text/javascript",
+        "json" => "application/json",
+        "txt" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}

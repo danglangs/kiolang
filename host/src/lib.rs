@@ -9,9 +9,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
-use wasmtime::component::{Component, Linker, Resource, ResourceTable};
+use wasmtime::component::{Component, InstancePre, Linker, Resource, ResourceTable};
 use wasmtime::Result;
-use wasmtime::{Engine, Store};
+use wasmtime::{Engine, InstanceAllocationStrategy, PoolingAllocationConfig, Store};
 use wasmtime_wasi::{HostMonotonicClock, HostWallClock, WasiCtx, WasiCtxView, WasiView};
 
 // Trappable imports let a host function stop the run by returning `Err`.
@@ -758,6 +758,10 @@ pub struct Response {
 /// What `run` returns: the outcome, or the diagnostics.
 type RunResult = std::result::Result<Outcome, Vec<Diag>>;
 
+/// A named `Incoming` or `Outgoing` grant on its way to `run`.
+type IncomingGrantArg = (String, Resource<kio::caps::web::Incoming>);
+type OutgoingGrantArg = (String, Resource<kio::caps::web::Outgoing>);
+
 /// Where `outgoing.send` records the response; shared so the host can read it after the run.
 type Sent = Arc<Mutex<Option<Response>>>;
 
@@ -896,15 +900,73 @@ impl Default for Limits {
     }
 }
 
+impl Limits {
+    /// Per-request limits for serving (web decision 9): 100 million fuel, 64 MB, 5 s.
+    pub fn web() -> Self {
+        Limits {
+            fuel: 100_000_000,
+            timeout_secs: 5,
+            memory: 64 << 20,
+            ..Limits::default()
+        }
+    }
+}
+
 /// `(name, path)` of each `Dir` grant, for the audit header.
 pub type DirPaths = Vec<(String, String)>;
+
+/// Starts the thread that advances `engine`'s epoch every 100 ms, until the returned flag is set.
+/// Wasmtime checks epochs only in guest code: host calls are bounded separately, by `State::within`.
+fn spawn_ticker(engine: &Engine) -> Arc<AtomicBool> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let (e, s) = (engine.clone(), stop.clone());
+    std::thread::spawn(move || {
+        while !s.load(Relaxed) {
+            std::thread::sleep(Duration::from_millis(100));
+            e.increment_epoch();
+        }
+    });
+    stop
+}
+
+fn load_guest(engine: &Engine) -> Result<Component> {
+    // SAFETY: GUEST is the output of `precompile_component` from our own build script, not
+    // untrusted input; Wasmtime still checks it matches this engine's version and settings.
+    unsafe { Component::deserialize(engine, GUEST) }
+}
+
+fn guest_linker(engine: &Engine) -> Result<Linker<State>> {
+    let mut linker = Linker::new(engine);
+    wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
+    Guest::add_to_linker::<State, wasmtime::component::HasSelf<State>>(&mut linker, |s| s)?;
+    Ok(linker)
+}
+
+/// A store holding `limits`' fuel, memory, call and I/O quotas and its deadline, counted from now.
+fn new_store(engine: &Engine, limits: &Limits) -> Result<Store<State>> {
+    let mut store = Store::new(engine, State::new());
+    store.data_mut().memory_limit = limits.memory;
+    store.data_mut().call_limit = limits.calls;
+    store.data_mut().io_limit = limits.io;
+    store.limiter(|s| s);
+    store.set_fuel(limits.fuel)?;
+    // A timeout too large to represent caps at a year rather than panicking.
+    let now = Instant::now();
+    let year = Duration::from_secs(365 * 24 * 3600);
+    let wait = Duration::from_secs(limits.timeout_secs).min(year);
+    store.data_mut().deadline = now.checked_add(wait).unwrap_or(now);
+    store.set_epoch_deadline(limits.timeout_secs.saturating_mul(10));
+    store.epoch_deadline_trap();
+    Ok(store)
+}
 
 /// A fresh instance of the embedded guest, for one run: fuel, deadline, call and I/O counters
 /// are not reset, so make a new `Kio` per run.
 pub struct Kio {
     store: Store<State>,
     guest: Guest,
-    stop: Arc<AtomicBool>,
+    /// Stops the epoch ticker on drop; `None` when a `Server` owns the ticker.
+    stop: Option<Arc<AtomicBool>>,
     limits: Limits,
     /// The audit log and the `(name, path)` of each `Dir` grant, until a run starts.
     audit: Option<(Box<dyn Write + Send>, DirPaths)>,
@@ -915,7 +977,9 @@ pub struct Kio {
 
 impl Drop for Kio {
     fn drop(&mut self) {
-        self.stop.store(true, Relaxed);
+        if let Some(stop) = &self.stop {
+            stop.store(true, Relaxed);
+        }
     }
 }
 
@@ -925,39 +989,15 @@ impl Kio {
         let mut config = config::compile_config();
         config.max_wasm_stack(limits.stack);
         let engine = Engine::new(&config)?;
-        // Wasmtime checks epochs only in guest code: host calls are bounded separately, by `State::within`.
-        let stop = Arc::new(AtomicBool::new(false));
-        let (e, s) = (engine.clone(), stop.clone());
-        std::thread::spawn(move || {
-            while !s.load(Relaxed) {
-                std::thread::sleep(Duration::from_millis(100));
-                e.increment_epoch();
-            }
-        });
-        // SAFETY: GUEST is the output of `precompile_component` from our own build script, not
-        // untrusted input; Wasmtime still checks it matches this engine's version and settings.
-        let component = unsafe { Component::deserialize(&engine, GUEST)? };
-        let mut linker = Linker::new(&engine);
-        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
-        Guest::add_to_linker::<State, wasmtime::component::HasSelf<State>>(&mut linker, |s| s)?;
-        let mut store = Store::new(&engine, State::new());
-        store.data_mut().memory_limit = limits.memory;
-        store.data_mut().call_limit = limits.calls;
-        store.data_mut().io_limit = limits.io;
-        store.limiter(|s| s);
-        store.set_fuel(limits.fuel)?;
-        // A timeout too large to represent caps at a year rather than panicking.
-        let now = Instant::now();
-        let year = Duration::from_secs(365 * 24 * 3600);
-        let wait = Duration::from_secs(limits.timeout_secs).min(year);
-        store.data_mut().deadline = now.checked_add(wait).unwrap_or(now);
-        store.set_epoch_deadline(limits.timeout_secs.saturating_mul(10));
-        store.epoch_deadline_trap();
+        let stop = spawn_ticker(&engine);
+        let component = load_guest(&engine)?;
+        let linker = guest_linker(&engine)?;
+        let mut store = new_store(&engine, &limits)?;
         let guest = Guest::instantiate(&mut store, &component, &linker)?;
         Ok(Kio {
             store,
             guest,
-            stop,
+            stop: Some(stop),
             limits,
             audit: None,
             #[cfg(feature = "test-hooks")]
@@ -1079,14 +1119,20 @@ impl Kio {
         dirs: Vec<(String, RealDir)>,
         request: Request,
     ) -> Result<(RunResult, Option<Response>)> {
+        let (sent, incomings, outgoings) = self.web_grants(request)?;
+        let outcome = self.run_all(&[single(source)], dirs, vec![], incomings, outgoings)?;
+        let response = sent.lock().unwrap_or_else(PoisonError::into_inner).take();
+        Ok((outcome, response))
+    }
+
+    /// The `req` and `res` grants for one request, and the slot `res.send` fills.
+    fn web_grants(&mut self, request: Request) -> Result<(Sent, Vec<IncomingGrantArg>, Vec<OutgoingGrantArg>)> {
         let sent = Sent::default();
         let req = self.store.data_mut().table.push(request)?;
         let res = self.store.data_mut().table.push(sent.clone())?;
         let incomings = vec![("req".to_string(), Resource::new_own(req.rep()))];
         let outgoings = vec![("res".to_string(), Resource::new_own(res.rep()))];
-        let outcome = self.run_all(&[single(source)], dirs, vec![], incomings, outgoings)?;
-        let response = sent.lock().unwrap_or_else(PoisonError::into_inner).take();
-        Ok((outcome, response))
+        Ok((sent, incomings, outgoings))
     }
 
     fn run_all(
@@ -1094,10 +1140,22 @@ impl Kio {
         files: &[(String, String)],
         dirs: Vec<(String, RealDir)>,
         https: Vec<(String, Origin)>,
-        incomings: Vec<(String, Resource<kio::caps::web::Incoming>)>,
-        outgoings: Vec<(String, Resource<kio::caps::web::Outgoing>)>,
+        incomings: Vec<IncomingGrantArg>,
+        outgoings: Vec<OutgoingGrantArg>,
     ) -> Result<std::result::Result<Outcome, Vec<Diag>>> {
         self.arm_report(files);
+        self.run_armed(files, dirs, https, incomings, outgoings)
+    }
+
+    /// `run_all` with `State::allowed` already set.
+    fn run_armed(
+        &mut self,
+        files: &[(String, String)],
+        dirs: Vec<(String, RealDir)>,
+        https: Vec<(String, Origin)>,
+        incomings: Vec<IncomingGrantArg>,
+        outgoings: Vec<OutgoingGrantArg>,
+    ) -> Result<std::result::Result<Outcome, Vec<Diag>>> {
         self.start_audit(files, &dirs, &https, &incomings, &outgoings)?;
         let result = self.run_granted(files, dirs, https, incomings, outgoings);
         self.end_audit(&result)?;
@@ -1107,10 +1165,8 @@ impl Kio {
     /// Set the `(parameter, method)` pairs a call may use. The host checks the files itself, so
     /// they do not come from the guest.
     fn arm_report(&mut self, files: &[(String, String)]) {
-        let pairs: Vec<(&str, &str)> = files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
-        let report = lang::check_files(&pairs, &lang::CapTable::v0()).map(|p| lang::report(&p));
         #[cfg_attr(not(feature = "test-hooks"), allow(unused_mut))]
-        let mut allowed = main_calls(report.as_deref().unwrap_or(""));
+        let mut allowed = allowed_calls(files);
         #[cfg(feature = "test-hooks")]
         if let Some(h) = &self.hidden {
             allowed.remove(h);
@@ -1124,8 +1180,8 @@ impl Kio {
         files: &[(String, String)],
         dirs: &[(String, RealDir)],
         https: &[(String, Origin)],
-        incomings: &[(String, Resource<kio::caps::web::Incoming>)],
-        outgoings: &[(String, Resource<kio::caps::web::Outgoing>)],
+        incomings: &[IncomingGrantArg],
+        outgoings: &[OutgoingGrantArg],
     ) -> Result<()> {
         let Some((out, dir_paths)) = self.audit.take() else {
             return Ok(());
@@ -1193,8 +1249,8 @@ impl Kio {
         files: &[(String, String)],
         dirs: Vec<(String, RealDir)>,
         https: Vec<(String, Origin)>,
-        incomings: Vec<(String, Resource<kio::caps::web::Incoming>)>,
-        outgoings: Vec<(String, Resource<kio::caps::web::Outgoing>)>,
+        incomings: Vec<IncomingGrantArg>,
+        outgoings: Vec<OutgoingGrantArg>,
     ) -> Result<std::result::Result<Outcome, Vec<Diag>>> {
         let mut grants = Vec::new();
         for (name, dir) in dirs {
@@ -1246,6 +1302,14 @@ impl Kio {
     }
 }
 
+/// The `(parameter, method)` pairs on `main`'s line of the report for `files`; none if they do
+/// not check.
+fn allowed_calls(files: &[(String, String)]) -> HashSet<(String, String)> {
+    let pairs: Vec<(&str, &str)> = files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
+    let report = lang::check_files(&pairs, &lang::CapTable::v0()).map(|p| lang::report(&p));
+    main_calls(report.as_deref().unwrap_or(""))
+}
+
 /// A lone root file, for callers with one source.
 fn single(source: &str) -> (String, String) {
     ("main".into(), source.into())
@@ -1259,4 +1323,131 @@ fn file_list(files: &[(String, String)]) -> Vec<File> {
             source: source.clone(),
         })
         .collect()
+}
+
+/// Serves one program: the engine, compiled guest and linker are built once, and every request
+/// gets a fresh instance (web decisions 3-5, 9). `Send + Sync`, so threads may share `handle`.
+pub struct Server {
+    engine: Engine,
+    pre: InstancePre<State>,
+    files: Vec<(String, String)>,
+    allowed: HashSet<(String, String)>,
+    report: String,
+    limits: Limits,
+    stop: Arc<AtomicBool>,
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.stop.store(true, Relaxed);
+    }
+}
+
+/// Instances the pool holds at once; one more fails `handle` until another request ends.
+const POOL_INSTANCES: u32 = 64;
+
+impl Server {
+    /// Check `files` (root first) once and prepare the guest, or return the diagnostics. Every
+    /// request runs under `limits`; the pool reserves address space for `limits.memory` per
+    /// instance, but touches only what the guest uses.
+    pub fn new(files: Vec<(String, String)>, limits: Limits) -> Result<std::result::Result<Self, Vec<Diag>>> {
+        let pairs: Vec<(&str, &str)> = files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
+        let program = match lang::check_files(&pairs, &lang::CapTable::v0()) {
+            Ok(p) => p,
+            Err(diags) => return Ok(Err(diags.into_iter().map(wit_diag).collect())),
+        };
+        let report = lang::report(&program);
+        let allowed = main_calls(&report);
+        let mut pool = PoolingAllocationConfig::new();
+        pool.total_component_instances(POOL_INSTANCES)
+            .total_core_instances(POOL_INSTANCES)
+            .total_memories(POOL_INSTANCES)
+            .total_tables(POOL_INSTANCES)
+            .total_stacks(POOL_INSTANCES)
+            .max_memory_size(limits.memory);
+        let mut config = config::compile_config();
+        config.max_wasm_stack(limits.stack);
+        config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+        let engine = Engine::new(&config)?;
+        let stop = spawn_ticker(&engine);
+        let pre = guest_linker(&engine)?.instantiate_pre(&load_guest(&engine)?)?;
+        Ok(Ok(Server {
+            engine,
+            pre,
+            files,
+            allowed,
+            report,
+            limits,
+            stop,
+        }))
+    }
+
+    /// The authority report, as `kio check` prints it.
+    pub fn report(&self) -> &str {
+        &self.report
+    }
+
+    /// Run `main` on `request` in a fresh instance, with `dirs` granted by name. A program that
+    /// sends no response, or traps, gets a 500 with an empty body and the cause on stderr. `Err`
+    /// means no instance could be made (for example the pool is full).
+    pub fn handle(&self, request: Request, dirs: Vec<(String, RealDir)>) -> std::result::Result<Response, String> {
+        let mut kio = self.instance().map_err(|e| format!("cannot start instance: {e:#}"))?;
+        kio.store.data_mut().allowed = self.allowed.clone();
+        let (sent, incomings, outgoings) = kio.web_grants(request).map_err(|e| e.to_string())?;
+        let result = kio.run_armed(&self.files, dirs, vec![], incomings, outgoings);
+        let response = sent.lock().unwrap_or_else(PoisonError::into_inner).take();
+        match (&result, response) {
+            (Ok(Ok(_)), Some(r)) => Ok(r),
+            (Err(e), _) => {
+                eprintln!("request failed: {}", kio.explain(e).unwrap_or_else(|| format!("{e:#}")));
+                Ok(Response::internal_error())
+            }
+            (Ok(Err(diags)), _) => {
+                let msgs: Vec<_> = diags.iter().map(|d| d.message.as_str()).collect();
+                eprintln!("request failed: {}", msgs.join("; "));
+                Ok(Response::internal_error())
+            }
+            _ => {
+                eprintln!("request failed: no response sent");
+                Ok(Response::internal_error())
+            }
+        }
+    }
+
+    /// A `Kio` with a fresh store and instance; it does not own the epoch ticker.
+    fn instance(&self) -> Result<Kio> {
+        let mut store = new_store(&self.engine, &self.limits)?;
+        let instance = self.pre.instantiate(&mut store)?;
+        let guest = Guest::new(&mut store, &instance)?;
+        Ok(Kio {
+            store,
+            guest,
+            stop: None,
+            limits: self.limits,
+            audit: None,
+            #[cfg(feature = "test-hooks")]
+            hidden: None,
+        })
+    }
+}
+
+/// A checker diagnostic in caps.wit's shape, as the guest returns it.
+fn wit_diag(d: lang::Diag) -> Diag {
+    Diag {
+        start: d.span.start as u32,
+        end: d.span.end as u32,
+        message: d.msg,
+        hint: d.hint,
+        file: d.span.file,
+    }
+}
+
+impl Response {
+    fn internal_error() -> Self {
+        Response {
+            status: 500,
+            headers: vec![],
+            body: vec![],
+        }
+    }
 }

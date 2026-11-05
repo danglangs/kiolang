@@ -1,0 +1,12 @@
+// A web app using kio-web (vendored web.kio, from github.com/danglangs/kio-web).
+// `kio run app.kio --dir public=./public --listen 127.0.0.1:8080` (W7b).
+mod web;
+
+fn main(req: Incoming, res: Outgoing, public: Dir) -> Result<(), WebErr> {
+    let r = web::request(req);
+    let out = match web::route(r, "GET", "/hello/:name") {
+        Some(p) => web::json(200, "{\"hello\": " + web::json_str(p.get(":name").unwrap_or("")) + "}"),
+        None => web::file(public, r.path),
+    };
+    web::send(res, out)
+}
