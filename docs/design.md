@@ -44,7 +44,7 @@ Everything runs in one OS process, the `kio` binary. Wasmtime is a library insid
 ## Three crates
 
 - `lang`: parser, checker, interpreter. No I/O, no Wasm dependency. All language tests run natively.
-- `guest`: `lang` plus a thin adapter, built once to `wasm32`. Exports `check(source)` and `run(source, caps)`. Forwards capability calls to the `caps.wit` imports.
+- `guest`: `lang` plus a thin adapter, built once to `wasm32`. Exports `check(files)` and `run(files, grants)`. Forwards capability calls to the `caps.wit` imports.
 - `host`: the runtime binary. Embeds Wasmtime and the guest bytes, parses grants, mints handles, sets limits, implements the host functions.
 
 ## Files and who owns them
@@ -71,7 +71,7 @@ kio run prog.kio --dir input=/srv/jobs/42/in --dir out=/srv/jobs/42/out
 |---|---|---|
 | 1 | Host opens each granted directory with cap-std and builds the handle table `{0: input, 1: out}` | host, native |
 | 2 | Host instantiates the guest with fuel, memory and epoch limits, and binds the WIT imports to its host functions | Wasmtime |
-| 3 | Host calls `run(source, [{input, 0}, {out, 1}], [])` | wall crossed, into the guest |
+| 3 | Host calls `run(files, [{input, 0}, {out, 1}], [], [], [])` | wall crossed, into the guest |
 | 4 | Guest parses and checks against the embedded capability table. On reject it returns the diagnostics. No I/O has happened. | guest |
 | 5 | Guest binds each grant to the `main` parameter of the same name; a missing or mistyped grant is an error and no code runs | guest |
 | 6 | Interpreter starts `main` with `Cap(Dir, 0)` and `Cap(Dir, 1)` | guest |

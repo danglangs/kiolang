@@ -102,7 +102,7 @@ The checker is for early, readable rejection and the authority report. The host 
 Three crates:
 
 - `lang`: parser, checker and interpreter. No I/O, no Wasm dependency, tested natively.
-- `guest`: `lang` plus a thin adapter, built once to `wasm32`. Exports `check(source)` and `run(source, caps)`.
+- `guest`: `lang` plus a thin adapter, built once to `wasm32`. Exports `check(files)` and `run(files, grants)`; see [caps.wit](caps.wit).
 - `host`: the native binary. Embeds Wasmtime and the guest, mints handles, sets limits, implements the host functions.
 
 Steps:
@@ -111,9 +111,10 @@ Steps:
 2. Done: interpreter natively, with stub host functions.
 3. Done: capability table generated from `caps.wit`, real `Dir` and `Http` host functions (G3, G4).
 4. Done: guest built for `wasm32`, running in Wasmtime with limits (G5).
-5. Done for `Dir`: adversarial reviews of the capability rules and the host (path escapes, forged handles, runaway loops, blocked calls). `Http` refuses other hosts, off-origin redirects and private addresses.
-6. MCP tool that serves the primer and runs `check`, so agents can learn and iterate.
-7. Later: attenuation, a compiler to Wasm.
+5. Done: adversarial reviews of the capability rules and the host (path escapes, forged handles, runaway loops, blocked calls). `Http` refuses other hosts, off-origin redirects and private addresses.
+6. Next: an audit log of every host call, and an MCP tool that serves the primer and runs `check`.
+7. Next: `kio run --listen` and kio-web, a web framework written in kio ([docs/web-support-todo.md](docs/web-support-todo.md)).
+8. Later: copy-on-write values and a lowering step, then attenuation and a compiler to Wasm.
 
 v0 has no closures, globals, reflection or `unsafe`. Capabilities are parameters only. See [docs/language.md](docs/language.md).
 
