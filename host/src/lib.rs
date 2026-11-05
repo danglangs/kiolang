@@ -1,4 +1,4 @@
-//! Runs the guest component under Wasmtime. `dir` is backed by cap-std; `http` is a ureq client fixed to one granted origin. Every import is counted.
+//! Runs the guest component under Wasmtime. `dir` is backed by cap-std; `http` is a ureq client fixed to one granted origin; `incoming` and `outgoing` hold one request and its first response. Every import is counted.
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir as RealDir, OpenOptions};
 use std::io::{self, Read, Write};
@@ -375,6 +375,7 @@ use kio::caps::fs::IoErr;
 
 impl kio::caps::fs::Host for State {}
 impl kio::caps::net::Host for State {}
+impl kio::caps::web::Host for State {}
 
 /// Map a cap-std error. cap-std reports an escape as a custom `PermissionDenied`; a real OS
 /// permission error has no inner error. Anything unexpected is `denied`.
@@ -423,6 +424,11 @@ impl State {
     fn dir(&mut self, h: &Resource<kio::caps::fs::Dir>) -> Option<RealDir> {
         let g = self.table.get(&Resource::<Granted>::new_borrow(h.rep())).ok()?;
         g.0.try_clone().ok()
+    }
+
+    /// The request behind a guest handle.
+    fn request(&self, h: &Resource<kio::caps::web::Incoming>) -> Result<&Request> {
+        Ok(self.table.get(&Resource::<Request>::new_borrow(h.rep()))?)
     }
 
     /// Run `work` on a detached thread and wait for it until the run's deadline; past it, stop the
@@ -550,6 +556,104 @@ impl kio::caps::net::HostHttp for State {
 
     fn drop(&mut self, h: Resource<kio::caps::net::Http>) -> Result<()> {
         let _ = self.table.delete(Resource::<Origin>::new_own(h.rep()));
+        Ok(())
+    }
+}
+
+/// One HTTP request as the host parsed it. `Kio::run_web` grants it as `req`.
+#[derive(Clone, Debug, Default)]
+pub struct Request {
+    pub method: String,
+    pub target: String,
+    pub header_names: Vec<String>,
+    pub header_values: Vec<String>,
+    pub body: Vec<u8>,
+}
+
+/// The first response a run sent. `Kio::run_web` grants the sender as `res`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Response {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+/// What `run` returns: the outcome, or the diagnostics.
+type RunResult = std::result::Result<Outcome, Vec<Diag>>;
+
+/// Where `outgoing.send` records the response; shared so the host can read it after the run.
+type Sent = Arc<Mutex<Option<Response>>>;
+
+/// Whether `s` could split a header line.
+fn has_crlf(s: &str) -> bool {
+    s.contains(['\r', '\n'])
+}
+
+impl kio::caps::web::HostIncoming for State {
+    fn method(&mut self, r: Resource<kio::caps::web::Incoming>) -> Result<String> {
+        self.count_call()?;
+        Ok(self.request(&r)?.method.clone())
+    }
+
+    fn target(&mut self, r: Resource<kio::caps::web::Incoming>) -> Result<String> {
+        self.count_call()?;
+        Ok(self.request(&r)?.target.clone())
+    }
+
+    fn header_names(&mut self, r: Resource<kio::caps::web::Incoming>) -> Result<Vec<String>> {
+        self.count_call()?;
+        Ok(self.request(&r)?.header_names.clone())
+    }
+
+    fn header_values(&mut self, r: Resource<kio::caps::web::Incoming>) -> Result<Vec<String>> {
+        self.count_call()?;
+        Ok(self.request(&r)?.header_values.clone())
+    }
+
+    fn body(&mut self, r: Resource<kio::caps::web::Incoming>) -> Result<Vec<u8>> {
+        self.count_call()?;
+        let body = self.request(&r)?.body.clone();
+        self.spend_io(body.len())?;
+        Ok(body)
+    }
+
+    fn drop(&mut self, r: Resource<kio::caps::web::Incoming>) -> Result<()> {
+        let _ = self.table.delete(Resource::<Request>::new_own(r.rep()));
+        Ok(())
+    }
+}
+
+impl kio::caps::web::HostOutgoing for State {
+    fn send(
+        &mut self,
+        r: Resource<kio::caps::web::Outgoing>,
+        status: u16,
+        header_names: Vec<String>,
+        header_values: Vec<String>,
+        body: Vec<u8>,
+    ) -> Result<Result<(), kio::caps::web::WebErr>> {
+        use kio::caps::web::WebErr;
+        self.count_call()?;
+        self.spend_io(body.len())?;
+        let sent = self.table.get(&Resource::<Sent>::new_borrow(r.rep()))?.clone();
+        let mut slot = sent.lock().unwrap_or_else(PoisonError::into_inner);
+        if slot.is_some() {
+            return Ok(Err(WebErr::AlreadySent));
+        }
+        // An invalid response is not recorded, so the guest may send a valid one.
+        let valid = (100..=599).contains(&status)
+            && header_names.len() == header_values.len()
+            && header_names.iter().chain(&header_values).all(|s| !has_crlf(s));
+        if !valid {
+            return Ok(Err(WebErr::Invalid));
+        }
+        let headers = header_names.into_iter().zip(header_values).collect();
+        *slot = Some(Response { status, headers, body });
+        Ok(Ok(()))
+    }
+
+    fn drop(&mut self, r: Resource<kio::caps::web::Outgoing>) -> Result<()> {
+        let _ = self.table.delete(Resource::<Sent>::new_own(r.rep()));
         Ok(())
     }
 }
@@ -712,6 +816,35 @@ impl Kio {
         dirs: Vec<(String, RealDir)>,
         https: Vec<(String, Origin)>,
     ) -> Result<std::result::Result<Outcome, Vec<Diag>>> {
+        self.run_all(source, dirs, https, vec![], vec![])
+    }
+
+    /// Run `main(req: Incoming, res: Outgoing, ..)` for one request, with `dirs` granted by name.
+    /// Returns the outcome and the first response `main` sent, if any.
+    pub fn run_web(
+        &mut self,
+        source: &str,
+        dirs: Vec<(String, RealDir)>,
+        request: Request,
+    ) -> Result<(RunResult, Option<Response>)> {
+        let sent = Sent::default();
+        let req = self.store.data_mut().table.push(request)?;
+        let res = self.store.data_mut().table.push(sent.clone())?;
+        let incomings = vec![("req".to_string(), Resource::new_own(req.rep()))];
+        let outgoings = vec![("res".to_string(), Resource::new_own(res.rep()))];
+        let outcome = self.run_all(source, dirs, vec![], incomings, outgoings)?;
+        let response = sent.lock().unwrap_or_else(PoisonError::into_inner).take();
+        Ok((outcome, response))
+    }
+
+    fn run_all(
+        &mut self,
+        source: &str,
+        dirs: Vec<(String, RealDir)>,
+        https: Vec<(String, Origin)>,
+        incomings: Vec<(String, Resource<kio::caps::web::Incoming>)>,
+        outgoings: Vec<(String, Resource<kio::caps::web::Outgoing>)>,
+    ) -> Result<std::result::Result<Outcome, Vec<Diag>>> {
         let mut grants = Vec::new();
         for (name, dir) in dirs {
             let h = self.store.data_mut().table.push(Granted(dir))?;
@@ -728,6 +861,15 @@ impl Kio {
                 http: Resource::new_own(h.rep()),
             });
         }
-        self.guest.call_run(&mut self.store, source, &grants, &http_grants)
+        let incomings: Vec<_> = incomings
+            .into_iter()
+            .map(|(name, incoming)| IncomingGrant { name, incoming })
+            .collect();
+        let outgoings: Vec<_> = outgoings
+            .into_iter()
+            .map(|(name, outgoing)| OutgoingGrant { name, outgoing })
+            .collect();
+        self.guest
+            .call_run(&mut self.store, source, &grants, &http_grants, &incomings, &outgoings)
     }
 }

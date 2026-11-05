@@ -1,7 +1,10 @@
+// The generated `run` export lowers to ten arguments: a string and four lists.
+#![allow(clippy::too_many_arguments)]
 wit_bindgen::generate!({ world: "guest", path: "../caps.wit" });
 
 use kio::caps::fs::IoErr;
 use kio::caps::net::HttpErr;
+use kio::caps::web::WebErr;
 use lang::{CapTable, Value};
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
@@ -18,7 +21,13 @@ impl Guest for Component {
         }
     }
 
-    fn run(source: String, dirs: Vec<DirGrant>, https: Vec<HttpGrant>) -> Result<Outcome, Vec<Diag>> {
+    fn run(
+        source: String,
+        dirs: Vec<DirGrant>,
+        https: Vec<HttpGrant>,
+        incomings: Vec<IncomingGrant>,
+        outgoings: Vec<OutgoingGrant>,
+    ) -> Result<Outcome, Vec<Diag>> {
         let program =
             lang::check(&source, &CapTable::v0()).map_err(|ds| ds.into_iter().map(diag).collect::<Vec<_>>())?;
         let mut grants = Grants(BTreeMap::new());
@@ -27,7 +36,9 @@ impl Guest for Component {
         let named = dirs
             .into_iter()
             .map(|g| (g.name, Grant::Dir(g.dir)))
-            .chain(https.into_iter().map(|g| (g.name, Grant::Http(g.http))));
+            .chain(https.into_iter().map(|g| (g.name, Grant::Http(g.http))))
+            .chain(incomings.into_iter().map(|g| (g.name, Grant::Incoming(g.incoming))))
+            .chain(outgoings.into_iter().map(|g| (g.name, Grant::Outgoing(g.outgoing))));
         for (name, grant) in named {
             if !names.contains(&name) {
                 let hint = format!("grant only `main`'s parameters: {}", names.join(", "));
@@ -63,6 +74,8 @@ impl Guest for Component {
 enum Grant {
     Dir(Dir),
     Http(Http),
+    Incoming(Incoming),
+    Outgoing(Outgoing),
 }
 
 /// The handles granted for one run, by `main` parameter name.
@@ -72,7 +85,10 @@ impl lang::Caps for Grants {
     fn has(&self, name: &str, ty: &str) -> bool {
         matches!(
             (self.0.get(name), ty),
-            (Some(Grant::Dir(_)), "Dir") | (Some(Grant::Http(_)), "Http")
+            (Some(Grant::Dir(_)), "Dir")
+                | (Some(Grant::Http(_)), "Http")
+                | (Some(Grant::Incoming(_)), "Incoming")
+                | (Some(Grant::Outgoing(_)), "Outgoing")
         )
     }
 
@@ -84,12 +100,44 @@ impl lang::Caps for Grants {
                 Ok(result(d.create(path, data).map(|()| Value::Unit).map_err(io_err)))
             }
             (Grant::Http(h), "get", [Value::Str(path)]) => Ok(result(h.get(path).map(Value::Bytes).map_err(http_err))),
+            (Grant::Incoming(i), "method", []) => Ok(Value::Str(i.method())),
+            (Grant::Incoming(i), "target", []) => Ok(Value::Str(i.target())),
+            (Grant::Incoming(i), "header_names", []) => Ok(strs(i.header_names())),
+            (Grant::Incoming(i), "header_values", []) => Ok(strs(i.header_values())),
+            (Grant::Incoming(i), "body", []) => Ok(Value::Bytes(i.body())),
+            (
+                Grant::Outgoing(o),
+                "send",
+                [Value::Int(status), Value::List(names), Value::List(values), Value::Bytes(body)],
+            ) => {
+                // A status that is not a `u16` cannot be valid, so it never reaches the host.
+                let Ok(status) = u16::try_from(*status) else {
+                    return Ok(result(Err(err_value("WebErr", "Invalid", vec![]))));
+                };
+                Ok(result(
+                    o.send(status, &texts(names)?, &texts(values)?, body)
+                        .map(|()| Value::Unit)
+                        .map_err(web_err),
+                ))
+            }
             _ => Err(format!(
                 "unsupported call `{cap}.{method}` with {} arguments",
                 args.len()
             )),
         }
     }
+}
+
+fn strs(v: Vec<String>) -> Value {
+    Value::List(v.into_iter().map(Value::Str).collect())
+}
+
+fn texts(v: &[Value]) -> Result<Vec<String>, String> {
+    let text = |v: &Value| match v {
+        Value::Str(s) => Ok(s.clone()),
+        _ => Err("expected a list of Str".to_string()),
+    };
+    v.iter().map(text).collect()
 }
 
 /// `Result` is variant 0 for `Ok` and 1 for `Err`.
@@ -130,6 +178,14 @@ fn http_err(e: HttpErr) -> Value {
         HttpErr::TooLarge => err_value("HttpErr", "TooLarge", vec![]),
         HttpErr::Status(n) => err_value("HttpErr", "Status", vec![Value::Int(n.into())]),
     }
+}
+
+fn web_err(e: WebErr) -> Value {
+    let case = match e {
+        WebErr::AlreadySent => "AlreadySent",
+        WebErr::Invalid => "Invalid",
+    };
+    err_value("WebErr", case, vec![])
 }
 
 fn grant_diag(message: String, hint: String) -> Diag {

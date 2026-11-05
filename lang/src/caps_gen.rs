@@ -39,6 +39,29 @@ pub fn v0() -> CapTable {
                     Ty::Result(Box::new(Ty::Bytes), Box::new(Ty::Enum("HttpErr".into()))),
                 )],
             },
+            CapType {
+                name: "Incoming".into(),
+                methods: vec![
+                    method("method", vec![], Ty::Str),
+                    method("target", vec![], Ty::Str),
+                    method("header_names", vec![], Ty::List(Box::new(Ty::Str))),
+                    method("header_values", vec![], Ty::List(Box::new(Ty::Str))),
+                    method("body", vec![], Ty::Bytes),
+                ],
+            },
+            CapType {
+                name: "Outgoing".into(),
+                methods: vec![method(
+                    "send",
+                    vec![
+                        Ty::Int,
+                        Ty::List(Box::new(Ty::Str)),
+                        Ty::List(Box::new(Ty::Str)),
+                        Ty::Bytes,
+                    ],
+                    Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("WebErr".into()))),
+                )],
+            },
         ],
         enums: vec![
             Enum {
@@ -59,6 +82,11 @@ pub fn v0() -> CapTable {
                     case("TooLarge", vec![]),
                     case("Status", vec![ty("Int")]),
                 ],
+                span: at,
+            },
+            Enum {
+                name: "WebErr".into(),
+                variants: vec![case("AlreadySent", vec![]), case("Invalid", vec![])],
                 span: at,
             },
         ],

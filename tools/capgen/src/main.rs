@@ -21,6 +21,7 @@ fn kio(r: &Resolve, t: &Option<Type>) -> Result<String> {
         Type::S8 | Type::S16 | Type::S32 | Type::S64 => "Ty::Int".into(),
         Type::Id(id) => match &r.types[*id].kind {
             TypeDefKind::List(Type::U8) => "Ty::Bytes".into(),
+            TypeDefKind::List(t) => format!("Ty::List({})", boxed(*t)?),
             TypeDefKind::Option(t) => format!("Ty::Option({})", boxed(*t)?),
             TypeDefKind::Result(x) => {
                 let ok = x.ok.map_or(Ok("Ty::Unit".into()), |t| kio(r, &Some(t)))?;

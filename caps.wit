@@ -23,11 +23,27 @@ interface net {
   }
 }
 
+interface web {
+  resource incoming {
+    method: func() -> string;                 // "GET"
+    target: func() -> string;                 // raw "/path?query", as sent
+    header-names: func() -> list<string>;     // lowercased, in order
+    header-values: func() -> list<string>;
+    body: func() -> list<u8>;
+  }
+  resource outgoing {
+    send: func(status: u16, header-names: list<string>, header-values: list<string>, body: list<u8>) -> result<_, web-err>;
+  }
+  variant web-err { already-sent, invalid }
+}
+
 world guest {
   import fs;
   import net;
+  import web;
   use fs.{dir};
   use net.{http};
+  use web.{incoming, outgoing};
 
   // A checker or runtime error: byte span into the source, message and an optional fix.
   record diag { start: u32, end: u32, message: string, hint: option<string> }
@@ -39,11 +55,13 @@ world guest {
   // `borrow` would be tighter but hits a wit-bindgen 0.63 codegen bug inside a list of records.
   record dir-grant { name: string, dir: dir }
   record http-grant { name: string, http: http }
+  record incoming-grant { name: string, incoming: incoming }
+  record outgoing-grant { name: string, outgoing: outgoing }
 
   // Parse and check. Needs no handles.
   export check: func(source: string) -> result<report, list<diag>>;
 
   // Check, then run `main` with each grant bound to its parameter by name; a missing or
   // mistyped grant is an error before any code runs.
-  export run: func(source: string, dirs: list<dir-grant>, https: list<http-grant>) -> result<outcome, list<diag>>;
+  export run: func(source: string, dirs: list<dir-grant>, https: list<http-grant>, incomings: list<incoming-grant>, outgoings: list<outgoing-grant>) -> result<outcome, list<diag>>;
 }

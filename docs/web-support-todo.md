@@ -129,7 +129,7 @@ Each changes `caps.wit` or the language. Recommendation first, then the alternat
 
 `[parallel]` tasks touch only `lang` or `tools/capgen` and can run alongside H1-H5, N1-N2 and M1. Each is pinned and split further before handoff, as in lang-todo.md.
 
-- [ ] **W1. The `web` interface in caps.wit.** `[parallel]` Add decision 1's `incoming`, `outgoing` and `web-err` exactly as written, import `web` in world `guest`, and add `incoming-grant`/`outgoing-grant` lists to `run`. capgen maps them like `Dir` (resources become capability types, `u16` becomes `Int`, `list<string>` becomes `List<Str>`). Security-review event.
+- [x] **W1. The `web` interface in caps.wit.** `[parallel]` Add decision 1's `incoming`, `outgoing` and `web-err` exactly as written, import `web` in world `guest`, and add `incoming-grant`/`outgoing-grant` lists to `run`. capgen maps them like `Dir` (resources become capability types, `u16` becomes `Int`, `list<string>` becomes `List<Str>`). Security-review event.
   Done: `fn main(req: Incoming, res: Outgoing)` checks and its report reads `main : req method target, res send` for a program calling those; `Incoming` cannot be stored or returned (rule 1); CI's capgen drift check passes.
 
 - [x] **W2. `Bytes` index and push.** `[parallel]` `b[i] -> Int` (0-255); `push(Int)` on a `let mut` `Bytes`, runtime error outside 0-255. Out-of-bounds index is the existing runtime error.
