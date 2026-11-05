@@ -94,7 +94,7 @@ kio run prog.kio --dir input=/srv/jobs/42/in --dir out=/srv/jobs/42/out
 
 ## Limits
 
-Defaults per run, or per request under `--listen` (fuel 100 million, 64 MB, 5 s); each can be overridden by a `kio run` flag. A server also bounds slow clients: headers within 10 s, the body within 10 s more, 1,000 connections, 30 s idle, 100 requests queued. Exceeding one stops the run with an error naming the limit.
+Defaults per run, or per request under `--listen` (fuel 100 million, 64 MB, 5 s); each can be overridden by a `kio run` flag. A server also bounds slow clients: headers within 10 s (which also closes an idle keep-alive connection after 10 s), the body within 10 s more, headers to about 64 KB (hyper checks after each read, so one large read can reach about 114 KB), 1,000 connections, 100 requests queued. Exceeding one stops the run with an error naming the limit.
 
 | Limit | Default | Flag | Bounds |
 |---|---|---|---|

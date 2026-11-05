@@ -119,7 +119,7 @@ Each changes `caps.wit` or the language. Recommendation first, then the alternat
    interface web {
      resource incoming {
        method: func() -> string;                 // "GET"
-       target: func() -> string;                 // raw "/path?query", as sent
+       target: func() -> string;                 // "/path?query" as sent, percent-encoding kept; no scheme, host or fragment
        header-names: func() -> list<string>;     // lowercased, in order
        header-values: func() -> list<string>;
        body: func() -> list<u8>;
