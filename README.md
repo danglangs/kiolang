@@ -96,6 +96,18 @@ kio-lang makes authority declarative:
 
 A reviewer reads the signature of `main` and knows everything the program can ever touch. Because there is no ambient clock or randomness, a run is also deterministic given its inputs, so a replay reproduces a bug exactly.
 
+## Why a new language
+
+Why not add a checker to Python or Rust, or run agent code in a container? kio is a small language where authority is explicit, the analysis is simple enough to understand, and execution is confined and audited by construction.
+
+| Approach | Where it falls short |
+|---|---|
+| Static analysis on an existing language | Ambient authority is built into the standard library, and `eval`, reflection, FFI, `unsafe`, macros, build scripts and dependencies all reach around the analysis. Making the analysis sound means banning most of the language, which is a new language without the enforcement. Nothing makes the code that runs be the code that was checked. |
+| Containers, seccomp, VMs | They confine the whole process, all or nothing. They cannot say which function may send data where, and nothing tells a reviewer what the code can do before it runs. |
+| kio | Authority is in every signature, so the checker's rule is one sentence and its report is exact. The checker runs inside the sandbox on the code it executes, the host enforces every grant again, and the host logs every call. |
+
+The cost is the ecosystem: kio has few libraries and no package manager yet. Two things soften it. Agents, not people, write most of the code, and Rust syntax means models already write it well. Heavy lifting such as HTTP, TLS and filesystems lives in the host, in Rust, behind capabilities.
+
 ## Threat model
 
 - **Adversary:** the agent writing the program. It may be buggy, prompt-injected or malicious.
