@@ -44,7 +44,7 @@ fn main(input: Dir, out: Dir) -> Result<(), IoErr> {
 | Scalars | `Int` (i64), `Bool`, `Str`, `Bytes`, `()` |
 | Containers | `List<T>`, `Map<K, V>` (key `Int` or `Str`) |
 | Errors | `Option<T>`, `Result<T, E>`, `?` |
-| User types | `struct`, and `enum` with payloads |
+| User types | `struct`, and `enum` with payloads; a type may contain itself only through `List` or `Map` |
 | Control | `if`, `while`, `for x in list`, `for i in 0..n`, `match`, `break`, `continue`, `return` |
 | Functions | free functions, recursion |
 | Capabilities | `Dir`, `Http`, generated from `caps.wit` |

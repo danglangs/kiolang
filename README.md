@@ -66,6 +66,7 @@ $ curl http://127.0.0.1:8080/hello/kio
 - `--audit log.jsonl` records every host call: capability, method, path, bytes and result. A call the report did not predict stops the run as a checker bug.
 - Every run is bounded: `--fuel`, `--timeout`, `--memory`, `--stack`, `--calls`, `--io`. Each limit's error names the flag that raises it.
 - Errors teach: `did you mean count?`, `declare it with let mut`.
+- Performance: about 5,900 requests/s with a fresh sandbox per request ([docs/perf.md](docs/perf.md)).
 - The language: [docs/language.md](docs/language.md). A web framework in kio: [kio-web](https://github.com/danglangs/kio-web).
 - From source: `cargo test` runs every suite; `cargo run -p kio -- run file.kio` runs without installing.
 

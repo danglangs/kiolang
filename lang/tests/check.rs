@@ -210,6 +210,15 @@ fn recursive_structs() {
     assert_eq!(check(src, &CapTable::default()).unwrap_err().len(), 2);
     // Sharing a struct is not recursion.
     ok("struct A { x: C, y: C } struct C {} fn main() {}");
+    // `Option` and `Result` store inline; `List` and `Map` use the heap.
+    let (msg, _) = reject("struct Node { next: Option<Node> } fn main() {}");
+    assert_eq!(msg, "struct `Node` contains itself");
+    assert_eq!(
+        hint("struct A { r: Result<Int, A> } fn main() {}"),
+        "use indexes into a `List` instead"
+    );
+    ok("struct Tree { kids: List<Tree> } fn main() {}");
+    ok("struct Tree { kids: Map<Str, Tree>, up: List<Option<Tree>> } fn main() {}");
 }
 
 #[test]

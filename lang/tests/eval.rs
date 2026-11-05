@@ -717,3 +717,59 @@ fn option_unwrap_or() {
     let src = "fn main() -> Str { let m: Map<Str, Str> = Map::new(); m.get(\"k\").unwrap_or(\"d\") }";
     assert_eq!(int(src), Value::Str("d".to_string()));
 }
+
+const JSON: &str = r#"
+enum Json { Null, Bool(Bool), Num(Int), Str(Str), Arr(List<Json>), Obj(Map<Str, Json>) }
+fn encode(j: Json) -> Str {
+    match j {
+        Json::Null => "null",
+        Json::Bool(b) => if b { "true" } else { "false" },
+        Json::Num(n) => n.to_str(),
+        Json::Str(s) => "\"" + s + "\"",
+        Json::Arr(items) => {
+            let mut out = "[";
+            let mut i = 0;
+            while i < items.len() {
+                if i > 0 { out = out + ","; }
+                out = out + encode(items[i]);
+                i += 1;
+            }
+            out + "]"
+        }
+        Json::Obj(m) => {
+            let mut out = "{";
+            let mut first = true;
+            for k in m.keys() {
+                if !first { out = out + ","; }
+                first = false;
+                match m.get(k) {
+                    Some(v) => { out = out + "\"" + k + "\":" + encode(v); }
+                    None => {}
+                }
+            }
+            out + "}"
+        }
+    }
+}
+fn doc() -> Json {
+    let mut o: Map<Str, Json> = Map::new();
+    o.insert("a", Json::Arr([Json::Num(1), Json::Null, Json::Arr([Json::Bool(true)])]));
+    o.insert("b", Json::Str("x"));
+    Json::Obj(o)
+}
+"#;
+
+#[test]
+fn recursive_json_encoder() {
+    let src = format!("{JSON} fn main() -> Str {{ encode(doc()) }}");
+    assert_eq!(int(&src), Value::Str(r#"{"a":[1,null,[true]],"b":"x"}"#.into()));
+}
+
+#[test]
+fn recursive_value_displays() {
+    let src = format!("{JSON} fn main() -> Json {{ doc() }}");
+    let p = check(&src, &CapTable::default()).unwrap();
+    let v = run(&p, &mut NoCaps).unwrap();
+    let want = r#"Json::Obj({"a": Json::Arr([Json::Num(1), Json::Null, Json::Arr([Json::Bool(true)])]), "b": Json::Str("x")})"#;
+    assert_eq!(p.display(&v), want);
+}

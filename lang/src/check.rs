@@ -725,12 +725,12 @@ fn method_names<'a>(caps: &'a CapTable, recv: &Ty) -> Vec<&'a str> {
         .collect()
 }
 
-/// The user types named inside `ty`.
+/// The user types stored inline in `ty`. `List` and `Map` hold items on the heap, so they end the walk.
 fn named(ty: &Ty) -> Vec<&str> {
     match ty {
         Ty::Struct(n) | Ty::Enum(n) => vec![n],
-        Ty::Option(t) | Ty::List(t) => named(t),
-        Ty::Result(t, e) | Ty::Map(t, e) => [named(t), named(e)].concat(),
+        Ty::Option(t) => named(t),
+        Ty::Result(t, e) => [named(t), named(e)].concat(),
         _ => Vec::new(),
     }
 }
