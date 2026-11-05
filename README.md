@@ -6,67 +6,68 @@ Most languages today are not AI-safe: any line can read files, open sockets or s
 
 kio is a fresh language built around that idea, using Rust's ecosystem for speed and tooling. The goal is a general-purpose systems language: near-native speed, no garbage collector, memory and capability safe.
 
-**Status: `kio check` and `kio run` work inside the Wasm sandbox with real directories, one granted HTTP host per `--http`, and every limit enforced (G1 to G5). `kio run --listen` serves HTTP, one fresh sandbox per request. Slow clients are bounded, and `kio mcp` lets an agent read the primer and check its code. Next: kio-web and performance. Progress: [docs/guest-host-todo.md](docs/guest-host-todo.md).**
+**Status:** v0 works end to end: checking, the authority report, a Wasm sandbox with enforced limits, files, HTTP and serving. Progress: [docs/guest-host-todo.md](docs/guest-host-todo.md), [docs/web-support-todo.md](docs/web-support-todo.md).
 
-## Try it
-
-Requires Rust via rustup, with `rustup target add wasm32-wasip2`.
+## Quickstart
 
 ```
-git clone https://github.com/danglangs/kiolang && cd kiolang
-mkdir -p examples/out
-cargo run -p host -- check examples/summarize.kio
-cargo run -p host -- run examples/summarize.kio --dir input=examples/in --dir out=examples/out
-cat examples/out/summary.csv
+rustup target add wasm32-wasip2
+cargo install --git https://github.com/danglangs/kiolang kio
+git clone https://github.com/danglangs/kiolang && cd kiolang      # for the examples
 ```
 
-To serve HTTP instead (the program's `main` takes `Incoming` and `Outgoing`; there is no default address):
+```
+$ kio run examples/tour/hello.kio
+hello, kio
+```
+
+### What kio adds
+
+**Authority is in the signature, and `kio check` reports it.** This helper looks like a pure summary but phones home. In most languages that is invisible without reading every line; here the report says so:
+
+```rust
+fn summarize(data: Bytes, log: Http) -> Bytes {
+    let ignored = log.get("/collect");
+    data
+}
+```
 
 ```
-mkdir -p examples/serve/public
-cargo run -p host -- run examples/serve/app.kio --dir public=examples/serve/public --listen 127.0.0.1:8080
-curl http://127.0.0.1:8080/hello/kio
+$ kio check examples/tour/leaky.kio
+main      : input read, out create, log get
+summarize : log get
+```
+
+**No ambient authority.** A function cannot use a capability it was not given, even one `main` holds. The program is rejected before it runs:
+
+```
+$ kio check examples/tour/sneaky.kio
+examples/tour/sneaky.kio:3: error: unknown name `log`
+  hint: `log` is a capability of `main`; take it as a parameter, `log: Http`, and pass it in
+```
+
+**Capabilities are granted per run and confined by the host.** The operator decides what `input` is; paths outside it, `..` and symlinks out are refused even though the program type-checks:
+
+```
+$ kio run examples/tour/escape.kio --dir input=examples/tour/in
+error: IoErr::InvalidPath
+```
+
+**A socket is a grant too.** A web server is the same model, one fresh sandbox per request:
+
+```
+$ kio run examples/serve/app.kio --dir public=examples/tour/in --listen 127.0.0.1:8080
+$ curl http://127.0.0.1:8080/hello/kio
 {"hello": "kio"}
 ```
 
-The agent wrote [examples/summarize.kio](examples/summarize.kio):
+### More
 
-```rust
-// Pure computation: no Dir in the signature, so no I/O is possible.
-fn summarize(data: Bytes) -> Bytes {
-    let n = data.len();
-    n.to_str().to_bytes()
-}
-
-fn main(input: Dir, out: Dir) -> Result<(), IoErr> {
-    let data = input.read("invoices.csv")?;
-    out.create("summary.csv", summarize(data))
-}
-```
-
-`check` prints the authority report, from inside the Wasm sandbox:
-
-```
-main      : input read, out create
-summarize : none
-```
-
-`run` prints the same report to stderr (only when `main` takes capabilities), then `main`'s value to stdout like Rust: nothing for `()` or `Ok(())`, `error: ...` and exit 1 for `Err`. Here `out/summary.csv` holds the byte count of `input/invoices.csv`. Every path in the program is relative to one granted directory: `..`, absolute paths and symlinks out are refused by the host, and `create` never overwrites, so run it again after `rm examples/out/summary.csv`.
-
-`--audit log.jsonl` writes one JSON line per host call: capability, method, path, bytes and result, never contents. Every call is also checked against the authority report; a call the report did not predict stops the run as a checker bug.
-
-Runs are bounded, and each limit names the flag that raises it: `--fuel` (instructions), `--timeout` (seconds), `--memory` (MB), `--stack` (KB), `--calls` (host calls) and `--io` (MB read and written). An infinite loop stops with `out of fuel (limit 1000000000; raise it with --fuel)`.
-
-Mistakes are caught before anything runs, with a hint at the fix:
-
-```
-a.kio:3: error: cannot assign to `x`, it is not `mut`
-  hint: declare it with `let mut`
-b.kio:5: error: unknown name `cuont`
-  hint: did you mean `count`?
-```
-
-The language has `Int`, `Bool`, `Str`, `Bytes`, `List`, `Map`, structs, enums with `match`, `Option`, `Result` and `?`, modules, `Dir` and `Http` capabilities (`kio run --http api=example.com`), functions, `let`, `if`, `while`, `for`, `break`, `continue` and recursion; see [docs/language.md](docs/language.md). A program can span files: `mod web;` in `app.kio` loads `web.kio` beside it, as in [examples/web](examples/web) (`kio run examples/web/app.kio` prints `41`). Pure programs also run natively with `cargo run -p lang --example run -- examples/fib.kio`. Run the test suite with `cargo test`.
+- `--audit log.jsonl` records every host call: capability, method, path, bytes and result. A call the report did not predict stops the run as a checker bug.
+- Every run is bounded: `--fuel`, `--timeout`, `--memory`, `--stack`, `--calls`, `--io`. Each limit's error names the flag that raises it.
+- Errors teach: `did you mean count?`, `declare it with let mut`.
+- The language: [docs/language.md](docs/language.md). A web framework in kio: [kio-web](https://github.com/danglangs/kio-web).
+- From source: `cargo test` runs every suite; `cargo run -p kio -- run file.kio` runs without installing.
 
 ## Use from an agent
 

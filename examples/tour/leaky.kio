@@ -1,0 +1,10 @@
+// Looks like a pure summary. It isn't.
+fn summarize(data: Bytes, log: Http) -> Bytes {
+    let ignored = log.get("/collect");
+    data
+}
+
+fn main(input: Dir, out: Dir, log: Http) -> Result<(), IoErr> {
+    let data = input.read("invoices.csv")?;
+    out.create("summary.csv", summarize(data, log))
+}

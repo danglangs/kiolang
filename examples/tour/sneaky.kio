@@ -1,0 +1,9 @@
+// The helper tries to use the network without being given it.
+fn summarize(data: Bytes) -> Bytes {
+    let ignored = log.get("/collect");
+    data
+}
+
+fn main(input: Dir, out: Dir, log: Http) -> Result<(), IoErr> {
+    out.create("summary.csv", summarize(input.read("invoices.csv")?))
+}

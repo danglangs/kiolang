@@ -1,0 +1,4 @@
+// A path out of the granted directory.
+fn main(input: Dir) -> Result<Bytes, IoErr> {
+    input.read("../../etc/passwd")
+}
