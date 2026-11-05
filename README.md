@@ -55,7 +55,7 @@ b.kio:5: error: unknown name `cuont`
   hint: did you mean `count`?
 ```
 
-The language has `Int`, `Bool`, `Str`, `Bytes`, `List`, `Map`, structs, enums with `match`, `Option`, `Result` and `?`, `Dir` and `Http` capabilities (`kio run --http api=example.com`), functions, `let`, `if`, `while`, `for`, `break`, `continue` and recursion; see [docs/language.md](docs/language.md). Pure programs also run natively with `cargo run -p lang --example run -- examples/fib.kio`. Run the test suite with `cargo test`.
+The language has `Int`, `Bool`, `Str`, `Bytes`, `List`, `Map`, structs, enums with `match`, `Option`, `Result` and `?`, modules, `Dir` and `Http` capabilities (`kio run --http api=example.com`), functions, `let`, `if`, `while`, `for`, `break`, `continue` and recursion; see [docs/language.md](docs/language.md). A program can span files: `mod web;` in `app.kio` loads `web.kio` beside it, as in [examples/web](examples/web) (`kio run examples/web/app.kio` prints `Int(41)`). Pure programs also run natively with `cargo run -p lang --example run -- examples/fib.kio`. Run the test suite with `cargo test`.
 
 ## Why
 

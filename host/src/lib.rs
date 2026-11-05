@@ -787,7 +787,12 @@ impl Kio {
 
     /// Parse and check `source`: the report lines, or the diagnostics.
     pub fn check(&mut self, source: &str) -> Result<std::result::Result<Report, Vec<Diag>>> {
-        self.guest.call_check(&mut self.store, source)
+        self.check_files(&[single(source)])
+    }
+
+    /// Like `check` for `(name, source)` files, root first; see `lang::check_files`.
+    pub fn check_files(&mut self, files: &[(String, String)]) -> Result<std::result::Result<Report, Vec<Diag>>> {
+        self.guest.call_check(&mut self.store, &file_list(files))
     }
 
     /// The most linear memory the guest has asked for, in bytes.
@@ -816,7 +821,17 @@ impl Kio {
         dirs: Vec<(String, RealDir)>,
         https: Vec<(String, Origin)>,
     ) -> Result<std::result::Result<Outcome, Vec<Diag>>> {
-        self.run_all(source, dirs, https, vec![], vec![])
+        self.run_files(&[single(source)], dirs, https)
+    }
+
+    /// Like `run_with` for `(name, source)` files, root first.
+    pub fn run_files(
+        &mut self,
+        files: &[(String, String)],
+        dirs: Vec<(String, RealDir)>,
+        https: Vec<(String, Origin)>,
+    ) -> Result<std::result::Result<Outcome, Vec<Diag>>> {
+        self.run_all(files, dirs, https, vec![], vec![])
     }
 
     /// Run `main(req: Incoming, res: Outgoing, ..)` for one request, with `dirs` granted by name.
@@ -832,14 +847,14 @@ impl Kio {
         let res = self.store.data_mut().table.push(sent.clone())?;
         let incomings = vec![("req".to_string(), Resource::new_own(req.rep()))];
         let outgoings = vec![("res".to_string(), Resource::new_own(res.rep()))];
-        let outcome = self.run_all(source, dirs, vec![], incomings, outgoings)?;
+        let outcome = self.run_all(&[single(source)], dirs, vec![], incomings, outgoings)?;
         let response = sent.lock().unwrap_or_else(PoisonError::into_inner).take();
         Ok((outcome, response))
     }
 
     fn run_all(
         &mut self,
-        source: &str,
+        files: &[(String, String)],
         dirs: Vec<(String, RealDir)>,
         https: Vec<(String, Origin)>,
         incomings: Vec<(String, Resource<kio::caps::web::Incoming>)>,
@@ -869,7 +884,28 @@ impl Kio {
             .into_iter()
             .map(|(name, outgoing)| OutgoingGrant { name, outgoing })
             .collect();
-        self.guest
-            .call_run(&mut self.store, source, &grants, &http_grants, &incomings, &outgoings)
+        self.guest.call_run(
+            &mut self.store,
+            &file_list(files),
+            &grants,
+            &http_grants,
+            &incomings,
+            &outgoings,
+        )
     }
+}
+
+/// A lone root file, for callers with one source.
+fn single(source: &str) -> (String, String) {
+    ("main".into(), source.into())
+}
+
+fn file_list(files: &[(String, String)]) -> Vec<File> {
+    files
+        .iter()
+        .map(|(name, source)| File {
+            name: name.clone(),
+            source: source.clone(),
+        })
+        .collect()
 }

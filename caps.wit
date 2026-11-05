@@ -45,8 +45,10 @@ world guest {
   use net.{http};
   use web.{incoming, outgoing};
 
-  // A checker or runtime error: byte span into the source, message and an optional fix.
-  record diag { start: u32, end: u32, message: string, hint: option<string> }
+  // A source file: `name` is `web.kio` for `mod web;`; the root comes first.
+  record file { name: string, source: string }
+  // A checker or runtime error: byte span into source file number `file`, message and an optional fix.
+  record diag { start: u32, end: u32, message: string, hint: option<string>, file: u32 }
   // The authority report, one line per function.
   record report { lines: list<string> }
   // What a run produced: the report, main's value printed, and whether main returned `Err`.
@@ -59,9 +61,9 @@ world guest {
   record outgoing-grant { name: string, outgoing: outgoing }
 
   // Parse and check. Needs no handles.
-  export check: func(source: string) -> result<report, list<diag>>;
+  export check: func(files: list<file>) -> result<report, list<diag>>;
 
   // Check, then run `main` with each grant bound to its parameter by name; a missing or
   // mistyped grant is an error before any code runs.
-  export run: func(source: string, dirs: list<dir-grant>, https: list<http-grant>, incomings: list<incoming-grant>, outgoings: list<outgoing-grant>) -> result<outcome, list<diag>>;
+  export run: func(files: list<file>, dirs: list<dir-grant>, https: list<http-grant>, incomings: list<incoming-grant>, outgoings: list<outgoing-grant>) -> result<outcome, list<diag>>;
 }

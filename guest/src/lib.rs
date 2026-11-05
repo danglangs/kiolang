@@ -12,24 +12,20 @@ use std::collections::BTreeMap;
 struct Component;
 
 impl Guest for Component {
-    fn check(source: String) -> Result<Report, Vec<Diag>> {
-        match lang::check(&source, &CapTable::v0()) {
-            Ok(program) => Ok(Report {
-                lines: lang::report(&program).lines().map(String::from).collect(),
-            }),
-            Err(diags) => Err(diags.into_iter().map(diag).collect()),
-        }
+    fn check(files: Vec<File>) -> Result<Report, Vec<Diag>> {
+        check_files(&files).map(|program| Report {
+            lines: lang::report(&program).lines().map(String::from).collect(),
+        })
     }
 
     fn run(
-        source: String,
+        files: Vec<File>,
         dirs: Vec<DirGrant>,
         https: Vec<HttpGrant>,
         incomings: Vec<IncomingGrant>,
         outgoings: Vec<OutgoingGrant>,
     ) -> Result<Outcome, Vec<Diag>> {
-        let program =
-            lang::check(&source, &CapTable::v0()).map_err(|ds| ds.into_iter().map(diag).collect::<Vec<_>>())?;
+        let program = check_files(&files)?;
         let mut grants = Grants(BTreeMap::new());
         let mut errs = Vec::new();
         let names: Vec<String> = program.main_params().into_iter().map(|(n, _)| n).collect();
@@ -66,6 +62,7 @@ impl Guest for Component {
                 end: e.span.end as u32,
                 message: e.msg,
                 hint: None,
+                file: e.span.file,
             }]),
         }
     }
@@ -194,6 +191,7 @@ fn grant_diag(message: String, hint: String) -> Diag {
         end: 0,
         message,
         hint: Some(hint),
+        file: 0,
     }
 }
 
@@ -203,7 +201,13 @@ fn diag(d: lang::Diag) -> Diag {
         end: d.span.end as u32,
         message: d.msg,
         hint: d.hint,
+        file: d.span.file,
     }
+}
+
+fn check_files(files: &[File]) -> Result<lang::Program, Vec<Diag>> {
+    let pairs: Vec<(&str, &str)> = files.iter().map(|f| (f.name.as_str(), f.source.as_str())).collect();
+    lang::check_files(&pairs, &CapTable::v0()).map_err(|ds| ds.into_iter().map(diag).collect())
 }
 
 export!(Component);

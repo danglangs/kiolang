@@ -1,0 +1,5 @@
+mod web;
+
+fn main() -> Int {
+    web::inc(web::double(20))
+}
