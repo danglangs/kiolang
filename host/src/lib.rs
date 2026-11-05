@@ -15,7 +15,10 @@ use wasmtime_wasi::{HostMonotonicClock, HostWallClock, WasiCtx, WasiCtxView, Was
 // Trappable imports let a host function stop the run by returning `Err`.
 wasmtime::component::bindgen!({ world: "guest", path: "../caps.wit", imports: { default: trappable } });
 
-const GUEST: &[u8] = include_bytes!("../../target/guest/wasm32-wasip2/release/guest.wasm");
+mod config;
+
+/// The guest, compiled to native code by `build.rs` with `config::compile_config`.
+const GUEST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/guest.cwasm"));
 
 /// The most one `Dir.read` returns; a larger file is `too-large`.
 const READ_CAP: u64 = 10 << 20;
@@ -447,10 +450,8 @@ impl Drop for Kio {
 impl Kio {
     /// A guest under `limits`. Running out of stack, fuel or time traps, which the host reports.
     pub fn new(limits: Limits) -> Result<Self> {
-        let mut config = wasmtime::Config::new();
+        let mut config = config::compile_config();
         config.max_wasm_stack(limits.stack);
-        config.consume_fuel(true);
-        config.epoch_interruption(true);
         let engine = Engine::new(&config)?;
         // Wasmtime checks epochs only in guest code: host calls are bounded separately, by `State::within`.
         let stop = Arc::new(AtomicBool::new(false));
@@ -461,7 +462,9 @@ impl Kio {
                 e.increment_epoch();
             }
         });
-        let component = Component::new(&engine, GUEST)?;
+        // SAFETY: GUEST is the output of `precompile_component` from our own build script, not
+        // untrusted input; Wasmtime still checks it matches this engine's version and settings.
+        let component = unsafe { Component::deserialize(&engine, GUEST)? };
         let mut linker = Linker::new(&engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
         Guest::add_to_linker::<State, wasmtime::component::HasSelf<State>>(&mut linker, |s| s)?;

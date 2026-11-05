@@ -21,6 +21,9 @@ ureq = "3"
 wasmtime = "50"
 wasmtime-wasi = "50"
 
+[build-dependencies]
+wasmtime = "50"
+
 [dev-dependencies]
 host = { path = ".", features = ["test-hooks"] }
 lang = { path = "../lang" }

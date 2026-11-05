@@ -76,6 +76,9 @@ host/    the kio binary: Wasmtime, cap-std, limits, host functions
   - Grants by name as for `Dir` (duplicates, extras, missing all refused).
   Done: tests against a local `std::net::TcpListener` server: a granted GET returns the body; `get("//evil.com/x")`, `get("http://evil.com")` and a path without `/` are denied; a 404 is `status(404)`; a server that never answers stops at the timeout; a body over the cap is `too-large`.
 
+- [x] **H7. Precompile the guest.** `build.rs` compiles `guest.wasm` to native code with `Engine::precompile_component`, using the same compile settings as the runtime (`host/src/config.rs`); `kio` loads it with `Component::deserialize`, which refuses a mismatched Wasmtime version or setting. `--stack` is a runtime setting and still applies.
+  Done: `kio run` takes 30 ms instead of 52 ms; all host tests pass.
+
 - [ ] **N2. Redirects and DNS.** Recheck the allowlist on every redirect; pin DNS per run; cap response size.
   Done: a redirect to an ungranted host is refused; tests for the pin and the cap.
 
