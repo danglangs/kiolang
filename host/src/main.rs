@@ -1,4 +1,4 @@
-use host::{open_dir, Diag, Kio, Limits};
+use host::{open_dir, Diag, Kio, Limits, Origin};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -6,7 +6,7 @@ fn main() {
         ["check", path] => std::process::exit(check(path)),
         ["run", path, ref flags @ ..] => std::process::exit(run(path, flags)),
         _ => eprintln!(
-            "usage: kio check <prog.kio>\n       kio run <prog.kio> [--dir name=path]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb]"
+            "usage: kio check <prog.kio>\n       kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb]"
         ),
     }
     std::process::exit(2);
@@ -37,9 +37,20 @@ fn run(path: &str, flags: &[&str]) -> i32 {
         Err(code) => return code,
     };
     let mut dirs = Vec::new();
+    let mut https = Vec::new();
     let mut limits = Limits::default();
     for pair in flags.chunks(2) {
         let (name, dir) = match pair {
+            ["--http", spec] => {
+                let Some((name, origin)) = spec.split_once('=') else {
+                    return fail(format!("--http {spec}: expected name=host"));
+                };
+                match Origin::parse(origin) {
+                    Ok(o) => https.push((name.to_string(), o)),
+                    Err(e) => return fail(format!("--http {name}={origin}: {e}")),
+                }
+                continue;
+            }
             [flag @ ("--fuel" | "--timeout" | "--memory" | "--stack" | "--calls" | "--io"), n] => {
                 let Some(v) = n.parse::<u64>().ok().filter(|&v| v > 0) else {
                     return fail(format!("{flag} {n}: expected a positive integer"));
@@ -59,7 +70,7 @@ fn run(path: &str, flags: &[&str]) -> i32 {
                 None => return fail(format!("--dir {spec}: expected name=path")),
             },
             _ => return fail(
-                "usage: kio run <prog.kio> [--dir name=path]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb]"
+                "usage: kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb]"
                     .into(),
             ),
         };
@@ -72,7 +83,7 @@ fn run(path: &str, flags: &[&str]) -> i32 {
         Ok(k) => k,
         Err(e) => return fail(format!("{e:#}")),
     };
-    match kio.run(&src, dirs) {
+    match kio.run_with(&src, dirs, https) {
         Err(e) => {
             // A limit or trap is the guest failing, not a usage error.
             match kio.explain(&e) {

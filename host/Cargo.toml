@@ -17,6 +17,7 @@ test-hooks = []
 
 [dependencies]
 cap-std = "4"
+ureq = "3"
 wasmtime = "50"
 wasmtime-wasi = "50"
 

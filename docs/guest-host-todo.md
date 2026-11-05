@@ -68,7 +68,7 @@ host/    the kio binary: Wasmtime, cap-std, limits, host functions
 - [x] **H6. Adversarial host review.** An independent agent attacks the host: path escapes, symlink races, forged and wrong-kind handles, quota bypasses, deadline bypasses, panics in host functions.
   Done: every finding fixed or logged in open_questions.
 
-- [ ] **N1. `Http` grant and allowlist.**
+- [x] **N1. `Http` grant and allowlist.**
   - `kio run .. --http name=host` grants an `Http` capability for one host, HTTPS only; `--http name=http://host:port` allows plain HTTP for local testing. One host per grant.
   - `Http.get(path)`: `path` must start with `/`; the host builds `scheme://host[:port]path` itself, so a program cannot name another host. Anything else is `denied`.
   - Client: `ureq` 3 with redirects off (N2 follows them), a 10 s per-request timeout bounded by the run deadline (as H5), response bodies read through the 10 MB per-read cap and charged to `--io`; non-2xx is `status(code)`; timeouts are `timeout`.

@@ -1,4 +1,4 @@
-//! Runs the guest component under Wasmtime. `dir` is backed by cap-std; `http` imports fail. Every import is counted.
+//! Runs the guest component under Wasmtime. `dir` is backed by cap-std; `http` is a ureq client fixed to one granted origin. Every import is counted.
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir as RealDir, OpenOptions};
 use std::io::{self, Read, Write};
@@ -22,6 +22,109 @@ const READ_CAP: u64 = 10 << 20;
 
 /// A granted directory in the resource table. Every guest path goes through it.
 struct Granted(RealDir);
+
+/// The one scheme, host and port an `Http` grant reaches. Guest input never changes it.
+pub struct Origin {
+    https: bool,
+    host: String,
+    port: u16,
+}
+
+impl Origin {
+    /// Parse `host[:port]` (HTTPS), `http://host[:port]` or `https://host[:port]`; nothing else.
+    pub fn parse(spec: &str) -> std::result::Result<Self, String> {
+        let bad = |why: &str| format!("{spec:?}: {why}; expected host, http://host:port or https://host:port");
+        let (https, rest) = match spec.split_once("://") {
+            Some(("http", r)) => (false, r),
+            Some(("https", r)) => (true, r),
+            Some(_) => return Err(bad("unknown scheme")),
+            None => (true, spec),
+        };
+        let (host, port) = match rest.strip_prefix('[') {
+            Some(v6) => match v6.split_once(']') {
+                Some((h, p)) if h.parse::<std::net::Ipv6Addr>().is_ok() => (format!("[{h}]"), p.strip_prefix(':')),
+                _ => return Err(bad("bad IPv6 address")),
+            },
+            None => match rest.split_once(':') {
+                Some((h, p)) => (h.to_string(), Some(p)),
+                None => (rest.to_string(), None),
+            },
+        };
+        let hostname = host.trim_matches(['[', ']']);
+        if hostname.is_empty() || !hostname.chars().all(|c| c.is_ascii_alphanumeric() || "-.:".contains(c)) {
+            return Err(bad("bad host"));
+        }
+        let default = if https { 443 } else { 80 };
+        let port = match port {
+            None => default,
+            Some(p) => p
+                .parse::<u16>()
+                .ok()
+                .filter(|&p| p > 0)
+                .ok_or_else(|| bad("bad port"))?,
+        };
+        Ok(Origin { https, host, port })
+    }
+
+    /// `scheme://host[:port]` followed by the guest's `path`, or `None` if the path could name
+    /// another authority or smuggle a header: it must start with a single `/` and hold no
+    /// backslash, `#`, space or control character.
+    fn url(&self, path: &str) -> Option<String> {
+        let ok = path.starts_with('/')
+            && !path.starts_with("//")
+            && path.len() <= PATH_MAX
+            && !path.chars().any(|c| c.is_ascii_control() || " \\#".contains(c));
+        let default = if self.https { 443 } else { 80 };
+        let port = if self.port == default {
+            String::new()
+        } else {
+            format!(":{}", self.port)
+        };
+        ok.then(|| {
+            format!(
+                "{}://{}{port}{path}",
+                if self.https { "https" } else { "http" },
+                self.host
+            )
+        })
+    }
+}
+
+/// The longest wait for one request; the run deadline can cut it shorter.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// GET `url` with no redirects, no proxy and `timeout` for the whole exchange. A non-2xx status
+/// is `Status`; the body is read through the same cap as `Dir.read`. Returns the bytes read too.
+fn fetch(url: &str, timeout: Duration) -> (Vec<u8>, std::result::Result<(), kio::caps::net::HttpErr>) {
+    use kio::caps::net::HttpErr;
+    let timed_out = |e: &io::Error| e.kind() == io::ErrorKind::TimedOut;
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .proxy(None) // ureq's default reads proxy variables from the environment
+        .max_redirects(0)
+        .http_status_as_error(false)
+        .timeout_global(Some(timeout))
+        .build()
+        .into();
+    let mut data = Vec::new();
+    let resp = match agent.get(url).call() {
+        Ok(r) => r,
+        Err(ureq::Error::Timeout(_)) => return (data, Err(HttpErr::Timeout)),
+        Err(ureq::Error::Io(e)) if timed_out(&e) => return (data, Err(HttpErr::Timeout)),
+        Err(_) => return (data, Err(HttpErr::Denied)),
+    };
+    let status = resp.status().as_u16();
+    if !(200..300).contains(&status) {
+        return (data, Err(HttpErr::Status(status)));
+    }
+    let read = resp.into_body().into_reader().take(READ_CAP + 1).read_to_end(&mut data);
+    let result = match read {
+        Ok(_) if data.len() as u64 > READ_CAP => Err(HttpErr::TooLarge),
+        Ok(_) => Ok(()),
+        Err(e) if timed_out(&e) => Err(HttpErr::Timeout),
+        Err(_) => Err(HttpErr::Denied),
+    };
+    (data, result)
+}
 
 /// Open a directory to grant: the host's only ambient filesystem call, made once per `--dir`.
 pub fn open_dir(path: &Path) -> io::Result<RealDir> {
@@ -273,14 +376,27 @@ impl kio::caps::fs::HostDir for State {
 impl kio::caps::net::HostHttp for State {
     fn get(
         &mut self,
-        _: Resource<kio::caps::net::Http>,
-        _: String,
+        h: Resource<kio::caps::net::Http>,
+        path: String,
     ) -> Result<Result<Vec<u8>, kio::caps::net::HttpErr>> {
+        use kio::caps::net::HttpErr;
         self.count_call()?;
-        Ok(Err(kio::caps::net::HttpErr::Denied))
+        let url = match self.table.get(&Resource::<Origin>::new_borrow(h.rep())) {
+            Ok(origin) => origin.url(&path),
+            Err(_) => None,
+        };
+        let Some(url) = url else {
+            return Ok(Err(HttpErr::Denied));
+        };
+        let timeout = HTTP_TIMEOUT.min(self.deadline.saturating_duration_since(Instant::now()));
+        let (data, result) = self.within(move || fetch(&url, timeout))?;
+        // Charge what was read, even when it is refused.
+        self.spend_io(data.len())?;
+        Ok(result.map(|()| data))
     }
 
-    fn drop(&mut self, _: Resource<kio::caps::net::Http>) -> Result<()> {
+    fn drop(&mut self, h: Resource<kio::caps::net::Http>) -> Result<()> {
+        let _ = self.table.delete(Resource::<Origin>::new_own(h.rep()));
         Ok(())
     }
 }
@@ -433,6 +549,16 @@ impl Kio {
         source: &str,
         dirs: Vec<(String, RealDir)>,
     ) -> Result<std::result::Result<Outcome, Vec<Diag>>> {
+        self.run_with(source, dirs, vec![])
+    }
+
+    /// Like `run`, with `https` granted by name too.
+    pub fn run_with(
+        &mut self,
+        source: &str,
+        dirs: Vec<(String, RealDir)>,
+        https: Vec<(String, Origin)>,
+    ) -> Result<std::result::Result<Outcome, Vec<Diag>>> {
         let mut grants = Vec::new();
         for (name, dir) in dirs {
             let h = self.store.data_mut().table.push(Granted(dir))?;
@@ -441,6 +567,14 @@ impl Kio {
                 dir: Resource::new_own(h.rep()),
             });
         }
-        self.guest.call_run(&mut self.store, source, &grants, &[])
+        let mut http_grants = Vec::new();
+        for (name, origin) in https {
+            let h = self.store.data_mut().table.push(origin)?;
+            http_grants.push(HttpGrant {
+                name,
+                http: Resource::new_own(h.rep()),
+            });
+        }
+        self.guest.call_run(&mut self.store, source, &grants, &http_grants)
     }
 }

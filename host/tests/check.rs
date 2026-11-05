@@ -440,3 +440,213 @@ fn overlong_path_is_invalid() {
         .unwrap();
     assert_eq!(out.value, r#"Enum("Result", 1, [Enum("IoErr", 3, [])])"#);
 }
+
+/// A one-thread HTTP/1.1 server on 127.0.0.1: `/ok` is 200 `hello`, `/big` is 10 MB + 1, `/hang`
+/// never answers, `/moved` redirects off-host, anything else is 404. Returns the grant string.
+fn serve() -> String {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let grant = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut lines = BufReader::new(&stream).lines().map(Result::unwrap);
+                let path = lines.next().unwrap().split(' ').nth(1).unwrap().to_string();
+                while lines.next().is_some_and(|l| !l.is_empty()) {}
+                let (head, body) = match path.as_str() {
+                    "/ok" => ("200 OK", b"hello".to_vec()),
+                    "/big" => ("200 OK", vec![b'x'; (10 << 20) + 1]),
+                    "/moved" => ("302 Found\r\nLocation: http://evil.com/x", vec![]),
+                    "/hang" => loop {
+                        std::thread::sleep(std::time::Duration::from_secs(60));
+                    },
+                    _ => ("404 Not Found", vec![]),
+                };
+                let mut out = &stream;
+                let _ = write!(
+                    out,
+                    "HTTP/1.1 {head}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = out.write_all(&body);
+            });
+        }
+    });
+    grant
+}
+
+/// Run `main(h: Http)` with `body` on the server at `grant`; the printed value.
+fn get(grant: &str, body: &str, limits: Limits) -> String {
+    let src = format!("fn main(h: Http) -> Result<Bytes, HttpErr> {{ {body} }}");
+    let origin = host::Origin::parse(grant).unwrap();
+    let mut kio = Kio::new(limits).unwrap();
+    kio.run_with(&src, vec![], vec![("h".into(), origin)])
+        .unwrap()
+        .unwrap()
+        .value
+}
+
+const HTTP_DENIED: &str = r#"Enum("Result", 1, [Enum("HttpErr", 0, [])])"#;
+
+/// N1: a granted GET returns the body, a 404 is `status(404)`, a redirect is not followed.
+#[test]
+fn http_get_and_status() {
+    let g = serve();
+    let l = Limits::default();
+    assert_eq!(
+        get(&g, "h.get(\"/ok\")", l),
+        r#"Enum("Result", 0, [Bytes([104, 101, 108, 108, 111])])"#
+    );
+    let status = |n: i64| format!(r#"Enum("Result", 1, [Enum("HttpErr", 3, [Int({n})])])"#);
+    assert_eq!(get(&g, "h.get(\"/nope\")", l), status(404));
+    assert_eq!(get(&g, "h.get(\"/moved\")", l), status(302));
+}
+
+/// N1: a path cannot name another host, scheme, authority or header; none of these reach the network.
+#[test]
+fn http_paths_are_denied() {
+    let g = serve();
+    for p in [
+        "//evil.com/x",
+        "http://evil.com",
+        "ok",
+        "",
+        "/a\\\\b",
+        "/a#b",
+        "/a b",
+        "/a\r\nHost: evil",
+        "/a\u{0}b",
+    ] {
+        let body = format!("h.get(\"{p}\")");
+        assert_eq!(get(&g, &body, Limits::default()), HTTP_DENIED, "{p:?}");
+    }
+}
+
+/// N1: the call is counted, the body is charged to `--io`, and a server that never answers
+/// stops the run at the deadline.
+#[test]
+fn http_quotas_and_timeout() {
+    let g = serve();
+    let src = "fn main(h: Http) -> Int { let r = h.get(\"/ok\"); let s = h.get(\"/ok\"); 0 }";
+    let run = |limits| {
+        let mut kio = Kio::new(limits).unwrap();
+        let o = host::Origin::parse(&g).unwrap();
+        let err = kio.run_with(src, vec![], vec![("h".into(), o)]);
+        (kio, err)
+    };
+    let (kio, r) = run(Limits::default());
+    r.unwrap().unwrap();
+    assert_eq!(kio.import_calls(), 2);
+    let (kio, r) = run(Limits {
+        calls: 1,
+        ..Limits::default()
+    });
+    assert_eq!(
+        kio.explain(&r.unwrap_err()).unwrap(),
+        "too many host calls (limit 1; raise it with --calls)"
+    );
+    let (kio, r) = run(Limits {
+        io: 9,
+        ..Limits::default()
+    });
+    assert_eq!(
+        kio.explain(&r.unwrap_err()).unwrap(),
+        "too much I/O (limit 0 MB; raise it with --io)"
+    );
+
+    let limits = Limits {
+        timeout_secs: 1,
+        ..Limits::default()
+    };
+    let src = "fn main(h: Http) -> Int { let r = h.get(\"/hang\"); 0 }";
+    let mut kio = Kio::new(limits).unwrap();
+    let o = host::Origin::parse(&g).unwrap();
+    let start = std::time::Instant::now();
+    // The request timeout and the deadline coincide: either stops the run, or `timeout` reaches the program.
+    match kio.run_with(src, vec![], vec![("h".into(), o)]) {
+        Err(e) => assert_eq!(
+            kio.explain(&e).unwrap(),
+            "timed out after 1 s (raise it with --timeout)"
+        ),
+        Ok(out) => assert_eq!(out.unwrap().value, "Int(0)"),
+    }
+    assert!(start.elapsed() < std::time::Duration::from_secs(2));
+}
+
+/// N1: a body over 10 MB is `too-large`, and what was read is charged.
+#[test]
+fn http_oversized_body_is_too_large() {
+    let g = serve();
+    let l = Limits::default();
+    assert_eq!(
+        get(&g, "h.get(\"/big\")", l),
+        r#"Enum("Result", 1, [Enum("HttpErr", 2, [])])"#
+    );
+}
+
+/// N1: a request that exceeds the per-request timeout (shorter than the run deadline) is `timeout`.
+#[test]
+fn http_slow_server_is_timeout() {
+    let g = serve();
+    let l = Limits {
+        timeout_secs: 30,
+        ..Limits::default()
+    };
+    // The 30 s run deadline is far off, so only the 10 s request timeout can produce `timeout`.
+    assert_eq!(
+        get(&g, "h.get(\"/hang\")", l),
+        r#"Enum("Result", 1, [Enum("HttpErr", 1, [])])"#
+    );
+}
+
+/// N1: grants are strict, as for `Dir`.
+#[test]
+fn http_grant_rules() {
+    let o = || host::Origin::parse("http://127.0.0.1:1").unwrap();
+    let src = "fn main(h: Http) -> Int { 1 }";
+    let run = |names: &[&str]| {
+        let grants = names.iter().map(|n| (n.to_string(), o())).collect();
+        Kio::new(Limits::default())
+            .unwrap()
+            .run_with(src, vec![], grants)
+            .unwrap()
+            .unwrap_err()
+    };
+    assert_eq!(run(&["h", "h"])[0].message, "grant `h` is given more than once");
+    assert_eq!(run(&["h", "x"])[0].message, "grant `x` is not a parameter of `main`");
+    assert_eq!(run(&[])[0].message, "no grant for `h: Http`");
+}
+
+/// N1: grant syntax.
+#[test]
+fn origin_parse() {
+    for ok in [
+        "example.com",
+        "https://example.com:8443",
+        "http://127.0.0.1:8080",
+        "http://[::1]:80",
+        "127.0.0.1",
+    ] {
+        assert!(host::Origin::parse(ok).is_ok(), "{ok}");
+    }
+    for bad in [
+        "",
+        "ftp://x",
+        "http://",
+        "http://a/b",
+        "a@b",
+        "a b",
+        "a:0",
+        "a:99999",
+        "a:",
+        "::1",
+        "http://a?x",
+        "a#b",
+        "https://a:b",
+        "http://a\\b",
+        "[::1",
+        "[zz]:80",
+    ] {
+        assert!(host::Origin::parse(bad).is_err(), "{bad}");
+    }
+}

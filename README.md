@@ -6,7 +6,7 @@ Most languages today are not AI-safe: any line can read files, open sockets or s
 
 kio is a fresh language built around that idea, using Rust's ecosystem for speed and tooling. The goal is a general-purpose systems language: near-native speed, no garbage collector, memory and capability safe.
 
-**Status: `kio check` and `kio run` work inside the Wasm sandbox with real directories and every limit enforced (G1, G2, G3, G5). The network allowlist (G4) and the MCP tool are next. Progress: [docs/guest-host-todo.md](docs/guest-host-todo.md).**
+**Status: `kio check` and `kio run` work inside the Wasm sandbox with real directories and every limit enforced (G1, G2, G3, G5). `Http` reaches one granted host (G4); redirect and DNS rules and the MCP tool are next. Progress: [docs/guest-host-todo.md](docs/guest-host-todo.md).**
 
 ## Try it
 
@@ -55,7 +55,7 @@ b.kio:5: error: unknown name `cuont`
   hint: did you mean `count`?
 ```
 
-The language has `Int`, `Bool`, `Str`, `Bytes`, `List`, `Map`, structs, enums with `match`, `Option`, `Result` and `?`, `Dir` and `Http` capabilities, functions, `let`, `if`, `while`, `for`, `break`, `continue` and recursion; see [docs/language.md](docs/language.md). Pure programs also run natively with `cargo run -p lang --example run -- examples/fib.kio`. Run the test suite with `cargo test`.
+The language has `Int`, `Bool`, `Str`, `Bytes`, `List`, `Map`, structs, enums with `match`, `Option`, `Result` and `?`, `Dir` and `Http` capabilities (`kio run --http api=example.com`), functions, `let`, `if`, `while`, `for`, `break`, `continue` and recursion; see [docs/language.md](docs/language.md). Pure programs also run natively with `cargo run -p lang --example run -- examples/fib.kio`. Run the test suite with `cargo test`.
 
 ## Why
 
