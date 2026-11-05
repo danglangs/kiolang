@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="mane" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#B07CFF"/>
+      <stop offset="0.5" stop-color="#FF79C6"/>
+      <stop offset="1" stop-color="#5CC8FF"/>
+    </linearGradient>
+    <linearGradient id="mane2" x1="1" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5CC8FF"/>
+      <stop offset="1" stop-color="#B07CFF"/>
+    </linearGradient>
+    <linearGradient id="horn" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFE9A0"/>
+      <stop offset="1" stop-color="#FFB547"/>
+    </linearGradient>
+    <radialGradient id="iris" cx="0.5" cy="0.35" r="0.7">
+      <stop offset="0" stop-color="#7FE0FF"/>
+      <stop offset="0.55" stop-color="#7A5CFF"/>
+      <stop offset="1" stop-color="#2A1650"/>
+    </radialGradient>
+    <radialGradient id="fur" cx="0.4" cy="0.3" r="0.8">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#EDE4FF"/>
+    </radialGradient>
+  </defs>
+  <g stroke="#3B2A5A" stroke-width="6" stroke-linejoin="round" stroke-linecap="round">
+    <!-- tail -->
+    <path d="M360 400 C 440 390, 470 330, 430 300 C 460 340, 420 370, 395 360 C 430 350, 425 320, 405 318 C 400 350, 380 370, 350 375 Z" fill="url(#mane2)"/>
+    <!-- body -->
+    <path d="M170 330 C 160 400, 170 450, 210 458 L 302 458 C 342 450, 352 400, 342 330 Z" fill="url(#fur)"/>
+    <!-- front hooves -->
+    <rect x="200" y="420" width="44" height="46" rx="18" fill="url(#fur)"/>
+    <rect x="268" y="420" width="44" height="46" rx="18" fill="url(#fur)"/>
+    <path d="M202 452 L242 452" stroke="#B07CFF" stroke-width="8"/>
+    <path d="M270 452 L310 452" stroke="#B07CFF" stroke-width="8"/>
+    <!-- back mane -->
+    <path d="M128 170 C 70 210, 80 300, 120 340 C 100 300, 120 280, 140 300 C 120 260, 150 240, 165 255 Z" fill="url(#mane)"/>
+    <!-- ears -->
+    <path d="M168 140 C 130 120, 118 80, 128 52 C 160 66, 196 96, 204 124 Z" fill="url(#fur)"/>
+    <path d="M344 140 C 382 120, 394 80, 384 52 C 352 66, 316 96, 308 124 Z" fill="url(#fur)"/>
+    <path d="M168 126 C 146 112, 138 90, 142 72 C 162 84, 182 102, 188 120 Z" fill="#FFB3D9" stroke="none"/>
+    <path d="M344 126 C 366 112, 374 90, 370 72 C 350 84, 330 102, 324 120 Z" fill="#FFB3D9" stroke="none"/>
+    <!-- head -->
+    <ellipse cx="256" cy="230" rx="138" ry="118" fill="url(#fur)"/>
+    <!-- horn: a key -->
+    <g>
+      <path d="M232 118 L 256 22 L 280 118 Z" fill="url(#horn)"/>
+      <path d="M241 84 L 268 74 M 236 104 L 274 92 M 247 62 L 263 56" stroke="#E08A1E" stroke-width="5"/>
+      <path d="M271 76 L 290 76 L 290 88 L 282 88 L 282 96 L 274 96 Z" fill="url(#horn)"/>
+    </g>
+    <!-- bangs -->
+    <path d="M170 140 C 200 100, 250 100, 290 118 C 270 130, 262 150, 266 172 C 248 150, 232 148, 220 168 C 214 150, 196 146, 186 170 C 180 156, 172 150, 170 140 Z" fill="url(#mane)"/>
+    <path d="M290 118 C 330 110, 362 130, 372 160 C 350 150, 335 158, 330 175 C 320 150, 300 146, 290 160 Z" fill="url(#mane2)"/>
+    <!-- eyes -->
+    <g>
+      <ellipse cx="200" cy="245" rx="38" ry="48" fill="url(#iris)"/>
+      <ellipse cx="312" cy="245" rx="38" ry="48" fill="url(#iris)"/>
+      <path d="M160 222 C 170 190, 230 188, 240 222" fill="none" stroke-width="9"/>
+      <path d="M272 222 C 282 188, 342 190, 352 222" fill="none" stroke-width="9"/>
+      <path d="M162 212 L 148 200 M 166 204 L 156 188" stroke-width="6"/>
+      <path d="M350 212 L 364 200 M 346 204 L 356 188" stroke-width="6"/>
+    </g>
+    <g stroke="none" fill="#FFFFFF">
+      <ellipse cx="186" cy="226" rx="13" ry="16"/>
+      <ellipse cx="298" cy="226" rx="13" ry="16"/>
+      <circle cx="214" cy="268" r="6"/>
+      <circle cx="326" cy="268" r="6"/>
+      <path d="M200 252 l3 8 8 3 -8 3 -3 8 -3 -8 -8 -3 8 -3 Z" fill="#FFF3B0"/>
+      <path d="M312 252 l3 8 8 3 -8 3 -3 8 -3 -8 -8 -3 8 -3 Z" fill="#FFF3B0"/>
+    </g>
+    <!-- blush, mouth -->
+    <ellipse cx="160" cy="298" rx="22" ry="11" fill="#FFB3D9" stroke="none" opacity="0.85"/>
+    <ellipse cx="352" cy="298" rx="22" ry="11" fill="#FFB3D9" stroke="none" opacity="0.85"/>
+    <ellipse cx="256" cy="306" rx="62" ry="38" fill="#FFF6FB"/>
+    <ellipse cx="236" cy="298" rx="6" ry="4" fill="#3B2A5A" stroke="none"/>
+    <ellipse cx="276" cy="298" rx="6" ry="4" fill="#3B2A5A" stroke="none"/>
+    <path d="M238 318 C 248 330, 264 330, 274 318" fill="none" stroke-width="5"/>
+    <!-- chest badge: a lock, closed -->
+    <rect x="236" y="368" width="40" height="32" rx="7" fill="#FFC53D"/>
+    <path d="M244 368 L 244 358 C 244 344, 268 344, 268 358 L 268 368" fill="none" stroke-width="6"/>
+    <circle cx="256" cy="383" r="4" fill="#3B2A5A" stroke="none"/>
+  </g>
+  <!-- sparkles -->
+  <g fill="#FFC53D">
+    <path d="M70 90 l5 14 14 5 -14 5 -5 14 -5 -14 -14 -5 14 -5 Z"/>
+    <path d="M440 120 l4 11 11 4 -11 4 -4 11 -4 -11 -11 -4 11 -4 Z" fill="#5CC8FF"/>
+    <path d="M455 230 l3 8 8 3 -8 3 -3 8 -3 -8 -8 -3 8 -3 Z" fill="#FF79C6"/>
+    <path d="M60 380 l4 10 10 4 -10 4 -4 10 -4 -10 -10 -4 10 -4 Z" fill="#B07CFF"/>
+  </g>
+</svg>

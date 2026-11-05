@@ -191,13 +191,26 @@ Each changes `caps.wit` or the language. Recommendation first, then the alternat
   5. `Dir.read` and `Dir.create` refuse anything that is not a regular file: open with `O_NONBLOCK` (cap-std `OpenOptionsExt::custom_flags`), then check `metadata().is_file()`, else `denied`. A FIFO in a granted dir then cannot block a worker, which closes the worse-than-stated part of #19.
   Done: one test per item (a non-reading client's connection is closed at the lifetime cap with a small test value; both flag combinations exit 2 with their hint and leave no file; status 101 is `invalid`; reading a FIFO is `denied` at once); all existing tests pass.
 
+- [x] **W12. JSON decoding in kio-web.** kio-web repo only; no kiolang change. A new module `json.kio` (an app writes `mod json;`; modules are flat, so it does not use `web.kio`).
+  - `pub enum Json { Null, Bool(Bool), Num(Int), Str(Str), Arr(List<Json>), Obj(Map<Str, Json>) }`, recursive through `List` and `Map` (L1). If the checker refuses a variant named like a type, rename it (`Text`, `Number`) and log it in the task notes.
+  - `pub fn parse(s: Str) -> Result<Json, Str>`: recursive descent over `s.to_bytes()`, with a `struct Parsed { value: Json, pos: Int }` threaded through helpers. Whitespace, `null`, `true`, `false`, integers (an optional `-`, digits; a fraction or exponent is `Err("floats are not supported")`), strings with every JSON escape (`\uXXXX` to UTF-8, surrogate pairs joined, a lone surrogate an error), arrays, objects (a repeated key keeps the last value). Trailing input after the value is an error. Nesting deeper than 64 is an error, so a hostile body cannot reach kio's evaluation depth limit. Error messages name the byte offset: `"expected ',' or '}' at byte 17"`.
+  - `pub fn encode(j: Json) -> Str`: compact, keys in `Map` order, strings escaped (`"` `\` and control bytes as `\n`, `\t`, `\u00XX`). `parse(encode(j)) == j` for any `j`.
+  - Accessors returning `Option`: `get(j, key)`, `at(j, i)`, `as_str(j)`, `as_int(j)`, `as_bool(j)`, `as_list(j)`.
+  - `tests/json_test.kio` in the style of `web_test.kio` (returns the number of the first failing check); `test.sh` runs it too; README gains a JSON section.
+  - Measure: parse time of a 10 KB and a 100 KB array of small objects under `kio run`. Values are copied, so passing the input `Bytes` down each call may be quadratic; record the numbers in the task notes, as they inform P2 (copy-on-write).
+  Done: tests pass under `kio run`, covering every grammar rule and each error, a round trip, and depth 65 refused; timings recorded.
+  Result: parsing is quadratic, since the input `Bytes` is copied on every call: 10 KB in 0.13 s (about 1e9 fuel, the default limit), 100 KB in 1.7 s (about 64e9 fuel). This makes P2 (copy-on-write) the next performance task. The round trip compares encoded text, as `==` does not work on enums.
+
+- [ ] **W13. Check once under `--listen` (spike).** Each request re-parses and re-checks the program in its fresh instance (decision 5); natively that check costs about 200 µs for the serve example, against about 1 ms per request. Spike, no committed code: measure the check's share of `Server::handle` in the release host, then try the decision 5 alternative, pre-initializing the guest component with the program already checked (`wasmtime-wizer` or an equivalent for components in Wasmtime 50), and report which works, its per-request saving and its cost (build steps, memory, startup). If snapshots do not work for components, list the next option with an estimate.
+  Done: a short report with numbers and a recommendation; the owner decides before code lands.
 
 ## Later, driven by kio-web
 
 - **Function values.** Route tables and middleware as wrappers (`with_auth(handler)`). Today middleware is a call at the top of `handle`; timeouts, body limits and logging are host concerns.
-- **JSON decoding.** Needs recursive types or an index-based tree; typed decoding needs generics.
+- **Typed JSON decoding** (into a struct) needs generics or derive; W12 decodes into a `Json` tree.
 - **`Result<Response, Response>` from `handle`,** so `?` works in handlers.
 - **Nested patterns** (`Err(IoErr::NotFound)`); today a nested `match`.
+- **Friction from W12 (json.kio).** `==` on enums and structs; `is_some`/`is_none`, and `unwrap_or` on `Result`; string escapes `\r`, `\0`, `\u{..}`; `loop` (today `while true` needs an unreachable tail expression); constants (today a function returning the value).
 - **Outbound calls.** The `Http` capability, allowlisted per route; moves execution to Wasmtime async (decision 4).
 - **Streaming bodies, HTTP/2, `wasi:http` export.** Decision 2's alternative.
 - **Persistent connections and WebSockets (owner to decide).** HTTP keep-alive already works: hyper keeps the connection and each request gets a fresh sandbox; W8 adds the idle timeout. WebSockets are a long-lived two-way stream, which conflicts with bounded runs and synchronous handlers. Options:

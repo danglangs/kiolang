@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/assets/kio-unicorn.svg" width="180" alt="kio mascot: a unicorn whose horn is a key"></p>
+
 # kio-lang
 
 A language for code that AI agents write: the code names what it needs (`input: Dir`), the operator decides what that is (`--dir input=/data`), and nothing else is reachable.
