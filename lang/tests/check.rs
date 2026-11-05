@@ -1228,3 +1228,33 @@ fn bytes_and_option_methods() {
         "`Option<Int>.unwrap_or` is declared as `unwrap_or(Int) -> Int`"
     );
 }
+
+#[test]
+fn modules_are_not_available_yet() {
+    for src in [
+        "mod web; fn main() {}",
+        "fn main() { web::f(); }",
+        "fn main() { web::P { a: 1 }; }",
+        "fn main() { web::S::A; }",
+        "fn main() { web::S::A(1); }",
+        "fn f(a: web::P) {} fn main() {}",
+        "enum E { A } fn main() { match E::A { web::E::A => {} } }",
+    ] {
+        let diags = check(src, &CapTable::default()).unwrap_err();
+        assert_eq!(diags[0].msg, "modules are not available yet", "{src}");
+        assert_eq!(diags[0].hint.as_deref(), Some("keep the code in one file"), "{src}");
+    }
+}
+
+/// Lowercase-then-`::` names a module, so type names must start uppercase.
+#[test]
+fn type_names_start_uppercase() {
+    for (src, name, fixed) in [
+        ("enum status { Paid } fn main() {}", "status", "Status"),
+        ("struct point { x: Int } fn main() {}", "point", "Point"),
+    ] {
+        let d = &check(src, &CapTable::default()).unwrap_err()[0];
+        assert_eq!(d.msg, format!("type names start with an uppercase letter: `{name}`"));
+        assert_eq!(d.hint.as_deref(), Some(format!("rename it `{fixed}`").as_str()));
+    }
+}

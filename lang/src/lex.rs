@@ -19,13 +19,13 @@ pub struct Token {
 
 const KEYWORDS: &[&str] = &[
     "fn", "let", "mut", "if", "else", "while", "for", "in", "return", "match", "break", "continue", "true", "false",
-    "struct", "enum",
+    "struct", "enum", "mod", "pub",
 ];
 
 const RESERVED: &[&str] = &[
-    "as", "async", "await", "box", "const", "crate", "dyn", "extern", "impl", "loop", "mod", "move", "pub", "ref",
-    "self", "Self", "static", "super", "trait", "type", "unsafe", "use", "where", "yield", "abstract", "become", "do",
-    "final", "macro", "override", "priv", "typeof", "unsized", "virtual", "try", "gen", "union",
+    "as", "async", "await", "box", "const", "crate", "dyn", "extern", "impl", "loop", "move", "ref", "self", "Self",
+    "static", "super", "trait", "type", "unsafe", "use", "where", "yield", "abstract", "become", "do", "final",
+    "macro", "override", "priv", "typeof", "unsized", "virtual", "try", "gen", "union",
 ];
 
 // Two-character symbols come first so that `==` wins over `=`.

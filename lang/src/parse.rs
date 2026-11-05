@@ -28,9 +28,7 @@ fn err(span: Span, msg: &str, hint: Option<&str>) -> Diag {
 fn reserved_hint(word: &str) -> &'static str {
     match word {
         "impl" | "trait" | "dyn" => "kio has no traits or `impl`; use free functions",
-        "use" | "mod" | "pub" | "crate" | "super" | "self" | "Self" => {
-            "kio is one file of functions: no modules or visibility"
-        }
+        "use" | "crate" | "super" | "self" | "Self" => "write the full path, like `web::text`",
         "const" | "static" => "kio has no globals; pass values as arguments",
         _ => "this Rust keyword is reserved in kio",
     }
@@ -115,6 +113,23 @@ impl Parser {
         Ok(name)
     }
 
+    /// Consumes a leading `web::`. A lowercase first segment is a module; enums and structs are capitalized.
+    fn module(&mut self) -> Result<Option<String>, Diag> {
+        let Some(Kind::Ident(name)) = self.peek() else {
+            return Ok(None);
+        };
+        let lower = name.starts_with(|c: char| c.is_lowercase());
+        if !lower || self.toks.get(self.pos + 1).is_none_or(|t| t.kind != Kind::Sym("::")) {
+            return Ok(None);
+        }
+        let name = self.ident()?;
+        self.pos += 1;
+        if !matches!(self.peek(), Some(Kind::Ident(_))) {
+            return Err(self.unexpected("a name"));
+        }
+        Ok(Some(name))
+    }
+
     /// The current token, or an empty span at the end of the input.
     fn span(&self) -> Span {
         match self.toks.get(self.pos) {
@@ -177,11 +192,18 @@ impl Parser {
 
     fn item(&mut self) -> Result<Item, Diag> {
         let start = self.span().start;
+        if self.eat_kw("mod") {
+            let name = self.ident()?;
+            self.expect(";")?;
+            return Ok(Item::Mod(name, self.since(start)));
+        }
+        let public = self.eat_kw("pub");
         if self.eat_kw("struct") {
             let name = self.ident()?;
             self.expect("{")?;
             let fields = self.list("}", Self::param)?;
             return Ok(Item::Struct(Struct {
+                public,
                 name,
                 fields,
                 span: self.since(start),
@@ -192,6 +214,7 @@ impl Parser {
             self.expect("{")?;
             let variants = self.list("}", Self::variant)?;
             return Ok(Item::Enum(Enum {
+                public,
                 name,
                 variants,
                 span: self.since(start),
@@ -214,6 +237,7 @@ impl Parser {
         };
         let body = self.block()?;
         Ok(Item::Fn(Fn {
+            public,
             name,
             params,
             ret,
@@ -257,7 +281,9 @@ impl Parser {
         let depth = self.depth;
         self.enter()?;
         let start = self.span().start;
-        let kind = if self.eat("(") {
+        let kind = if let Some(module) = self.module()? {
+            TypeKind::Module(module, Box::new(self.ty()?))
+        } else if self.eat("(") {
             if !self.at(")") {
                 return Err(err(self.span(), "kio has no tuple types", Some("use a struct")));
             }
@@ -508,6 +534,13 @@ impl Parser {
 
     fn primary(&mut self) -> Result<Expr, Diag> {
         let span = self.span();
+        if let Some(module) = self.module()? {
+            let inner = self.primary()?;
+            return Ok(Expr {
+                kind: ExprKind::Module(module, Box::new(inner)),
+                span: self.since(span.start),
+            });
+        }
         let kind = match self.peek() {
             Some(Kind::Int(n)) => ExprKind::Int(*n),
             Some(Kind::Str(s)) => ExprKind::Str(s.clone()),
@@ -665,6 +698,13 @@ impl Parser {
 
     fn pat(&mut self) -> Result<Pat, Diag> {
         let start = self.span().start;
+        if let Some(module) = self.module()? {
+            let inner = self.pat()?;
+            return Ok(Pat {
+                kind: PatKind::Module(module, Box::new(inner)),
+                span: self.since(start),
+            });
+        }
         let neg = self.eat("-");
         let kind = match self.peek() {
             Some(Kind::Int(n)) => {

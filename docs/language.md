@@ -63,6 +63,7 @@ Everything else is rejected with a message that names the kio alternative, for e
 - **Deterministic.** No clock or randomness. `Map` iterates in key order.
 - **Comments:** `//` only.
 - **Reserved words.** All Rust keywords not used by kio are reserved and cannot be names.
+- **Type names start uppercase.** `struct Point`, `enum Status`. A lowercase name before `::` is a module, as in `web::text`.
 
 ## Built-ins
 

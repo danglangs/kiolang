@@ -272,6 +272,7 @@ fn resolve(
 ) -> Result<Ty, Diag> {
     match &t.kind {
         TypeKind::Unit => Ok(Ty::Unit),
+        TypeKind::Module(..) => Err(no_modules(t.span)),
         TypeKind::Named(n, args) => match (n.as_str(), args.as_slice()) {
             ("Option", [a]) => Ok(Ty::Option(Box::new(resolve(a, caps, structs, enums)?))),
             ("Result", [a, b]) => {
@@ -308,6 +309,14 @@ fn resolve(
             _ => Err(unknown_type(t)),
         },
     }
+}
+
+fn no_modules(span: Span) -> Diag {
+    err(
+        span,
+        "modules are not available yet".to_string(),
+        Some("keep the code in one file"),
+    )
 }
 
 fn unknown_type(t: &Type) -> Diag {
@@ -619,13 +628,26 @@ fn check_all(src: &str, caps: &CapTable) -> Result<Program, Vec<Diag>> {
             Item::Struct(s) => Some((s.name.as_str(), s.span)),
             Item::Enum(e) => Some((e.name.as_str(), e.span)),
             Item::Fn(_) => None,
+            Item::Mod(_, span) => {
+                diags.push(no_modules(*span));
+                continue;
+            }
         };
         if let Some((name, span)) = declared.filter(|(n, _)| reserved(n)) {
             let msg = format!("`{name}` is a built-in type");
             diags.push(err(span, msg, Some("rename your type")));
             continue;
         }
+        // `web::x` means module `web`, so a lowercase type name would be ambiguous in a path.
+        if let Some((name, span)) = declared.filter(|(n, _)| !n.starts_with(|c: char| c.is_ascii_uppercase())) {
+            let mut fixed = name.to_string();
+            fixed[..1].make_ascii_uppercase();
+            let msg = format!("type names start with an uppercase letter: `{name}`");
+            diags.push(err(span, msg, Some(&format!("rename it `{fixed}`"))));
+            continue;
+        }
         match item {
+            Item::Mod(..) => unreachable!("rejected above"),
             Item::Fn(f) => fns.push(f),
             Item::Enum(e) if structs.contains_key(&e.name) || enums.contains_key(&e.name) => {
                 diags.push(err(
@@ -981,6 +1003,7 @@ impl Checker<'_> {
             ExprKind::List(items) => self.list_lit(e, items, expected),
             ExprKind::StructLit(name, inits) => self.struct_lit(e, name, inits),
             ExprKind::Path(en, v) => self.variant_value(e, en, v, &[]),
+            ExprKind::Module(..) => Err(no_modules(e.span)),
             ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms, expected),
             ExprKind::Try(x) => self.try_expr(e, x),
         }
@@ -1259,6 +1282,7 @@ impl Checker<'_> {
                 Some(_) => self.variant_pattern(p, shape, n, &[]),
                 None => Ok((Cover::All, vec![(n.clone(), st.clone())])),
             },
+            PatKind::Module(..) => Err(no_modules(p.span)),
             PatKind::Variant(named, v, names) => {
                 if named.as_deref().is_some_and(|n| n != en) {
                     want(p.span, &Ty::Enum(named.clone().unwrap()), st)?;
@@ -1402,6 +1426,7 @@ impl Checker<'_> {
             ExprKind::Name(name) => name,
             ExprKind::Path(en, v) if en == "Map" && v == "new" => return self.map_new(e, args, expected),
             ExprKind::Path(en, v) => return self.variant_value(e, en, v, args),
+            ExprKind::Module(..) => return Err(no_modules(callee.span)),
             _ => {
                 let hint = "call a function by name, like `f(x)`";
                 return Err(err(callee.span, "only functions can be called".to_string(), Some(hint)));

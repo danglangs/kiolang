@@ -22,6 +22,7 @@ fn show(e: &Expr) -> String {
         ExprKind::List(items) => format!("(list{})", list(items)),
         ExprKind::Try(x) => format!("(? {})", show(x)),
         ExprKind::Path(e, v) => format!("{e}::{v}"),
+        ExprKind::Module(m, x) => format!("{m}::{}", show(x)),
         ExprKind::Match(s, arms) => {
             let arms = arms.iter().fold(String::new(), |a, arm| {
                 a + &format!(" ({} {})", pat(&arm.pat), show(&arm.body))
@@ -44,6 +45,7 @@ fn pat(p: &Pat) -> String {
         PatKind::Int(n) => n.to_string(),
         PatKind::Str(s) => format!("{s:?}"),
         PatKind::Bool(b) => b.to_string(),
+        PatKind::Module(m, p) => format!("{m}::{}", pat(p)),
         PatKind::Variant(e, v, bindings) => {
             let e = e.as_ref().map_or(String::new(), |e| format!("{e}::"));
             let bindings = bindings
@@ -58,6 +60,7 @@ fn ty(t: &Type) -> String {
     match &t.kind {
         TypeKind::Unit => "()".into(),
         TypeKind::Named(n, args) if args.is_empty() => n.clone(),
+        TypeKind::Module(m, t) => format!("{m}::{}", ty(t)),
         TypeKind::Named(n, args) => format!("{n}<{}>", args.iter().map(ty).collect::<Vec<_>>().join(",")),
     }
 }
@@ -242,8 +245,12 @@ fn rejected_with(src: &str, text: &str, msg: &str, hint: Option<&str>) {
 #[test]
 fn rejects_reserved_words() {
     rejected("impl Foo {}", "impl", "`impl` is not supported in kio", true);
-    rejected("use a;", "use", "`use` is not supported in kio", true);
-    rejected("pub fn f() {}", "pub", "`pub` is not supported in kio", true);
+    rejected_with(
+        "use web::text;",
+        "use",
+        "`use` is not supported in kio",
+        Some("write the full path, like `web::text`"),
+    );
     rejected(
         "fn f() { let x = self; }",
         "self",
@@ -503,4 +510,70 @@ fn rejects_empty_type_arguments() {
         (d.msg.as_str(), d.hint.as_deref()),
         ("empty type arguments", Some("write `Dir` without `<>`"))
     );
+}
+
+#[test]
+fn module_items() {
+    let items = parse("mod web; pub fn f() {} pub struct S {} pub enum E {} fn g() {} struct T {}").unwrap();
+    assert_eq!(items[0], Item::Mod("web".into(), Span { start: 0, end: 8 }));
+    let public = |i: &Item| match i {
+        Item::Fn(f) => f.public,
+        Item::Struct(s) => s.public,
+        Item::Enum(e) => e.public,
+        Item::Mod(..) => panic!(),
+    };
+    let flags: Vec<bool> = items[1..].iter().map(public).collect();
+    assert_eq!(flags, [true, true, true, false, false]);
+    // A pub item's span starts at `pub`.
+    let Item::Fn(f) = &items[1] else { panic!() };
+    assert_eq!(f.span, Span { start: 9, end: 22 });
+}
+
+#[test]
+fn module_item_errors() {
+    let d = fail("mod web");
+    assert_eq!(d.msg, "expected `;`");
+    assert_eq!(d.hint.as_deref(), Some("add `;`"));
+    rejected("mod;", ";", "expected a name", false);
+    rejected("pub mod web;", "mod", "expected `fn`", false);
+}
+
+#[test]
+fn module_paths() {
+    assert_eq!(expr("web::text(a, 1)"), "(call web::text a 1)");
+    assert_eq!(expr("web::Point { x: 1 }"), "web::(new Point x: 1)");
+    assert_eq!(expr("web::Point"), "web::Point");
+    assert_eq!(expr("web::Status::Paid"), "web::Status::Paid");
+    assert_eq!(expr("web::Status::Paid(1)"), "(call web::Status::Paid 1)");
+    assert_eq!(expr("web::f(1).x"), "(. (call web::f 1) x)");
+    assert_eq!(expr("Status::Paid"), "Status::Paid");
+}
+
+#[test]
+fn module_struct_literal_not_in_condition() {
+    assert_eq!(expr("if web::ok { 1 } else { 2 }"), "(if web::ok {tail 1} {tail 2})");
+}
+
+#[test]
+fn module_types() {
+    let items = parse("fn f(a: web::Point, b: List<web::Point>) -> web::Status {}").unwrap();
+    let Item::Fn(f) = &items[0] else { panic!() };
+    assert_eq!(ty(&f.params[0].ty), "web::Point");
+    assert_eq!(ty(&f.params[1].ty), "List<web::Point>");
+    assert_eq!(ty(&f.ret), "web::Status");
+}
+
+#[test]
+fn module_patterns() {
+    assert_eq!(
+        expr("match s { web::Status::Paid(x) => x, web::Status::Open => 0, _ => 1 }"),
+        "(match s (web::[Status::Paid x] x) (web::[Status::Open] 0) (_ 1))"
+    );
+}
+
+#[test]
+fn module_path_errors() {
+    rejected("fn f() { web::; }", ";", "expected a name", false);
+    rejected("fn f(a: web::) {}", ")", "expected a name", false);
+    rejected("fn f() { web::1; }", "1", "expected a name", false);
 }

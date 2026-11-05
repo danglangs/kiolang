@@ -137,6 +137,7 @@ fn walk(e: &Expr, visit: &mut dyn FnMut(&Expr)) {
         | ExprKind::Bool(_)
         | ExprKind::Unit
         | ExprKind::Name(_)
-        | ExprKind::Path(..) => {}
+        | ExprKind::Path(..)
+        | ExprKind::Module(..) => {}
     }
 }

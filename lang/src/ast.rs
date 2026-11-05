@@ -5,10 +5,13 @@ pub enum Item {
     Fn(Fn),
     Struct(Struct),
     Enum(Enum),
+    /// `mod name;`
+    Mod(String, Span),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fn {
+    pub public: bool,
     pub name: String,
     pub params: Vec<Param>,
     /// `()` when the source has no `->`.
@@ -19,6 +22,7 @@ pub struct Fn {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Struct {
+    pub public: bool,
     pub name: String,
     /// Declared fields, which have the shape of parameters.
     pub fields: Vec<Param>,
@@ -27,6 +31,7 @@ pub struct Struct {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Enum {
+    pub public: bool,
     pub name: String,
     pub variants: Vec<Variant>,
     pub span: Span,
@@ -58,6 +63,8 @@ pub enum TypeKind {
     Unit,
     /// `List<Int>` is `Named("List", [Int])`.
     Named(String, Vec<Type>),
+    /// `web::Point`: the type after `web::`.
+    Module(String, Box<Type>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,6 +149,8 @@ pub enum ExprKind {
     StructLit(String, Vec<(String, Expr)>),
     /// `Enum::Variant`; a payload is a `Call` on it.
     Path(String, String),
+    /// `web::f`, `web::Point { .. }` or `web::Status::Paid`: the expression after `web::`.
+    Module(String, Box<Expr>),
     Match(Box<Expr>, Vec<Arm>),
     /// `e?`
     Try(Box<Expr>),
@@ -171,4 +180,6 @@ pub enum PatKind {
     Bool(bool),
     /// `Enum::Variant(a, _)` or `Variant(a)`; a `None` binding is `_`.
     Variant(Option<String>, String, Vec<Option<String>>),
+    /// `web::Status::Paid(x)`: the pattern after `web::`.
+    Module(String, Box<Pat>),
 }

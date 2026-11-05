@@ -417,6 +417,7 @@ impl Interp<'_> {
             },
             ExprKind::StructLit(name, inits) => self.struct_lit(name, inits),
             ExprKind::Path(en, v) => Ok(self.variant(en, v, Vec::new())),
+            ExprKind::Module(..) => unreachable!("modules are rejected by the checker"),
             ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms),
             ExprKind::Try(x) => self.try_expr(x),
             ExprKind::Method(recv, name, args) => self.method(recv, name, args, e.span),
@@ -752,7 +753,7 @@ fn constructor(name: &str, payload: Vec<Value>) -> Value {
 fn pure(e: &Expr) -> bool {
     match &e.kind {
         ExprKind::Int(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Unit => true,
-        ExprKind::Name(_) | ExprKind::Path(..) => true,
+        ExprKind::Name(_) | ExprKind::Path(..) | ExprKind::Module(..) => true,
         ExprKind::Block(_) | ExprKind::If(..) | ExprKind::Match(..) => false,
         ExprKind::Unary(_, x) | ExprKind::Field(x, _) | ExprKind::Try(x) => pure(x),
         ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) => pure(a) && pure(b),

@@ -136,7 +136,7 @@ Each changes `caps.wit` or the language. Recommendation first, then the alternat
   Done: `json_str` from the sketch and a percent-decoder run in tests; push of 256 and index past the end each stop with their error.
 - [x] **W3. `Option.unwrap_or(T)`.** `[parallel]`
   Done: tests for `Some` and `None`, and a type-mismatch rejection with a hint.
-- [ ] **W4a. Module syntax.** `[parallel]` Parser only. `mod name;` as an item; `pub` before `fn`, `struct`, `enum`; paths `name::item` in expressions, types and patterns, extending today's `Enum::Variant` path. `mod`, `pub` leave the reserved list; `use` stays reserved.
+- [x] **W4a. Module syntax.** `[parallel]` Parser only. `mod name;` as an item; `pub` before `fn`, `struct`, `enum`; paths `name::item` in expressions, types and patterns, extending today's `Enum::Variant` path. `mod`, `pub` leave the reserved list; `use` stays reserved.
   Done: parse tests for each form; `use` is rejected with hint "write the full path, like `web::text`".
 - [ ] **W4b. Modules in the checker and interpreter.** `[parallel]` After W4a. v0 is flat: a module is one file, only the root file may declare `mod`, so there are no nested modules and no cycles. Items in a module are visible outside it only if `pub`; the root's own items need no `pub`. Function, struct and enum names are resolved per module; `web::text` calls `web.kio`'s `text`. `Span` gains `file: u32` (0 is the root). The report names module functions `web::text`.
   Done: a two-file program runs natively; calling a non-`pub` function, `mod` outside the root, an unknown module, and a duplicate `mod` are each rejected with a hint; a diag in `web.kio` carries its file.

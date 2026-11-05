@@ -29,15 +29,16 @@ fn keywords() {
     assert!(toks.iter().all(|k| matches!(k, Kind::Keyword(_))));
     assert_eq!(toks[0], kw("fn"));
     assert_eq!(toks[15], kw("enum"));
+    assert_eq!(kinds("mod pub"), [kw("mod"), kw("pub")]);
 }
 
 #[test]
 fn reserved_words() {
-    let src = "as async await box const crate dyn extern impl loop mod move pub ref self Self \
+    let src = "as async await box const crate dyn extern impl loop move ref self Self \
                static super trait type unsafe use where yield abstract become do final macro \
                override priv typeof unsized virtual try gen union";
     let toks = kinds(src);
-    assert_eq!(toks.len(), 37);
+    assert_eq!(toks.len(), 35);
     assert!(toks.iter().all(|k| matches!(k, Kind::Reserved(_))));
     assert_eq!(kinds("impl"), [Kind::Reserved("impl".into())]);
     assert_eq!(kinds("implx"), [ident("implx")]);
