@@ -13,7 +13,7 @@ Goal: `kio-web`, a small but complete web framework written in kio, in its own r
 | State | `State<T>`, `Arc<Mutex<..>>` | KV/SQL host APIs | Bindings (`env`), KV, D1 | Capabilities only (`Dir` now, `Kv` later) |
 | Limits | tower middleware | Fuel, memory, epochs | CPU time, memory | Fuel, memory, epoch, quotas per request |
 
-**Decided with the owner:** one fresh guest instance per request; synchronous kio handlers, no async in the language; the host does accept and concurrency. Consequences: no state leaks between requests, and each handler's authority is its signature, so the report shows what each route can touch.
+**Decided with the owner:** one fresh guest instance per request; synchronous kio handlers, no async in the language; the host does accept and concurrency; plain WIT records, not `wasi:http` (decision 2); Rust's module syntax (decision 6). Consequences: no state leaks between requests, and each handler's authority is its signature, so the report shows what each route can touch.
 
 **Cost of fresh instances.** Wasmtime's pooling allocator plus copy-on-write memory cut SpiderMonkey's instantiation from 2 ms to 5 µs ([Wasmtime 1.0](https://bytecodealliance.org/articles/wasmtime-10-performance)). `wasmtime serve` on a hello-world went from about 5k to 35k-43k requests/s with pooling on 4- and 16-core Linux machines, and 236k on a maintainer's; the remaining cost is resetting memory (`memset`, `madvise`) ([wasmtime#8034](https://github.com/bytecodealliance/wasmtime/issues/8034)). The kio guest uses 1.1-1.5 MB of linear memory (G4), so reset is small. The real per-request cost is the guest re-parsing and re-checking the program; W10 measures it.
 
@@ -99,7 +99,7 @@ Found while writing it: routing, path params, query maps, status helpers and fil
 
 Each changes `caps.wit` or the language. Recommendation first, then the alternative.
 
-1. **Entry point.** `fn handle(req: Request, ..caps) -> Response`; rule 3 becomes "`main` or `handle`, exactly one". Caps are bound by name with `--dir`, as for `main`. Alt: `main` returns a `Response` and reads the request from a cap; that hides the request's type from the checker.
+1. **How a request reaches the program (proposed, owner to confirm).** No language change: `main` stays the only entry point, and HTTP is a capability. `caps.wit` gains `resource incoming { request: func() -> request }` and `resource outgoing { send: func(response) }`, where `request` and `response` are the decision 2 records. A server program is `fn main(req: Incoming, res: Outgoing, public: Dir) -> Result<(), IoErr>`, and the host calls `main` once per request with fresh grants. `Request`, `Response`, routing and helpers live in kio-web, not the language, as in axum. The report shows each handler's access: `main : req request, res send, public read`. In Rust, `main` owns the socket and loops; a kio program cannot open sockets or loop forever, so the host calls in, and a capability is how it hands over the request. Alt: a second entry point `fn handle(req: Request, ..caps) -> Response`, which types the request as a struct but changes rule 3.
 2. **Request and response: plain WIT records, not `wasi:http`.** In a new `web` interface:
    `record header { name: string, value: string }`,
    `record request { method: string, path: string, query: string, headers: list<header>, body: list<u8> }`,
@@ -109,7 +109,7 @@ Each changes `caps.wit` or the language. Recommendation first, then the alternat
 3. **Buffered bodies.** The host reads the whole request body (cap 1 MB) before starting the guest and writes the response after the instance is dropped. A slow client never holds an instance. Alt: streaming, which needs decision 2's alternative; see Later.
 4. **Execution.** Sync Wasmtime (as `kio run` today) on `tokio::task::spawn_blocking`, bounded by a semaphore (default: 2 × CPUs); when it is full, queue up to 100 more for 1 s, then 503. Engine, `Component` and `InstancePre` are built once at startup; today `Kio::with_stack` compiles the component on every call. Alt: Wasmtime async with epoch yields; needed once handlers call `Http`, so a slow upstream does not pin a thread.
 5. **Checking.** `kio serve` runs `check` once at startup, prints the report and refuses to start on a diag. Each request re-parses and re-checks inside its fresh instance. Alt, if W10 shows it dominates: snapshot a checked guest per program with [`wasmtime wizer`](https://docs.wasmtime.dev/api/wasmtime_wizer/index.html) so instances start with `Program` already in copy-on-write memory.
-6. **Modules.** Rust's own syntax: `mod web;` loads `web.kio` beside the file; `pub fn` / `pub struct`; `web::f`, `web::T`. No `use` in v0. `check`, `run` and `serve` take `list<record file { path: string, source: string }>`; `Span` gains a file id. kio-web is vendored as one file: no package manager. Alt: concatenate files on the host; no language change, but diags and names collide.
+6. **Modules (decided).** Rust's own syntax: `mod web;` appears once, in the file that owns the module, and loads `web.kio` beside it; other files refer to `web::f` without declaring it again; `pub fn` / `pub struct`; `web::f`, `web::T`. No `use` in v0. `check`, `run` and `serve` take `list<record file { path: string, source: string }>`; `Span` gains a file id. kio-web is vendored as one file: no package manager. Alt: concatenate files on the host; no language change, but diags and names collide.
 7. **Routing.** A `route` helper and `match`/early return, as in the sketch. Alt: route tables (`router.get("/", home)`), which need function values; see Later.
 8. **JSON.** Encode only: `json_str`, plus builders over `List<Field>` with `Str` values already encoded. Decoding waits for recursive types or an index-based tree.
 9. **Per-request limits** (overridable flags): fuel 100 million, memory 64 MB, wall clock 5 s, host calls and I/O as `kio run`; hyper `header_read_timeout` 10 s (default 30 s), `max_headers` 100, header bytes 64 KB, body read deadline 10 s, idle keep-alive 30 s ([hyper http1 Builder](https://docs.rs/hyper/latest/hyper/server/conn/http1/struct.Builder.html)). A trap or limit is 500 with no detail to the client; the diag goes to the log. HTTP/1.1 only in v0.
@@ -118,7 +118,7 @@ Each changes `caps.wit` or the language. Recommendation first, then the alternat
 
 `[parallel]` tasks touch only `lang` or `tools/capgen` and can run alongside H1-H5, N1-N2 and M1. Each is pinned and split further before handoff, as in lang-todo.md.
 
-- [ ] **W1. Records in caps.wit.** `[parallel]` capgen maps a WIT `record` to a kio struct declared in every program (`header` to `Header`, `u16` to `Int`, `list<u8>` to `Bytes`); add decision 2's `web` interface. A user struct with the same name is an error. Security-review event.
+- [ ] **W1. Records in caps.wit.** `[parallel]` capgen maps a WIT `record` to a kio struct declared in every program (`header` to `Header`, `u16` to `Int`, `list<u8>` to `Bytes`); add decision 2's records and decision 1's `incoming` and `outgoing` resources. A user struct with the same name is an error. Security-review event.
   Done: `Header { name: "a", value: "b" }` checks with no declaration; a duplicate user `struct Request` is rejected with a hint; CI's capgen drift check passes.
 - [x] **W2. `Bytes` index and push.** `[parallel]` `b[i] -> Int` (0-255); `push(Int)` on a `let mut` `Bytes`, runtime error outside 0-255. Out-of-bounds index is the existing runtime error.
   Done: `json_str` from the sketch and a percent-decoder run in tests; push of 256 and index past the end each stop with their error.
@@ -126,9 +126,9 @@ Each changes `caps.wit` or the language. Recommendation first, then the alternat
   Done: tests for `Some` and `None`, and a type-mismatch rejection with a hint.
 - [ ] **W4. Modules.** `[parallel]` Decision 6. Split by pass: parse (`mod`, `pub`, `a::b`), resolve and check (unknown module, private item, cycles), then the API change to a file list.
   Done: a two-file program runs; a diag in `web.kio` prints `web.kio:line`; calling a non-`pub` function and a `mod` cycle are each rejected with a hint; the report names functions as `web::file`.
-- [ ] **W5. `handle` entry point.** After W1. Rule 3 as in decision 1; the report covers `handle` and its helpers; `lang::run_handle(p, req, caps) -> Result<Value, RunErr>`.
-  Done: a program with both `main` and `handle`, one with neither, and `handle` with a wrong signature are each rejected with a hint; a native test returns a `Response` value for a `Request`.
-- [ ] **W6. Guest `serve` export.** After W4, W5. `serve(files, req, dirs, https) -> result<response, list<diag>>` in world `guest`.
+- [ ] **W5. `Incoming` and `Outgoing` capabilities.** After W1. Checked like `Dir` (decision 1): parameters only, `request()` and `send()` from the table. `send` twice is a runtime error. No language change beyond the table.
+  Done: a native test with stub caps returns a `Response` for a `Request`; storing or returning `req` is rejected by rule 1; the report lists `req request, res send`.
+- [ ] **W6. Guest serve path.** After W4, W5. The host grants `incoming` and `outgoing` handles for one request and calls the existing `run` export; no new export.
   Done: with G3's in-memory host, the sketch app answers `/hello/kio` with `{"hello": "kio"}`; a runtime error is a diag with its span.
 - [ ] **W7. `kio serve`.** After W6, H2, H3. tokio + hyper http1 + Wasmtime pooling allocator; decisions 4 and 5. `kio serve app.kio --port 8080 --dir public=./public`.
   Done: an integration test with a real client gets the right body for three routes, and 100 concurrent requests all succeed; a program with a diag exits 1 before binding the port.
