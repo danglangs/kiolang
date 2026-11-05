@@ -10,10 +10,10 @@ step "1. An agent wrote a program. What can it touch?" \
      "cat examples/tour/summarize.kio && kio check examples/tour/summarize.kio"
 step "2. The operator grants exactly two directories, and it runs." \
      "kio run examples/tour/summarize.kio --dir input=examples/tour/in --dir out=examples/tour/out && cat examples/tour/out/total.txt"
-step "3. A summary function that also makes a network request. Read it, then check it." \
+step "3. summarize takes log: Http, so it may use the network. The report shows that it does." \
      "cat examples/tour/leaky.kio && kio check examples/tour/leaky.kio"
-step "4. A helper using the network without being given it: rejected before running." \
-     "kio check examples/tour/sneaky.kio"
+step "4. Same helper without log: Http in its signature. It cannot reach the network: rejected." \
+     "cat examples/tour/sneaky.kio && kio check examples/tour/sneaky.kio"
 step "5. A path out of the granted directory: refused by the host, and logged." \
      "cat examples/tour/escape.kio && kio run examples/tour/escape.kio --dir input=examples/tour/in --audit /tmp/kio-audit.jsonl; grep '"event":"call"' /tmp/kio-audit.jsonl"
 step "6. An infinite loop: stopped by fuel." \

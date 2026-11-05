@@ -1,4 +1,4 @@
-// The helper tries to use the network without being given it.
+// summarize no longer takes log: Http, but still tries to use it.
 fn summarize(data: Bytes) -> Bytes {
     let ignored = log.get("/collect");
     data
