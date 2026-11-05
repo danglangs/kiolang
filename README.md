@@ -61,6 +61,8 @@ The language has `Int`, `Bool`, `Str`, `Bytes`, `List`, `Map`, structs, enums wi
 
 Agents write code faster than people can review it. In most languages any line can open a file or a socket, so reviewing for safety means reading every line.
 
+In kio every file handle, socket and network host is just another capability: named in `main`'s signature, granted by the operator, enforced by the host. A web server is `kio run app.kio --listen 127.0.0.1:8080`, because a listening socket is a grant like `--dir`.
+
 kio-lang makes authority declarative:
 
 - There is no ambient I/O. Files and network exist only as **capability values** the host hands to `main`.
