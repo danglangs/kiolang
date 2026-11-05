@@ -99,8 +99,24 @@ Found while writing it: routing, path params, query maps, status helpers and fil
 
 Each changes `caps.wit` or the language. Recommendation first, then the alternative.
 
-1. **How a request reaches the program (decided).** No language change: `main` stays the only entry point, and HTTP is a capability. `caps.wit` gains `resource incoming { request: func() -> request }` and `resource outgoing { send: func(response) }`, where `request` and `response` are the decision 2 records. A server program is `fn main(req: Incoming, res: Outgoing, public: Dir) -> Result<(), IoErr>`, and the host calls `main` once per request with fresh grants. `Request`, `Response`, routing and helpers live in kio-web, not the language, as in axum. The report shows each handler's access: `main : req request, res send, public read`. In Rust, `main` owns the socket and loops; a kio program cannot open sockets or loop forever, so the host calls in, and a capability is how it hands over the request. Alt: a second entry point `fn handle(req: Request, ..caps) -> Response`, which types the request as a struct but changes rule 3.
-2. **Request and response: plain WIT records, not `wasi:http`.** In a new `web` interface:
+1. **How a request reaches the program (decided).** No language change: `main` stays the only entry point, and HTTP is a capability carrying only the raw bytes across the wall, as hyper does for axum. `caps.wit` gains:
+   ```wit
+   interface web {
+     resource incoming {
+       method: func() -> string;                 // "GET"
+       target: func() -> string;                 // raw "/path?query", as sent
+       header-names: func() -> list<string>;     // lowercased, in order
+       header-values: func() -> list<string>;
+       body: func() -> list<u8>;
+     }
+     resource outgoing {
+       send: func(status: u16, header-names: list<string>, header-values: list<string>, body: list<u8>) -> result<_, web-err>;
+     }
+     variant web-err { already-sent, invalid }
+   }
+   ```
+   A server program is `fn main(req: Incoming, res: Outgoing, public: Dir) -> Result<(), IoErr>`, and the host calls `main` once per request with fresh grants. `Request`, `Response`, `Header`, routing and helpers are kio-web types built from these parts; changing them never touches `caps.wit`. Headers are two parallel lists because kio has no tuples. The report shows each handler's access: `main : req method target, res send, public read`.
+2. **Not `wasi:http` (decided).** Raw parts as in decision 1, rather than `wasi:http` resources and streams. Earlier draft, superseded by decision 1:
    `record header { name: string, value: string }`,
    `record request { method: string, path: string, query: string, headers: list<header>, body: list<u8> }`,
    `record response { status: u16, headers: list<header>, body: list<u8> }`.
