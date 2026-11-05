@@ -76,14 +76,16 @@ fn main() -> Result<()> {
                         };
                         cs += &format!("case(\"{}\", vec![{fields}]),", pascal(&c.name));
                     }
-                    enums += &format!("Enum {{ name: \"{name}\".into(), variants: vec![{cs}], span: at, public: true }},");
+                    enums +=
+                        &format!("Enum {{ name: \"{name}\".into(), variants: vec![{cs}], span: at, public: true }},");
                 }
                 TypeDefKind::Enum(e) => {
                     let mut cs = String::new();
                     for c in &e.cases {
                         cs += &format!("case(\"{}\", vec![]),", pascal(&c.name));
                     }
-                    enums += &format!("Enum {{ name: \"{name}\".into(), variants: vec![{cs}], span: at, public: true }},");
+                    enums +=
+                        &format!("Enum {{ name: \"{name}\".into(), variants: vec![{cs}], span: at, public: true }},");
                 }
                 k => bail!("unsupported WIT declaration `{name}`: {}", k.as_str()),
             }
