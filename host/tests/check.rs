@@ -57,7 +57,7 @@ fn invoices_writes_total() {
     let grants = vec![("input".to_string(), input), ("out".to_string(), out)];
     let out = kio.run(&invoices(), grants).unwrap().unwrap();
     assert_eq!(out.report.lines.len(), 4);
-    assert_eq!(out.value, r#"Enum("Result", 0, [Unit])"#);
+    assert_eq!(out.value, "Ok(())");
     assert!(!out.failed);
     assert_eq!(std::fs::read(out_t.path().join("total.txt")).unwrap(), b"42");
     assert_eq!(kio.import_calls(), 2);
@@ -87,9 +87,9 @@ fn on(d: cap_std::fs::Dir, body: &str) -> String {
         .value
 }
 
-const NOT_FOUND: &str = r#"Enum("Result", 1, [Enum("IoErr", 0, [])])"#;
-const DENIED: &str = r#"Enum("Result", 1, [Enum("IoErr", 1, [])])"#;
-const INVALID: &str = r#"Enum("Result", 1, [Enum("IoErr", 3, [])])"#;
+const NOT_FOUND: &str = "IoErr::NotFound";
+const DENIED: &str = "IoErr::Denied";
+const INVALID: &str = "IoErr::InvalidPath";
 
 #[test]
 fn read_errors() {
@@ -139,7 +139,7 @@ fn create_errors_leave_filesystem_unchanged() {
     std::fs::write(root.join("old"), "keep").unwrap();
     std::fs::create_dir(root.join("in")).unwrap();
     let d = || host::open_dir(&root).unwrap();
-    let ok = r#"Enum("Result", 0, [Unit])"#;
+    let ok = "Ok(())";
     assert_eq!(on(d(), "d.create(\"old\", \"new\".to_bytes())"), DENIED);
     assert_eq!(std::fs::read(root.join("old")).unwrap(), b"keep");
     for p in ["../x", "/tmp/kio-x", "", "in/../../x"] {
@@ -253,7 +253,7 @@ fn main_err_marks_the_run_failed() {
         .unwrap()
         .unwrap();
     assert!(out.failed);
-    assert_eq!(out.value, r#"Enum("Result", 1, [Enum("IoErr", 1, [])])"#);
+    assert_eq!(out.value, "IoErr::Denied");
 }
 
 #[test]
@@ -397,7 +397,7 @@ fn oversized_read_is_too_large() {
         .run(src, vec![("d".into(), d)])
         .unwrap()
         .unwrap();
-    assert_eq!(out.value, "Int(11)");
+    assert_eq!(out.value, "11");
 }
 
 /// H4: a write that fails after the file is created leaves no file, so a retry works.
@@ -420,7 +420,7 @@ fn huge_timeout_does_not_panic() {
         ..Limits::default()
     };
     let out = Kio::new(limits).unwrap().run("fn main() -> Int { 1 }", vec![]).unwrap();
-    assert_eq!(out.unwrap().value, "Int(1)");
+    assert_eq!(out.unwrap().value, "1");
 }
 
 /// H6: a path longer than the host accepts is refused before any work, so it costs no host memory.
@@ -433,7 +433,7 @@ fn overlong_path_is_invalid() {
         .run(src, vec![("d".into(), d)])
         .unwrap()
         .unwrap();
-    assert_eq!(out.value, r#"Enum("Result", 1, [Enum("IoErr", 3, [])])"#);
+    assert_eq!(out.value, "IoErr::InvalidPath");
 }
 
 /// A one-thread HTTP/1.1 server on 127.0.0.1: `/ok` is 200 `hello`, `/big` is 10 MB + 1, `/hang`
@@ -496,18 +496,15 @@ fn get(grant: &str, body: &str, limits: Limits) -> String {
         .value
 }
 
-const HTTP_DENIED: &str = r#"Enum("Result", 1, [Enum("HttpErr", 0, [])])"#;
+const HTTP_DENIED: &str = "HttpErr::Denied";
 
 /// N1: a granted GET returns the body, a 404 is `status(404)`.
 #[test]
 fn http_get_and_status() {
     let g = serve();
     let l = Limits::default();
-    assert_eq!(
-        get(&g, "h.get(\"/ok\")", l),
-        r#"Enum("Result", 0, [Bytes([104, 101, 108, 108, 111])])"#
-    );
-    let status = |n: i64| format!(r#"Enum("Result", 1, [Enum("HttpErr", 3, [Int({n})])])"#);
+    assert_eq!(get(&g, "h.get(\"/ok\")", l), "Ok(<5 bytes>)");
+    let status = |n: i64| format!("HttpErr::Status({n})");
     assert_eq!(get(&g, "h.get(\"/nope\")", l), status(404));
 }
 
@@ -517,7 +514,7 @@ fn http_get_and_status() {
 fn http_redirects() {
     let g = serve();
     let l = Limits::default();
-    let ok = r#"Enum("Result", 0, [Bytes([104, 101, 108, 108, 111])])"#;
+    let ok = "Ok(<5 bytes>)";
     assert_eq!(get(&g, "h.get(\"/same\")", l), ok);
     assert_eq!(get(&g, "h.get(\"/hop4\")", l), ok); // 5 redirects
     for p in ["/moved", "/port", "/https", "/bare", "/hop5"] {
@@ -623,7 +620,7 @@ fn http_quotas_and_timeout() {
             kio.explain(&e).unwrap(),
             "timed out after 1 s (raise it with --timeout)"
         ),
-        Ok(out) => assert_eq!(out.unwrap().value, "Int(0)"),
+        Ok(out) => assert_eq!(out.unwrap().value, "0"),
     }
     assert!(start.elapsed() < std::time::Duration::from_secs(2));
 }
@@ -633,10 +630,7 @@ fn http_quotas_and_timeout() {
 fn http_oversized_body_is_too_large() {
     let g = serve();
     let l = Limits::default();
-    assert_eq!(
-        get(&g, "h.get(\"/big\")", l),
-        r#"Enum("Result", 1, [Enum("HttpErr", 2, [])])"#
-    );
+    assert_eq!(get(&g, "h.get(\"/big\")", l), "HttpErr::TooLarge");
 }
 
 /// N1: a request that exceeds the per-request timeout (shorter than the run deadline) is `timeout`.
@@ -648,10 +642,7 @@ fn http_slow_server_is_timeout() {
         ..Limits::default()
     };
     // The 30 s run deadline is far off, so only the 10 s request timeout can produce `timeout`.
-    assert_eq!(
-        get(&g, "h.get(\"/hang\")", l),
-        r#"Enum("Result", 1, [Enum("HttpErr", 1, [])])"#
-    );
+    assert_eq!(get(&g, "h.get(\"/hang\")", l), "HttpErr::Timeout");
 }
 
 /// N1: grants are strict, as for `Dir`.

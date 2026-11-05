@@ -78,7 +78,7 @@ kio run prog.kio --dir input=/srv/jobs/42/in --dir out=/srv/jobs/42/out
 | 7 | On `input.read("invoices.csv")` the interpreter calls the import `dir.read(0, "invoices.csv")` | wall crossed, out of the guest |
 | 8 | Host looks up handle 0, checks its kind, charges the call quota, resolves the path beneath the root, enforces the size limit, reads, returns bytes | host, native |
 | 9 | Interpreter continues. Steps 7 and 8 repeat per capability call. | guest |
-| 10 | `main` returns. The guest returns the report and `main`'s value; the host prints both, sets the exit status and drops the handle table. | host |
+| 10 | `main` returns. The guest returns the report and `main`'s value; the host prints the report to stderr (when `main` takes capabilities) and the value (nothing for `()` or `Ok(())`; `Err(e)` as `error: e` on stderr), sets the exit status and drops the handle table. | host |
 
 `kio check prog.kio` calls the `check` export: steps 3 and 4 only, no handles. It returns the report or the diagnostics, with spans and hints. The MCP tool calls the same export.
 

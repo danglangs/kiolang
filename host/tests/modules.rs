@@ -14,7 +14,7 @@ fn two_files_check_and_run_through_the_guest() {
     let report = kio.check_files(&files(GOOD)).unwrap().unwrap();
     assert_eq!(report.lines.len(), 2);
     let out = kio.run_files(&files(GOOD), vec![], vec![]).unwrap().unwrap();
-    assert_eq!(out.value, "Int(2)");
+    assert_eq!(out.value, "2");
 }
 
 #[test]
@@ -46,7 +46,7 @@ fn project(web: Option<&str>) -> tempfile::TempDir {
 #[test]
 fn cli_runs_the_example() {
     let (code, out, _) = kio(&["run", "../examples/web/app.kio"]);
-    assert_eq!((code, out.lines().last()), (0, Some("Int(41)")));
+    assert_eq!((code, out.lines().last()), (0, Some("41")));
     assert_eq!(kio(&["check", "../examples/web/app.kio"]).0, 0);
 }
 

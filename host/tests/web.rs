@@ -27,7 +27,7 @@ fn serve(src: &str) -> (String, Option<Response>) {
 fn echoes_the_body() {
     let mut kio = Kio::new(Limits::default()).unwrap();
     let (outcome, sent) = kio.run_web(ECHO, vec![], request(b"ping")).unwrap();
-    assert_eq!(outcome.unwrap().value, r#"Enum("Result", 0, [Unit])"#);
+    assert_eq!(outcome.unwrap().value, "Ok(())");
     let sent = sent.unwrap();
     assert_eq!(sent.status, 200);
     assert_eq!(sent.headers, [("content-type".to_string(), "text/plain".to_string())]);
@@ -59,7 +59,7 @@ fn second_send_is_already_sent() {
         res.send(500, [], [], "two".to_bytes())
     }"#;
     let (value, sent) = serve(src);
-    assert_eq!(value, r#"Enum("Result", 1, [Enum("WebErr", 0, [])])"#);
+    assert_eq!(value, "WebErr::AlreadySent");
     assert_eq!(sent.unwrap().body, b"one");
 }
 
@@ -78,11 +78,7 @@ fn bad_responses_are_invalid() {
         );
         let mut kio = Kio::new(Limits::default()).unwrap();
         let (outcome, sent) = kio.run_web(&src, vec![], request(b"")).unwrap();
-        assert_eq!(
-            outcome.unwrap().value,
-            r#"Enum("Result", 1, [Enum("WebErr", 1, [])])"#,
-            "{src}"
-        );
+        assert_eq!(outcome.unwrap().value, "WebErr::Invalid", "{src}");
         assert!(sent.is_none(), "{src}");
     }
 }

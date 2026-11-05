@@ -54,8 +54,12 @@ impl Guest for Component {
                 report: Report {
                     lines: lang::report(&program).lines().map(String::from).collect(),
                 },
+                // A failed main sends its error alone, so `Err("bad")` reads `bad`, as Rust's Display would.
                 failed: matches!(&v, Value::Enum(en, 1, _) if en == "Result"),
-                value: format!("{v:?}"),
+                value: match &v {
+                    Value::Enum(en, 1, payload) if en == "Result" => program.display(&payload[0]),
+                    _ => program.display(&v),
+                },
             }),
             Err(e) => Err(vec![Diag {
                 start: e.span.start as u32,

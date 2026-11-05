@@ -99,7 +99,7 @@ host/    the kio binary: Wasmtime, cap-std, limits, host functions
   - `serde_json` is the only new dependency.
   Done: a test drives `kio mcp` over pipes: initialize, tools/list shows both tools with input schemas, the primer contains "Rules the checker enforces", a bad program returns its diag with line and hint, a good one returns its report; malformed JSON gets a parse error and the server keeps running. The README says how to add it to an MCP client.
 
-- [ ] **H9. Readable output.** What `kio run` prints, following Rust's `main`:
+- [x] **H9. Readable output.** What `kio run` prints, following Rust's `main`:
   - `lang`: `impl Display for Value`: `Str` as is, `Int` and `Bool` plain, `()` as `()`, `Bytes` as `<N bytes>`, `List` as `[a, b]`, `Map` as `{k: v}`, structs as `Name { f: v }`, enums as `Name::V(x)`, with `Option`/`Result` as `Some(x)`, `None`, `Ok(x)`, `Err(x)`. Nested strings are quoted (`["a", "b"]`); only a top-level `Str` is bare.
   - Guest: `outcome.value` uses it.
   - `kio run`: `()` or `Ok(())` prints nothing; `Err(e)` prints `error: e` to stderr and exits 1; anything else prints the value to stdout. The authority report goes to stderr, and only when `main` takes capabilities; `kio check` always prints it to stdout.

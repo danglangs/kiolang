@@ -51,7 +51,7 @@ main      : input read, out create
 summarize : none
 ```
 
-`run` prints the report, then `main`'s value, and `out/summary.csv` holds the byte count of `input/invoices.csv`. Every path in the program is relative to one granted directory: `..`, absolute paths and symlinks out are refused by the host, and `create` never overwrites, so run it again after `rm examples/out/summary.csv`.
+`run` prints the same report to stderr (only when `main` takes capabilities), then `main`'s value to stdout like Rust: nothing for `()` or `Ok(())`, `error: ...` and exit 1 for `Err`. Here `out/summary.csv` holds the byte count of `input/invoices.csv`. Every path in the program is relative to one granted directory: `..`, absolute paths and symlinks out are refused by the host, and `create` never overwrites, so run it again after `rm examples/out/summary.csv`.
 
 `--audit log.jsonl` writes one JSON line per host call: capability, method, path, bytes and result, never contents. Every call is also checked against the authority report; a call the report did not predict stops the run as a checker bug.
 
@@ -66,7 +66,7 @@ b.kio:5: error: unknown name `cuont`
   hint: did you mean `count`?
 ```
 
-The language has `Int`, `Bool`, `Str`, `Bytes`, `List`, `Map`, structs, enums with `match`, `Option`, `Result` and `?`, modules, `Dir` and `Http` capabilities (`kio run --http api=example.com`), functions, `let`, `if`, `while`, `for`, `break`, `continue` and recursion; see [docs/language.md](docs/language.md). A program can span files: `mod web;` in `app.kio` loads `web.kio` beside it, as in [examples/web](examples/web) (`kio run examples/web/app.kio` prints `Int(41)`). Pure programs also run natively with `cargo run -p lang --example run -- examples/fib.kio`. Run the test suite with `cargo test`.
+The language has `Int`, `Bool`, `Str`, `Bytes`, `List`, `Map`, structs, enums with `match`, `Option`, `Result` and `?`, modules, `Dir` and `Http` capabilities (`kio run --http api=example.com`), functions, `let`, `if`, `while`, `for`, `break`, `continue` and recursion; see [docs/language.md](docs/language.md). A program can span files: `mod web;` in `app.kio` loads `web.kio` beside it, as in [examples/web](examples/web) (`kio run examples/web/app.kio` prints `41`). Pure programs also run natively with `cargo run -p lang --example run -- examples/fib.kio`. Run the test suite with `cargo test`.
 
 ## Use from an agent
 

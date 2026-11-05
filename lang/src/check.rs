@@ -55,6 +55,60 @@ impl Program {
             .collect()
     }
 
+    /// `v` as `kio run` prints it: a top-level `Str` bare, everything else like its source form
+    /// (`["a", 1]`, `Point { x: 1 }`, `Shape::Circle(2)`, `Some(3)`), with declared field and variant names.
+    pub fn display(&self, v: &Value) -> String {
+        match v {
+            Value::Str(s) => s.clone(),
+            _ => self.nested(v),
+        }
+    }
+
+    fn nested(&self, v: &Value) -> String {
+        let list = |vs: &[Value]| vs.iter().map(|v| self.nested(v)).collect::<Vec<_>>().join(", ");
+        match v {
+            Value::Int(n) => n.to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::Str(s) => format!("{s:?}"),
+            Value::Bytes(b) => format!("<{} bytes>", b.len()),
+            Value::Unit => "()".to_string(),
+            Value::List(vs) => format!("[{}]", list(vs)),
+            Value::Map(m) => {
+                let entries: Vec<_> = m
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", self.nested(&k.to_value()), self.nested(v)))
+                    .collect();
+                format!("{{{}}}", entries.join(", "))
+            }
+            Value::Struct(name, vs) => {
+                let fields = self.structs.get(name).map_or(&[][..], |s| &s.fields);
+                let fields: Vec<_> = fields
+                    .iter()
+                    .zip(vs)
+                    .map(|(f, v)| format!("{}: {}", f.name, self.nested(v)))
+                    .collect();
+                if fields.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{name} {{ {} }}", fields.join(", "))
+                }
+            }
+            Value::Enum(en, i, vs) => {
+                let variant = match (en.as_str(), self.enums.get(en)) {
+                    (_, Some(e)) => format!("{en}::{}", e.variants[*i].name),
+                    ("Option", None) => ["None", "Some"][*i].to_string(),
+                    _ => ["Ok", "Err"][*i].to_string(),
+                };
+                if vs.is_empty() {
+                    variant
+                } else {
+                    format!("{variant}({})", list(vs))
+                }
+            }
+            Value::Cap(name) => name.clone(),
+        }
+    }
+
     pub(crate) fn is_cap(&self, ty: &str) -> bool {
         self.cap_methods.keys().any(|(c, _)| c == ty)
     }

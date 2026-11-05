@@ -9,7 +9,7 @@ fn main() {
         ["mcp"] => std::process::exit(mcp::serve()),
         ["run", path, ref flags @ ..] => std::process::exit(run(path, flags)),
         _ => eprintln!(
-            "usage: kio check <prog.kio>\n       kio mcp\n       kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr]"
+            "kio: a capability-typed language; a program touches only what its signature names.\n\nusage: kio check <prog.kio>\n       kio mcp\n       kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr]"
         ),
     }
     std::process::exit(2);
@@ -136,15 +136,13 @@ fn run(path: &str, flags: &[&str]) -> i32 {
         }
     }
     // A program that fails to check is reported by the run below.
-    let serves = lang::check_files(
+    let params = lang::check_files(
         &files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect::<Vec<_>>(),
         &lang::CapTable::v0(),
     )
-    .is_ok_and(|p| {
-        p.main_params()
-            .iter()
-            .any(|(_, ty)| ty == "Incoming" || ty == "Outgoing")
-    });
+    .map(|p| p.main_params())
+    .unwrap_or_default();
+    let serves = params.iter().any(|(_, ty)| ty == "Incoming" || ty == "Outgoing");
     match (listen, serves) {
         (Some(addr), true) => return serve(files, dirs, addr, limits),
         (None, true) => return fail("main takes Incoming/Outgoing but there is no address\n  hint: add `--listen 127.0.0.1:8080`".into()),
@@ -171,8 +169,15 @@ fn run(path: &str, flags: &[&str]) -> i32 {
             1
         }
         Ok(Ok(out)) => {
-            println!("{}\n{}", out.report.lines.join("\n"), out.value);
-            // `main` returning `Err` is a failed run, like a nonzero exit from any Unix tool.
+            if !params.is_empty() {
+                eprintln!("{}", out.report.lines.join("\n"));
+            }
+            // Like Rust's `main`: `()` and `Ok(())` print nothing, `Err(e)` goes to stderr and fails the run.
+            if out.failed {
+                eprintln!("error: {}", out.value);
+            } else if out.value != "()" && out.value != "Ok(())" {
+                println!("{}", out.value);
+            }
             i32::from(out.failed)
         }
         Ok(Err(diags)) => print_diags(&files, diags),

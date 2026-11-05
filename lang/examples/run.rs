@@ -29,7 +29,7 @@ fn main() {
         Ok(p) => {
             println!("{}\n", report(&p));
             match run(&p, &mut NoCaps) {
-                Ok(v) => println!("{v:?}"),
+                Ok(v) => println!("{}", p.display(&v)),
                 Err(e) => {
                     eprintln!("{path}:{}: runtime error: {}", line(e.span.start), e.msg);
                     std::process::exit(1);
