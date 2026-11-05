@@ -15,3 +15,5 @@
 
 # kio run output
 /examples/out/
+/examples/tour/out/*
+!/examples/tour/out/.gitkeep

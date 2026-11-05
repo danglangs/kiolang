@@ -1,0 +1,14 @@
+// Read invoices, write a total. The signature is the whole authority.
+fn total(text: Str) -> Int {
+    let mut sum = 0;
+    for line in text.lines() {
+        let parts = line.split(",");
+        if parts.len() == 2 { sum += parts[1].parse_int().unwrap_or(0); }
+    }
+    sum
+}
+
+fn main(input: Dir, out: Dir) -> Result<(), IoErr> {
+    let text = input.read("invoices.csv")?.to_str();
+    out.create("total.txt", total(text).to_str().to_bytes())
+}

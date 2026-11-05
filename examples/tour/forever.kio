@@ -1,0 +1,5 @@
+// An agent's bug: a loop that never ends.
+fn main() -> Int {
+    while true {}
+    0
+}

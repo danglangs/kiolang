@@ -68,6 +68,7 @@ $ curl http://127.0.0.1:8080/hello/kio
 - Errors teach: `did you mean count?`, `declare it with let mut`.
 - Performance: about 5,900 requests/s with a fresh sandbox per request ([docs/perf.md](docs/perf.md)).
 - The language: [docs/language.md](docs/language.md). A web framework in kio: [kio-web](https://github.com/danglangs/kio-web).
+- A guided demo: `docs/hack/demo.sh` walks through the report, a rejected helper, a refused escape and a fuel stop.
 - From source: `cargo test` runs every suite; `cargo run -p kio -- run file.kio` runs without installing.
 
 ## Use from an agent
