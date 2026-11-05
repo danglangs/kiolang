@@ -136,8 +136,13 @@ Each changes `caps.wit` or the language. Recommendation first, then the alternat
   Done: `json_str` from the sketch and a percent-decoder run in tests; push of 256 and index past the end each stop with their error.
 - [x] **W3. `Option.unwrap_or(T)`.** `[parallel]`
   Done: tests for `Some` and `None`, and a type-mismatch rejection with a hint.
-- [ ] **W4. Modules.** `[parallel]` Decision 6. Split by pass: parse (`mod`, `pub`, `a::b`), resolve and check (unknown module, private item, cycles), then the API change to a file list.
-  Done: a two-file program runs; a diag in `web.kio` prints `web.kio:line`; calling a non-`pub` function and a `mod` cycle are each rejected with a hint; the report names functions as `web::file`.
+- [ ] **W4a. Module syntax.** `[parallel]` Parser only. `mod name;` as an item; `pub` before `fn`, `struct`, `enum`; paths `name::item` in expressions, types and patterns, extending today's `Enum::Variant` path. `mod`, `pub` leave the reserved list; `use` stays reserved.
+  Done: parse tests for each form; `use` is rejected with hint "write the full path, like `web::text`".
+- [ ] **W4b. Modules in the checker and interpreter.** `[parallel]` After W4a. v0 is flat: a module is one file, only the root file may declare `mod`, so there are no nested modules and no cycles. Items in a module are visible outside it only if `pub`; the root's own items need no `pub`. Function, struct and enum names are resolved per module; `web::text` calls `web.kio`'s `text`. `Span` gains `file: u32` (0 is the root). The report names module functions `web::text`.
+  Done: a two-file program runs natively; calling a non-`pub` function, `mod` outside the root, an unknown module, and a duplicate `mod` are each rejected with a hint; a diag in `web.kio` carries its file.
+- [ ] **W4c. Files through the API and host.** After W4b. `lang::check_files(&[(name, source)])` with the root first, and `check(src)` as its one-file case. caps.wit's `check` and `run` take `list<record file { name: string, source: string }>` (security-review event). The host reads `name.kio` beside the root file for each `mod name;`, and prints diags as `web.kio:line`.
+  Done: `kio run app.kio` with `mod web;` runs; a diag inside `web.kio` prints `web.kio:3`; a `mod` naming a missing file is a clean error.
+
 - [ ] **W5. `Incoming` and `Outgoing` capabilities.** After W1. Checked like `Dir` (decision 1): parameters only, `request()` and `send()` from the table. `send` twice is a runtime error. No language change beyond the table.
   Done: a native test with stub caps returns a `Response` for a `Request`; storing or returning `req` is rejected by rule 1; the report lists `req request, res send`.
 - [ ] **W6. Guest serve path.** After W4, W5. The host grants `incoming` and `outgoing` handles for one request and calls the existing `run` export; no new export.
