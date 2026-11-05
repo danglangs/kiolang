@@ -2,10 +2,11 @@
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir as RealDir, OpenOptions};
 use std::io::{self, Read, Write};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use std::sync::mpsc::RecvTimeoutError;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 use wasmtime::component::{Component, Linker, Resource, ResourceTable};
 use wasmtime::Result;
@@ -26,11 +27,19 @@ const READ_CAP: u64 = 10 << 20;
 /// A granted directory in the resource table. Every guest path goes through it.
 struct Granted(RealDir);
 
-/// The one scheme, host and port an `Http` grant reaches. Guest input never changes it.
+/// The one scheme, host and port an `Http` grant reaches. Guest input never changes it. It also
+/// holds the run's pinned DNS answer; clones share it.
+#[derive(Clone, Debug)]
 pub struct Origin {
     https: bool,
     host: String,
     port: u16,
+    /// The host's addresses from its first resolution; every later request and hop reuses them.
+    pinned: Arc<Mutex<Option<Vec<SocketAddr>>>>,
+    /// Real lookups made (at most one per run).
+    lookups: Arc<AtomicU32>,
+    /// Non-public addresses are allowed: the grant is an IP literal.
+    any_addr: bool,
 }
 
 impl Origin {
@@ -66,7 +75,40 @@ impl Origin {
                 .filter(|&p| p > 0)
                 .ok_or_else(|| bad("bad port"))?,
         };
-        Ok(Origin { https, host, port })
+        let any_addr = hostname.parse::<IpAddr>().is_ok();
+        Ok(Origin {
+            https,
+            host,
+            port,
+            pinned: Arc::default(),
+            lookups: Arc::default(),
+            any_addr,
+        })
+    }
+
+    /// Allow loopback and private addresses for a named host, so tests can use `localhost`.
+    #[cfg(feature = "test-hooks")]
+    pub fn allow_private_addrs(&mut self) {
+        self.any_addr = true;
+    }
+
+    /// How many times the host name was actually looked up.
+    #[cfg(feature = "test-hooks")]
+    pub fn lookups(&self) -> u32 {
+        self.lookups.load(Relaxed)
+    }
+
+    /// Resolve `location` against `current`; `None` unless the result is exactly this origin
+    /// (scheme, host and port, no credentials), so a redirect can never leave the grant.
+    fn follow(&self, current: &str, location: &str) -> Option<String> {
+        let mut next = url::Url::parse(current).ok()?.join(location).ok()?;
+        let same = (next.scheme() == "https") == self.https
+            && next.host_str().is_some_and(|h| h.eq_ignore_ascii_case(&self.host))
+            && next.port_or_known_default() == Some(self.port)
+            && next.username().is_empty()
+            && next.password().is_none();
+        next.set_fragment(None);
+        same.then(|| next.into())
     }
 
     /// `scheme://host[:port]` followed by the guest's `path`, or `None` if the path could name
@@ -96,28 +138,124 @@ impl Origin {
 /// The longest wait for one request; the run deadline can cut it shorter.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// GET `url` with no redirects, no proxy and `timeout` for the whole exchange. A non-2xx status
-/// is `Status`; the body is read through the same cap as `Dir.read`. Returns the bytes read too.
-fn fetch(url: &str, timeout: Duration) -> (Vec<u8>, std::result::Result<(), kio::caps::net::HttpErr>) {
+/// Redirects followed per `Http.get`; the next one is `denied`.
+const MAX_REDIRECTS: usize = 5;
+
+/// Whether a connection may go to `ip`: not loopback, private, link-local, unspecified,
+/// multicast or shared (CGNAT) space. IPv4-mapped and NAT64 IPv6 addresses are judged as the IPv4
+/// address inside.
+fn is_public(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            !(v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || o[0] == 0
+                || (o[0] == 100 && o[1] & 0xc0 == 64))
+        }
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_public(v4.into());
+            }
+            if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                let [a, b] = [s[6].to_be_bytes(), s[7].to_be_bytes()];
+                return is_public(Ipv4Addr::new(a[0], a[1], b[0], b[1]).into());
+            }
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || s[0] & 0xfe00 == 0xfc00 // unique local
+                || s[0] & 0xffc0 == 0xfe80) // link-local
+        }
+    }
+}
+
+/// Resolves only the grant's host, once per run: later requests and hops reuse the first answer,
+/// so DNS rebinding cannot change where the run connects. Non-public addresses are dropped.
+#[derive(Debug)]
+struct Pinned(Origin);
+
+impl ureq::unversioned::resolver::Resolver for Pinned {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        config: &ureq::config::Config,
+        timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> std::result::Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
+        let o = &self.0;
+        if !uri.host().is_some_and(|h| h.eq_ignore_ascii_case(&o.host)) {
+            return Err(ureq::Error::HostNotFound);
+        }
+        let mut pinned = o.pinned.lock().unwrap_or_else(PoisonError::into_inner);
+        let addrs = match &*pinned {
+            Some(addrs) => addrs,
+            None => {
+                o.lookups.fetch_add(1, Relaxed);
+                let found = ureq::unversioned::resolver::DefaultResolver::default().resolve(uri, config, timeout)?;
+                let kept: Vec<_> = found
+                    .iter()
+                    .copied()
+                    .filter(|a| o.any_addr || is_public(a.ip()))
+                    .collect();
+                pinned.insert(kept) // an all-refused answer is pinned too
+            }
+        };
+        if addrs.is_empty() {
+            return Err(ureq::Error::HostNotFound);
+        }
+        let mut out = self.empty();
+        addrs.iter().for_each(|a| out.push(*a));
+        Ok(out)
+    }
+}
+
+/// GET `url` with no redirects, no proxy and `timeout` for the whole exchange, connecting only to
+/// `origin`'s pinned addresses. A non-2xx status is `Status`; the body is read through the same cap
+/// as `Dir.read`. Returns the bytes read, and the `Location` if the answer was a redirect.
+fn fetch(
+    origin: &Origin,
+    url: &str,
+    timeout: Duration,
+) -> (
+    Vec<u8>,
+    std::result::Result<(), kio::caps::net::HttpErr>,
+    Option<String>,
+) {
     use kio::caps::net::HttpErr;
     let timed_out = |e: &io::Error| e.kind() == io::ErrorKind::TimedOut;
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+    let config = ureq::Agent::config_builder()
         .proxy(None) // ureq's default reads proxy variables from the environment
         .max_redirects(0)
         .http_status_as_error(false)
         .timeout_global(Some(timeout))
-        .build()
-        .into();
+        .build();
+    let agent = ureq::Agent::with_parts(
+        config,
+        ureq::unversioned::transport::DefaultConnector::default(),
+        Pinned(origin.clone()),
+    );
     let mut data = Vec::new();
     let resp = match agent.get(url).call() {
         Ok(r) => r,
-        Err(ureq::Error::Timeout(_)) => return (data, Err(HttpErr::Timeout)),
-        Err(ureq::Error::Io(e)) if timed_out(&e) => return (data, Err(HttpErr::Timeout)),
-        Err(_) => return (data, Err(HttpErr::Denied)),
+        Err(ureq::Error::Timeout(_)) => return (data, Err(HttpErr::Timeout), None),
+        Err(ureq::Error::Io(e)) if timed_out(&e) => return (data, Err(HttpErr::Timeout), None),
+        Err(_) => return (data, Err(HttpErr::Denied), None),
     };
     let status = resp.status().as_u16();
+    if matches!(status, 301 | 302 | 303 | 307 | 308) {
+        // A redirect without a usable `Location` is refused.
+        return match resp.headers().get("location").and_then(|v| v.to_str().ok()) {
+            Some(loc) => (data, Err(HttpErr::Status(status)), Some(loc.to_string())),
+            None => (data, Err(HttpErr::Denied), None),
+        };
+    }
     if !(200..300).contains(&status) {
-        return (data, Err(HttpErr::Status(status)));
+        return (data, Err(HttpErr::Status(status)), None);
     }
     let read = resp.into_body().into_reader().take(READ_CAP + 1).read_to_end(&mut data);
     let result = match read {
@@ -126,7 +264,7 @@ fn fetch(url: &str, timeout: Duration) -> (Vec<u8>, std::result::Result<(), kio:
         Err(e) if timed_out(&e) => Err(HttpErr::Timeout),
         Err(_) => Err(HttpErr::Denied),
     };
-    (data, result)
+    (data, result, None)
 }
 
 /// Open a directory to grant: the host's only ambient filesystem call, made once per `--dir`.
@@ -384,18 +522,30 @@ impl kio::caps::net::HostHttp for State {
     ) -> Result<Result<Vec<u8>, kio::caps::net::HttpErr>> {
         use kio::caps::net::HttpErr;
         self.count_call()?;
-        let url = match self.table.get(&Resource::<Origin>::new_borrow(h.rep())) {
-            Ok(origin) => origin.url(&path),
-            Err(_) => None,
-        };
-        let Some(url) = url else {
+        let Ok(origin) = self.table.get(&Resource::<Origin>::new_borrow(h.rep())).cloned() else {
             return Ok(Err(HttpErr::Denied));
         };
-        let timeout = HTTP_TIMEOUT.min(self.deadline.saturating_duration_since(Instant::now()));
-        let (data, result) = self.within(move || fetch(&url, timeout))?;
-        // Charge what was read, even when it is refused.
-        self.spend_io(data.len())?;
-        Ok(result.map(|()| data))
+        let Some(mut url) = origin.url(&path) else {
+            return Ok(Err(HttpErr::Denied));
+        };
+        for hop in 0..=MAX_REDIRECTS {
+            if hop > 0 {
+                self.count_call()?; // each followed redirect is a call
+            }
+            let timeout = HTTP_TIMEOUT.min(self.deadline.saturating_duration_since(Instant::now()));
+            let (o, u) = (origin.clone(), url.clone());
+            let (data, result, location) = self.within(move || fetch(&o, &u, timeout))?;
+            // Charge what was read, even when it is refused.
+            self.spend_io(data.len())?;
+            let Some(location) = location else {
+                return Ok(result.map(|()| data));
+            };
+            match origin.follow(&url, &location) {
+                Some(next) if hop < MAX_REDIRECTS => url = next,
+                _ => break,
+            }
+        }
+        Ok(Err(HttpErr::Denied))
     }
 
     fn drop(&mut self, h: Resource<kio::caps::net::Http>) -> Result<()> {

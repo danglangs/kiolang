@@ -79,7 +79,7 @@ host/    the kio binary: Wasmtime, cap-std, limits, host functions
 - [x] **H7. Precompile the guest.** `build.rs` compiles `guest.wasm` to native code with `Engine::precompile_component`, using the same compile settings as the runtime (`host/src/config.rs`); `kio` loads it with `Component::deserialize`, which refuses a mismatched Wasmtime version or setting. `--stack` is a runtime setting and still applies.
   Done: `kio run` takes 30 ms instead of 52 ms; all host tests pass.
 
-- [ ] **N2. Redirects and DNS.**
+- [x] **N2. Redirects and DNS.**
   - Follow up to 5 redirects in the host (ureq's own following stays off). Each `Location` is resolved against the current URL; a hop to any scheme, host or port other than the grant's is refused with `denied`, and so is a downgrade from HTTPS to HTTP. Each hop counts against `--calls` and the run deadline.
   - DNS pinning: resolve the granted host once per run (the first request) through a custom ureq resolver, and use only those addresses for every later request and hop. Refuse addresses in loopback, private, link-local or unspecified ranges unless the grant names an IP literal (so `--http api=127.0.0.1:8080` still works for tests).
   Done: tests with local servers: a redirect to the same origin is followed; to another port or host is `denied`; a sixth redirect is `denied`; a host resolving to a private address is refused; the resolver is called once across two requests.

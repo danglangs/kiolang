@@ -720,6 +720,7 @@ dependencies = [
  "lang",
  "tempfile",
  "ureq",
+ "url",
  "wasmtime",
  "wasmtime-wasi",
 ]

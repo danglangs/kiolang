@@ -442,7 +442,9 @@ fn overlong_path_is_invalid() {
 }
 
 /// A one-thread HTTP/1.1 server on 127.0.0.1: `/ok` is 200 `hello`, `/big` is 10 MB + 1, `/hang`
-/// never answers, `/moved` redirects off-host, anything else is 404. Returns the grant string.
+/// never answers, `/moved` redirects off-host, `/same` to `/ok`, `/port` and `/https` to another
+/// port and scheme, `/bare` redirects with no `Location`, `/hopN` redirects N times then `/ok`,
+/// anything else is 404. Returns the grant string.
 fn serve() -> String {
     use std::io::{BufRead, BufReader, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -453,14 +455,27 @@ fn serve() -> String {
                 let mut lines = BufReader::new(&stream).lines().map(Result::unwrap);
                 let path = lines.next().unwrap().split(' ').nth(1).unwrap().to_string();
                 while lines.next().is_some_and(|l| !l.is_empty()) {}
-                let (head, body) = match path.as_str() {
-                    "/ok" => ("200 OK", b"hello".to_vec()),
-                    "/big" => ("200 OK", vec![b'x'; (10 << 20) + 1]),
-                    "/moved" => ("302 Found\r\nLocation: http://evil.com/x", vec![]),
+                let (head, body): (String, Vec<u8>) = match path.as_str() {
+                    "/ok" => ("200 OK".into(), b"hello".to_vec()),
+                    "/big" => ("200 OK".into(), vec![b'x'; (10 << 20) + 1]),
+                    "/moved" => ("302 Found\r\nLocation: http://evil.com/x".into(), vec![]),
+                    "/same" => ("302 Found\r\nLocation: /ok".into(), vec![]),
+                    "/port" => ("302 Found\r\nLocation: http://127.0.0.1:1/ok".into(), vec![]),
+                    "/https" => ("302 Found\r\nLocation: https://127.0.0.1/ok".into(), vec![]),
+                    "/bare" => ("302 Found".into(), vec![]),
+                    p if p.starts_with("/hop") => {
+                        let n: u32 = p[4..].parse().unwrap();
+                        let to = if n == 0 {
+                            "/ok".to_string()
+                        } else {
+                            format!("/hop{}", n - 1)
+                        };
+                        (format!("307 Temporary Redirect\r\nLocation: {to}"), vec![])
+                    }
                     "/hang" => loop {
                         std::thread::sleep(std::time::Duration::from_secs(60));
                     },
-                    _ => ("404 Not Found", vec![]),
+                    _ => ("404 Not Found".into(), vec![]),
                 };
                 let mut out = &stream;
                 let _ = write!(
@@ -488,7 +503,7 @@ fn get(grant: &str, body: &str, limits: Limits) -> String {
 
 const HTTP_DENIED: &str = r#"Enum("Result", 1, [Enum("HttpErr", 0, [])])"#;
 
-/// N1: a granted GET returns the body, a 404 is `status(404)`, a redirect is not followed.
+/// N1: a granted GET returns the body, a 404 is `status(404)`.
 #[test]
 fn http_get_and_status() {
     let g = serve();
@@ -499,7 +514,52 @@ fn http_get_and_status() {
     );
     let status = |n: i64| format!(r#"Enum("Result", 1, [Enum("HttpErr", 3, [Int({n})])])"#);
     assert_eq!(get(&g, "h.get(\"/nope\")", l), status(404));
-    assert_eq!(get(&g, "h.get(\"/moved\")", l), status(302));
+}
+
+/// N2: a redirect within the origin is followed, up to 5 hops; any other host, port or scheme, a
+/// sixth hop and a redirect with no `Location` are `denied`. Each hop is a counted call.
+#[test]
+fn http_redirects() {
+    let g = serve();
+    let l = Limits::default();
+    let ok = r#"Enum("Result", 0, [Bytes([104, 101, 108, 108, 111])])"#;
+    assert_eq!(get(&g, "h.get(\"/same\")", l), ok);
+    assert_eq!(get(&g, "h.get(\"/hop4\")", l), ok); // 5 redirects
+    for p in ["/moved", "/port", "/https", "/bare", "/hop5"] {
+        assert_eq!(get(&g, &format!("h.get(\"{p}\")"), l), HTTP_DENIED, "{p}");
+    }
+    let calls = |path: &str| {
+        let src = format!("fn main(h: Http) -> Int {{ let r = h.get(\"{path}\"); 0 }}");
+        let mut kio = Kio::new(l).unwrap();
+        let origin = host::Origin::parse(&g).unwrap();
+        kio.run_with(&src, vec![], vec![("h".into(), origin)]).unwrap().unwrap();
+        kio.import_calls()
+    };
+    assert_eq!(calls("/hop2"), calls("/ok") + 3); // /hop2 redirects 3 times
+}
+
+/// N2: a named host is resolved once per run, however many requests and hops; one that resolves
+/// only to loopback is refused unless the grant is an IP literal.
+#[test]
+fn http_dns_is_pinned_and_filtered() {
+    let g = serve().replace("127.0.0.1", "localhost");
+    let src = "fn main(h: Http) -> Int { let a = h.get(\"/ok\"); let b = h.get(\"/same\"); 0 }";
+    let run = |origin: host::Origin| {
+        Kio::new(Limits::default())
+            .unwrap()
+            .run_with(src, vec![], vec![("h".into(), origin)])
+            .unwrap()
+            .unwrap();
+    };
+    let mut origin = host::Origin::parse(&g).unwrap();
+    origin.allow_private_addrs();
+    run(origin.clone());
+    assert_eq!(origin.lookups(), 1);
+    // Without the allowance, `localhost` has no usable address: denied, and still looked up once.
+    let origin = host::Origin::parse(&g).unwrap();
+    run(origin.clone());
+    assert_eq!(origin.lookups(), 1);
+    assert_eq!(get(&g, "h.get(\"/ok\")", Limits::default()), HTTP_DENIED);
 }
 
 /// N1: a path cannot name another host, scheme, authority or header; none of these reach the network.
