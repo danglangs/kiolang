@@ -57,7 +57,7 @@ Recorded  audit log        what did it touch?
 
 **Script (about 60 s):**
 1. (10 s) "Agents write code faster than we can review it. In most languages, any line can read a file or call the internet, so to know what agent code does you read every line."
-2. (20 s) "kio is a language where a function can only touch what its signature names. Files, hosts and even the server socket are capabilities you grant at run time. `kio check` prints exactly what each function can reach. Here a helper that looks pure turns out to phone home, and the report shows it."
+2. (20 s) "kio is a language where the code names what it needs, like `input: Dir`, and whoever runs it decides what that is, like `--dir input=/data`. Files, hosts and even the server socket are capabilities you grant at run time. `kio check` prints exactly what each function can reach. Here a helper that looks pure turns out to phone home, and the report shows it."
 3. (20 s) "Three layers: the checker rejects code that reaches for authority it wasn't given; a Wasm sandbox refuses it again at run time, so a checker bug isn't a breach; and the host logs every call."
 4. (10 s) "It runs today, serves HTTP at about 6,000 requests a second with a fresh sandbox per request, and it's open source. Come see it break out of nothing at the booth."
 

@@ -9,7 +9,7 @@ fn main() {
         ["mcp"] => std::process::exit(mcp::serve()),
         ["run", path, ref flags @ ..] => std::process::exit(run(path, flags)),
         _ => eprintln!(
-            "kio: a capability-typed language; a program touches only what its signature names.\n\nusage: kio check <prog.kio>\n       kio mcp\n       kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr]"
+            "kio: a capability-typed language; code names what it needs, the operator grants what that is.\n\nusage: kio check <prog.kio>\n       kio mcp\n       kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr]"
         ),
     }
     std::process::exit(2);

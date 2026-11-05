@@ -1,6 +1,6 @@
 # kio-lang
 
-A language for code that AI agents write, where a function can only touch what its signature names.
+A language for code that AI agents write: the code names what it needs (`input: Dir`), the operator decides what that is (`--dir input=/data`), and nothing else is reachable.
 
 Most languages today are not AI-safe: any line can read files, open sockets or start processes. Rust gives strong spatial and temporal memory safety, but any Rust function can still reach the network. Research such as [TACIT](https://arxiv.org/abs/2603.00991) and [Scala capture checking](https://docs.scala-lang.org/scala3/reference/experimental/cc.html) makes capabilities first-class.
 
