@@ -65,7 +65,6 @@ pub fn v0() -> CapTable {
         ],
         enums: vec![
             Enum {
-                public: true,
                 name: "IoErr".into(),
                 variants: vec![
                     case("NotFound", vec![]),
@@ -74,9 +73,9 @@ pub fn v0() -> CapTable {
                     case("InvalidPath", vec![]),
                 ],
                 span: at,
+                public: true,
             },
             Enum {
-                public: true,
                 name: "HttpErr".into(),
                 variants: vec![
                     case("Denied", vec![]),
@@ -85,12 +84,13 @@ pub fn v0() -> CapTable {
                     case("Status", vec![ty("Int")]),
                 ],
                 span: at,
+                public: true,
             },
             Enum {
-                public: true,
                 name: "WebErr".into(),
                 variants: vec![case("AlreadySent", vec![]), case("Invalid", vec![])],
                 span: at,
+                public: true,
             },
         ],
     }
