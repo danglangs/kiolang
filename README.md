@@ -6,7 +6,7 @@ Most languages today are not AI-safe: any line can read files, open sockets or s
 
 kio is a fresh language built around that idea, using Rust's ecosystem for speed and tooling. The goal is a general-purpose systems language: near-native speed, no garbage collector, memory and capability safe.
 
-**Status: `kio check` and `kio run` work on real directories inside the Wasm sandbox. Limits and the network are next. Progress: [docs/guest-host-todo.md](docs/guest-host-todo.md).**
+**Status: `kio check` and `kio run` work inside the Wasm sandbox with real directories and every limit enforced (G1, G2, G3, G5). The network allowlist (G4) and the MCP tool are next. Progress: [docs/guest-host-todo.md](docs/guest-host-todo.md).**
 
 ## Try it
 
@@ -107,9 +107,9 @@ Steps:
 
 1. Done: parser, checker and authority report natively, with accept/reject tests (G1, G2).
 2. Done: interpreter natively, with stub host functions.
-3. Capability table generated from `caps.wit`, real host functions (G3, G4).
-4. Guest built for `wasm32`, running in Wasmtime with limits (G5).
-5. Adversarial suite: path escapes, disallowed hosts, redirects, forged handles, runaway loops, slow servers.
+3. Done: capability table generated from `caps.wit`, real `Dir` host functions (G3). `Http` (G4) is next.
+4. Done: guest built for `wasm32`, running in Wasmtime with limits (G5).
+5. Done for `Dir`: adversarial reviews of the capability rules and the host (path escapes, forged handles, runaway loops, blocked calls). Disallowed hosts and redirects come with `Http`.
 6. MCP tool that serves the primer and runs `check`, so agents can learn and iterate.
 7. Later: attenuation, a compiler to Wasm.
 
