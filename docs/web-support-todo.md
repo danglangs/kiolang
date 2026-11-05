@@ -8,7 +8,7 @@ Goal: `kio-web`, a small but complete web framework written in kio, in its own r
 |---|---|---|---|---|
 | Accept | tokio + hyper in the app | Host (Wasmtime) | Host (V8 runtime) | Host: tokio + hyper, outside the sandbox |
 | Concurrency | Async tasks, work-stealing pool | Fresh instance per request ([Spin](https://dev.to/matei_radu/spin-10-the-developer-tool-for-serverless-webassembly-2bhk), [wasmCloud](https://wasmcloud.com/blog/wasmcloud-2-6-release/) by default; warm pools opt-in) | Isolates reused across requests, globals leak between them ([docs](https://developers.cloudflare.com/workers/about/how-it-works)) | Fresh guest instance per request |
-| Handler | `async fn` + extractors | `wasi:http` handler export | `async fetch(req, env)` | Synchronous kio `fn handle` |
+| Handler | `async fn` + extractors | `wasi:http` handler export | `async fetch(req, env)` | Synchronous kio `main(req: Incoming, res: Outgoing, ..)` |
 | Routing | `Router` / `#[get]` + `mount` | Manifest routes, most specific wins ([Spin](https://github.com/spinframework/spin-docs/blob/main/content/v3/http-trigger.md)) | In code | In kio code |
 | State | `State<T>`, `Arc<Mutex<..>>` | KV/SQL host APIs | Bindings (`env`), KV, D1 | Capabilities only (`Dir` now, `Kv` later) |
 | Limits | tower middleware | Fuel, memory, epochs | CPU time, memory | Fuel, memory, epoch, quotas per request |
@@ -19,11 +19,34 @@ Goal: `kio-web`, a small but complete web framework written in kio, in its own r
 
 ## Sketch: kio-web v0 core
 
-Checked with today's `kio check` (record structs declared inline, `pub`, `mod`, `web::` stripped). It compiles except the lines marked with a task number.
+kio-web owns the types; only raw parts cross the wall (decision 1). Lines marked `// W4` need modules; everything else checks today.
 
 ```rust
-// web.kio: the library, vendored into the app. Header, Request, Response come from caps.wit.  // W1
-pub fn respond(status: Int, ctype: Str, body: Bytes) -> Response {                            // W4: pub
+// web.kio: the library, vendored into the app.
+pub struct Header { name: Str, value: Str }                                                  // W4: pub
+pub struct Request { method: Str, path: Str, query: Str, headers: List<Header>, body: Bytes }
+pub struct Response { status: Int, headers: List<Header>, body: Bytes }
+
+// Build a Request from the raw parts the host hands over.
+pub fn request(req: Incoming) -> Request {
+  let target = req.target().split("?");
+  let names = req.header_names();
+  let values = req.header_values();
+  let mut hs: List<Header> = [];
+  for i in 0..names.len() { hs.push(Header { name: names[i], value: values[i] }); }
+  let query = if target.len() > 1 { target[1] } else { "" };
+  Request { method: req.method(), path: target[0], query: query, headers: hs, body: req.body() }
+}
+
+// Send a Response back through the host.
+pub fn send(res: Outgoing, r: Response) -> Result<(), WebErr> {
+  let mut names: List<Str> = [];
+  let mut values: List<Str> = [];
+  for h in r.headers { names.push(h.name); values.push(h.value); }
+  res.send(r.status, names, values, r.body)
+}
+
+pub fn respond(status: Int, ctype: Str, body: Bytes) -> Response {
   let mut hs: List<Header> = [];
   hs.push(Header { name: "content-type", value: ctype });
   Response { status: status, headers: hs, body: body }
@@ -33,10 +56,10 @@ pub fn json(status: Int, s: Str) -> Response { respond(status, "application/json
 pub fn not_found() -> Response { text(404, "not found") }
 
 // Match "/hello/:name"; Some(params) on a hit.
-pub fn route(req: Request, method: Str, pattern: Str) -> Option<Map<Str, Str>> {
-  if req.method != method { return None; }
+pub fn route(r: Request, method: Str, pattern: Str) -> Option<Map<Str, Str>> {
+  if r.method != method { return None; }
   let want = pattern.split("/");
-  let got = req.path.split("/");
+  let got = r.path.split("/");
   if want.len() != got.len() { return None; }
   let mut params: Map<Str, Str> = Map::new();
   for i in 0..want.len() {
@@ -46,21 +69,12 @@ pub fn route(req: Request, method: Str, pattern: Str) -> Option<Map<Str, Str>> {
   Some(params)
 }
 
-pub fn query(req: Request) -> Map<Str, Str> {
-  let mut m: Map<Str, Str> = Map::new();
-  for pair in req.query.split("&") {
-    let kv = pair.split("=");
-    if kv.len() == 2 { m.insert(kv[0], kv[1]); }
-  }
-  m
-}
-
 pub fn json_str(s: Str) -> Str {
   let b = s.to_bytes();
   let mut out = "\"".to_bytes();
   for i in 0..b.len() {
-    let c = b[i];                                                                              // W2: index
-    if c == 34 || c == 92 { out.push(92); }                                                    // W2: push
+    let c = b[i];
+    if c == 34 || c == 92 { out.push(92); }
     out.push(c);
   }
   out.push(34);
@@ -68,32 +82,33 @@ pub fn json_str(s: Str) -> Str {
 }
 
 pub fn file(files: Dir, name: Str) -> Response {
-  let parts = name.split(".");
-  let ctype = match parts[parts.len() - 1] { "css" => "text/css", "html" => "text/html", _ => "application/octet-stream" };
   match files.read(name) {
-    Ok(b) => respond(200, ctype, b),
+    Ok(b) => respond(200, "application/octet-stream", b),
     Err(e) => match e { IoErr::NotFound => not_found(), _ => text(500, "read failed") },
   }
 }
 
 // app.kio: `kio serve app.kio --dir public=./public`
-mod web;                                                                                       // W4
+mod web;                                                                                     // W4
 
-fn handle(req: Request, public: Dir) -> Response {                                            // W5
-  match web::route(req, "GET", "/hello/:name") {                                               // W4: paths
-    Some(p) => { return web::json(200, "{\"hello\": " + web::json_str(p.get(":name").unwrap_or("")) + "}"); } // W3
-    None => {}
-  }
-  match web::query(req).get("file") { Some(f) => web::file(public, f), None => web::not_found() }
+fn main(req: Incoming, res: Outgoing, public: Dir) -> Result<(), WebErr> {
+  let r = web::request(req);                                                                 // W4: paths
+  let out = match web::route(r, "GET", "/hello/:name") {
+    Some(p) => web::json(200, "{\"hello\": " + web::json_str(p.get(":name").unwrap_or("")) + "}"),
+    None => web::file(public, r.path),
+  };
+  web::send(res, out)
 }
 ```
 
 ```
-file   : files read
-handle : public read
+main    : req body header_names header_values method target, res send, public read
+request : req body header_names header_values method target
+send    : res send
+file    : files read
 ```
 
-Found while writing it: routing, path params, query maps, status helpers and file serving need nothing new. JSON needs byte access. A `Json` value enum is rejected ("enum `Json` contains itself"), so v0 encodes by building strings and does not decode.
+Found while writing it: routing, path params, status helpers and file serving need nothing new. A `Json` value enum is rejected ("enum `Json` contains itself"), so v0 encodes JSON by building strings and does not decode.
 
 ## Decisions to pin with the owner
 
@@ -143,10 +158,8 @@ Each changes `caps.wit` or the language. Recommendation first, then the alternat
 - [ ] **W4c. Files through the API and host.** After W4b. `lang::check_files(&[(name, source)])` with the root first, and `check(src)` as its one-file case. caps.wit's `check` and `run` take `list<record file { name: string, source: string }>` (security-review event). The host reads `name.kio` beside the root file for each `mod name;`, and prints diags as `web.kio:line`.
   Done: `kio run app.kio` with `mod web;` runs; a diag inside `web.kio` prints `web.kio:3`; a `mod` naming a missing file is a clean error.
 
-- [ ] **W5. `Incoming` and `Outgoing` capabilities.** After W1. Checked like `Dir` (decision 1): parameters only, `request()` and `send()` from the table. `send` twice is a runtime error. No language change beyond the table.
-  Done: a native test with stub caps returns a `Response` for a `Request`; storing or returning `req` is rejected by rule 1; the report lists `req request, res send`.
-- [ ] **W6. Guest serve path.** After W4, W5. The host grants `incoming` and `outgoing` handles for one request and calls the existing `run` export; no new export.
-  Done: with G3's in-memory host, the sketch app answers `/hello/kio` with `{"hello": "kio"}`; a runtime error is a diag with its span.
+- [x] **W5. `Incoming` and `Outgoing` capabilities.** Delivered by W1: both are checked like `Dir` (parameters only), a second `send` is `already-sent`, and the report lists their methods.
+- [x] **W6. Guest serve path.** Delivered by W1: the host grants `incoming` and `outgoing` for one request through the existing `run` export (`Kio::run_web`), tested in host/tests/web.rs.
 - [ ] **W7. `kio serve`.** After W6, H2, H3. tokio + hyper http1 + Wasmtime pooling allocator; decisions 4 and 5. `kio serve app.kio --port 8080 --dir public=./public`.
   Done: an integration test with a real client gets the right body for three routes, and 100 concurrent requests all succeed; a program with a diag exits 1 before binding the port.
 - [ ] **W8. Request limits and slow clients.** After W7. Decisions 3 and 9, and the request/response validation in decision 2.
