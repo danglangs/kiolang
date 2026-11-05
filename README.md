@@ -132,7 +132,7 @@ Steps:
 4. Done: guest built for `wasm32`, running in Wasmtime with limits (G5).
 5. Done: adversarial reviews of the capability rules and the host (path escapes, forged handles, runaway loops, blocked calls). `Http` refuses other hosts, off-origin redirects and private addresses.
 6. Done: an audit log of every host call, and `kio mcp`, which serves the primer and `check` to agents.
-7. Done: `kio run --listen`, one fresh sandbox per request (about 0.5 ms each), with slow-client limits. Next: kio-web, a web framework written in kio ([docs/web-support-todo.md](docs/web-support-todo.md)).
+7. Done: `kio run --listen`, one fresh sandbox per request (about 0.5 ms each), with slow-client limits, and [kio-web](https://github.com/danglangs/kio-web), a web framework written in kio ([docs/web-support-todo.md](docs/web-support-todo.md)).
 8. Later: copy-on-write values and a lowering step, then attenuation and a compiler to Wasm.
 
 v0 has no closures, globals, reflection or `unsafe`. Capabilities are parameters only. See [docs/language.md](docs/language.md).
