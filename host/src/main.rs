@@ -1,6 +1,4 @@
-mod listen;
-
-use host::{open_dir, Diag, Kio, Limits, Origin, Server};
+use host::{listen, open_dir, Diag, Kio, Limits, Origin, Server};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

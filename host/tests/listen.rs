@@ -1,3 +1,4 @@
+use host::listen::ListenLimits;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
@@ -122,4 +123,159 @@ fn guest_framing_headers_are_dropped() {
     let got = send(kio.port, "GET", "/", b"");
     std::fs::remove_file(&app).unwrap();
     assert_eq!(got, (200, b"hello".to_vec()));
+}
+
+/// W8: serve a one-file app in this process with small limits; returns the port.
+mod limits {
+    use super::*;
+    use host::listen::{serve_with, ListenLimits};
+    use host::{open_dir, Limits, Server};
+    use std::time::Duration;
+
+    /// `/pipe` reads a FIFO nobody writes (blocks until the 2 s deadline); any other path answers 200.
+    const APP: &str = r#"fn main(req: Incoming, res: Outgoing, public: Dir) -> Result<(), WebErr> {
+        if req.target() == "/pipe" { let r = public.read("pipe"); }
+        res.send(200, [], [], "ok".to_bytes())
+    }"#;
+
+    pub fn start(public: &std::path::Path, limits: ListenLimits) -> u16 {
+        let server = Server::new(
+            vec![("app.kio".into(), APP.into())],
+            Limits {
+                timeout_secs: 2,
+                ..Limits::web()
+            },
+        )
+        .unwrap()
+        .unwrap();
+        let dirs = vec![("public".to_string(), open_dir(public).unwrap())];
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = serve_with(server, dirs, "127.0.0.1:0".parse().unwrap(), limits, |a| {
+                tx.send(a.port()).unwrap()
+            });
+        });
+        rx.recv().unwrap()
+    }
+
+    pub fn fifo(dir: &std::path::Path) {
+        assert!(Command::new("mkfifo").arg(dir.join("pipe")).status().unwrap().success());
+    }
+
+    pub fn connect(port: u16) -> TcpStream {
+        let s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        s
+    }
+
+    /// Everything the server sends before it closes the connection.
+    pub fn read_all(mut s: TcpStream) -> String {
+        let mut raw = Vec::new();
+        // A read timeout is an error here: the server must have closed the connection.
+        s.read_to_end(&mut raw)
+            .or_else(|e| {
+                if raw.is_empty() && e.kind() == std::io::ErrorKind::ConnectionReset {
+                    Ok(0)
+                } else {
+                    Err(e)
+                }
+            })
+            .unwrap();
+        String::from_utf8_lossy(&raw).into_owned()
+    }
+
+    pub fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+}
+
+#[test]
+fn stalled_headers_get_no_response_and_close() {
+    let public = tempfile::tempdir().unwrap();
+    let port = limits::start(
+        public.path(),
+        ListenLimits {
+            header_timeout: limits::ms(300),
+            ..Default::default()
+        },
+    );
+    let mut s = limits::connect(port);
+    s.write_all(b"GET / HTTP/1.1\r\nhost: x\r\n").unwrap();
+    assert_eq!(limits::read_all(s), "");
+}
+
+#[test]
+fn slow_body_is_408() {
+    let public = tempfile::tempdir().unwrap();
+    let port = limits::start(
+        public.path(),
+        ListenLimits {
+            body_deadline: limits::ms(300),
+            ..Default::default()
+        },
+    );
+    let mut s = limits::connect(port);
+    s.write_all(b"POST / HTTP/1.1\r\nhost: x\r\ncontent-length: 10\r\n\r\nabc")
+        .unwrap();
+    assert!(limits::read_all(s).starts_with("HTTP/1.1 408"));
+}
+
+#[test]
+fn idle_keep_alive_connection_is_closed() {
+    let public = tempfile::tempdir().unwrap();
+    let port = limits::start(
+        public.path(),
+        ListenLimits {
+            idle: limits::ms(300),
+            ..Default::default()
+        },
+    );
+    let mut s = limits::connect(port);
+    s.write_all(b"GET / HTTP/1.1\r\nhost: x\r\n\r\n").unwrap();
+    // One answer, then the server closes the idle connection (read_all returns at EOF).
+    let got = limits::read_all(s);
+    assert!(got.starts_with("HTTP/1.1 200") && got.ends_with("ok"));
+}
+
+#[test]
+fn connections_past_the_cap_are_dropped() {
+    let public = tempfile::tempdir().unwrap();
+    let port = limits::start(
+        public.path(),
+        ListenLimits {
+            connections: 1,
+            ..Default::default()
+        },
+    );
+    let _held = limits::connect(port);
+    // The held connection takes the only slot; the next is closed without an answer.
+    let mut s = limits::connect(port);
+    let _ = s.write_all(b"GET / HTTP/1.1\r\nhost: x\r\n\r\n");
+    assert_eq!(limits::read_all(s), "");
+}
+
+#[cfg(unix)]
+#[test]
+fn request_past_the_queue_cap_is_503_at_once() {
+    let public = tempfile::tempdir().unwrap();
+    limits::fifo(public.path());
+    let port = limits::start(
+        public.path(),
+        ListenLimits {
+            workers: 1,
+            queued: 1,
+            ..Default::default()
+        },
+    );
+    // One request holds the worker (blocked on the FIFO), one waits in the queue.
+    let hold = std::thread::spawn(move || send(port, "GET", "/pipe", b""));
+    std::thread::sleep(limits::ms(500));
+    let wait = std::thread::spawn(move || send(port, "GET", "/pipe", b""));
+    std::thread::sleep(limits::ms(300));
+    let start = std::time::Instant::now();
+    assert_eq!(send(port, "GET", "/", b"").0, 503);
+    assert!(start.elapsed() < limits::ms(500));
+    // The queued request gives up after the 1 s queue wait.
+    assert_eq!(wait.join().unwrap().0, 503);
+    assert_eq!(hold.join().unwrap().0, 500);
 }

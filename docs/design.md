@@ -94,7 +94,7 @@ kio run prog.kio --dir input=/srv/jobs/42/in --dir out=/srv/jobs/42/out
 
 ## Limits
 
-Defaults per run; each can be overridden by a `kio run` flag. Exceeding one stops the run with an error naming the limit.
+Defaults per run, or per request under `--listen` (fuel 100 million, 64 MB, 5 s); each can be overridden by a `kio run` flag. A server also bounds slow clients: headers within 10 s, the body within 10 s more, 1,000 connections, 30 s idle, 100 requests queued. Exceeding one stops the run with an error naming the limit.
 
 | Limit | Default | Flag | Bounds |
 |---|---|---|---|
@@ -102,7 +102,7 @@ Defaults per run; each can be overridden by a `kio run` flag. Exceeding one stop
 | Memory | 256 MB | `--memory` (MB) | guest linear memory |
 | Wasm stack | 2 MB | `--stack` (KB) | recursion; the deepest the depth budget allows needs about 900 KB in a release host, more in a debug one |
 | Wall clock | 10 s | `--timeout` | slow hosts and long runs |
-| Host calls | 10,000 | `--calls` | capability calls |
+| Host calls | 10,000 | `--calls` | capability calls; at most 64 timed-out calls may still be finishing at once, process-wide |
 | I/O | 100 MB total, 10 MB per read | `--io` | bytes read and written |
 
 ## Why the checker runs in the guest

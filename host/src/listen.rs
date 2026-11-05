@@ -1,59 +1,139 @@
 //! `kio run --listen`: the HTTP accept loop on top of `Server` (web decisions 2-4).
 
+use crate::{Request, Response, Server};
 use cap_std::fs::Dir;
-use host::{Request, Response, Server};
 use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
 use hyper::body::{Bytes, Incoming};
 use hyper::service::service_fn;
 use hyper::StatusCode;
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Semaphore;
+use tokio::sync::{watch, Semaphore};
 
 /// Largest request body the host reads (decision 3).
 const MAX_BODY: usize = 1 << 20;
 /// How long a request waits for a worker before it is answered 503 (decision 4).
 const QUEUE_WAIT: Duration = Duration::from_secs(1);
+/// Requests that may wait for a worker; more are answered 503 at once.
+const MAX_QUEUED: usize = 100;
+/// Open connections; past this the accept loop drops new ones.
+const MAX_CONNECTIONS: usize = 1000;
+/// Time to receive a request's headers (hyper's default is 30 s).
+const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
+/// Most headers in one request.
+const MAX_HEADERS: usize = 100;
+/// Bytes hyper buffers per connection, which bounds the header size.
+const MAX_BUF: usize = 64 << 10;
+/// Time for the whole body to arrive once the headers have; past it, 408.
+const BODY_DEADLINE: Duration = Duration::from_secs(10);
+/// A connection with no request for this long is closed.
+const IDLE: Duration = Duration::from_secs(30);
+
+/// The limits of `serve`. Tests lower them through `serve_with`.
+#[doc(hidden)]
+pub struct ListenLimits {
+    pub workers: usize,
+    pub queued: usize,
+    pub connections: usize,
+    pub header_timeout: Duration,
+    pub body_deadline: Duration,
+    pub idle: Duration,
+}
+
+impl Default for ListenLimits {
+    fn default() -> Self {
+        ListenLimits {
+            workers: 2 * std::thread::available_parallelism().map_or(1, |n| n.get()),
+            queued: MAX_QUEUED,
+            connections: MAX_CONNECTIONS,
+            header_timeout: HEADER_TIMEOUT,
+            body_deadline: BODY_DEADLINE,
+            idle: IDLE,
+        }
+    }
+}
 
 struct Ctx {
     server: Server,
     dirs: Vec<(String, Dir)>,
     workers: Arc<Semaphore>,
+    queue: Semaphore,
+    body_deadline: Duration,
 }
 
 /// Serve until Ctrl-C. `dirs` are opened once; each request gets clones.
 pub fn serve(server: Server, dirs: Vec<(String, Dir)>, addr: SocketAddr) -> Result<(), String> {
+    serve_with(server, dirs, addr, ListenLimits::default(), |_| {})
+}
+
+/// `serve` with explicit limits; `bound` is told the address once it is listening.
+#[doc(hidden)]
+pub fn serve_with(
+    server: Server,
+    dirs: Vec<(String, Dir)>,
+    addr: SocketAddr,
+    limits: ListenLimits,
+    bound: impl FnOnce(SocketAddr),
+) -> Result<(), String> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
-    let permits = 2 * std::thread::available_parallelism().map_or(1, |n| n.get());
     let result = rt.block_on(async {
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .map_err(|e| format!("--listen {addr}: {e}"))?;
-        let bound = listener.local_addr().map_err(|e| e.to_string())?;
-        eprintln!("{}\nlistening on http://{bound}", server.report());
+        let local = listener.local_addr().map_err(|e| e.to_string())?;
+        eprintln!("{}\nlistening on http://{local}", server.report());
+        bound(local);
         let ctx = Arc::new(Ctx {
             server,
             dirs,
-            workers: Arc::new(Semaphore::new(permits)),
+            workers: Arc::new(Semaphore::new(limits.workers)),
+            queue: Semaphore::new(limits.queued),
+            body_deadline: limits.body_deadline,
         });
+        let open = Arc::new(Semaphore::new(limits.connections));
         loop {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => return Ok(()),
                 accepted = listener.accept() => {
                     let Ok((stream, _)) = accepted else { continue };
+                    // Past the cap the stream is dropped, which closes it.
+                    let Ok(slot) = open.clone().try_acquire_owned() else { continue };
                     let ctx = ctx.clone();
                     tokio::spawn(async move {
-                        let service = service_fn(move |req| handle(ctx.clone(), req));
-                        // W8: header read timeout, header limits, slow-client body deadline, idle keep-alive.
+                        // Requests in flight, so that only a connection with none is idle.
+                        let (busy, mut changes) = watch::channel(0usize);
+                        let service = service_fn(move |req| {
+                            let busy = busy.clone();
+                            let ctx = ctx.clone();
+                            async move {
+                                busy.send_modify(|n| *n += 1);
+                                let response = handle(ctx, req).await;
+                                busy.send_modify(|n| *n -= 1);
+                                response
+                            }
+                        });
                         let conn = hyper::server::conn::http1::Builder::new()
+                            .timer(TokioTimer::new())
+                            .header_read_timeout(limits.header_timeout)
+                            .max_headers(MAX_HEADERS)
+                            .max_buf_size(MAX_BUF)
                             .serve_connection(TokioIo::new(stream), service);
-                        let _ = conn.await;
+                        tokio::pin!(conn);
+                        loop {
+                            let idle = *changes.borrow() == 0;
+                            tokio::select! {
+                                _ = conn.as_mut() => break,
+                                _ = tokio::time::sleep(limits.idle), if idle => conn.as_mut().graceful_shutdown(),
+                                _ = changes.changed() => {}
+                            }
+                        }
+                        drop(slot);
                     });
                 }
             }
@@ -65,7 +145,7 @@ pub fn serve(server: Server, dirs: Vec<(String, Dir)>, addr: SocketAddr) -> Resu
 }
 
 async fn handle(ctx: Arc<Ctx>, req: hyper::Request<Incoming>) -> Result<hyper::Response<Full<Bytes>>, Infallible> {
-    Ok(match read_request(req).await {
+    Ok(match read_request(req, ctx.body_deadline).await {
         Err(status) => reply(status),
         Ok(request) => match run(ctx, request).await {
             Ok(r) => respond(r),
@@ -75,7 +155,7 @@ async fn handle(ctx: Arc<Ctx>, req: hyper::Request<Incoming>) -> Result<hyper::R
 }
 
 /// The request as the guest sees it, or the status to answer with instead.
-async fn read_request(req: hyper::Request<Incoming>) -> Result<Request, StatusCode> {
+async fn read_request(req: hyper::Request<Incoming>, deadline: Duration) -> Result<Request, StatusCode> {
     let (parts, body) = req.into_parts();
     let mut header_names = Vec::new();
     let mut header_values = Vec::new();
@@ -84,14 +164,17 @@ async fn read_request(req: hyper::Request<Incoming>) -> Result<Request, StatusCo
         header_names.push(name.as_str().to_string()); // hyper lowercases names
         header_values.push(value.to_string());
     }
-    // W8: body read deadline (a slow client must not hold a connection forever).
-    let body = Limited::new(body, MAX_BODY).collect().await.map_err(|e| {
-        if e.is::<LengthLimitError>() {
-            StatusCode::PAYLOAD_TOO_LARGE
-        } else {
-            StatusCode::BAD_REQUEST
-        }
-    })?;
+    // A slow client must not hold a connection forever.
+    let body = tokio::time::timeout(deadline, Limited::new(body, MAX_BODY).collect())
+        .await
+        .map_err(|_| StatusCode::REQUEST_TIMEOUT)?
+        .map_err(|e| {
+            if e.is::<LengthLimitError>() {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                StatusCode::BAD_REQUEST
+            }
+        })?;
     Ok(Request {
         method: parts.method.as_str().to_string(),
         target: parts.uri.path_and_query().map_or("/", |p| p.as_str()).to_string(),
@@ -104,11 +187,12 @@ async fn read_request(req: hyper::Request<Incoming>) -> Result<Request, StatusCo
 /// Run the guest on a blocking thread, once a worker permit is free.
 async fn run(ctx: Arc<Ctx>, request: Request) -> Result<Response, StatusCode> {
     let busy = StatusCode::SERVICE_UNAVAILABLE;
-    // W8: cap the detached host-call workers (H5) and answer 503 at the cap.
+    let waiting = ctx.queue.try_acquire().map_err(|_| busy)?;
     let permit = tokio::time::timeout(QUEUE_WAIT, ctx.workers.clone().acquire_owned())
         .await
         .map_err(|_| busy)?
         .map_err(|_| busy)?;
+    drop(waiting);
     let work = tokio::task::spawn_blocking(move || {
         let dirs = ctx
             .dirs

@@ -169,7 +169,7 @@ Each changes `caps.wit` or the language. Recommendation first, then the alternat
 - [x] **W7b. `--listen`.** After W7a. `kio run app.kio --listen addr ..`: tokio + hyper 1 (http1 only) accept loop; each request is read fully (decision 3), handed to `Server::handle` on `spawn_blocking` behind a semaphore (decision 4), and its response written back. `--listen` must name an address; nothing listens without it. `main` taking `Incoming`/`Outgoing` without `--listen`, or `--listen` with a `main` that does not, is an error with a hint. Ctrl-C stops the server.
   Done: an integration test starts `kio run --listen 127.0.0.1:0`, sends three requests with a real client and gets the right bodies; 100 concurrent requests all succeed; the README Try it gains a serve example. Also: the host drops guest-set framing headers (`content-length`, `transfer-encoding`, `connection`, `keep-alive`, `upgrade`), so a handler cannot desync a keep-alive connection.
 
-- [ ] **W8. Request limits and slow clients.** After W7b. Host only; all values are constants in `listen.rs` (flags later if needed).
+- [x] **W8. Request limits and slow clients.** After W7b. Host only; all values are constants in `listen.rs` (flags later if needed).
   - hyper http1 builder: `header_read_timeout` 10 s (with `hyper_util::rt::TokioTimer`), `max_headers` 100, `max_buf_size` 64 KB (bounds header bytes).
   - Body read deadline: the whole body must arrive within 10 s of the headers, else 408.
   - Connection cap: at most 1,000 open connections (a semaphore taken at accept, before spawning); past it, the accept loop drops the new connection. Idle keep-alive: a connection with no request for 30 s is closed.

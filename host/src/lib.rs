@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering::Relaxed};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -18,6 +18,7 @@ use wasmtime_wasi::{HostMonotonicClock, HostWallClock, WasiCtx, WasiCtxView, Was
 wasmtime::component::bindgen!({ world: "guest", path: "../caps.wit", imports: { default: trappable } });
 
 mod config;
+pub mod listen;
 
 /// The guest, compiled to native code by `build.rs` with `config::compile_config`.
 const GUEST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/guest.cwasm"));
@@ -146,6 +147,8 @@ impl Origin {
     }
 }
 
+/// Most detached host-call workers alive at once.
+const MAX_WORKERS: usize = 64;
 /// The longest wait for one request; the run deadline can cut it shorter.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -586,16 +589,31 @@ impl State {
     /// Run `work` on a detached thread and wait for it until the run's deadline; past it, stop the
     /// run. The thread finishes in the background and its result is dropped.
     fn within<T: Send + 'static>(&mut self, work: impl FnOnce() -> T + Send + 'static) -> Result<T> {
+        // Timed-out workers linger; past MAX_WORKERS live ones, refuse as a timeout.
+        static LIVE: AtomicUsize = AtomicUsize::new(0);
+        let timeout = |s: &mut Self| {
+            s.timed_out = true;
+            wasmtime::Error::msg("host call timed out")
+        };
+        if LIVE.fetch_add(1, Relaxed) >= MAX_WORKERS {
+            LIVE.fetch_sub(1, Relaxed);
+            return Err(timeout(self));
+        }
+        // Releases the slot when the worker ends, even if `work` panics.
+        struct Slot;
+        impl Drop for Slot {
+            fn drop(&mut self) {
+                LIVE.fetch_sub(1, Relaxed);
+            }
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
+            let _slot = Slot;
             let _ = tx.send(work());
         });
         rx.recv_timeout(self.deadline.saturating_duration_since(Instant::now()))
             .map_err(|e| match e {
-                RecvTimeoutError::Timeout => {
-                    self.timed_out = true;
-                    wasmtime::Error::msg("host call timed out")
-                }
+                RecvTimeoutError::Timeout => timeout(self),
                 RecvTimeoutError::Disconnected => wasmtime::Error::msg("host call failed"),
             })
     }
