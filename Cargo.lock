@@ -727,6 +727,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "lang",
+ "serde_json",
  "tempfile",
  "tokio",
  "ureq",

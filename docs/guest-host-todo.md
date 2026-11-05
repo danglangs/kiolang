@@ -91,7 +91,7 @@ host/    the kio binary: Wasmtime, cap-std, limits, host functions
   - A call whose `(capability, method)` is missing from the authority report is logged as `"unexpected": true` and stops the run: the checker was wrong.
   Done: the primer's log has its header, two calls and a trailer; a denied call and a quota stop are logged with their reason; the same program and inputs give identical logs apart from durations.
 
-- [ ] **M1. MCP tool.** `kio mcp`: an MCP server over stdio (JSON-RPC 2.0, one message per line), so an agent can learn kio and check its code.
+- [x] **M1. MCP tool.** `kio mcp`: an MCP server over stdio (JSON-RPC 2.0, one message per line), so an agent can learn kio and check its code.
   - Handles `initialize`, `notifications/initialized`, `tools/list`, `tools/call`, `ping`; anything else is a JSON-RPC method-not-found error.
   - Tool `kio_primer`, no arguments: returns docs/language.md, embedded at build time.
   - Tool `kio_check`, arguments `{ files: [{ name, source }] }` (root first): runs the guest's `check` in the sandbox and returns either the report or each diag as `{ file, line, message, hint }` with the line computed as `kio check` does.

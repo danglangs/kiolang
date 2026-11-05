@@ -1,12 +1,15 @@
+mod mcp;
+
 use host::{listen, open_dir, Diag, Kio, Limits, Origin, Server};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
         ["check", path] => std::process::exit(check(path)),
+        ["mcp"] => std::process::exit(mcp::serve()),
         ["run", path, ref flags @ ..] => std::process::exit(run(path, flags)),
         _ => eprintln!(
-            "usage: kio check <prog.kio>\n       kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr]"
+            "usage: kio check <prog.kio>\n       kio mcp\n       kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr]"
         ),
     }
     std::process::exit(2);
@@ -183,7 +186,9 @@ fn serve(
     }
 }
 
-fn print_diags(files: &[(String, String)], diags: Vec<Diag>) -> i32 {
+/// The file index and 1-based line of each diag. The guest is untrusted: any file number or
+/// offset maps to some line, never a panic.
+fn locate(files: &[(String, String)], diags: &[Diag]) -> Vec<(usize, usize)> {
     // Byte offset of each line start, one table per file: per-diag scans are quadratic in the source.
     let starts: Vec<Vec<usize>> = files
         .iter()
@@ -193,12 +198,19 @@ fn print_diags(files: &[(String, String)], diags: Vec<Diag>) -> i32 {
                 .collect()
         })
         .collect();
-    for d in diags {
-        // The guest is untrusted: any file number or offset maps to some line, never a panic.
-        let file = (d.file as usize).min(files.len() - 1);
-        let line = starts[file].partition_point(|&s| s <= d.start as usize).max(1);
+    diags
+        .iter()
+        .map(|d| {
+            let file = (d.file as usize).min(files.len() - 1);
+            (file, starts[file].partition_point(|&s| s <= d.start as usize).max(1))
+        })
+        .collect()
+}
+
+fn print_diags(files: &[(String, String)], diags: Vec<Diag>) -> i32 {
+    for (d, (file, line)) in diags.iter().zip(locate(files, &diags)) {
         eprintln!("{}:{line}: error: {}", files[file].0, d.message);
-        if let Some(h) = d.hint {
+        if let Some(h) = &d.hint {
             eprintln!("  hint: {h}");
         }
     }

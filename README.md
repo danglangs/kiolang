@@ -6,7 +6,7 @@ Most languages today are not AI-safe: any line can read files, open sockets or s
 
 kio is a fresh language built around that idea, using Rust's ecosystem for speed and tooling. The goal is a general-purpose systems language: near-native speed, no garbage collector, memory and capability safe.
 
-**Status: `kio check` and `kio run` work inside the Wasm sandbox with real directories, one granted HTTP host per `--http`, and every limit enforced (G1 to G5). `kio run --listen` serves HTTP, one fresh sandbox per request. Next: limits for slow clients, kio-web and the MCP tool. Progress: [docs/guest-host-todo.md](docs/guest-host-todo.md).**
+**Status: `kio check` and `kio run` work inside the Wasm sandbox with real directories, one granted HTTP host per `--http`, and every limit enforced (G1 to G5). `kio run --listen` serves HTTP, one fresh sandbox per request. Slow clients are bounded, and `kio mcp` lets an agent read the primer and check its code. Next: kio-web and performance. Progress: [docs/guest-host-todo.md](docs/guest-host-todo.md).**
 
 ## Try it
 
@@ -68,6 +68,14 @@ b.kio:5: error: unknown name `cuont`
 
 The language has `Int`, `Bool`, `Str`, `Bytes`, `List`, `Map`, structs, enums with `match`, `Option`, `Result` and `?`, modules, `Dir` and `Http` capabilities (`kio run --http api=example.com`), functions, `let`, `if`, `while`, `for`, `break`, `continue` and recursion; see [docs/language.md](docs/language.md). A program can span files: `mod web;` in `app.kio` loads `web.kio` beside it, as in [examples/web](examples/web) (`kio run examples/web/app.kio` prints `Int(41)`). Pure programs also run natively with `cargo run -p lang --example run -- examples/fib.kio`. Run the test suite with `cargo test`.
 
+## Use from an agent
+
+`kio mcp` is an MCP server on stdio with two tools: `kio_primer` (the language guide) and `kio_check` (check source in the sandbox; errors come back as `{file, line, message, hint}`). There is no run tool: grants are the operator's decision. Add it to an MCP client config:
+
+```json
+{ "mcpServers": { "kio": { "command": "kio", "args": ["mcp"] } } }
+```
+
 ## Why
 
 Agents write code faster than people can review it. In most languages any line can open a file or a socket, so reviewing for safety means reading every line.
@@ -123,8 +131,8 @@ Steps:
 3. Done: capability table generated from `caps.wit`, real `Dir` and `Http` host functions (G3, G4).
 4. Done: guest built for `wasm32`, running in Wasmtime with limits (G5).
 5. Done: adversarial reviews of the capability rules and the host (path escapes, forged handles, runaway loops, blocked calls). `Http` refuses other hosts, off-origin redirects and private addresses.
-6. Done: an audit log of every host call. Next: an MCP tool that serves the primer and runs `check`.
-7. Done: `kio run --listen`, one fresh sandbox per request (about 0.5 ms each). Next: slow-client limits, and kio-web, a web framework written in kio ([docs/web-support-todo.md](docs/web-support-todo.md)).
+6. Done: an audit log of every host call, and `kio mcp`, which serves the primer and `check` to agents.
+7. Done: `kio run --listen`, one fresh sandbox per request (about 0.5 ms each), with slow-client limits. Next: kio-web, a web framework written in kio ([docs/web-support-todo.md](docs/web-support-todo.md)).
 8. Later: copy-on-write values and a lowering step, then attenuation and a compiler to Wasm.
 
 v0 has no closures, globals, reflection or `unsafe`. Capabilities are parameters only. See [docs/language.md](docs/language.md).
