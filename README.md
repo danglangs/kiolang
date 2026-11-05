@@ -38,12 +38,12 @@ main      : input read, out create, log get
 summarize : log get
 ```
 
-**No ambient authority.** A function cannot use a capability it was not given, even one `main` holds. The program is rejected before it runs:
+**No ambient authority.** In Python or Rust a helper can import `urllib` or `std::net` and reach the network without its signature saying so. kio has no such import; the only way in is a parameter:
 
 ```
 $ kio check examples/tour/sneaky.kio
-examples/tour/sneaky.kio:3: error: unknown name `log`
-  hint: `log` is a capability of `main`; take it as a parameter, `log: Http`, and pass it in
+examples/tour/sneaky.kio:5: error: no ambient Http access: `Http::get` does not exist
+  hint: capabilities come only as parameters of `main`
 ```
 
 **Capabilities are granted per run and confined by the host.** The operator decides what `input` is; paths outside it, `..` and symlinks out are refused even though the program type-checks:

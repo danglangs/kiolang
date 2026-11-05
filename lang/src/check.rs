@@ -1059,8 +1059,12 @@ impl Checker<'_> {
     }
 
     fn unknown_variant(&self, span: Span, en: &str, v: &str) -> Diag {
+        // `Http::get(..)` or `Dir::open(..)`: the ambient access other languages give, which kio has none of.
+        if self.is_cap(en) {
+            let msg = format!("no ambient {en} access: `{en}::{v}` does not exist");
+            return err(span, msg, Some(NO_CAP_SYNTAX));
+        }
         let hint = match (en, self.variants.get(en)) {
-            _ if self.is_cap(en) => NO_CAP_SYNTAX.to_string(),
             ("Option", _) => suggest(v, &["None", "Some"], "variants"),
             ("Result", _) => suggest(v, &["Ok", "Err"], "variants"),
             ("Map", _) => "the only Map function is `Map::new()`".to_string(),

@@ -67,7 +67,7 @@ Run `docs/hack/demo.sh`; press Enter between steps:
 1. `kio check` on a file program: its whole authority in two lines.
 2. Run it with two directory grants; it writes `42`.
 3. `leaky.kio`: a summary function that makes a network request, shown by the report.
-4. `sneaky.kio`: the same helper without `log: Http` in its signature tries the same call and is rejected, with a hint that teaches the rule. Steps 3 and 4 together: a function's network use is always in its signature, so the report cannot be fooled.
+4. `sneaky.kio`: the helper tries `Http::get(..)`, the equivalent of Python's `urllib` or Rust's `std::net`, which need nothing in the signature. kio has no ambient network, so it is rejected: "no ambient Http access". Steps 3 and 4 together: a function's network use is always in its signature, so the report cannot be fooled.
 5. `escape.kio`: `../../etc/passwd` type-checks but the host refuses it, and the audit log records the attempt.
 6. `forever.kio`: an infinite loop stopped by fuel.
 

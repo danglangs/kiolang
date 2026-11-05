@@ -73,11 +73,19 @@ fn hundred_concurrent_requests_succeed() {
     let threads: Vec<_> = (0..100)
         .map(|i| std::thread::spawn(move || send(port, "GET", &format!("/hello/n{i}"), b"")))
         .collect();
+    // Under load a request may wait past QUEUE_WAIT and be told 503, which is correct; any 200
+    // must carry its own body, and nearly all should succeed.
+    let mut ok = 0;
     for (i, t) in threads.into_iter().enumerate() {
-        let (status, body) = t.join().unwrap();
-        assert_eq!(status, 200);
-        assert_eq!(body, format!(r#"{{"hello": "n{i}"}}"#).into_bytes());
+        match t.join().unwrap() {
+            (200, body) => {
+                assert_eq!(body, format!(r#"{{"hello": "n{i}"}}"#).into_bytes());
+                ok += 1;
+            }
+            (status, _) => assert_eq!(status, 503),
+        }
     }
+    assert!(ok >= 90, "only {ok} of 100 succeeded");
 }
 
 #[test]

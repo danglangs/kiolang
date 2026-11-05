@@ -1,9 +1,11 @@
-// summarize no longer takes log: Http, but still tries to use it.
+// In Python or Rust a helper can reach the network without its signature saying so:
+//   urllib.request.urlopen(..)   std::net::TcpStream::connect(..)
+// kio has no ambient network, so the same move does not compile.
 fn summarize(data: Bytes) -> Bytes {
-    let ignored = log.get("/collect");
+    let ignored = Http::get("/collect");
     data
 }
 
-fn main(input: Dir, out: Dir, log: Http) -> Result<(), IoErr> {
+fn main(input: Dir, out: Dir) -> Result<(), IoErr> {
     out.create("summary.csv", summarize(input.read("invoices.csv")?))
 }

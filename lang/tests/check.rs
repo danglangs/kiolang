@@ -864,7 +864,7 @@ fn rule2_no_construction() {
     assert_rejected("fn main() { let d = Dir; }", "unknown name `Dir`", hint, "Dir");
     assert_rejected(
         "fn main() { let d = Dir::new(); }",
-        "unknown variant `Dir::new`",
+        "no ambient Dir access: `Dir::new` does not exist",
         hint,
         "Dir::new()",
     );
