@@ -187,5 +187,9 @@ Each changes `caps.wit` or the language. Recommendation first, then the alternat
 - **Nested patterns** (`Err(IoErr::NotFound)`); today a nested `match`.
 - **Outbound calls.** The `Http` capability, allowlisted per route; moves execution to Wasmtime async (decision 4).
 - **Streaming bodies, HTTP/2, `wasi:http` export.** Decision 2's alternative.
+- **Persistent connections and WebSockets (owner to decide).** HTTP keep-alive already works: hyper keeps the connection and each request gets a fresh sandbox; W8 adds the idle timeout. WebSockets are a long-lived two-way stream, which conflicts with bounded runs and synchronous handlers. Options:
+  1. **A fresh sandbox per message (recommended).** The host owns the socket; each message runs `main(msg: WsMessage, conn: WsSend, ..)`, bounded, isolated and logged like a request. State between messages goes through a capability such as `Kv`. A connection is just another grant. Needs `WsMessage`/`WsSend` in caps.wit, the upgrade and a connection table in the host, and `Kv`. Cloudflare Durable Objects and Spin work this way.
+  2. **One sandbox per connection.** `main(ws: WebSocket)` loops on a blocking `ws.recv()`; fuel and timeout apply per message, with an idle cap. Simpler programs, but a hung connection holds an instance.
+  3. **Async in the language.** `await` in kio: a large change and a one-way door, not needed for 1 or 2.
 - **Databases.** A `Kv` or `Sql` capability in caps.wit.
 - **Cookies, forms, multipart, websockets.**
