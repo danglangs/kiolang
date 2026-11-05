@@ -1,6 +1,6 @@
 //! Runs the guest component under Wasmtime. `dir` is backed by cap-std; `http` is a ureq client fixed to one granted origin; `incoming` and `outgoing` hold one request and its first response. Every import is counted and, if asked, written to an audit log.
 use cap_std::ambient_authority;
-use cap_std::fs::{Dir as RealDir, OpenOptions};
+use cap_std::fs::{Dir as RealDir, OpenOptions, OpenOptionsExt};
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -405,6 +405,17 @@ impl kio::caps::fs::Host for State {}
 impl kio::caps::net::Host for State {}
 impl kio::caps::web::Host for State {}
 
+/// Open `path` (already confined by cap-std) and refuse anything but a regular file. `O_NONBLOCK`
+/// keeps opening a FIFO from waiting for a peer; the check then refuses it.
+fn open_regular(dir: &RealDir, path: &str, opts: &mut OpenOptions) -> io::Result<cap_std::fs::File> {
+    let file = dir.open_with(path, opts.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32))?;
+    if file.metadata()?.is_file() {
+        Ok(file)
+    } else {
+        Err(io::ErrorKind::PermissionDenied.into())
+    }
+}
+
 /// Map a cap-std error. cap-std reports an escape as a custom `PermissionDenied`; a real OS
 /// permission error has no inner error. Anything unexpected is `denied`.
 fn io_err(e: &io::Error) -> IoErr {
@@ -646,9 +657,13 @@ impl State {
         };
         // One byte past the cap tells a too-large file from an exact fit, even if it is growing.
         let (data, read) = self.within(move || {
+            // Test only: stands in for a read that blocks, since a FIFO is now refused at once.
+            #[cfg(feature = "test-hooks")]
+            if path == "pipe" {
+                std::thread::sleep(Duration::from_secs(10));
+            }
             let mut data = Vec::new();
-            let read = dir
-                .open(&path)
+            let read = open_regular(&dir, &path, OpenOptions::new().read(true))
                 .and_then(|f| f.take(READ_CAP + 1).read_to_end(&mut data));
             (data, read)
         })?;
@@ -682,7 +697,7 @@ impl State {
             // `create_new` fails if the path exists, in the same call that creates it.
             let mut opts = OpenOptions::new();
             opts.write(true).create_new(true);
-            let mut file = match dir.open_with(&path, &opts) {
+            let mut file = match open_regular(&dir, &path, &mut opts) {
                 Ok(f) => f,
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(IoErr::Denied),
                 Err(e) => return Err(io_err(&e)),
@@ -878,7 +893,7 @@ impl State {
             return Ok(Err(WebErr::AlreadySent));
         }
         // An invalid response is not recorded, so the guest may send a valid one.
-        let valid = (100..=599).contains(&status)
+        let valid = (200..=599).contains(&status)
             && header_names.len() == header_values.len()
             && header_names.iter().chain(&header_values).all(|s| !has_crlf(s));
         if !valid {

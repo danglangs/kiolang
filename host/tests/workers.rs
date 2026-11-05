@@ -2,18 +2,13 @@
 
 use host::{open_dir, Kio, Limits};
 
-/// 64 reads blocked on a FIFO with no writer each leave a detached worker; the next host call,
+/// 64 reads blocked (the `pipe` test hook) each leave a detached worker; the next host call,
 /// even one that would not block, is refused as a timeout.
 #[cfg(unix)]
 #[test]
 fn blocked_reads_stop_at_the_worker_cap() {
     let t = tempfile::tempdir().unwrap();
     std::fs::write(t.path().join("a"), "x").unwrap();
-    let made = std::process::Command::new("mkfifo")
-        .arg(t.path().join("pipe"))
-        .status()
-        .unwrap();
-    assert!(made.success());
     let limits = Limits {
         timeout_secs: 1,
         ..Limits::default()

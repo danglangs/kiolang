@@ -271,16 +271,11 @@ fn infinite_loop_runs_out_of_fuel() {
     );
 }
 
-/// H5: a read that blocks forever (a FIFO with no writer) stops at the deadline, not after it.
+/// H5: a read that blocks forever (the `pipe` test hook) stops at the deadline, not after it.
 #[cfg(unix)]
 #[test]
 fn blocked_host_call_times_out() {
-    let (t, d) = dir(&[("a", b"x")]);
-    let made = std::process::Command::new("mkfifo")
-        .arg(t.path().join("pipe"))
-        .status()
-        .unwrap();
-    assert!(made.success());
+    let (_t, d) = dir(&[("a", b"x")]);
     let limits = Limits {
         timeout_secs: 1,
         ..Limits::default()
@@ -709,4 +704,19 @@ fn origin_parse() {
     ] {
         assert!(host::Origin::parse(bad).is_err(), "{bad}");
     }
+}
+
+/// W11b: a FIFO is not a regular file; reading it is `denied` at once, never blocked.
+#[cfg(unix)]
+#[test]
+fn fifo_read_is_denied_at_once() {
+    let (t, d) = dir(&[]);
+    assert!(std::process::Command::new("mkfifo")
+        .arg(t.path().join("p"))
+        .status()
+        .unwrap()
+        .success());
+    let start = std::time::Instant::now();
+    assert_eq!(on(d, "d.read(\"p\")"), DENIED);
+    assert!(start.elapsed() < std::time::Duration::from_secs(1));
 }

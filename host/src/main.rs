@@ -97,10 +97,8 @@ fn run(path: &str, flags: &[&str]) -> i32 {
                 continue;
             }
             ["--audit", path] => {
-                match std::fs::File::create(path) {
-                    Ok(f) => audit = Some(f),
-                    Err(e) => return fail(format!("--audit {path}: {e}")),
-                }
+                // Created below, once the flags that conflict with it are known.
+                audit = Some(path.to_string());
                 continue;
             }
             ["--listen", spec] => {
@@ -127,6 +125,16 @@ fn run(path: &str, flags: &[&str]) -> i32 {
             Err(e) => return fail(format!("--dir {name}={dir}: {e}")),
         }
     }
+    if listen.is_some() {
+        if audit.is_some() {
+            return fail(
+                "--audit with --listen\n  hint: per-request audit logging is not supported yet; drop --audit".into(),
+            );
+        }
+        if !https.is_empty() {
+            return fail("--http with --listen\n  hint: Http grants under --listen are not supported yet".into());
+        }
+    }
     // A program that fails to check is reported by the run below.
     let serves = lang::check_files(
         &files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect::<Vec<_>>(),
@@ -147,8 +155,11 @@ fn run(path: &str, flags: &[&str]) -> i32 {
         Ok(k) => k,
         Err(e) => return fail(format!("{e:#}")),
     };
-    if let Some(f) = audit {
-        kio.audit(f, dir_paths);
+    if let Some(path) = audit {
+        match std::fs::File::create(&path) {
+            Ok(f) => kio.audit(f, dir_paths),
+            Err(e) => return fail(format!("--audit {path}: {e}")),
+        }
     }
     match kio.run_files(&files, dirs, https) {
         Err(e) => {

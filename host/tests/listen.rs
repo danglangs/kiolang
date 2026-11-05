@@ -132,7 +132,7 @@ mod limits {
     use host::{open_dir, Limits, Server};
     use std::time::Duration;
 
-    /// `/pipe` reads a FIFO nobody writes (blocks until the 2 s deadline); any other path answers 200.
+    /// `/pipe` reads a path the `test-hooks` build blocks on (until the 2 s deadline); any other path answers 200.
     const APP: &str = r#"fn main(req: Incoming, res: Outgoing, public: Dir) -> Result<(), WebErr> {
         if req.target() == "/pipe" { let r = public.read("pipe"); }
         res.send(200, [], [], "ok".to_bytes())
@@ -156,10 +156,6 @@ mod limits {
             });
         });
         rx.recv().unwrap()
-    }
-
-    pub fn fifo(dir: &std::path::Path) {
-        assert!(Command::new("mkfifo").arg(dir.join("pipe")).status().unwrap().success());
     }
 
     pub fn connect(port: u16) -> TcpStream {
@@ -258,7 +254,6 @@ fn connections_past_the_cap_are_dropped() {
 #[test]
 fn request_past_the_queue_cap_is_503_at_once() {
     let public = tempfile::tempdir().unwrap();
-    limits::fifo(public.path());
     let port = limits::start(
         public.path(),
         ListenLimits {
@@ -267,7 +262,7 @@ fn request_past_the_queue_cap_is_503_at_once() {
             ..Default::default()
         },
     );
-    // One request holds the worker (blocked on the FIFO), one waits in the queue.
+    // One request holds the worker (blocked on `pipe`), one waits in the queue.
     let hold = std::thread::spawn(move || send(port, "GET", "/pipe", b""));
     std::thread::sleep(limits::ms(500));
     let wait = std::thread::spawn(move || send(port, "GET", "/pipe", b""));
@@ -278,4 +273,60 @@ fn request_past_the_queue_cap_is_503_at_once() {
     // The queued request gives up after the 1 s queue wait.
     assert_eq!(wait.join().unwrap().0, 503);
     assert_eq!(hold.join().unwrap().0, 500);
+}
+
+#[test]
+fn connection_is_closed_at_the_lifetime_cap() {
+    let public = tempfile::tempdir().unwrap();
+    let port = limits::start(
+        public.path(),
+        ListenLimits {
+            lifetime: limits::ms(500),
+            ..Default::default()
+        },
+    );
+    // Never read the answer: the server must still close the connection at the cap.
+    let mut s = limits::connect(port);
+    s.write_all(b"GET / HTTP/1.1\r\nhost: x\r\n\r\n").unwrap();
+    let start = std::time::Instant::now();
+    std::thread::sleep(limits::ms(800));
+    assert!(limits::read_all(s).starts_with("HTTP/1.1 200"));
+    assert!(start.elapsed() < limits::ms(2000));
+}
+
+/// W11b: `--audit` and `--http` conflict with `--listen`: exit 2 and a hint, before any file exists.
+#[test]
+fn audit_and_http_are_refused_with_listen() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    for (flag, value, hint) in [
+        (
+            "--audit",
+            log.to_str().unwrap(),
+            "per-request audit logging is not supported yet; drop --audit",
+        ),
+        (
+            "--http",
+            "x=http://127.0.0.1:1",
+            "Http grants under --listen are not supported yet",
+        ),
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_kio"))
+            .args([
+                "run",
+                "../examples/serve/app.kio",
+                flag,
+                value,
+                "--listen",
+                "127.0.0.1:0",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{flag}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(&format!("hint: {hint}")),
+            "{flag}"
+        );
+    }
+    assert!(!log.exists());
 }

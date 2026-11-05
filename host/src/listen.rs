@@ -31,6 +31,8 @@ const MAX_BUF: usize = 64 << 10;
 const BODY_DEADLINE: Duration = Duration::from_secs(10);
 /// A connection with no request for this long is closed.
 const IDLE: Duration = Duration::from_secs(30);
+/// Hard cap on a connection's life, so a client that never reads cannot hold a slot.
+const LIFETIME: Duration = Duration::from_secs(60);
 
 /// The limits of `serve`. Tests lower them through `serve_with`.
 #[doc(hidden)]
@@ -41,6 +43,7 @@ pub struct ListenLimits {
     pub header_timeout: Duration,
     pub body_deadline: Duration,
     pub idle: Duration,
+    pub lifetime: Duration,
 }
 
 impl Default for ListenLimits {
@@ -52,6 +55,7 @@ impl Default for ListenLimits {
             header_timeout: HEADER_TIMEOUT,
             body_deadline: BODY_DEADLINE,
             idle: IDLE,
+            lifetime: LIFETIME,
         }
     }
 }
@@ -106,6 +110,8 @@ pub fn serve_with(
                     let Ok(slot) = open.clone().try_acquire_owned() else { continue };
                     let ctx = ctx.clone();
                     tokio::spawn(async move {
+                        // Dropping the future on timeout closes the socket.
+                        let _ = tokio::time::timeout(limits.lifetime, async {
                         // Requests in flight, so that only a connection with none is idle.
                         let (busy, mut changes) = watch::channel(0usize);
                         let service = service_fn(move |req| {
@@ -133,6 +139,8 @@ pub fn serve_with(
                                 _ = changes.changed() => {}
                             }
                         }
+                        })
+                        .await;
                         drop(slot);
                     });
                 }

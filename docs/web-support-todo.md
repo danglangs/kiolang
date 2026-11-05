@@ -182,7 +182,7 @@ Each changes `caps.wit` or the language. Recommendation first, then the alternat
 - [ ] **W10. Benchmark.** After W9. Requests/s and p50/p99 for the example app, with time split into instantiate, check and handle. Decides decision 5's snapshot, the bytecode VM, and copy-on-write values: v0 copies `req`, body included, into every helper call.
   Done: numbers and the decisions they force recorded in open_questions.
 - [x] **W11. Adversarial serve review.** 47 attacks: no smuggling or desync, no response splitting, no cross-request leaks, no host panics, no per-request limit bypass. Fixed in W11b.
-- [ ] **W11b. Fix the review's findings.** Host only.
+- [x] **W11b. Fix the review's findings.** Host only.
   1. Connection lifetime: a hard 60 s cap per connection (`ListenLimits::lifetime`), enforced by dropping the connection future, so a client that never reads its responses cannot hold a slot or buffered response forever.
   2. `--audit` with `--listen`: refused at startup, before the log file is created, with hint "per-request audit logging is not supported yet; drop --audit".
   3. `--http` with `--listen`: refused at startup the same way (hint "Http grants under --listen are not supported yet").
