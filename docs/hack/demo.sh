@@ -10,7 +10,7 @@ step "1. An agent wrote a program. What can it touch?" \
      "kio check examples/tour/summarize.kio"
 step "2. The operator grants exactly two directories, and it runs." \
      "kio run examples/tour/summarize.kio --dir input=examples/tour/in --dir out=examples/tour/out && cat examples/tour/out/total.txt"
-step "3. A helper that looks pure but phones home: the report shows it." \
+step "3. A summary function that also makes network calls: the report shows it." \
      "kio check examples/tour/leaky.kio"
 step "4. A helper using the network without being given it: rejected before running." \
      "kio check examples/tour/sneaky.kio"
