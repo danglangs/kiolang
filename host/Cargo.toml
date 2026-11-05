@@ -17,6 +17,7 @@ test-hooks = []
 
 [dependencies]
 cap-std = "4"
+lang = { path = "../lang" }
 ureq = "3"
 url = "2"
 wasmtime = "50"
@@ -27,5 +28,4 @@ wasmtime = "50"
 
 [dev-dependencies]
 host = { path = ".", features = ["test-hooks"] }
-lang = { path = "../lang" }
 tempfile = "3"

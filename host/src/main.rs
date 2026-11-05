@@ -6,7 +6,7 @@ fn main() {
         ["check", path] => std::process::exit(check(path)),
         ["run", path, ref flags @ ..] => std::process::exit(run(path, flags)),
         _ => eprintln!(
-            "usage: kio check <prog.kio>\n       kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb]"
+            "usage: kio check <prog.kio>\n       kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log]"
         ),
     }
     std::process::exit(2);
@@ -60,6 +60,8 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     let mut dirs = Vec::new();
     let mut https = Vec::new();
     let mut limits = Limits::default();
+    let mut audit = None;
+    let mut dir_paths = Vec::new();
     for pair in flags.chunks(2) {
         let (name, dir) = match pair {
             ["--http", spec] => {
@@ -86,17 +88,27 @@ fn run(path: &str, flags: &[&str]) -> i32 {
                 }
                 continue;
             }
+            ["--audit", path] => {
+                match std::fs::File::create(path) {
+                    Ok(f) => audit = Some(f),
+                    Err(e) => return fail(format!("--audit {path}: {e}")),
+                }
+                continue;
+            }
             ["--dir", spec] => match spec.split_once('=') {
                 Some(nd) => nd,
                 None => return fail(format!("--dir {spec}: expected name=path")),
             },
             _ => return fail(
-                "usage: kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb]"
+                "usage: kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log]"
                     .into(),
             ),
         };
         match open_dir(dir.as_ref()) {
-            Ok(d) => dirs.push((name.to_string(), d)),
+            Ok(d) => {
+                dirs.push((name.to_string(), d));
+                dir_paths.push((name.to_string(), dir.to_string()));
+            }
             Err(e) => return fail(format!("--dir {name}={dir}: {e}")),
         }
     }
@@ -104,6 +116,9 @@ fn run(path: &str, flags: &[&str]) -> i32 {
         Ok(k) => k,
         Err(e) => return fail(format!("{e:#}")),
     };
+    if let Some(f) = audit {
+        kio.audit(f, dir_paths);
+    }
     match kio.run_files(&files, dirs, https) {
         Err(e) => {
             // A limit or trap is the guest failing, not a usage error.

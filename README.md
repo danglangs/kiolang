@@ -44,6 +44,8 @@ summarize : none
 
 `run` prints the report, then `main`'s value, and `out/summary.csv` holds the byte count of `input/invoices.csv`. Every path in the program is relative to one granted directory: `..`, absolute paths and symlinks out are refused by the host, and `create` never overwrites, so run it again after `rm examples/out/summary.csv`.
 
+`--audit log.jsonl` writes one JSON line per host call: capability, method, path, bytes and result, never contents. Every call is also checked against the authority report; a call the report did not predict stops the run as a checker bug.
+
 Runs are bounded, and each limit names the flag that raises it: `--fuel` (instructions), `--timeout` (seconds), `--memory` (MB), `--stack` (KB), `--calls` (host calls) and `--io` (MB read and written). An infinite loop stops with `out of fuel (limit 1000000000; raise it with --fuel)`.
 
 Mistakes are caught before anything runs, with a hint at the fix:
@@ -112,7 +114,7 @@ Steps:
 3. Done: capability table generated from `caps.wit`, real `Dir` and `Http` host functions (G3, G4).
 4. Done: guest built for `wasm32`, running in Wasmtime with limits (G5).
 5. Done: adversarial reviews of the capability rules and the host (path escapes, forged handles, runaway loops, blocked calls). `Http` refuses other hosts, off-origin redirects and private addresses.
-6. Next: an audit log of every host call, and an MCP tool that serves the primer and runs `check`.
+6. Done: an audit log of every host call. Next: an MCP tool that serves the primer and runs `check`.
 7. Next: `kio run --listen` and kio-web, a web framework written in kio ([docs/web-support-todo.md](docs/web-support-todo.md)).
 8. Later: copy-on-write values and a lowering step, then attenuation and a compiler to Wasm.
 

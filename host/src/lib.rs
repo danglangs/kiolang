@@ -1,6 +1,7 @@
-//! Runs the guest component under Wasmtime. `dir` is backed by cap-std; `http` is a ureq client fixed to one granted origin; `incoming` and `outgoing` hold one request and its first response. Every import is counted.
+//! Runs the guest component under Wasmtime. `dir` is backed by cap-std; `http` is a ureq client fixed to one granted origin; `incoming` and `outgoing` hold one request and its first response. Every import is counted and, if asked, written to an audit log.
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir as RealDir, OpenOptions};
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
@@ -84,6 +85,16 @@ impl Origin {
             lookups: Arc::default(),
             any_addr,
         })
+    }
+
+    /// `scheme://host:port`, for the audit log.
+    fn target(&self) -> String {
+        format!(
+            "{}://{}:{}",
+            if self.https { "https" } else { "http" },
+            self.host,
+            self.port
+        )
     }
 
     /// Allow loopback and private addresses for a named host, so tests can use `localhost`.
@@ -292,6 +303,15 @@ pub struct State {
     timed_out: bool,
     #[cfg(feature = "test-hooks")]
     fail_writes: bool,
+    audit: Option<Audit>,
+    /// Set by a call missing from the authority report.
+    unexpected: bool,
+    /// `(capability parameter, method)` pairs on `main`'s report line; any other call is a checker
+    /// bug. Set at the start of every run, whether or not a log is written.
+    allowed: HashSet<(String, String)>,
+    /// Grant name and kind of each handle.
+    handles: HashMap<u32, (String, &'static str)>,
+    audit_msg: String,
     wasi: WasiCtx,
     table: ResourceTable,
 }
@@ -341,6 +361,11 @@ impl State {
             timed_out: false,
             #[cfg(feature = "test-hooks")]
             fail_writes: false,
+            audit: None,
+            unexpected: false,
+            allowed: HashSet::new(),
+            handles: HashMap::new(),
+            audit_msg: String::new(),
             wasi,
             table: ResourceTable::new(),
         }
@@ -398,7 +423,134 @@ fn check_path(path: &str) -> Result<(), IoErr> {
     Ok(())
 }
 
+/// The audit log (H8): one JSON line per host call. Sizes only, never contents.
+struct Audit {
+    out: Box<dyn Write + Send>,
+    seq: u64,
+}
+
+impl Audit {
+    /// Write one line and flush it. `State::call` does this after the work, so a crash of the host
+    /// process inside a host call can lose that call's line.
+    fn line(&mut self, line: &str) -> io::Result<()> {
+        writeln!(self.out, "{line}")?;
+        self.out.flush()
+    }
+}
+
+/// A JSON string literal.
+fn json(s: &str) -> String {
+    let mut o = String::from('"');
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            c if c < ' ' => o.push_str(&format!("\\u{:04x}", c as u32)),
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
+}
+
+/// The `(parameter, method)` pairs on `main`'s line of an authority report, such as
+/// `main : input read, out create`.
+fn main_calls(report: &str) -> HashSet<(String, String)> {
+    let line = report
+        .lines()
+        .find_map(|l| l.strip_prefix("main")?.trim_start().strip_prefix(':'));
+    let mut pairs = HashSet::new();
+    for part in line.map(str::trim).filter(|&l| l != "none").unwrap_or("").split(',') {
+        let mut words = part.split_whitespace();
+        if let Some(cap) = words.next() {
+            pairs.extend(words.map(|m| (cap.to_string(), m.to_string())));
+        }
+    }
+    pairs
+}
+
+/// For calls that cannot fail.
+fn ok<T>(_: &T) -> String {
+    "ok".into()
+}
+
+/// `ok`, or the error variant as caps.wit spells it: `TooLarge` is `too-large`, `Status(404)`
+/// is `status(404)`.
+fn outcome<T, E: std::fmt::Debug>(r: &std::result::Result<T, E>) -> String {
+    let Err(e) = r else { return "ok".into() };
+    let mut out = String::new();
+    let name = format!("{e:?}");
+    let name = name.rsplit("::").next().unwrap_or_default();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_ascii_uppercase() && i > 0 {
+            out.push('-');
+        }
+        out.push(c.to_ascii_lowercase());
+    }
+    out
+}
+
 impl State {
+    /// Run one host function `f` as a counted, checked call. Every host function goes through
+    /// here, so none can skip the quota, the report check or the log. `arg` is the path (or the
+    /// method name when there is none); `result` names the call's outcome. With a log, the call's
+    /// line is written after the work and before this returns, so a crash of the host process
+    /// inside a host call can lose that one line. A call refused by a quota, the deadline or the
+    /// report check is logged with `stopped:<why>` before the run stops.
+    fn call<T>(
+        &mut self,
+        handle: u32,
+        method: &str,
+        arg: &str,
+        f: impl FnOnce(&mut Self) -> Result<T>,
+        result: impl FnOnce(&T) -> String,
+    ) -> Result<T> {
+        let (start, io) = (Instant::now(), self.io);
+        let r = self
+            .count_call()
+            .and_then(|()| self.check_report(handle, method))
+            .and_then(|()| f(self));
+        let Some(mut a) = self.audit.take() else { return r };
+        let (cap, kind) = self.handles.get(&handle).cloned().unwrap_or(("?".into(), "?"));
+        let why = match &r {
+            Ok(v) => result(v),
+            Err(_) if self.unexpected => "stopped:unexpected".into(),
+            Err(_) if self.too_many_calls => "stopped:calls".into(),
+            Err(_) if self.too_much_io => "stopped:io".into(),
+            Err(_) if self.timed_out => "stopped:time".into(),
+            Err(_) => "stopped:error".into(),
+        };
+        a.seq += 1;
+        let line = format!(
+            r#"{{"event":"call","seq":{},"cap":{},"kind":"{kind}","method":{},"arg":{},"bytes":{},"result":{}{},"ms":{:.1}}}"#,
+            a.seq,
+            json(&cap),
+            json(method),
+            json(&arg.chars().take(256).collect::<String>()),
+            self.io - io,
+            json(&why),
+            if self.unexpected { r#","unexpected":true"# } else { "" },
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+        let written = a.line(&line);
+        self.audit = Some(a);
+        let r = r?;
+        written.map_err(|e| wasmtime::Error::msg(format!("audit: cannot write the log: {e}")))?;
+        Ok(r)
+    }
+
+    /// Stop a call whose `(capability parameter, method)` is not on `main`'s
+    /// report line: the checker was wrong.
+    fn check_report(&mut self, handle: u32, method: &str) -> Result<()> {
+        let cap = self.handles.get(&handle).map_or("?", |h| h.0.as_str());
+        if self.allowed.contains(&(cap.to_string(), method.to_string())) {
+            return Ok(());
+        }
+        self.unexpected = true;
+        self.audit_msg = format!("audit: call `{cap}.{method}` not in the authority report (a checker bug)");
+        Err(wasmtime::Error::msg(self.audit_msg.clone()))
+    }
+
     /// Count one capability call; the call past `call_limit` stops the run.
     fn count_call(&mut self) -> Result<()> {
         self.calls = self.calls.saturating_add(1);
@@ -451,11 +603,27 @@ impl State {
 
 impl kio::caps::fs::HostDir for State {
     fn read(&mut self, d: Resource<kio::caps::fs::Dir>, path: String) -> Result<Result<Vec<u8>, IoErr>> {
-        self.count_call()?;
+        let arg = path.clone();
+        self.call(d.rep(), "read", &arg, |s| s.read_file(&d, path), outcome)
+    }
+
+    fn create(&mut self, d: Resource<kio::caps::fs::Dir>, path: String, data: Vec<u8>) -> Result<Result<(), IoErr>> {
+        let arg = path.clone();
+        self.call(d.rep(), "create", &arg, |s| s.create_file(&d, path, data), outcome)
+    }
+
+    fn drop(&mut self, d: Resource<kio::caps::fs::Dir>) -> Result<()> {
+        let _ = self.table.delete(Resource::<Granted>::new_own(d.rep()));
+        Ok(())
+    }
+}
+
+impl State {
+    fn read_file(&mut self, d: &Resource<kio::caps::fs::Dir>, path: String) -> Result<Result<Vec<u8>, IoErr>> {
         if let Err(e) = check_path(&path) {
             return Ok(Err(e));
         }
-        let Some(dir) = self.dir(&d) else {
+        let Some(dir) = self.dir(d) else {
             return Ok(Err(IoErr::Denied));
         };
         // One byte past the cap tells a too-large file from an exact fit, even if it is growing.
@@ -475,8 +643,12 @@ impl kio::caps::fs::HostDir for State {
         })
     }
 
-    fn create(&mut self, d: Resource<kio::caps::fs::Dir>, path: String, data: Vec<u8>) -> Result<Result<(), IoErr>> {
-        self.count_call()?;
+    fn create_file(
+        &mut self,
+        d: &Resource<kio::caps::fs::Dir>,
+        path: String,
+        data: Vec<u8>,
+    ) -> Result<Result<(), IoErr>> {
         // Charged before the file exists, so a refused call leaves nothing behind.
         self.spend_io(data.len())?;
         if let Err(e) = check_path(&path) {
@@ -484,7 +656,7 @@ impl kio::caps::fs::HostDir for State {
         }
         #[cfg(feature = "test-hooks")]
         let fail_write = self.fail_writes;
-        let Some(dir) = self.dir(&d) else {
+        let Some(dir) = self.dir(d) else {
             return Ok(Err(IoErr::Denied));
         };
         // After a timeout the worker may still create the file, if it was only slow to open it.
@@ -513,11 +685,6 @@ impl kio::caps::fs::HostDir for State {
             Ok(())
         })
     }
-
-    fn drop(&mut self, d: Resource<kio::caps::fs::Dir>) -> Result<()> {
-        let _ = self.table.delete(Resource::<Granted>::new_own(d.rep()));
-        Ok(())
-    }
 }
 
 impl kio::caps::net::HostHttp for State {
@@ -526,8 +693,23 @@ impl kio::caps::net::HostHttp for State {
         h: Resource<kio::caps::net::Http>,
         path: String,
     ) -> Result<Result<Vec<u8>, kio::caps::net::HttpErr>> {
+        let arg = path.clone();
+        self.call(h.rep(), "get", &arg, |s| s.get_url(&h, path), outcome)
+    }
+
+    fn drop(&mut self, h: Resource<kio::caps::net::Http>) -> Result<()> {
+        let _ = self.table.delete(Resource::<Origin>::new_own(h.rep()));
+        Ok(())
+    }
+}
+
+impl State {
+    fn get_url(
+        &mut self,
+        h: &Resource<kio::caps::net::Http>,
+        path: String,
+    ) -> Result<Result<Vec<u8>, kio::caps::net::HttpErr>> {
         use kio::caps::net::HttpErr;
-        self.count_call()?;
         let Ok(origin) = self.table.get(&Resource::<Origin>::new_borrow(h.rep())).cloned() else {
             return Ok(Err(HttpErr::Denied));
         };
@@ -552,11 +734,6 @@ impl kio::caps::net::HostHttp for State {
             }
         }
         Ok(Err(HttpErr::Denied))
-    }
-
-    fn drop(&mut self, h: Resource<kio::caps::net::Http>) -> Result<()> {
-        let _ = self.table.delete(Resource::<Origin>::new_own(h.rep()));
-        Ok(())
     }
 }
 
@@ -591,30 +768,45 @@ fn has_crlf(s: &str) -> bool {
 
 impl kio::caps::web::HostIncoming for State {
     fn method(&mut self, r: Resource<kio::caps::web::Incoming>) -> Result<String> {
-        self.count_call()?;
-        Ok(self.request(&r)?.method.clone())
+        self.call(r.rep(), "method", "method", |s| Ok(s.request(&r)?.method.clone()), ok)
     }
 
     fn target(&mut self, r: Resource<kio::caps::web::Incoming>) -> Result<String> {
-        self.count_call()?;
-        Ok(self.request(&r)?.target.clone())
+        self.call(r.rep(), "target", "target", |s| Ok(s.request(&r)?.target.clone()), ok)
     }
 
     fn header_names(&mut self, r: Resource<kio::caps::web::Incoming>) -> Result<Vec<String>> {
-        self.count_call()?;
-        Ok(self.request(&r)?.header_names.clone())
+        self.call(
+            r.rep(),
+            "header_names",
+            "header_names",
+            |s| Ok(s.request(&r)?.header_names.clone()),
+            ok,
+        )
     }
 
     fn header_values(&mut self, r: Resource<kio::caps::web::Incoming>) -> Result<Vec<String>> {
-        self.count_call()?;
-        Ok(self.request(&r)?.header_values.clone())
+        self.call(
+            r.rep(),
+            "header_values",
+            "header_values",
+            |s| Ok(s.request(&r)?.header_values.clone()),
+            ok,
+        )
     }
 
     fn body(&mut self, r: Resource<kio::caps::web::Incoming>) -> Result<Vec<u8>> {
-        self.count_call()?;
-        let body = self.request(&r)?.body.clone();
-        self.spend_io(body.len())?;
-        Ok(body)
+        self.call(
+            r.rep(),
+            "body",
+            "body",
+            |s| {
+                let body = s.request(&r)?.body.clone();
+                s.spend_io(body.len())?;
+                Ok(body)
+            },
+            ok,
+        )
     }
 
     fn drop(&mut self, r: Resource<kio::caps::web::Incoming>) -> Result<()> {
@@ -632,8 +824,31 @@ impl kio::caps::web::HostOutgoing for State {
         header_values: Vec<String>,
         body: Vec<u8>,
     ) -> Result<Result<(), kio::caps::web::WebErr>> {
+        self.call(
+            r.rep(),
+            "send",
+            "send",
+            |s| s.send_response(&r, status, header_names, header_values, body),
+            outcome,
+        )
+    }
+
+    fn drop(&mut self, r: Resource<kio::caps::web::Outgoing>) -> Result<()> {
+        let _ = self.table.delete(Resource::<Sent>::new_own(r.rep()));
+        Ok(())
+    }
+}
+
+impl State {
+    fn send_response(
+        &mut self,
+        r: &Resource<kio::caps::web::Outgoing>,
+        status: u16,
+        header_names: Vec<String>,
+        header_values: Vec<String>,
+        body: Vec<u8>,
+    ) -> Result<Result<(), kio::caps::web::WebErr>> {
         use kio::caps::web::WebErr;
-        self.count_call()?;
         self.spend_io(body.len())?;
         let sent = self.table.get(&Resource::<Sent>::new_borrow(r.rep()))?.clone();
         let mut slot = sent.lock().unwrap_or_else(PoisonError::into_inner);
@@ -650,11 +865,6 @@ impl kio::caps::web::HostOutgoing for State {
         let headers = header_names.into_iter().zip(header_values).collect();
         *slot = Some(Response { status, headers, body });
         Ok(Ok(()))
-    }
-
-    fn drop(&mut self, r: Resource<kio::caps::web::Outgoing>) -> Result<()> {
-        let _ = self.table.delete(Resource::<Sent>::new_own(r.rep()));
-        Ok(())
     }
 }
 
@@ -686,6 +896,9 @@ impl Default for Limits {
     }
 }
 
+/// `(name, path)` of each `Dir` grant, for the audit header.
+pub type DirPaths = Vec<(String, String)>;
+
 /// A fresh instance of the embedded guest, for one run: fuel, deadline, call and I/O counters
 /// are not reset, so make a new `Kio` per run.
 pub struct Kio {
@@ -693,6 +906,11 @@ pub struct Kio {
     guest: Guest,
     stop: Arc<AtomicBool>,
     limits: Limits,
+    /// The audit log and the `(name, path)` of each `Dir` grant, until a run starts.
+    audit: Option<(Box<dyn Write + Send>, DirPaths)>,
+    /// Test only: a `(parameter, method)` pair to leave out of the authority report.
+    #[cfg(feature = "test-hooks")]
+    hidden: Option<(String, String)>,
 }
 
 impl Drop for Kio {
@@ -741,7 +959,23 @@ impl Kio {
             guest,
             stop,
             limits,
+            audit: None,
+            #[cfg(feature = "test-hooks")]
+            hidden: None,
         })
+    }
+
+    /// Write the audit log (H8) of the next run to `out`: a header, one line per host call, a
+    /// trailer. `dir_paths` gives the `(name, path)` of each `Dir` grant for the header, since a
+    /// handle does not know its path. Sizes only, never contents.
+    pub fn audit(&mut self, out: impl Write + Send + 'static, dir_paths: DirPaths) {
+        self.audit = Some((Box::new(out), dir_paths));
+    }
+
+    /// Test only: pretend the authority report lacks `cap.method`, so the call is "unexpected".
+    #[cfg(feature = "test-hooks")]
+    pub fn hide_from_report(&mut self, cap: &str, method: &str) {
+        self.hidden = Some((cap.into(), method.into()));
     }
 
     /// Make every `Dir.create` fail after the file is created, to test the cleanup.
@@ -759,6 +993,9 @@ impl Kio {
                 "out of memory (limit {} MB; raise it with --memory)",
                 l.memory >> 20
             ));
+        }
+        if self.store.data().unexpected {
+            return Some(self.store.data().audit_msg.clone());
         }
         if self.store.data().too_many_calls {
             return Some(format!(
@@ -860,9 +1097,109 @@ impl Kio {
         incomings: Vec<(String, Resource<kio::caps::web::Incoming>)>,
         outgoings: Vec<(String, Resource<kio::caps::web::Outgoing>)>,
     ) -> Result<std::result::Result<Outcome, Vec<Diag>>> {
+        self.arm_report(files);
+        self.start_audit(files, &dirs, &https, &incomings, &outgoings)?;
+        let result = self.run_granted(files, dirs, https, incomings, outgoings);
+        self.end_audit(&result)?;
+        result
+    }
+
+    /// Set the `(parameter, method)` pairs a call may use. The host checks the files itself, so
+    /// they do not come from the guest.
+    fn arm_report(&mut self, files: &[(String, String)]) {
+        let pairs: Vec<(&str, &str)> = files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
+        let report = lang::check_files(&pairs, &lang::CapTable::v0()).map(|p| lang::report(&p));
+        #[cfg_attr(not(feature = "test-hooks"), allow(unused_mut))]
+        let mut allowed = main_calls(report.as_deref().unwrap_or(""));
+        #[cfg(feature = "test-hooks")]
+        if let Some(h) = &self.hidden {
+            allowed.remove(h);
+        }
+        self.store.data_mut().allowed = allowed;
+    }
+
+    /// Write the audit header and arm the per-call log, if `audit` was called.
+    fn start_audit(
+        &mut self,
+        files: &[(String, String)],
+        dirs: &[(String, RealDir)],
+        https: &[(String, Origin)],
+        incomings: &[(String, Resource<kio::caps::web::Incoming>)],
+        outgoings: &[(String, Resource<kio::caps::web::Outgoing>)],
+    ) -> Result<()> {
+        let Some((out, dir_paths)) = self.audit.take() else {
+            return Ok(());
+        };
+        let mut grant_json = Vec::new();
+        let mut grant = |name: &str, kind: &'static str, target: Option<String>| {
+            let t = target.map_or("null".into(), |t| json(&t));
+            grant_json.push(format!(r#"{{"name":{},"kind":"{kind}","target":{t}}}"#, json(name)));
+        };
+        for (name, _) in dirs {
+            let path = dir_paths.iter().find(|(n, _)| n == name).map(|(_, p)| p.clone());
+            grant(name, "Dir", path);
+        }
+        for (name, o) in https {
+            grant(name, "Http", Some(o.target()));
+        }
+        for (name, _) in incomings {
+            grant(name, "Incoming", None);
+        }
+        for (name, _) in outgoings {
+            grant(name, "Outgoing", None);
+        }
+        let l = &self.limits;
+        let mut hasher = std::hash::DefaultHasher::new();
+        files
+            .iter()
+            .for_each(|(_, src)| std::hash::Hash::hash(src, &mut hasher));
+        let header = format!(
+            r#"{{"event":"start","program_hash":"{:016x}","grants":[{}],"limits":{{"fuel":{},"timeout_secs":{},"stack":{},"memory":{},"calls":{},"io":{}}}}}"#,
+            std::hash::Hasher::finish(&hasher),
+            grant_json.join(","),
+            l.fuel,
+            l.timeout_secs,
+            l.stack,
+            l.memory,
+            l.calls,
+            l.io
+        );
+        let mut audit = Audit { out, seq: 0 };
+        audit.line(&header)?;
+        self.store.data_mut().audit = Some(audit);
+        Ok(())
+    }
+
+    /// Write the audit trailer, even when the run stopped.
+    fn end_audit(&mut self, result: &Result<std::result::Result<Outcome, Vec<Diag>>>) -> Result<()> {
+        let fuel_used = self.limits.fuel.saturating_sub(self.store.get_fuel().unwrap_or(0));
+        let d = self.store.data_mut();
+        let Some(a) = d.audit.as_mut() else { return Ok(()) };
+        let outcome = match result {
+            Ok(Ok(o)) if !o.failed => "ok",
+            Ok(Ok(_)) => "failed",
+            _ => "error",
+        };
+        let line = format!(
+            r#"{{"event":"end","outcome":"{outcome}","calls":{},"io":{},"peak_memory":{},"fuel_used":{fuel_used}}}"#,
+            d.calls, d.io, d.peak_memory
+        );
+        a.line(&line)?;
+        Ok(())
+    }
+
+    fn run_granted(
+        &mut self,
+        files: &[(String, String)],
+        dirs: Vec<(String, RealDir)>,
+        https: Vec<(String, Origin)>,
+        incomings: Vec<(String, Resource<kio::caps::web::Incoming>)>,
+        outgoings: Vec<(String, Resource<kio::caps::web::Outgoing>)>,
+    ) -> Result<std::result::Result<Outcome, Vec<Diag>>> {
         let mut grants = Vec::new();
         for (name, dir) in dirs {
             let h = self.store.data_mut().table.push(Granted(dir))?;
+            self.name_handle(h.rep(), &name, "Dir");
             grants.push(DirGrant {
                 name,
                 dir: Resource::new_own(h.rep()),
@@ -871,10 +1208,17 @@ impl Kio {
         let mut http_grants = Vec::new();
         for (name, origin) in https {
             let h = self.store.data_mut().table.push(origin)?;
+            self.name_handle(h.rep(), &name, "Http");
             http_grants.push(HttpGrant {
                 name,
                 http: Resource::new_own(h.rep()),
             });
+        }
+        for (name, r) in &incomings {
+            self.name_handle(r.rep(), name, "Incoming");
+        }
+        for (name, r) in &outgoings {
+            self.name_handle(r.rep(), name, "Outgoing");
         }
         let incomings: Vec<_> = incomings
             .into_iter()
@@ -892,6 +1236,13 @@ impl Kio {
             &incomings,
             &outgoings,
         )
+    }
+}
+
+impl Kio {
+    /// Record which grant a handle is, for the report check and the log.
+    fn name_handle(&mut self, rep: u32, name: &str, kind: &'static str) {
+        self.store.data_mut().handles.insert(rep, (name.to_string(), kind));
     }
 }
 
