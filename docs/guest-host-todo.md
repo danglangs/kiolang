@@ -84,5 +84,12 @@ host/    the kio binary: Wasmtime, cap-std, limits, host functions
   - DNS pinning: resolve the granted host once per run (the first request) through a custom ureq resolver, and use only those addresses for every later request and hop. Refuse addresses in loopback, private, link-local or unspecified ranges unless the grant names an IP literal (so `--http api=127.0.0.1:8080` still works for tests).
   Done: tests with local servers: a redirect to the same origin is followed; to another port or host is `denied`; a sixth redirect is `denied`; a host resolving to a private address is refused; the resolver is called once across two requests.
 
+- [ ] **H8. Audit log.** `kio run --audit path` writes one JSON line per host call, from the single place every call already passes (`count_call`), so no call can skip it. The host writes it; the guest cannot reach it.
+  - Header: program hash, grants, limits. Per call: sequence number, capability name and kind, method, argument (path or URL path), bytes, result, duration. Trailer: outcome, and fuel, memory, calls and I/O used.
+  - Sizes, never contents: no file or response bodies in the log.
+  - Each entry is written before the host function returns, so a crash leaves a complete record up to that call.
+  - A call whose `(capability, method)` is missing from the authority report is logged as `"unexpected": true` and stops the run: the checker was wrong.
+  Done: the primer's log has its header, two calls and a trailer; a denied call and a quota stop are logged with their reason; the same program and inputs give identical logs apart from durations.
+
 - [ ] **M1. MCP tool.** Serves `primer` (language.md) and `check` (the guest export).
   Done: an MCP client gets the primer and structured diagnostics for a bad program.

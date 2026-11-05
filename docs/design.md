@@ -1,5 +1,15 @@
 # Design
 
+## Three layers of assurance
+
+| Layer | Question it answers | Where | Status |
+|---|---|---|---|
+| Static: checker and report | What can this program touch? | `lang` | Done: `main : input read, out create` |
+| Enforced: host and limits | Can it touch anything else? | host, Wasmtime | Done: G1 to G5, fuel and every quota |
+| Recorded: audit log | What did it touch, this run? | host | Planned (H8) |
+
+Each layer holds without the one above it. The host enforces every guarantee even if the checker is wrong; the log records every call even if the program is hostile, because the host writes it. The log also checks the checker: every logged call must appear in the report, so a call the report did not predict is flagged as a checker bug.
+
 ## Components
 
 ```
