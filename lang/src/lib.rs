@@ -2,6 +2,7 @@ pub mod ast;
 mod caps_gen;
 pub mod check;
 pub mod eval;
+pub mod ir;
 pub mod lex;
 pub mod parse;
 pub mod report;

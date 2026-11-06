@@ -23,6 +23,7 @@ source ─► parse ─► check ─► lower (P3) ─► IR ─┬─► interp
 3. **Values:** `Int` and `Bool` as `i64`/`i32`; `()` erased; everything else a pointer to a reference-counted heap object, copied on write (the P2 model, now in the runtime). No cycles exist, so refcounts never leak.
 4. **Runtime errors:** the runtime traps with a code and the span is looked up from a table emitted with the module, so messages match the interpreter's.
 5. **Fuel:** Wasmtime fuel as today; compiled code uses far less fuel per operation, so default limits are re-measured.
+6. **Depth limit (owner decision, before P3c):** today "evaluation nested deeper than 3_000" counts nested expressions, which mirrors the AST node for node and cannot be reproduced by compiled code. Proposed: a call-depth limit, checked at each call with the call's span; nesting within one function is already bounded by the parser. The error message stays "evaluation is too deep"; docs/language.md changes from "nested deeper than 3_000 (about 1_400 recursive calls)" to a call depth.
 
 ## Correctness
 
@@ -37,15 +38,7 @@ Every task from P3c on re-runs the benchmark set and records it in its result li
 
 ## Tasks
 
-- [ ] **P3a. IR types.** New module `lang/src/ir.rs`, types only, no lowering and no evaluation. Shape:
-  - `Module { funcs: Vec<Func>, structs: Vec<StructDef>, enums: Vec<EnumDef>, main: FuncId }`, with `FuncId`, `StructId`, `EnumId` as `u32` newtypes. Names kept only for display and errors (`Func.name`, field and variant names), never for lookup.
-  - `Func { name, params: Vec<Ty>, ret: Ty, locals: Vec<Ty> /* params first */, body: Block, span }`. Locals are `LocalId(u32)` slots; shadowing gets a new slot.
-  - `Expr { kind, ty: Ty, span }` with kinds: `Int`, `Bool`, `Str`, `Unit`, `Local(LocalId)`, `Cap(LocalId)`, `Unary(UnOp, ..)`, `Binary(BinOp, ..)` with `BinOp` an enum (`Add, Sub, Mul, Div, Rem, Lt, Le, Gt, Ge, Eq, Ne, And, Or, Concat`), `If`, `Block`, `Call(FuncId, args)`, `CapCall { cap: LocalId, method: u32 /* index in CapTable */, args }`, `Builtin(BuiltinMethod, recv, args)` with `BuiltinMethod` an enum of every built-in method, `List`, `MapNew`, `StructLit(StructId, fields in declaration order)`, `Field(base, u32)`, `Index`, `Variant(EnumId, u32, payload)`, `Match(scrut, arms)`, `Try(..)`. Places for assignment: `Place { root: LocalId, steps: Vec<PlaceStep> }` with `Field(u32)` / `Index(Expr)`.
-  - `Stmt`: `Let(LocalId, Expr)`, `Assign(Place, AssignOp, Expr)`, `Mutate(Place, BuiltinMethod, args)` for `push`/`insert`/`remove`, `Return`, `While`, `Loop`, `ForList(LocalId, Expr, Block)`, `ForRange(LocalId, Expr, Expr, Block)`, `Break`, `Continue`, `Expr`.
-  - `Pat`: `Wild`, `Bind(LocalId)`, `Int`, `Str`, `Bool`, `Variant(u32, Vec<Option<LocalId>>)`.
-  - `Ty` reuses the checker's `Ty`, with `Struct`/`Enum` holding ids instead of names (or a parallel IR `Ty`; choose the smaller change and say why).
-  - Every type derives `Debug, Clone, PartialEq`. A short module comment explains the invariants: every id is in range, every `Expr.ty` is the checked type, no names are resolved at run time.
-  Done: compiles, `cargo doc` renders it, no lowering yet; reviewed by the owner's agent for shape before P3b (shape-setting code: iterate review).
+- [x] **P3a. IR types.** `lang/src/ir.rs`: a `Module` of functions, structs, enums and capabilities addressed by index; locals as slots with names kept for errors; operators, built-in methods and mutating methods as enums; every expression carrying its type. Reviewed for both consumers (interpreter and Wasm codegen); review fixes applied: mutation is an expression (`rows.push(r)` is a match arm), struct literals keep source order (evaluation order), index places carry the `xs[i]` span, `+=` names its operator so `Str` and `Int` differ, `main`'s parameter names survive for grant errors, capability error enums come first with fixed ids.
 - [ ] **P3b. Lowering.** Checked AST to IR, for the whole language. Tests: IR snapshots for small programs.
 - [ ] **P3c. Interpreter on the IR.** The interpreter runs the IR instead of the AST; all tests pass unchanged; measure (expect 2-5x from slot lookups alone).
 - [ ] **C0. Design review.** The decisions above, a value layout, and the runtime API, written up for the owner. One-way door: wait for approval.
