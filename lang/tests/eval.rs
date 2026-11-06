@@ -847,3 +847,21 @@ fn for_iterates_the_original_list() {
                }";
     assert_eq!(int(src), Value::Int(36));
 }
+
+#[test]
+fn option_result_predicates() {
+    let src = "fn main() -> Int {
+        let a: Option<Int> = Some(1);
+        let b: Option<Int> = None;
+        let c: Result<Int, Str> = Ok(5);
+        let d: Result<Int, Str> = Err(\"e\");
+        let mut n = 0;
+        if a.is_some() { n += 1; }
+        if b.is_none() { n += 10; }
+        if c.is_ok() { n += 100; }
+        if d.is_err() { n += 1000; }
+        if a.is_none() || b.is_some() || c.is_err() || d.is_ok() { n += 10000; }
+        n + c.unwrap_or(7) * 100000 + d.unwrap_or(7) * 1000000
+    }";
+    assert_eq!(int(src), Value::Int(1111 + 500000 + 7000000));
+}

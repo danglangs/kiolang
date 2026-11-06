@@ -796,13 +796,17 @@ fn builtin_method(recv: &Value, name: &str, mut args: Vec<Value>, span: Span) ->
             Ok(s) => Value::Str(s.into()),
             Err(_) => return Err(fail(span, "invalid UTF-8")),
         },
-        (Value::Enum(en, i, payload), "unwrap_or") if en == "Option" => {
-            if builtin("Some") == Some((en.as_str(), *i)) {
+        (Value::Enum(en, i, payload), "unwrap_or") if en == "Option" || en == "Result" => {
+            if builtin("Some") == Some((en.as_str(), *i)) || builtin("Ok") == Some((en.as_str(), *i)) {
                 payload[0].clone()
             } else {
                 args.remove(0)
             }
         }
+        (Value::Enum(en, i, _), "is_some") if en == "Option" => Value::Bool(builtin("Some") == Some((en.as_str(), *i))),
+        (Value::Enum(en, i, _), "is_none") if en == "Option" => Value::Bool(builtin("None") == Some((en.as_str(), *i))),
+        (Value::Enum(en, i, _), "is_ok") if en == "Result" => Value::Bool(builtin("Ok") == Some((en.as_str(), *i))),
+        (Value::Enum(en, i, _), "is_err") if en == "Result" => Value::Bool(builtin("Err") == Some((en.as_str(), *i))),
         _ => unreachable!("checked method"),
     })
 }

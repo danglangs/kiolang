@@ -73,7 +73,8 @@ Everything else is rejected with a message that names the kio alternative, for e
 | `Int` | `to_str() -> Str` |
 | `Str` | `len() -> Int`, `split(Str) -> List<Str>`, `lines() -> List<Str>`, `trim() -> Str`, `contains(Str) -> Bool`, `starts_with(Str) -> Bool`, `parse_int() -> Option<Int>`, `to_bytes() -> Bytes` |
 | `Bytes` | `b[i] -> Int` (0-255), `len() -> Int`, `push(Int)` (0-255), `to_str() -> Str` |
-| `Option<T>` | `unwrap_or(T) -> T` |
+| `Option<T>` | `unwrap_or(T) -> T`, `is_some() -> Bool`, `is_none() -> Bool` |
+| `Result<T, E>` | `unwrap_or(T) -> T`, `is_ok() -> Bool`, `is_err() -> Bool` |
 | `List<T>` | `xs[i]`, `len() -> Int`, `push(T)` |
 | `Map<K, V>` | `Map::new()`, `get(K) -> Option<V>`, `insert(K, V)`, `remove(K)`, `keys() -> List<K>` |
 

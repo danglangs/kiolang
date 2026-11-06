@@ -1238,6 +1238,21 @@ fn bytes_and_option_methods() {
     );
 }
 
+#[test]
+fn option_result_predicates() {
+    ok("fn f(o: Option<Int>, r: Result<Int, Str>) -> Bool { o.is_some() && o.is_none() || r.is_ok() || r.is_err() } fn main() {}");
+    ok("fn f(r: Result<Int, Str>) -> Int { r.unwrap_or(0) } fn main() {}");
+    let (msg, _) = reject("fn f(r: Result<Int, Str>) -> Int { r.unwrap_or(\"x\") } fn main() {}");
+    assert_eq!(msg, "expected Int, found Str");
+    assert_eq!(
+        hint("fn f(r: Result<Int, Str>) -> Int { r.unwrap_or(\"x\") } fn main() {}"),
+        "`Result<Int, Str>.unwrap_or` is declared as `unwrap_or(Int) -> Int`"
+    );
+    // `is_ok` is not an Option method.
+    let h = hint("fn f(o: Option<Int>) -> Bool { o.is_ok() } fn main() {}");
+    assert!(h.contains("is_some") && h.contains("is_none"), "{h}");
+}
+
 /// Lowercase-then-`::` names a module, so type names must start uppercase.
 #[test]
 fn type_names_start_uppercase() {
