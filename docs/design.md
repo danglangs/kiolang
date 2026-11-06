@@ -111,6 +111,16 @@ The checker is part of `lang`, and `lang` is what gets compiled to `wasm32`. Run
 
 The consequence: the host never relies on the checker's verdict for safety. The handle table and host functions enforce every guarantee on their own. The checker exists for early, readable rejection and for the authority report.
 
+## Where state lives
+
+| Lifetime | Where | How a program reaches it |
+|---|---|---|
+| One run or request | guest memory | `let mut`, `List`, `Map`: the language |
+| Across requests, or across messages on one connection | host memory | a capability such as `Kv` over an in-host map |
+| Across restarts | a directory or another service | `Dir` (flat files, a SQLite file), or a network capability |
+
+Only the first is in the language. Every other tier is a capability: named in `main`, granted by the operator, enforced and logged by the host, like any other I/O. A fresh sandbox per request is what makes the second tier necessary; other languages keep it in process globals, which kio does not have.
+
 ## Memory model
 
 Value semantics without a garbage collector or lifetimes. The v0 interpreter clones eagerly and is the reference: later optimizations must not change what a program observes, and the tests that pin copy behavior are what make them safe.

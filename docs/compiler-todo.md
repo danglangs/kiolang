@@ -14,10 +14,11 @@ source ─► parse ─► check ─► lower (P3) ─► IR ─┬─► interp
 - **The interpreter stays** as the reference. Every compiled program must behave exactly as the interpreter: same value, same runtime error and span, same host calls in the same order.
 - **The sandbox is unchanged.** Compiled code calls the same host functions under the same limits (fuel, memory, time). A compiler bug can give a wrong answer, but cannot escape: Wasmtime validates every module, and the host enforces every grant (layer 2).
 - **The checker still decides what runs.** Codegen accepts only checked, lowered programs.
+- **The host checks and compiles; the guest only runs** (owner decision 2026-11-06). The host is already trusted with every grant, so a second check inside the sandbox adds no safety. Today the guest re-checks the source (W13b snapshots that); with the compiler, the sandbox receives compiled code and nothing parses source inside it. This also resolves open_questions #33: no checking within the sandbox's memory or fuel, and no source copied in per request. Layer 1 (static) moves to the host; layers 2 and 3 are unchanged.
 
 ## Decisions, proposed (owner reviews C0)
 
-1. **Where codegen runs:** in the guest, beside the checker, so the code that checks a program is the code that compiles it. The guest returns Wasm bytes; the host compiles them with Cranelift. Alt: codegen in the host (faster startup, but a second copy of the front end outside the sandbox).
+1. **Where codegen runs (decided): in the host**, after the host's check. The host emits the program's Wasm and compiles it with Cranelift. Adversarial source is parsed outside the sandbox, so the front end's depth limits and fuzzing (C6) matter: a parser bug is a host bug. Alt: codegen in the guest, returning Wasm bytes.
 2. **Crates:** `lang` stays dependency-free and gains the IR. A new crate `codegen` depends on `lang` and `wasm-encoder` (Bytecode Alliance). A new crate `runtime` (Rust, `no_std` + `alloc`, built to `wasm32-unknown-unknown`) holds value operations; codegen'd code calls it.
 3. **Values:** `Int` and `Bool` as `i64`/`i32`; `()` erased; everything else a pointer to a reference-counted heap object, copied on write (the P2 model, now in the runtime). No cycles exist, so refcounts never leak.
 4. **Runtime errors:** the runtime traps with a code and the span is looked up from a table emitted with the module, so messages match the interpreter's.
@@ -30,9 +31,21 @@ source ─► parse ─► check ─► lower (P3) ─► IR ─┬─► interp
 - **IR validation:** the interpreter runs the lowered IR (P3c) before any codegen exists, so lowering is proven against all existing tests first.
 - **Adversarial review** of the runtime and codegen (C7), as for every boundary so far.
 
+## Measuring
+
+Every task from P3c on re-runs the benchmark set and records it in its result line: `fib(32)` and the 3 M-iteration loop from docs/roadmap.md, JSON parse of 100 KB, and the serve example's `Server::handle` median. Baseline (2026-11-06, release, interpreter): fib(32) 1.07 s native and 2.6 s in Wasm; loop 0.33 s and 0.85 s; Python 0.4 s and 0.18 s; Rust 0.013 s and 0.003 s. Profile with macOS `sample` on the native interpreter. The baseline profile of fib: most time in per-call name hashing (SipHash on the function name), `rsplit_once` on the name for its module, cloning parameter names into the locals, string compares on lookup and on operators, and allocating argument vectors. P3 removes all of these.
+
 ## Tasks
 
-- [ ] **P3a. IR types.** A typed IR in `lang`: locals as slot indexes, fields and variants as indexes, calls by function index, every expression carrying its type. No evaluation yet.
+- [ ] **P3a. IR types.** New module `lang/src/ir.rs`, types only, no lowering and no evaluation. Shape:
+  - `Module { funcs: Vec<Func>, structs: Vec<StructDef>, enums: Vec<EnumDef>, main: FuncId }`, with `FuncId`, `StructId`, `EnumId` as `u32` newtypes. Names kept only for display and errors (`Func.name`, field and variant names), never for lookup.
+  - `Func { name, params: Vec<Ty>, ret: Ty, locals: Vec<Ty> /* params first */, body: Block, span }`. Locals are `LocalId(u32)` slots; shadowing gets a new slot.
+  - `Expr { kind, ty: Ty, span }` with kinds: `Int`, `Bool`, `Str`, `Unit`, `Local(LocalId)`, `Cap(LocalId)`, `Unary(UnOp, ..)`, `Binary(BinOp, ..)` with `BinOp` an enum (`Add, Sub, Mul, Div, Rem, Lt, Le, Gt, Ge, Eq, Ne, And, Or, Concat`), `If`, `Block`, `Call(FuncId, args)`, `CapCall { cap: LocalId, method: u32 /* index in CapTable */, args }`, `Builtin(BuiltinMethod, recv, args)` with `BuiltinMethod` an enum of every built-in method, `List`, `MapNew`, `StructLit(StructId, fields in declaration order)`, `Field(base, u32)`, `Index`, `Variant(EnumId, u32, payload)`, `Match(scrut, arms)`, `Try(..)`. Places for assignment: `Place { root: LocalId, steps: Vec<PlaceStep> }` with `Field(u32)` / `Index(Expr)`.
+  - `Stmt`: `Let(LocalId, Expr)`, `Assign(Place, AssignOp, Expr)`, `Mutate(Place, BuiltinMethod, args)` for `push`/`insert`/`remove`, `Return`, `While`, `Loop`, `ForList(LocalId, Expr, Block)`, `ForRange(LocalId, Expr, Expr, Block)`, `Break`, `Continue`, `Expr`.
+  - `Pat`: `Wild`, `Bind(LocalId)`, `Int`, `Str`, `Bool`, `Variant(u32, Vec<Option<LocalId>>)`.
+  - `Ty` reuses the checker's `Ty`, with `Struct`/`Enum` holding ids instead of names (or a parallel IR `Ty`; choose the smaller change and say why).
+  - Every type derives `Debug, Clone, PartialEq`. A short module comment explains the invariants: every id is in range, every `Expr.ty` is the checked type, no names are resolved at run time.
+  Done: compiles, `cargo doc` renders it, no lowering yet; reviewed by the owner's agent for shape before P3b (shape-setting code: iterate review).
 - [ ] **P3b. Lowering.** Checked AST to IR, for the whole language. Tests: IR snapshots for small programs.
 - [ ] **P3c. Interpreter on the IR.** The interpreter runs the IR instead of the AST; all tests pass unchanged; measure (expect 2-5x from slot lookups alone).
 - [ ] **C0. Design review.** The decisions above, a value layout, and the runtime API, written up for the owner. One-way door: wait for approval.
