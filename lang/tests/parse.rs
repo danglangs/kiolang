@@ -81,6 +81,7 @@ fn stmt(s: &Stmt) -> String {
         StmtKind::Return(None) => "(return)".into(),
         StmtKind::Return(Some(e)) => format!("(return {})", show(e)),
         StmtKind::While { cond, body } => format!("(while {} {})", show(cond), block(body)),
+        StmtKind::Loop { body } => format!("(loop {})", block(body)),
         StmtKind::For { name, iter, body } => {
             let iter = match iter {
                 Iter::List(e) => show(e),
@@ -286,7 +287,6 @@ fn rejects_reserved_words() {
         "`self` is not supported in kio",
         true,
     );
-    rejected("fn f() { loop {} }", "loop", "`loop` is not supported in kio", true);
 }
 
 #[test]
@@ -664,4 +664,15 @@ fn module_path_errors() {
     rejected("fn f() { web::; }", ";", "expected a name", false);
     rejected("fn f(a: web::) {}", ")", "expected a name", false);
     rejected("fn f() { web::1; }", "1", "expected a name", false);
+}
+
+#[test]
+fn loop_statement() {
+    assert_eq!(body("loop { break; }"), "{(loop {(break)})}");
+    rejected_with(
+        "fn f() { loop { break 1; } }",
+        "1",
+        "`break` with a value",
+        Some("use a `let mut` and `break`"),
+    );
 }

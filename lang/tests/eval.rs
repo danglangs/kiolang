@@ -895,3 +895,23 @@ fn structural_equality() {
     }";
     assert_eq!(int(src), Value::Bool(true));
 }
+
+#[test]
+fn loop_break_continue() {
+    let src = "fn main() -> Int {
+        let mut i = 0;
+        let mut s = 0;
+        loop {
+            i += 1;
+            if i < 3 { continue; }
+            if i == 6 { break; }
+            s += i;
+        }
+        s * 100 + i
+    }";
+    assert_eq!(int(src), Value::Int(12 * 100 + 6));
+    assert_eq!(
+        int("fn f() -> Int { let mut i = 0; loop { i += 1; if i == 4 { return i; } } } fn main() -> Int { f() }"),
+        Value::Int(4)
+    );
+}

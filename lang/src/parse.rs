@@ -357,6 +357,8 @@ impl Parser {
                 self.return_stmt()?
             } else if self.at_kw("while") {
                 self.while_stmt()?
+            } else if self.at_kw("loop") {
+                self.loop_stmt()?
             } else if self.at_kw("for") {
                 self.for_stmt()?
             } else if self.at_kw("break") || self.at_kw("continue") {
@@ -428,6 +430,11 @@ impl Parser {
         Ok(StmtKind::While { cond, body })
     }
 
+    fn loop_stmt(&mut self) -> Result<StmtKind, Diag> {
+        self.pos += 1;
+        Ok(StmtKind::Loop { body: self.block()? })
+    }
+
     fn for_stmt(&mut self) -> Result<StmtKind, Diag> {
         self.pos += 1;
         let name = self.ident()?;
@@ -453,6 +460,10 @@ impl Parser {
             StmtKind::Continue
         };
         self.pos += 1;
+        if matches!(kind, StmtKind::Break) && !self.at(";") && !self.at("}") && self.peek().is_some() {
+            let span = self.span();
+            return Err(err(span, "`break` with a value", Some("use a `let mut` and `break`")));
+        }
         self.expect(";")?;
         Ok(kind)
     }

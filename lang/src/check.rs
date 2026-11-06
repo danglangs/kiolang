@@ -955,7 +955,7 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
             home: Scope { module, mods: &mods },
             scopes: Vec::new(),
             ret: Ty::Unit,
-            loops: 0,
+            loops: Vec::new(),
             main_caps: &main_caps,
         };
         diags.extend(sig_err.or_else(|| c.function(f).err()));
@@ -998,7 +998,8 @@ struct Checker<'a> {
     /// Return type of the function being checked.
     ret: Ty,
     /// Loops enclosing the statement being checked.
-    loops: usize,
+    /// One entry per enclosing loop: whether a `break` has been seen in it.
+    loops: Vec<bool>,
     /// Name and type of each capability parameter of `main`.
     main_caps: &'a [(String, String)],
 }
@@ -1148,11 +1149,18 @@ impl Checker<'_> {
             }
             StmtKind::While { cond, body } => {
                 want_expr(cond, &self.expr(cond, None)?, &Ty::Bool)?;
-                self.loops += 1;
+                self.loops.push(false);
                 let found = self.block(body, None);
-                self.loops -= 1;
+                self.loops.pop();
                 want(body.span, &found?, &Ty::Unit)?;
                 Ok(Ty::Unit)
+            }
+            StmtKind::Loop { body } => {
+                self.loops.push(false);
+                let found = self.block(body, None);
+                let broke = self.loops.pop() == Some(true);
+                want(body.span, &found?, &Ty::Unit)?;
+                Ok(if broke { Ty::Unit } else { Ty::Never })
             }
             StmtKind::For { name, iter, body } => {
                 not_builtin(name, s.span)?;
@@ -1172,15 +1180,15 @@ impl Checker<'_> {
                 };
                 self.scopes
                     .push(HashMap::from([(name.clone(), Local { ty, mutable: false })]));
-                self.loops += 1;
+                self.loops.push(false);
                 let found = self.block(body, None);
-                self.loops -= 1;
+                self.loops.pop();
                 self.scopes.pop();
                 want(body.span, &found?, &Ty::Unit)?;
                 Ok(Ty::Unit)
             }
             StmtKind::Break | StmtKind::Continue => {
-                if self.loops == 0 {
+                if self.loops.is_empty() {
                     let word = if matches!(s.kind, StmtKind::Break) {
                         "break"
                     } else {
@@ -1188,6 +1196,9 @@ impl Checker<'_> {
                     };
                     let hint = "use `return` to leave a function";
                     return Err(err(s.span, format!("`{word}` outside a loop"), Some(hint)));
+                }
+                if matches!(s.kind, StmtKind::Break) {
+                    *self.loops.last_mut().unwrap() = true;
                 }
                 Ok(Ty::Never)
             }

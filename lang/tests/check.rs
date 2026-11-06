@@ -1295,3 +1295,16 @@ fn capabilities_have_no_equality() {
         assert_eq!(d.hint.as_deref(), Some("capabilities have no equality"));
     }
 }
+
+#[test]
+fn loop_types() {
+    ok("fn f() -> Int { loop { return 1; } } fn main() {}");
+    ok("fn main() -> Int { let mut n = 0; loop { n += 1; if n > 2 { break; } } n }");
+    ok("fn main() { let mut n = 0; loop { n += 1; if n < 2 { continue; } break; } }");
+    // A `break` in a nested loop does not end the outer `loop`.
+    ok("fn f() -> Int { loop { while true { break; } return 1; } } fn main() {}");
+    // A `loop` with a `break` can fall through, so a tail is needed.
+    let (msg, _) = reject("fn f() -> Int { loop { break; } } fn main() {}");
+    assert_eq!(msg, "missing return: `f` must return Int");
+    ok("fn f() -> Int { loop { while true { break; } } } fn main() {}");
+}

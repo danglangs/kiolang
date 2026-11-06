@@ -45,7 +45,7 @@ fn main(input: Dir, out: Dir) -> Result<(), IoErr> {
 | Containers | `List<T>`, `Map<K, V>` (key `Int` or `Str`) |
 | Errors | `Option<T>`, `Result<T, E>`, `?` |
 | User types | `struct`, and `enum` with payloads; a type may contain itself only through `List` or `Map` |
-| Control | `if`, `while`, `for x in list`, `for i in 0..n`, `match`, `break`, `continue`, `return` |
+| Control | `if`, `while`, `loop`, `for x in list`, `for i in 0..n`, `match`, `break`, `continue`, `return` |
 | Functions | free functions, recursion |
 | Capabilities | `Dir`, `Http`, generated from `caps.wit` |
 
@@ -54,7 +54,8 @@ Everything else is rejected with a message that names the kio alternative, for e
 ## Semantics
 
 - **Values are copied.** Assignment and argument passing never share state. Only `let mut` locals change: `x = v`, `x += v`, `x -= v`, `x.f = v`, `xs[i] = v`, `m.insert(k, v)`, `xs.push(v)`, `m.remove(k)`. A function changes its caller's data only by returning a new value. `for x in xs` iterates over `xs` as it was when the loop started.
-- **Statements end in `;`**, as in Rust. A block's last expression has no `;` and is the block's value. `if`, `while`, `for` and `match` used as statements need no `;`. `if` chains with `else if`.
+- **`loop { .. }`** repeats until `break`; `continue` and `return` work as in Rust. A `loop` with no `break` never finishes normally, so `fn f() -> Int { loop { return 1; } }` needs no tail. `break` takes no value: use a `let mut` and `break`.
+- **Statements end in `;`**, as in Rust. A block's last expression has no `;` and is the block's value. `if`, `while`, `loop`, `for` and `match` used as statements need no `;`. `if` chains with `else if`.
 - **Types are explicit where they cannot be read off the value.** `[]`, `Map::new()` and `None` need a declared or expected type: `let mut rows: List<Row> = [];`.
 - **Operators.** `+ - * / %` on `Int`, `+` on `Str`, `== !=` on two values of one type, structurally (structs, enums, `Option`, `Result`, `List`, `Map` included; capabilities have no equality), `< <= > >=` on `Int`, `&& || !` on `Bool`. `/` and `%` truncate toward zero, as in Rust.
 - **Runtime errors stop the run:** `Int` overflow, division by zero, an out-of-bounds index, invalid UTF-8 in `to_str`, evaluation nested deeper than 3_000 (about 1_400 recursive calls). Nothing wraps or panics silently.

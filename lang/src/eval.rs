@@ -190,6 +190,10 @@ impl Interp<'_> {
             StmtKind::Assign { target, op, value } => self.assign(target, op, value, s.span),
             StmtKind::Return(value) => self.return_stmt(value.as_ref()),
             StmtKind::While { cond, body } => self.while_stmt(cond, body),
+            StmtKind::Loop { body } => {
+                while self.iteration(body)? {}
+                Ok(())
+            }
             StmtKind::For { name, iter, body } => self.for_stmt(name, iter, body),
             StmtKind::Break => Err(Box::new(Stop::Break)),
             StmtKind::Continue => Err(Box::new(Stop::Continue)),

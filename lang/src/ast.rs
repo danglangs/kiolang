@@ -100,6 +100,9 @@ pub enum StmtKind {
         cond: Expr,
         body: Block,
     },
+    Loop {
+        body: Block,
+    },
     For {
         name: String,
         iter: Iter,
