@@ -70,12 +70,13 @@ fn int_too_large() {
 #[test]
 fn str_literals() {
     assert_eq!(
-        kinds(r#""" "a b" "x\ny\t\"\\" "é""#),
+        kinds(r#""" "a b" "x\ny\t\"\\" "é" "\r\0""#),
         [
             Kind::Str("".into()),
             Kind::Str("a b".into()),
             Kind::Str("x\ny\t\"\\".into()),
             Kind::Str("é".into()),
+            Kind::Str("\r\0".into()),
         ]
     );
 }
@@ -92,7 +93,9 @@ fn bad_escape() {
         }
     );
     assert_eq!(d.msg, "unknown escape `\\q`");
-    assert!(d.hint.is_some());
+    assert_eq!(d.hint.as_deref(), Some("escapes are \\n \\r \\t \\0 \\\" \\\\"));
+    let d = lex(r#""\u{41}""#).unwrap_err();
+    assert_eq!(d.msg, "unknown escape `\\u`");
 }
 
 #[test]

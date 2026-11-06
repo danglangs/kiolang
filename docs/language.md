@@ -59,7 +59,7 @@ Everything else is rejected with a message that names the kio alternative, for e
 - **Operators.** `+ - * / %` on `Int`, `+` on `Str`, `== !=` on scalars, `< <= > >=` on `Int`, `&& || !` on `Bool`. `/` and `%` truncate toward zero, as in Rust.
 - **Runtime errors stop the run:** `Int` overflow, division by zero, an out-of-bounds index, invalid UTF-8 in `to_str`, evaluation nested deeper than 3_000 (about 1_400 recursive calls). Nothing wraps or panics silently.
 - **`match` is exhaustive.** Patterns are one level deep: a variant with bindings, a literal, a name or `_`.
-- **`Str` is UTF-8.** `len()` counts bytes, in constant time.
+- **`Str` is UTF-8.** `len()` counts bytes, in constant time. Literal escapes: `\n \r \t \0 \" \\`.
 - **Deterministic.** No clock or randomness. `Map` iterates in key order.
 - **Comments:** `//` only.
 - **Reserved words.** All Rust keywords not used by kio are reserved and cannot be names.

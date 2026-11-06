@@ -126,6 +126,8 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diag> {
                             match esc {
                                 'n' => text.push('\n'),
                                 't' => text.push('\t'),
+                                'r' => text.push('\r'),
+                                '0' => text.push('\0'),
                                 '"' => text.push('"'),
                                 '\\' => text.push('\\'),
                                 _ => {
@@ -134,7 +136,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diag> {
                                         i - 1 - esc.len_utf8(),
                                         i,
                                         &msg,
-                                        Some("escapes are \\n \\t \\\" \\\\"),
+                                        Some("escapes are \\n \\r \\t \\0 \\\" \\\\"),
                                     ));
                                 }
                             }
