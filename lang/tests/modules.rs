@@ -95,7 +95,7 @@ impl Caps for Stub {
     }
 
     fn call(&mut self, cap: &str, method: &str, args: Vec<Value>) -> Result<Value, String> {
-        let strs = |v: &[&str]| Value::List(v.iter().map(|s| Value::Str((*s).into())).collect());
+        let strs = |v: &[&str]| Value::List(v.iter().map(|s| Value::Str((*s).into())).collect::<Vec<_>>().into());
         let ok = |v| Value::Enum("Result".into(), 0, vec![v]);
         Ok(match (cap, method) {
             ("req", "method") => Value::Str("GET".into()),

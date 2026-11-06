@@ -388,7 +388,7 @@ fn methods() {
 
 #[test]
 fn list_values_and_indexing() {
-    let ints = |ns: &[i64]| Value::List(ns.iter().map(|n| Value::Int(*n)).collect());
+    let ints = |ns: &[i64]| Value::List(ns.iter().map(|n| Value::Int(*n)).collect::<Vec<_>>().into());
     assert_eq!(int("fn main() -> List<Int> { [1, 2 + 1,] }"), ints(&[1, 3]));
     assert_eq!(int("fn main() -> List<Int> { [] }"), ints(&[]));
     assert_eq!(
@@ -430,7 +430,7 @@ fn list_assignment_and_push() {
     assert_eq!(int(src), Value::Int(6 + 10 + 3 + 4 + 2));
     assert_eq!(
         int("fn main() -> List<Int> { let mut xs = [1]; xs.push(2); xs }"),
-        Value::List(vec![Value::Int(1), Value::Int(2)])
+        Value::List(vec![Value::Int(1), Value::Int(2)].into())
     );
 }
 
@@ -511,13 +511,13 @@ fn map_keys_are_sorted() {
                    m.keys()
                }";
     let strs = ["a", "b", "c"].map(|s| Value::Str(s.into()));
-    assert_eq!(int(src), Value::List(strs.to_vec()));
+    assert_eq!(int(src), Value::List(strs.to_vec().into()));
     let src = "fn main() -> List<Int> {
                    let mut m: Map<Int, Str> = Map::new();
                    m.insert(3, \"x\"); m.insert(-1, \"y\"); m.insert(2, \"z\");
                    m.keys()
                }";
-    assert_eq!(int(src), Value::List([-1, 2, 3].map(Value::Int).to_vec()));
+    assert_eq!(int(src), Value::List([-1, 2, 3].map(Value::Int).to_vec().into()));
 }
 
 #[test]
@@ -579,7 +579,7 @@ fn maps_are_copied() {
 }
 
 fn strs(xs: &[&str]) -> Value {
-    Value::List(xs.iter().map(|s| Value::Str((*s).into())).collect())
+    Value::List(xs.iter().map(|s| Value::Str((*s).into())).collect::<Vec<_>>().into())
 }
 
 #[test]
@@ -797,4 +797,53 @@ fn str_argument_changed_in_callee() {
                    a.len() * 10 + b.len()
                }";
     assert_eq!(int(src), Value::Int(12));
+}
+
+#[test]
+fn list_push_and_assign_in_callee() {
+    let src = "fn grow(xs: List<Int>) -> List<Int> {
+                   let mut ys = xs;
+                   ys.push(9);
+                   ys[0] = 5;
+                   ys
+               }
+               fn main() -> Int {
+                   let a = [1, 2];
+                   let b = grow(a);
+                   a.len() * 1000 + a[0] * 100 + b.len() * 10 + b[0]
+               }";
+    assert_eq!(int(src), Value::Int(2000 + 100 + 30 + 5));
+}
+
+#[test]
+fn map_insert_and_remove_in_callee() {
+    let src = "fn change(m: Map<Int, Int>) -> Map<Int, Int> {
+                   let mut n = m;
+                   n.insert(1, 7);
+                   n.insert(2, 8);
+                   n.remove(3);
+                   n
+               }
+               fn main() -> Int {
+                   let mut a: Map<Int, Int> = Map::new();
+                   a.insert(1, 1);
+                   a.insert(3, 3);
+                   let b = change(a);
+                   a.len() * 1000 + a.get(1).unwrap_or(0) * 100 + b.len() * 10 + b.get(1).unwrap_or(0)
+               }";
+    assert_eq!(int(src), Value::Int(2000 + 100 + 20 + 7));
+}
+
+#[test]
+fn for_iterates_the_original_list() {
+    let src = "fn main() -> Int {
+                   let mut xs = [1, 2, 3];
+                   let mut n = 0;
+                   for x in xs {
+                       xs.push(x);
+                       n += 1;
+                   }
+                   n * 10 + xs.len()
+               }";
+    assert_eq!(int(src), Value::Int(36));
 }

@@ -149,7 +149,7 @@ impl lang::Caps for Grants {
 }
 
 fn strs(v: Vec<String>) -> Value {
-    Value::List(v.into_iter().map(|s| Value::Str(s.into())).collect())
+    Value::List(v.into_iter().map(|s| Value::Str(s.into())).collect::<Vec<_>>().into())
 }
 
 fn texts(v: &[Value]) -> Result<Vec<String>, String> {

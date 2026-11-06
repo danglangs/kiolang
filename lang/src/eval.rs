@@ -24,9 +24,9 @@ pub enum Value {
     Str(Rc<str>),
     Bytes(Rc<Vec<u8>>),
     Unit,
-    List(Vec<Value>),
+    List(Rc<Vec<Value>>),
     /// Ordered by key, so `keys()` and iteration are deterministic.
-    Map(BTreeMap<Key, Value>),
+    Map(Rc<BTreeMap<Key, Value>>),
     /// The struct's name and its field values in declaration order.
     Struct(String, Vec<Value>),
     /// The enum's name, the variant's index in declaration order and its payload.
@@ -238,7 +238,39 @@ impl Interp<'_> {
         Ok((name, steps))
     }
 
-    /// The part of local `root` that `steps` lead to.
+    /// The part of local `root` that `steps` lead to, to read without copying a shared list.
+    fn view(&self, root: &str, steps: &[Step]) -> Result<&Value, Box<Stop>> {
+        let mut slot = &self.locals[self.base..]
+            .iter()
+            .rev()
+            .find(|(n, _)| n == root)
+            .expect("checked name")
+            .1;
+        for &step in steps {
+            slot = match (step, slot) {
+                (Step::Field(field), Value::Struct(s, vals)) => &vals[field_index(self.structs, s, field)],
+                (Step::Index(i, span), Value::List(vals)) => match usize::try_from(i).ok().and_then(|i| vals.get(i)) {
+                    Some(v) => v,
+                    None => {
+                        return Err(fail(
+                            span,
+                            &format!("index {i} out of bounds for length {}", vals.len()),
+                        ))
+                    }
+                },
+                (Step::Index(i, span), Value::Bytes(b)) => {
+                    if usize::try_from(i).map_or(true, |i| i >= b.len()) {
+                        return Err(fail(span, &format!("index {i} out of bounds for length {}", b.len())));
+                    }
+                    slot
+                }
+                _ => unreachable!("checked place"),
+            };
+        }
+        Ok(slot)
+    }
+
+    /// Like `view`, to write: a shared list on the way is copied first.
     fn slot(&mut self, root: &str, steps: &[Step]) -> Result<&mut Value, Box<Stop>> {
         let structs = self.structs;
         let mut slot = self.lookup(root);
@@ -246,6 +278,7 @@ impl Interp<'_> {
             slot = match (step, slot) {
                 (Step::Field(field), Value::Struct(s, vals)) => &mut vals[field_index(structs, s, field)],
                 (Step::Index(i, span), Value::List(vals)) => {
+                    let vals = Rc::make_mut(vals);
                     let len = vals.len();
                     match usize::try_from(i).ok().and_then(|i| vals.get_mut(i)) {
                         Some(v) => v,
@@ -310,7 +343,7 @@ impl Interp<'_> {
                 }
                 _ => unreachable!("chain holds fields and indexes"),
             });
-            self.slot(name, &steps)?;
+            self.view(name, &steps)?;
         }
         Ok(Some((name, steps)))
     }
@@ -321,10 +354,10 @@ impl Interp<'_> {
             return Ok(None);
         };
         let (last, parents) = steps.split_last().expect("a field or index has a step");
-        if let (Step::Index(i, _), Value::Bytes(b)) = (*last, self.slot(root, parents)?) {
+        if let (Step::Index(i, _), Value::Bytes(b)) = (*last, self.view(root, parents)?) {
             return Ok(Some(Value::Int(i64::from(b[i as usize]))));
         }
-        Ok(Some(self.slot(root, &steps)?.clone()))
+        Ok(Some(self.view(root, &steps)?.clone()))
     }
 
     #[inline(never)]
@@ -356,7 +389,7 @@ impl Interp<'_> {
                 let Value::List(vals) = self.expr(e)? else {
                     unreachable!("checked list");
                 };
-                Box::new(vals.into_iter())
+                Box::new((0..vals.len()).map(move |i| vals[i].clone()))
             }
             Iter::Range(a, b) => {
                 let (Value::Int(a), Value::Int(b)) = (self.expr(a)?, self.expr(b)?) else {
@@ -434,7 +467,7 @@ impl Interp<'_> {
                 Some(v) => Ok(v),
                 None => self.index(base, index, e.span),
             },
-            ExprKind::List(items) => Ok(Value::List(self.values(items)?)),
+            ExprKind::List(items) => Ok(Value::List(self.values(items)?.into())),
         }
     }
 
@@ -475,7 +508,7 @@ impl Interp<'_> {
             return Err(fail(span, &format!("index {i} out of bounds for length {len}")));
         };
         Ok(match base {
-            Value::List(mut vals) => vals.swap_remove(at),
+            Value::List(vals) => vals[at].clone(),
             Value::Bytes(b) => Value::Int(i64::from(b[at])),
             _ => unreachable!("checked index"),
         })
@@ -493,16 +526,16 @@ impl Interp<'_> {
             let mut args = self.values(args)?.into_iter();
             let (a, b) = (args.next(), args.next());
             match (self.slot(root, &steps)?, name, a, b) {
-                (Value::List(vals), "push", Some(item), _) => vals.push(item),
+                (Value::List(vals), "push", Some(item), _) => Rc::make_mut(vals).push(item),
                 (Value::Bytes(b), "push", Some(Value::Int(n)), _) => match u8::try_from(n) {
                     Ok(n) => Rc::make_mut(b).push(n),
                     Err(_) => return Err(fail(span, &format!("byte {n} out of range 0..=255"))),
                 },
                 (Value::Map(map), "insert", Some(k), Some(v)) => {
-                    map.insert(Key::from_value(k), v);
+                    Rc::make_mut(map).insert(Key::from_value(k), v);
                 }
                 (Value::Map(map), "remove", Some(k), _) => {
-                    map.remove(&Key::from_value(k));
+                    Rc::make_mut(map).remove(&Key::from_value(k));
                 }
                 _ => unreachable!("checked mutation"),
             }
@@ -528,7 +561,7 @@ impl Interp<'_> {
             return builtin_method(&recv, name, vals, span);
         };
         let vals = self.values(args)?;
-        builtin_method(self.slot(root, &steps)?, name, vals, span)
+        builtin_method(self.view(root, &steps)?, name, vals, span)
     }
 
     #[inline(never)]
@@ -619,7 +652,7 @@ impl Interp<'_> {
                 return Ok(constructor(name, vals));
             }
             ExprKind::Name(name) => key(self.module, name),
-            ExprKind::Path(en, _) if en == "Map" => return Ok(Value::Map(BTreeMap::new())),
+            ExprKind::Path(en, _) if en == "Map" => return Ok(Value::Map(Rc::default())),
             ExprKind::Path(en, v) => {
                 let vals = args.iter().map(|a| self.expr(a)).collect::<Result<_, _>>()?;
                 return Ok(self.variant(&self.enum_key(en), v, vals));
@@ -733,9 +766,9 @@ fn builtin_method(recv: &Value, name: &str, mut args: Vec<Value>, span: Span) ->
             if sep.is_empty() {
                 return Err(fail(span, "`split` needs a non-empty separator"));
             }
-            Value::List(s.split(&*sep).map(|p| Value::Str(p.into())).collect())
+            Value::List(s.split(&*sep).map(|p| Value::Str(p.into())).collect::<Vec<_>>().into())
         }
-        (Value::Str(s), "lines") => Value::List(s.lines().map(|l| Value::Str(l.into())).collect()),
+        (Value::Str(s), "lines") => Value::List(s.lines().map(|l| Value::Str(l.into())).collect::<Vec<_>>().into()),
         (Value::Str(s), "trim") => Value::Str(s.trim().into()),
         (Value::Str(s), "contains" | "starts_with") => {
             let Value::Str(arg) = args.remove(0) else {
@@ -753,7 +786,7 @@ fn builtin_method(recv: &Value, name: &str, mut args: Vec<Value>, span: Span) ->
         },
         (Value::List(v), "len") => Value::Int(v.len() as i64),
         (Value::Map(m), "len") => Value::Int(m.len() as i64),
-        (Value::Map(m), "keys") => Value::List(m.keys().map(Key::to_value).collect()),
+        (Value::Map(m), "keys") => Value::List(m.keys().map(Key::to_value).collect::<Vec<_>>().into()),
         (Value::Map(m), "get") => match m.get(&Key::from_value(args.remove(0))) {
             Some(v) => constructor("Some", vec![v.clone()]),
             None => constructor("None", vec![]),
