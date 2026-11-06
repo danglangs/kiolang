@@ -251,7 +251,7 @@ Order: enums and `Result` first, because capability methods return `Result<_, Io
   - [x] **L2d. `loop`.** `loop { .. }` with `break` and `continue`, as Rust; a `loop` with no `break` has type `Never`, so `fn f() -> Int { loop { return 1; } }` checks without a tail. `break` with a value is not in v0 (error with hint "use a `let mut` and `break`"). `loop` is removed from the reserved words.
   Not here: constants (they interact with "no globals"; logged in open_questions for the owner).
 
-- [ ] **P3. Lowering.** Resolve names, field and variant indexes into a typed form before evaluation, as design.md's `Program` describes. Prerequisite for the bytecode VM or a compiler.
+- [ ] **P3. Lowering.** Resolve names, field and variant indexes into a typed form before evaluation, as design.md's `Program` describes. Prerequisite for the compiler; split into P3a-P3c in [compiler-todo.md](compiler-todo.md). Owner decision 2026-11-05: no bytecode VM; P3 leads to a Wasm backend.
 
 ## Later, not in `lang`
 

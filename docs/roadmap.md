@@ -27,7 +27,7 @@ v0 tree-walker ──► P2 copy-on-write ──► P3 lowering ──► byteco
 - **Bytecode VM**: worthwhile only if kio keeps interpreting. Inside Wasm it remains an interpreter in a sandbox, so its ceiling is roughly CPython-to-Lua speed.
 - **Compile to Wasm** is how "near native" is reached. kio has a static type system with no GC, no references and no reflection, so lowering to Wasm functions is direct. Wasmtime's Cranelift then compiles that to native code, typically within 1.5-3x of native Rust. The checker and report stay as they are; the host and its enforcement are unchanged, since compiled code still calls the same host functions. This replaces the guest's interpreter, not the sandbox.
 
-So: P3 is critical, because both the VM and the compiler need it. The recommendation is to skip the bytecode VM and go from P3 to a Wasm backend, unless a profile after P3 shows interpretation is good enough for kio's workloads for a long time.
+So: P3 is critical, because the compiler needs it. Decided 2026-11-05: no bytecode VM; P3 then a Wasm backend ([compiler-todo.md](compiler-todo.md)).
 
 ## What a real app needs that kio lacks
 
