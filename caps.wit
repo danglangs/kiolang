@@ -63,6 +63,9 @@ world guest {
   // Parse and check. Needs no handles.
   export check: func(files: list<file>) -> result<report, list<diag>>;
 
+  // Check `files` and keep the checked program, for a snapshot taken before any request.
+  export init: func(files: list<file>) -> result<_, list<diag>>;
+
   // Check, then run `main` with each grant bound to its parameter by name; a missing or
   // mistyped grant is an error before any code runs.
   export run: func(files: list<file>, dirs: list<dir-grant>, https: list<http-grant>, incomings: list<incoming-grant>, outgoings: list<outgoing-grant>) -> result<outcome, list<diag>>;

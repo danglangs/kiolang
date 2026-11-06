@@ -59,6 +59,8 @@ fn primer_log_has_header_two_calls_and_trailer() {
     let lines = log.lines();
     assert!(!stopped);
     assert_eq!(lines.len(), 4);
+    let hash = lines[0].split(r#""program_hash":""#).nth(1).unwrap();
+    assert_eq!(hash.find('"'), Some(64));
     assert!(lines[0].starts_with(r#"{"event":"start","program_hash":""#));
     assert!(lines[0].contains(
         r#""grants":[{"name":"input","kind":"Dir","target":"/in"},{"name":"out","kind":"Dir","target":"/out"}]"#

@@ -22,6 +22,8 @@ pub mod listen;
 
 /// The guest, compiled to native code by `build.rs` with `config::compile_config`.
 const GUEST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/guest.cwasm"));
+/// The same guest as Wasm, for `Server` to pre-initialize with its program.
+const GUEST_WASM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/guest.wasm"));
 
 /// The most one `Dir.read` returns; a larger file is `too-large`.
 const READ_CAP: u64 = 10 << 20;
@@ -968,6 +970,53 @@ fn load_guest(engine: &Engine) -> Result<Component> {
     unsafe { Component::deserialize(engine, GUEST) }
 }
 
+/// SHA-256 of the program as 64 hex digits; lengths keep file boundaries in the hash.
+pub fn program_hash(files: &[(String, String)]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut sha = Sha256::new();
+    for text in files.iter().flat_map(|(name, source)| [name, source]) {
+        sha.update((text.len() as u64).to_le_bytes());
+        sha.update(text);
+    }
+    sha.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The guest with `files` already checked, from running its `init` export once and snapshotting
+/// the result. Each instance then starts with the checked program in its memory.
+fn checked_guest(engine: &Engine, files: &[(String, String)]) -> Result<Component> {
+    // `init` is called as a WAVE-syntax call: a list of `{name, source}` records.
+    let wave = |s: &str| {
+        let body: String = s
+            .chars()
+            .map(|c| match c {
+                '"' | '\\' => format!("\\{c}"),
+                c if c.is_control() => format!("\\u{{{:x}}}", c as u32),
+                c => c.to_string(),
+            })
+            .collect();
+        format!("\"{body}\"")
+    };
+    let list: Vec<String> = files
+        .iter()
+        .map(|(n, s)| format!("{{name: {}, source: {}}}", wave(n), wave(s)))
+        .collect();
+    let mut wizer = wasmtime_wizer::Wizer::new();
+    wizer.init_func(format!("init([{}])", list.join(", ")));
+    // The generated bindings still look up `init`.
+    wizer.keep_init_func(true);
+    let (mut store, linker) = (new_store(engine, &Limits::default())?, guest_linker(engine)?);
+    let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+    let (wasm, rets) = runtime.block_on(wizer.run_component(&mut store, GUEST_WASM, async |s, c| {
+        linker.instantiate_async(s, c).await
+    }))?;
+    if matches!(rets.first(), Some(wasmtime::component::Val::Result(Err(_)))) {
+        wasmtime::bail!("the guest refused a program the host had checked");
+    }
+    let native = engine.precompile_component(&wasm)?;
+    // SAFETY: `native` was just produced by this engine from the guest and a program checked above.
+    unsafe { Component::deserialize(engine, &native) }
+}
+
 fn guest_linker(engine: &Engine) -> Result<Linker<State>> {
     let mut linker = Linker::new(engine);
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
@@ -1238,13 +1287,9 @@ impl Kio {
             grant(name, "Outgoing", None);
         }
         let l = &self.limits;
-        let mut hasher = std::hash::DefaultHasher::new();
-        files
-            .iter()
-            .for_each(|(_, src)| std::hash::Hash::hash(src, &mut hasher));
         let header = format!(
-            r#"{{"event":"start","program_hash":"{:016x}","grants":[{}],"limits":{{"fuel":{},"timeout_secs":{},"stack":{},"memory":{},"calls":{},"io":{}}}}}"#,
-            std::hash::Hasher::finish(&hasher),
+            r#"{{"event":"start","program_hash":"{}","grants":[{}],"limits":{{"fuel":{},"timeout_secs":{},"stack":{},"memory":{},"calls":{},"io":{}}}}}"#,
+            program_hash(files),
             grant_json.join(","),
             l.fuel,
             l.timeout_secs,
@@ -1402,8 +1447,9 @@ impl Server {
         config.max_wasm_stack(limits.stack);
         config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
         let engine = Engine::new(&config)?;
+        let component = checked_guest(&engine, &files)?;
         let stop = spawn_ticker(&engine);
-        let pre = guest_linker(&engine)?.instantiate_pre(&load_guest(&engine)?)?;
+        let pre = guest_linker(&engine)?.instantiate_pre(&component)?;
         Ok(Ok(Server {
             engine,
             pre,
@@ -1413,6 +1459,11 @@ impl Server {
             limits,
             stop,
         }))
+    }
+
+    /// The program's files, root first.
+    pub fn files(&self) -> &[(String, String)] {
+        &self.files
     }
 
     /// The authority report, as `kio check` prints it.

@@ -91,7 +91,11 @@ pub fn serve_with(
             .await
             .map_err(|e| format!("--listen {addr}: {e}"))?;
         let local = listener.local_addr().map_err(|e| e.to_string())?;
-        eprintln!("{}\nlistening on http://{local}", server.report());
+        eprintln!(
+            "{}\nprogram sha256:{}\nlistening on http://{local}",
+            server.report(),
+            crate::program_hash(server.files())
+        );
         bound(local);
         let ctx = Arc::new(Ctx {
             server,

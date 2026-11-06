@@ -71,3 +71,42 @@ fn type_error_returns_the_diags() {
     };
     assert!(!diags.is_empty());
 }
+
+/// Fuel is deterministic: this much covers a request that only runs the program (about 2 M on the
+/// serve example) but not a one-shot run, which checks it too (over 3 M).
+#[test]
+fn a_request_does_not_recheck() {
+    let read = |p: &str| std::fs::read_to_string(format!("../examples/serve/{p}")).unwrap();
+    let files = vec![
+        ("app.kio".to_string(), read("app.kio")),
+        ("web.kio".to_string(), read("web.kio")),
+    ];
+    let limits = Limits {
+        fuel: 2_500_000,
+        ..Limits::web()
+    };
+    let public = tempfile::tempdir().unwrap();
+    let dirs = vec![("public".to_string(), open_dir(public.path()).unwrap())];
+    let server = Server::new(files.clone(), limits).unwrap().unwrap();
+    assert_eq!(server.handle(get("/hello/kio"), dirs).unwrap().status, 200);
+    let mut kio = kio_host::Kio::new(limits).unwrap();
+    assert!(
+        kio.run_files(&files, vec![], vec![]).is_err(),
+        "one-shot run checks too, so runs out"
+    );
+}
+
+#[test]
+fn program_hash_is_sha256_of_names_and_sources() {
+    let f = |n: &str, s: &str| (n.to_string(), s.to_string());
+    let h = kio_host::program_hash(&[f("a", "x"), f("b", "y")]);
+    assert_eq!(h.len(), 64);
+    assert!(h.bytes().all(|b| b.is_ascii_hexdigit()));
+    assert_eq!(h, kio_host::program_hash(&[f("a", "x"), f("b", "y")]));
+    assert_ne!(h, kio_host::program_hash(&[f("a", "x"), f("b", "z")]));
+    assert_ne!(
+        h,
+        kio_host::program_hash(&[f("a", "xb"), f("", "y")]),
+        "file boundaries count"
+    );
+}

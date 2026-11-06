@@ -68,7 +68,7 @@ $ curl http://127.0.0.1:8080/hello/kio
 - `--audit log.jsonl` records every host call: capability, method, path, bytes and result. A call the report did not predict stops the run as a checker bug.
 - Every run is bounded: `--fuel`, `--timeout`, `--memory`, `--stack`, `--calls`, `--io`. Each limit's error names the flag that raises it.
 - Errors teach: `did you mean count?`, `declare it with let mut`.
-- Performance: about 5,900 requests/s with a fresh sandbox per request ([docs/perf.md](docs/perf.md)).
+- Performance: about 24,000 requests/s with keep-alive, 6,200 without, with a fresh sandbox per request ([docs/perf.md](docs/perf.md)).
 - The language: [docs/language.md](docs/language.md). A web framework in kio: [kio-web](https://github.com/danglangs/kio-web).
 - A guided demo: `docs/hack/demo.sh` walks through the report, a rejected helper, a refused escape and a fuel stop.
 - From source: `cargo test` runs every suite; `cargo run -p kio -- run file.kio` runs without installing.
@@ -149,7 +149,7 @@ Steps:
 4. Done: guest built for `wasm32`, running in Wasmtime with limits (G5).
 5. Done: adversarial reviews of the capability rules and the host (path escapes, forged handles, runaway loops, blocked calls). `Http` refuses other hosts, off-origin redirects and private addresses.
 6. Done: an audit log of every host call, and `kio mcp`, which serves the primer and `check` to agents.
-7. Done: `kio run --listen`, one fresh sandbox per request (about 0.5 ms each), with slow-client limits, and [kio-web](https://github.com/danglangs/kio-web), a web framework written in kio ([docs/web-support-todo.md](docs/web-support-todo.md)).
+7. Done: `kio run --listen`, one fresh sandbox per request (about 0.2 ms each), with slow-client limits, and [kio-web](https://github.com/danglangs/kio-web), a web framework written in kio ([docs/web-support-todo.md](docs/web-support-todo.md)).
 8. Later: copy-on-write values and a lowering step, then attenuation and a compiler to Wasm.
 
 v0 has no closures, globals, reflection or `unsafe`. Capabilities are parameters only. See [docs/language.md](docs/language.md).

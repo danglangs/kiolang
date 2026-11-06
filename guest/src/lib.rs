@@ -6,8 +6,14 @@ use kio::caps::fs::IoErr;
 use kio::caps::net::HttpErr;
 use kio::caps::web::WebErr;
 use lang::{CapTable, Value};
+use std::cell::RefCell;
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
+
+thread_local! {
+    /// The files `init` checked and their program, until a `run` on the same files takes it.
+    static CHECKED: RefCell<Option<(Vec<File>, lang::Program)>> = const { RefCell::new(None) };
+}
 
 struct Component;
 
@@ -18,6 +24,12 @@ impl Guest for Component {
         })
     }
 
+    fn init(files: Vec<File>) -> Result<(), Vec<Diag>> {
+        let program = check_files(&files)?;
+        CHECKED.set(Some((files, program)));
+        Ok(())
+    }
+
     fn run(
         files: Vec<File>,
         dirs: Vec<DirGrant>,
@@ -25,7 +37,10 @@ impl Guest for Component {
         incomings: Vec<IncomingGrant>,
         outgoings: Vec<OutgoingGrant>,
     ) -> Result<Outcome, Vec<Diag>> {
-        let program = check_files(&files)?;
+        let program = match CHECKED.take() {
+            Some((checked, program)) if same_files(&checked, &files) => program,
+            _ => check_files(&files)?,
+        };
         let mut grants = Grants(BTreeMap::new());
         let mut errs = Vec::new();
         let names: Vec<String> = program.main_params().into_iter().map(|(n, _)| n).collect();
@@ -207,6 +222,10 @@ fn diag(d: lang::Diag) -> Diag {
         hint: d.hint,
         file: d.span.file,
     }
+}
+
+fn same_files(a: &[File], b: &[File]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.name == y.name && x.source == y.source)
 }
 
 fn check_files(files: &[File]) -> Result<lang::Program, Vec<Diag>> {

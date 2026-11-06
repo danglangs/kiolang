@@ -21,5 +21,8 @@ fn main() {
     let wasm = std::fs::read(root.join("target/guest/wasm32-wasip2/release/guest.wasm")).unwrap();
     let engine = wasmtime::Engine::new(&config::compile_config()).unwrap();
     let native = engine.precompile_component(&wasm).unwrap();
-    std::fs::write(PathBuf::from(env::var("OUT_DIR").unwrap()).join("guest.cwasm"), native).unwrap();
+    let out = PathBuf::from(env::var("OUT_DIR").unwrap());
+    std::fs::write(out.join("guest.cwasm"), native).unwrap();
+    // `Server` pre-initializes the guest for its program, which needs the Wasm itself.
+    std::fs::write(out.join("guest.wasm"), wasm).unwrap();
 }
