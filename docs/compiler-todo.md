@@ -60,7 +60,7 @@ Every task from P3c on re-runs the benchmark set and records it in its result li
   | serve `Server::handle` median (3,000 requests) | 164 µs | 164 µs |
 
   Profile of native fib after (`sample`, top of stack): `Interp::expr` 37%, `binary` 21%, `Value` drop 18%, `call` 6%, `block` 6%, `Value::clone` 6%, `Vec::resize` (the frame) 3%, `returned` 2%. Left: each read clones a `Value` and drops it after; `Stop` is boxed per `return`. `Server::handle` is unchanged because instantiation dominates it.
-- [ ] **C0. Design review.** The decisions above, a value layout, and the runtime API, written up for the owner. One-way door: wait for approval.
+- [ ] **C0. Design review.** [codegen.md](codegen.md): one core module (runtime plus program), a `compiled` world with a `trap` import, value layout with type descriptors, ownership rules, error sites, testing. Revised after an adversarial review (8 must-fix: owned temporaries, early-exit leaks, double frees, descriptors instead of a scalar/pointer kind, iterative free, dynamic error messages and Wasm `rem_s`, the WIT world, linking). Waiting on the owner: decides 1-3.
 - [ ] **C1. Runtime.** Allocator, refcounts, `Str`, `Bytes`, `List`, `Map` operations; unit-tested natively and on wasm32.
 - [ ] **C2. Codegen: Int, Bool, control flow, functions.** `fib` and `loop` compile and match the interpreter; differential test harness lands here.
 - [ ] **C3. Codegen: Str, Bytes, List, Map, structs, enums, `match`.**
