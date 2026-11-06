@@ -244,6 +244,13 @@ Order: enums and `Result` first, because capability methods return `Result<_, Io
     Result: `Value::Str(Rc<str>)`, `Value::Bytes(Rc<Vec<u8>>)`. Parse of 10 KB: 0.13 s to 0.08 s, fuel 1e9 to 0.55e9; 100 KB: 1.7 s to 0.58 s, fuel 64e9 to 5.5e9 (linear now). `fib` and `loop` unchanged.
   - [x] **P2b. `List` and `Map`.** The same for `Value::List(Rc<Vec<Value>>)` and `Value::Map(Rc<BTreeMap<..>>)`, including `xs[i] = v` and `m.insert` copying first when shared. After P2a, measured again. Result: passing a 10,000-element `List` to a helper went from 100 us to 2 us per call (2.0 s to 0.05 s for 20,000 calls); JSON parse, fib and loop unchanged. Reads use `view`, so only writes copy a shared list.
 
+- [ ] **L2. Small gaps found by json.kio (W12).** Each only accepts more programs; no change to existing ones. One commit each, with tests and docs/language.md updated.
+  - [ ] **L2a. String escapes** `\r` and `\0`, as Rust. `\u{..}` stays unknown, with a hint naming the two new escapes plus `\n \t \" \\`.
+  - [ ] **L2b. `Option` and `Result` methods.** `is_some()`, `is_none()` on `Option`; `is_ok()`, `is_err()`, `unwrap_or(T)` on `Result`. Built-ins as `unwrap_or` is today (check.rs `builtin`, eval.rs `builtin_method`).
+  - [ ] **L2c. `==` and `!=` on structs, enums, `Option`, `Result`, `List` and `Map`**, when both sides have the same type and that type contains no capability anywhere (a struct field, payload or element). Structural, as the derived `PartialEq` on `Value`. Capability types stay rejected, so a program cannot compare grants. Error for a capability: "cannot compare `Dir` values" with hint "capabilities have no equality".
+  - [ ] **L2d. `loop`.** `loop { .. }` with `break` and `continue`, as Rust; a `loop` with no `break` has type `Never`, so `fn f() -> Int { loop { return 1; } }` checks without a tail. `break` with a value is not in v0 (error with hint "use a `let mut` and `break`"). `loop` is removed from the reserved words.
+  Not here: constants (they interact with "no globals"; logged in open_questions for the owner).
+
 - [ ] **P3. Lowering.** Resolve names, field and variant indexes into a typed form before evaluation, as design.md's `Program` describes. Prerequisite for the bytecode VM or a compiler.
 
 ## Later, not in `lang`
