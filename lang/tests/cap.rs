@@ -22,25 +22,25 @@ impl Caps for StubDir {
         let Value::Str(path) = args[0].clone() else {
             return Err("path must be Str".to_string());
         };
-        self.calls.push((cap.to_string(), method.to_string(), path.clone()));
-        if path == "boom" {
+        self.calls.push((cap.to_string(), method.to_string(), path.to_string()));
+        if &*path == "boom" {
             return Err("disk on fire".to_string());
         }
-        if path == "liar" {
+        if &*path == "liar" {
             return Ok(Value::Int(7));
         }
-        if path == "wrong-payload" {
+        if &*path == "wrong-payload" {
             return Ok(Value::Enum("Result".into(), 0, vec![Value::Int(5)]));
         }
         let files = self.files.get_mut(cap).ok_or("not granted")?;
         let variant = |en: &str, i, payload| Value::Enum(en.to_string(), i, payload);
         Ok(match (method, args.get(1)) {
-            ("read", None) => match files.get(&path) {
-                Some(b) => variant("Result", 0, vec![Value::Bytes(b.clone())]),
+            ("read", None) => match files.get(&*path) {
+                Some(b) => variant("Result", 0, vec![Value::Bytes(b.clone().into())]),
                 None => variant("Result", 1, vec![variant("IoErr", 0, vec![])]),
             },
             ("create", Some(Value::Bytes(b))) => {
-                files.insert(path, b.clone());
+                files.insert(path.to_string(), b.to_vec());
                 variant("Result", 0, vec![Value::Unit])
             }
             _ => return Err(format!("unsupported call `{method}`")),
@@ -63,11 +63,10 @@ fn calls(cs: &[(&str, &str, &str)]) -> Vec<Call> {
         .collect()
 }
 
-/// Checks `src` and runs it on twice the stack `run` documents for debug builds.
+/// Checks `src` and runs it on a large stack.
 fn exec(src: &str, mut s: StubDir) -> (Result<Value, RunErr>, StubDir) {
     let p = check(src, &common::caps()).unwrap_or_else(|d| panic!("{d:?}"));
-    let t = std::thread::Builder::new().stack_size(16 << 20);
-    t.spawn(move || (run(&p, &mut s), s)).unwrap().join().unwrap()
+    common::big_stack(move || (run(&p, &mut s), s))
 }
 
 const COPY: &str = "

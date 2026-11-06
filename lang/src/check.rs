@@ -59,7 +59,7 @@ impl Program {
     /// (`["a", 1]`, `Point { x: 1 }`, `Shape::Circle(2)`, `Some(3)`), with declared field and variant names.
     pub fn display(&self, v: &Value) -> String {
         match v {
-            Value::Str(s) => s.clone(),
+            Value::Str(s) => s.to_string(),
             _ => self.nested(v),
         }
     }

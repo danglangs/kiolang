@@ -3,6 +3,7 @@ use crate::check::{builtin, key, module_of, Program};
 use crate::Span;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
 
 /// Bounds Rust recursion, and so stack use, for any program.
 const MAX_DEPTH: usize = 3_000;
@@ -20,8 +21,8 @@ pub trait Caps {
 pub enum Value {
     Int(i64),
     Bool(bool),
-    Str(String),
-    Bytes(Vec<u8>),
+    Str(Rc<str>),
+    Bytes(Rc<Vec<u8>>),
     Unit,
     List(Vec<Value>),
     /// Ordered by key, so `keys()` and iteration are deterministic.
@@ -45,7 +46,7 @@ impl Key {
     fn from_value(v: Value) -> Key {
         match v {
             Value::Int(n) => Key::Int(n),
-            Value::Str(s) => Key::Str(s),
+            Value::Str(s) => Key::Str(s.to_string()),
             _ => unreachable!("checked key"),
         }
     }
@@ -53,7 +54,7 @@ impl Key {
     pub(crate) fn to_value(&self) -> Value {
         match self {
             Key::Int(n) => Value::Int(*n),
-            Key::Str(s) => Value::Str(s.clone()),
+            Key::Str(s) => Value::Str(s.as_str().into()),
         }
     }
 }
@@ -494,7 +495,7 @@ impl Interp<'_> {
             match (self.slot(root, &steps)?, name, a, b) {
                 (Value::List(vals), "push", Some(item), _) => vals.push(item),
                 (Value::Bytes(b), "push", Some(Value::Int(n)), _) => match u8::try_from(n) {
-                    Ok(n) => b.push(n),
+                    Ok(n) => Rc::make_mut(b).push(n),
                     Err(_) => return Err(fail(span, &format!("byte {n} out of range 0..=255"))),
                 },
                 (Value::Map(map), "insert", Some(k), Some(v)) => {
@@ -586,7 +587,7 @@ impl Interp<'_> {
         match (&p.kind, v) {
             (PatKind::Wild, _) => true,
             (PatKind::Int(a), Value::Int(b)) => a == b,
-            (PatKind::Str(a), Value::Str(b)) => a == b,
+            (PatKind::Str(a), Value::Str(b)) => **a == **b,
             (PatKind::Bool(a), Value::Bool(b)) => a == b,
             (PatKind::Name(n), _) => {
                 if let Value::Enum(en, i, _) = v {
@@ -702,7 +703,7 @@ fn returned(r: Res) -> Res {
 fn literal(e: &Expr) -> Value {
     match &e.kind {
         ExprKind::Int(n) => Value::Int(*n),
-        ExprKind::Str(s) => Value::Str(s.clone()),
+        ExprKind::Str(s) => Value::Str(s.as_str().into()),
         ExprKind::Bool(b) => Value::Bool(*b),
         _ => Value::Unit,
     }
@@ -722,9 +723,9 @@ fn negate(op: &str, x: Value, span: Span) -> Res {
 /// A built-in method on `recv`, which may be part of a local.
 fn builtin_method(recv: &Value, name: &str, mut args: Vec<Value>, span: Span) -> Res {
     Ok(match (recv, name) {
-        (Value::Int(n), "to_str") => Value::Str(n.to_string()),
+        (Value::Int(n), "to_str") => Value::Str(n.to_string().into()),
         (Value::Str(s), "len") => Value::Int(s.len() as i64),
-        (Value::Str(s), "to_bytes") => Value::Bytes(s.clone().into_bytes()),
+        (Value::Str(s), "to_bytes") => Value::Bytes(Rc::new(s.as_bytes().to_vec())),
         (Value::Str(s), "split") => {
             let Value::Str(sep) = args.remove(0) else {
                 unreachable!("checked argument");
@@ -732,18 +733,18 @@ fn builtin_method(recv: &Value, name: &str, mut args: Vec<Value>, span: Span) ->
             if sep.is_empty() {
                 return Err(fail(span, "`split` needs a non-empty separator"));
             }
-            Value::List(s.split(&sep).map(|p| Value::Str(p.to_string())).collect())
+            Value::List(s.split(&*sep).map(|p| Value::Str(p.into())).collect())
         }
-        (Value::Str(s), "lines") => Value::List(s.lines().map(|l| Value::Str(l.to_string())).collect()),
-        (Value::Str(s), "trim") => Value::Str(s.trim().to_string()),
+        (Value::Str(s), "lines") => Value::List(s.lines().map(|l| Value::Str(l.into())).collect()),
+        (Value::Str(s), "trim") => Value::Str(s.trim().into()),
         (Value::Str(s), "contains" | "starts_with") => {
             let Value::Str(arg) = args.remove(0) else {
                 unreachable!("checked argument");
             };
             Value::Bool(if name == "contains" {
-                s.contains(&arg)
+                s.contains(&*arg)
             } else {
-                s.starts_with(&arg)
+                s.starts_with(&*arg)
             })
         }
         (Value::Str(s), "parse_int") => match s.parse::<i64>() {
@@ -758,8 +759,8 @@ fn builtin_method(recv: &Value, name: &str, mut args: Vec<Value>, span: Span) ->
             None => constructor("None", vec![]),
         },
         (Value::Bytes(b), "len") => Value::Int(b.len() as i64),
-        (Value::Bytes(b), "to_str") => match String::from_utf8(b.clone()) {
-            Ok(s) => Value::Str(s),
+        (Value::Bytes(b), "to_str") => match std::str::from_utf8(b) {
+            Ok(s) => Value::Str(s.into()),
             Err(_) => return Err(fail(span, "invalid UTF-8")),
         },
         (Value::Enum(en, i, payload), "unwrap_or") if en == "Option" => {
@@ -810,7 +811,7 @@ fn binary(op: &str, l: Value, r: Value, span: Span) -> Res {
             "==" => Ok(Value::Bool(a == b)),
             _ => Ok(Value::Bool(a != b)),
         },
-        (Value::Str(a), Value::Str(b)) if op == "+" => Ok(Value::Str(a + &b)),
+        (Value::Str(a), Value::Str(b)) if op == "+" => Ok(Value::Str([&*a, &*b].concat().into())),
         (a, b) => Ok(Value::Bool((a == b) == (op == "=="))),
     }
 }

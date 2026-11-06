@@ -1,3 +1,5 @@
+mod common;
+
 use lang::{check, run, CapTable, Caps, RunErr, Value};
 
 struct NoCaps;
@@ -11,11 +13,9 @@ impl Caps for NoCaps {
     }
 }
 
-/// Runs on twice the stack `run` documents for debug builds, so growth shows up before CI breaks.
 fn exec(src: &str) -> Result<Value, RunErr> {
     let p = check(src, &CapTable::default()).unwrap_or_else(|d| panic!("{d:?}"));
-    let t = std::thread::Builder::new().stack_size(16 << 20);
-    t.spawn(move || run(&p, &mut NoCaps)).unwrap().join().unwrap()
+    common::big_stack(move || run(&p, &mut NoCaps))
 }
 
 fn int(src: &str) -> Value {
@@ -372,7 +372,10 @@ fn methods() {
     let src = "fn main() -> Int { \"h\u{e9}\".len() * 10 + \"h\u{e9}\".to_bytes().len() }";
     assert_eq!(int(src), Value::Int(33));
     assert_eq!(int("fn main() -> Str { (-42).to_str() }"), Value::Str("-42".into()));
-    assert_eq!(int("fn main() -> Bytes { \"a\".to_bytes() }"), Value::Bytes(vec![97]));
+    assert_eq!(
+        int("fn main() -> Bytes { \"a\".to_bytes() }"),
+        Value::Bytes(vec![97].into())
+    );
     assert_eq!(
         int("fn main() -> Bool { \"a\".to_bytes() == \"a\".to_bytes() }"),
         Value::Bool(true)
@@ -507,7 +510,7 @@ fn map_keys_are_sorted() {
                    m.insert(\"b\", 1); m.insert(\"a\", 2); m.insert(\"c\", 3);
                    m.keys()
                }";
-    let strs = ["a", "b", "c"].map(|s| Value::Str(s.to_string()));
+    let strs = ["a", "b", "c"].map(|s| Value::Str(s.into()));
     assert_eq!(int(src), Value::List(strs.to_vec()));
     let src = "fn main() -> List<Int> {
                    let mut m: Map<Int, Str> = Map::new();
@@ -576,7 +579,7 @@ fn maps_are_copied() {
 }
 
 fn strs(xs: &[&str]) -> Value {
-    Value::List(xs.iter().map(|s| Value::Str(s.to_string())).collect())
+    Value::List(xs.iter().map(|s| Value::Str((*s).into())).collect())
 }
 
 #[test]
@@ -658,7 +661,7 @@ const JSON_STR: &str = "fn json_str(s: Str) -> Str {
 #[test]
 fn bytes_json_str() {
     let src = format!("{JSON_STR} fn main() -> Str {{ json_str(\"a\\\"b\\\\c\") }}");
-    assert_eq!(int(&src), Value::Str("\"a\\\"b\\\\c\"".to_string()));
+    assert_eq!(int(&src), Value::Str("\"a\\\"b\\\\c\"".into()));
 }
 
 #[test]
@@ -680,7 +683,7 @@ fn bytes_percent_decode() {
             out.to_str()
         }
         fn main() -> Str { decode(\"%41b%42\") }";
-    assert_eq!(int(src), Value::Str("AbB".to_string()));
+    assert_eq!(int(src), Value::Str("AbB".into()));
 }
 
 #[test]
@@ -715,7 +718,7 @@ fn option_unwrap_or() {
         Value::Int(9)
     );
     let src = "fn main() -> Str { let m: Map<Str, Str> = Map::new(); m.get(\"k\").unwrap_or(\"d\") }";
-    assert_eq!(int(src), Value::Str("d".to_string()));
+    assert_eq!(int(src), Value::Str("d".into()));
 }
 
 const JSON: &str = r#"
@@ -772,4 +775,26 @@ fn recursive_value_displays() {
     let v = run(&p, &mut NoCaps).unwrap();
     let want = r#"Json::Obj({"a": Json::Arr([Json::Num(1), Json::Null, Json::Arr([Json::Bool(true)])]), "b": Json::Str("x")})"#;
     assert_eq!(p.display(&v), want);
+}
+
+#[test]
+fn bytes_argument_changed_in_callee() {
+    let src = "fn grow(b: Bytes) -> Bytes { let mut c = b; c.push(1); c }
+               fn main() -> Int {
+                   let a = \"x\".to_bytes();
+                   let b = grow(a);
+                   a.len() * 10 + b.len()
+               }";
+    assert_eq!(int(src), Value::Int(12));
+}
+
+#[test]
+fn str_argument_changed_in_callee() {
+    let src = "fn grow(s: Str) -> Str { let mut t = s; t += \"y\"; t }
+               fn main() -> Int {
+                   let a = \"x\";
+                   let b = grow(a);
+                   a.len() * 10 + b.len()
+               }";
+    assert_eq!(int(src), Value::Int(12));
 }

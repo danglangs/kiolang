@@ -95,19 +95,19 @@ impl Caps for Stub {
     }
 
     fn call(&mut self, cap: &str, method: &str, args: Vec<Value>) -> Result<Value, String> {
-        let strs = |v: &[&str]| Value::List(v.iter().map(|s| Value::Str(s.to_string())).collect());
+        let strs = |v: &[&str]| Value::List(v.iter().map(|s| Value::Str((*s).into())).collect());
         let ok = |v| Value::Enum("Result".into(), 0, vec![v]);
         Ok(match (cap, method) {
             ("req", "method") => Value::Str("GET".into()),
             ("req", "target") => Value::Str(self.target.into()),
             ("req", "header_names") => strs(&["host"]),
             ("req", "header_values") => strs(&["kio"]),
-            ("req", "body") => Value::Bytes(vec![]),
+            ("req", "body") => Value::Bytes(vec![].into()),
             ("res", "send") => {
                 let (Value::Int(status), Value::Bytes(body)) = (&args[0], &args[3]) else {
                     return Err("bad send".into());
                 };
-                self.sent.push((*status, body.clone()));
+                self.sent.push((*status, body.to_vec()));
                 ok(Value::Unit)
             }
             ("public", "read") => Value::Enum("Result".into(), 1, vec![Value::Enum("IoErr".into(), 0, vec![])]),
@@ -133,12 +133,7 @@ fn fails(files: &[(&str, &str)], msg: &str, hint: &str) {
 fn serve(target: &'static str) -> Vec<(i64, Vec<u8>)> {
     let p = check(&[("app", MAIN), ("web", WEB)]).unwrap_or_else(|d| panic!("{d:?}"));
     let mut stub = Stub { target, sent: vec![] };
-    let t = std::thread::Builder::new().stack_size(16 << 20);
-    let result = t
-        .spawn(move || (run(&p, &mut stub), stub.sent))
-        .unwrap()
-        .join()
-        .unwrap();
+    let result = common::big_stack(move || (run(&p, &mut stub), stub.sent));
     assert!(result.0.is_ok(), "{:?}", result.0);
     result.1
 }

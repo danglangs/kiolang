@@ -111,16 +111,20 @@ impl lang::Caps for Grants {
     fn call(&mut self, cap: &str, method: &str, args: Vec<Value>) -> Result<Value, String> {
         let grant = self.0.get(cap).ok_or_else(|| format!("no grant `{cap}`"))?;
         match (grant, method, args.as_slice()) {
-            (Grant::Dir(d), "read", [Value::Str(path)]) => Ok(result(d.read(path).map(Value::Bytes).map_err(io_err))),
+            (Grant::Dir(d), "read", [Value::Str(path)]) => {
+                Ok(result(d.read(path).map(|b| Value::Bytes(b.into())).map_err(io_err)))
+            }
             (Grant::Dir(d), "create", [Value::Str(path), Value::Bytes(data)]) => {
                 Ok(result(d.create(path, data).map(|()| Value::Unit).map_err(io_err)))
             }
-            (Grant::Http(h), "get", [Value::Str(path)]) => Ok(result(h.get(path).map(Value::Bytes).map_err(http_err))),
-            (Grant::Incoming(i), "method", []) => Ok(Value::Str(i.method())),
-            (Grant::Incoming(i), "target", []) => Ok(Value::Str(i.target())),
+            (Grant::Http(h), "get", [Value::Str(path)]) => {
+                Ok(result(h.get(path).map(|b| Value::Bytes(b.into())).map_err(http_err)))
+            }
+            (Grant::Incoming(i), "method", []) => Ok(Value::Str(i.method().into())),
+            (Grant::Incoming(i), "target", []) => Ok(Value::Str(i.target().into())),
             (Grant::Incoming(i), "header_names", []) => Ok(strs(i.header_names())),
             (Grant::Incoming(i), "header_values", []) => Ok(strs(i.header_values())),
-            (Grant::Incoming(i), "body", []) => Ok(Value::Bytes(i.body())),
+            (Grant::Incoming(i), "body", []) => Ok(Value::Bytes(i.body().into())),
             (
                 Grant::Outgoing(o),
                 "send",
@@ -145,12 +149,12 @@ impl lang::Caps for Grants {
 }
 
 fn strs(v: Vec<String>) -> Value {
-    Value::List(v.into_iter().map(Value::Str).collect())
+    Value::List(v.into_iter().map(|s| Value::Str(s.into())).collect())
 }
 
 fn texts(v: &[Value]) -> Result<Vec<String>, String> {
     let text = |v: &Value| match v {
-        Value::Str(s) => Ok(s.clone()),
+        Value::Str(s) => Ok(s.to_string()),
         _ => Err("expected a list of Str".to_string()),
     };
     v.iter().map(text).collect()
