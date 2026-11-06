@@ -3,16 +3,23 @@ mod mcp;
 use kio_host::{listen, open_dir, Diag, Kio, Limits, Origin, Server};
 
 fn main() {
+    // The host checks and lowers programs natively, recursing as deep as the guest may; run on a
+    // stack well above the largest `--stack`, not the main thread's default.
+    let t = std::thread::Builder::new().stack_size(4 * kio_host::MAX_STACK);
+    std::process::exit(t.spawn(cli).unwrap().join().unwrap());
+}
+
+fn cli() -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
-        ["check", path] => std::process::exit(check(path)),
-        ["mcp"] => std::process::exit(mcp::serve()),
-        ["run", path, ref flags @ ..] => std::process::exit(run(path, flags)),
+        ["check", path] => return check(path),
+        ["mcp"] => return mcp::serve(),
+        ["run", path, ref flags @ ..] => return run(path, flags),
         _ => eprintln!(
             "kio: a capability-typed language; code names what it needs, the operator grants what that is.\n\nusage: kio check <prog.kio>\n       kio mcp\n       kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr]"
         ),
     }
-    std::process::exit(2);
+    2
 }
 
 /// The root file, then `NAME.kio` beside it for each `mod NAME;` line. This is operator input,
@@ -92,6 +99,9 @@ fn run(path: &str, flags: &[&str]) -> i32 {
                     "--memory" => limits.memory = (v as usize).saturating_mul(1 << 20),
                     "--calls" => limits.calls = u32::try_from(v).unwrap_or(u32::MAX),
                     "--io" => limits.io = v.saturating_mul(1 << 20),
+                    _ if v > (kio_host::MAX_STACK >> 10) as u64 => {
+                        return fail(format!("--stack {n}: at most {} KB", kio_host::MAX_STACK >> 10));
+                    }
                     _ => limits.stack = (v as usize).saturating_mul(1 << 10),
                 }
                 continue;

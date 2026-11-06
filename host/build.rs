@@ -4,7 +4,7 @@ use std::{env, path::PathBuf, process::Command};
 mod config;
 
 fn main() {
-    for p in ["../guest", "../lang/src", "../caps.wit", "src/config.rs"] {
+    for p in ["../guest", "../lang/src", "../caps.wit", "src/config.rs", "build.rs"] {
         println!("cargo:rerun-if-changed={p}");
     }
     let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("..");
@@ -13,6 +13,15 @@ fn main() {
         .current_dir(&root)
         .args(["build", "-p", "guest", "--target", "wasm32-wasip2", "--release"])
         .args(["--target-dir", "target/guest"])
+        // The guest's own Rust stack lives in its linear memory and is fixed here, at link time.
+        // Make it at least `MAX_STACK`, so `--stack` (Wasmtime's stack) is always the limit that
+        // trips first and a deep program stops with "stack overflow", never a memory fault.
+        // (The outer cargo sets `CARGO_ENCODED_RUSTFLAGS` for this script, which would override a
+        // target-specific variable, so set it directly. Its separator is 0x1f.)
+        .env(
+            "CARGO_ENCODED_RUSTFLAGS",
+            format!("-C\x1flink-arg=-zstack-size={}", config::MAX_STACK),
+        )
         .status()
         .unwrap()
         .success();

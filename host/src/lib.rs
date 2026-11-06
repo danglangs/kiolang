@@ -18,6 +18,7 @@ use wasmtime_wasi::{HostMonotonicClock, HostWallClock, WasiCtx, WasiCtxView, Was
 wasmtime::component::bindgen!({ world: "guest", path: "../caps.wit", imports: { default: trappable } });
 
 mod config;
+pub use config::MAX_STACK;
 pub mod listen;
 
 /// The guest, compiled to native code by `build.rs` with `config::compile_config`.
@@ -964,6 +965,14 @@ fn spawn_ticker(engine: &Engine) -> Arc<AtomicBool> {
     stop
 }
 
+/// The guest's stack limit. Wasmtime requires the async stack (enabled by wizer, W13b) to be at
+/// least as large, so a `--stack` over its 2 MB default would otherwise be refused.
+fn set_stack(config: &mut wasmtime::Config, bytes: usize) {
+    let bytes = bytes.min(config::MAX_STACK);
+    config.max_wasm_stack(bytes);
+    config.async_stack_size(bytes.max(2 << 20) + (64 << 10));
+}
+
 fn load_guest(engine: &Engine) -> Result<Component> {
     // SAFETY: GUEST is the output of `precompile_component` from our own build script, not
     // untrusted input; Wasmtime still checks it matches this engine's version and settings.
@@ -1090,7 +1099,7 @@ impl Kio {
     /// A guest under `limits`. Running out of stack, fuel or time traps, which the host reports.
     pub fn new(limits: Limits) -> Result<Self> {
         let mut config = config::compile_config();
-        config.max_wasm_stack(limits.stack);
+        set_stack(&mut config, limits.stack);
         let engine = Engine::new(&config)?;
         let stop = spawn_ticker(&engine);
         let component = load_guest(&engine)?;
@@ -1465,7 +1474,7 @@ impl Server {
             .total_stacks(POOL_INSTANCES)
             .max_memory_size(limits.memory);
         let mut config = config::compile_config();
-        config.max_wasm_stack(limits.stack);
+        set_stack(&mut config, limits.stack);
         config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
         let engine = Engine::new(&config)?;
         let component = checked_guest(&engine, &files)?;

@@ -6,3 +6,6 @@ pub fn compile_config() -> wasmtime::Config {
     config.epoch_interruption(true);
     config
 }
+
+/// The largest `--stack`, in bytes; the guest's in-memory stack is linked at this size.
+pub const MAX_STACK: usize = 8 << 20;

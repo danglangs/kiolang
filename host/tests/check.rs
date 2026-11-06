@@ -341,6 +341,29 @@ fn deep_recursion_overflows_a_small_stack() {
     );
 }
 
+/// Raising `--stack` above the 2 MB default lets deeper expressions run (once refused by Wasmtime).
+#[test]
+fn a_larger_stack_runs_deeper() {
+    // The host checks the program first, natively; give that recursion room too.
+    let t = std::thread::Builder::new().stack_size(64 << 20);
+    t.spawn(larger_stack).unwrap().join().unwrap();
+}
+
+fn larger_stack() {
+    let deep = format!(
+        "fn d(n: Int) -> Int {{ if n == 0 {{ 0 }} else {{ {}d(n - 1) }} }} fn main() -> Int {{ d(600) }}",
+        "- ".repeat(58)
+    );
+    let mut small = Kio::new(Limits::default()).unwrap();
+    let err = small.run(&deep, vec![]).unwrap_err();
+    assert!(small.explain(&err).unwrap().starts_with("stack overflow"));
+    let limits = Limits {
+        stack: kio_host::MAX_STACK,
+        ..Limits::default()
+    };
+    Kio::new(limits).unwrap().run(&deep, vec![]).unwrap().unwrap();
+}
+
 /// H4: the call past `--calls` stops the run.
 #[test]
 fn too_many_calls_stops_the_run() {
