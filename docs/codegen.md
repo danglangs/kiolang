@@ -41,8 +41,8 @@ world compiled {
 | `Int` | `i64` | none |
 | `Bool` | `i32` | none |
 | `()` | nothing; 0 in a slot | none |
-| `Str` | `i32` pointer | `[rc u32][len u32][bytes]` |
-| `Bytes` | `i32` pointer | `[rc][len][cap][bytes]`, so `push` amortizes |
+| `Str` | `i32` pointer | `[rc u32][desc u32][len u32][cap u32][bytes]` |
+| `Bytes` | `i32` pointer | as `Str`; `cap` lets `push` amortize |
 | `List<T>` | `i32` pointer | `[rc][desc]` + the runtime's `Vec<u64>` |
 | `Map<K, V>` | `i32` pointer | `[rc][desc]` + the runtime's `BTreeMap` (Int keys, or Str keys ordered by bytes) |
 | struct, enum, `Option`, `Result` | `i32` pointer | `[rc][desc][variant][payload]`, 8-byte slots |

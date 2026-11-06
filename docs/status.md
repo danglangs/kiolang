@@ -8,7 +8,7 @@ The compiler ([compiler-todo.md](compiler-todo.md)): P3a IR, P3b lowering and P3
 
 ## Next
 
-1. C1 runtime (C1a-d), then C2-C4 codegen with differential tests against the interpreter. Design: [codegen.md](codegen.md), approved.
+1. C1 runtime (C1a done: objects and refcounts; C1b-d next), then C2-C4 codegen with differential tests against the interpreter. Design: [codegen.md](codegen.md), approved.
 2. `Dir` gains `list`, `write`, `remove`, `exists` (caps.wit; agreed in principle, pin first). Unblocks the notes app's PUT and DELETE (web W9a report).
 3. `Option::and_then`/`map`; a bare `return` as a match arm; kio-web helpers (`json_value`, `error`, `body_json`), all from the W9a report.
 

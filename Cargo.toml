@@ -1,3 +1,3 @@
 [workspace]
-members = ["lang", "guest", "host", "tools/capgen"]
+members = ["lang", "guest", "host", "runtime", "tools/capgen"]
 resolver = "2"
