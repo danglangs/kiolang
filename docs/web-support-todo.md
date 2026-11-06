@@ -252,6 +252,7 @@ Each changes `caps.wit` or the language. Recommendation first, then the alternat
 - [x] **W13d. Idle memory after W13b.** An idle `kio run --listen` server's RSS went from about 11 MB (2866620) to about 91 MB (c3adf24, W13b), before any request. Find where it goes (macOS `vmmap`/`heap`, or `DHAT`): the wizer run, the in-process `precompile_component`, or the pool. Fix if cheap (for example drop the compile engine and its arenas after `deserialize`, or precompile on a thread that exits), else record the cost in docs/perf.md.
   Done: idle RSS within about 2x of 11 MB, or the cause and its cost recorded; a test or script that prints idle RSS so a regression shows.
   Result: RSS 100 MB to 53 MB (footprint dirty 87 to 43 MB), 11 MB originally: the startup compiles freed ~90 MB that macOS malloc keeps resident; now single-threaded and the wizer run uses an unoptimized engine; startup 0.18 s to 0.61 s. `host/tests/idle_rss.rs` prints it.
+  Interim: the compiler (docs/codegen.md) drops wizer and the second compile, the cause; re-measure idle RSS and startup at C5.
 
 ## Later, driven by kio-web
 
