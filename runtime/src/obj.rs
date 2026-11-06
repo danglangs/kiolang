@@ -50,7 +50,7 @@ pub enum Key {
 pub type List = Vec<u64>;
 pub type Map = BTreeMap<Key, u64>;
 
-const HEADER: usize = 8;
+pub(crate) const HEADER: usize = 8;
 const ENUM_SLOTS: usize = 16;
 pub(crate) const BYTES_DATA: usize = 16;
 const _: () = assert!(HEADER.is_multiple_of(align_of::<List>()) && HEADER.is_multiple_of(align_of::<Map>()));
@@ -306,7 +306,7 @@ unsafe fn ptrs(t: &Table, p: *mut Header, mut f: impl FnMut(*mut Header)) {
 }
 
 /// A struct's or enum variant's first slot offset and slot descriptors.
-unsafe fn record<'t>(t: &Table<'t>, p: *mut Header) -> (usize, &'t [u32]) {
+pub(crate) unsafe fn record<'t>(t: &Table<'t>, p: *mut Header) -> (usize, &'t [u32]) {
     // SAFETY: `p` is live; an enum has its variant at HEADER.
     unsafe {
         match t.desc((*p).desc) {

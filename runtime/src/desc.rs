@@ -8,7 +8,10 @@
 //! Invariants, which codegen establishes and nothing re-checks beyond Rust's bounds checks:
 //! - `descs[0..5]` are `Unit`, `Int`, `Bool`, `Str`, `Bytes`, at the indices below, so the
 //!   runtime can make strings without being told their descriptor.
-//! - Every index and `Slice` is in range of its array; a `Name` is UTF-8.
+//! - Every index and `Slice` is in range of its array; a `Name` is UTF-8; `fields` is as long as `slots`.
+//! - Display names: a struct's or enum's is its module-qualified key (`web::Point`); a variant's
+//!   is bare. The enums named `Option` and `Result` (reserved, so no user type has them) print
+//!   their variants without the enum name.
 //! - Each generic instance has its own descriptor: `Option<Int>` and `Option<Str>` differ,
 //!   because their payload slots do.
 
@@ -37,7 +40,8 @@ pub enum Desc {
         key: u32,
         value: u32,
     },
-    /// A struct: its slots' descriptors, in field order.
+    /// A struct: its slots' descriptors, in field order. Field `i`'s name is
+    /// `Table::fields[slots.start + i]`.
     Record {
         name: Name,
         slots: Slice,
@@ -81,6 +85,8 @@ pub struct Table<'t> {
     pub descs: &'t [Desc],
     /// Descriptor indexes of record and variant slots.
     pub slots: &'t [u32],
+    /// Parallel to `slots`: a record slot's field name; empty for a variant slot.
+    pub fields: &'t [Name],
     pub variants: &'t [Variant],
     pub names: &'t [u8],
 }
@@ -102,6 +108,11 @@ impl<'t> Table<'t> {
     /// Variant `v` of an enum whose variants are `s`.
     pub fn variant(&self, s: Slice, v: u32) -> Variant {
         self.variants[s.start as usize..][..s.len as usize][v as usize]
+    }
+
+    /// The name of field `i` of a record whose slots are `s`.
+    pub fn field_name(&self, s: Slice, i: usize) -> &'t [u8] {
+        self.name(self.fields[s.start as usize + i])
     }
 
     pub fn name(&self, n: Name) -> &'t [u8] {

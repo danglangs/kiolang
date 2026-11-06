@@ -50,7 +50,7 @@ world compiled {
 
 - **Containers are Rust's own** (`alloc` in `no_std`): `Vec` and `BTreeMap` give the interpreter's exact semantics and costs, including key order.
 - **Headers are 8 bytes**, so `i64` slots align.
-- **Type descriptors.** Codegen emits a table: per struct and per (enum, variant), which slots are pointers and their descriptors; a container's element, key and value descriptors; names for display. Objects carry a descriptor index, so `rt_dec`, `rt_unique`, `rt_eq` and display need no type argument.
+- **Type descriptors.** Codegen emits a table: per struct and per (enum, variant), which slots are pointers and their descriptors; a container's element, key and value descriptors; names for display (a struct's or enum's module-qualified key, record field names in a `fields` array parallel to `slots`, bare variant names; `Option` and `Result` print variants alone). Objects carry a descriptor index, so `rt_dec`, `rt_unique`, `rt_eq` and display need no type argument.
 - **Static objects** (string literals, interned per module; payload-free variants like `None`): refcount `u32::MAX`, pinned. `rt_inc`/`rt_dec` skip them; `rt_unique` treats them as shared and copies.
 
 **decide 3: no unboxing in v1.** `Option<Int>` and small structs stay on the heap. Recommend: correctness first; C8 measures.

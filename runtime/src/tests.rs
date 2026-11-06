@@ -37,6 +37,7 @@ const DESCS: [Desc; 10] = [
     },
 ];
 const SLOTS: [u32; 4] = [desc::STR, desc::INT, LIST_INNER, CHAIN];
+const FIELDS: [Name; 4] = [Name { off: 0, len: 0 }; 4];
 const VARIANTS: [Variant; 2] = [
     Variant {
         name: Name { off: 15, len: 3 },
@@ -50,6 +51,7 @@ const VARIANTS: [Variant; 2] = [
 const T: Table = Table {
     descs: &DESCS,
     slots: &SLOTS,
+    fields: &FIELDS,
     variants: &VARIANTS,
     names: b"InnerOuterChainEndLink",
 };

@@ -56,6 +56,7 @@ const DESCS: [Desc; 16] = [
     Desc::List { elem: DEEP },
 ];
 const SLOTS: [u32; 6] = [desc::INT, desc::STR, CHAIN, desc::STR, LIST_INT, LIST_INT];
+const FIELDS: [Name; 6] = [Name { off: 0, len: 0 }; 6];
 const fn variant(start: u32, len: u32) -> Variant {
     Variant {
         name: NAME,
@@ -73,6 +74,7 @@ const VARIANTS: [Variant; 6] = [
 const T: Table = Table {
     descs: &DESCS,
     slots: &SLOTS,
+    fields: &FIELDS,
     variants: &VARIANTS,
     names: b"",
 };

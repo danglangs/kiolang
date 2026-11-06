@@ -22,6 +22,7 @@ const DESCS: [Desc; 7] = [
     },
 ];
 const SLOTS: [u32; 1] = [desc::INT];
+const FIELDS: [Name; 1] = [Name { off: 0, len: 0 }; 1];
 const VARIANTS: [Variant; 2] = [
     Variant {
         name: Name { off: 6, len: 4 },
@@ -35,6 +36,7 @@ const VARIANTS: [Variant; 2] = [
 const T: Table = Table {
     descs: &DESCS,
     slots: &SLOTS,
+    fields: &FIELDS,
     variants: &VARIANTS,
     names: b"OptionNoneSome",
 };

@@ -2,6 +2,7 @@
 //! calls. Design: docs/codegen.md.
 //!
 //! - `desc`: type descriptors, the table codegen emits as data.
+//! - `display`: a value as `kio run` prints it.
 //! - `obj`: object layout, allocation, `inc`, `dec`, `unique`; the safe-to-call Rust layer.
 //! - `abi`: the `extern "C"` functions generated code calls, over `u32` addresses (wasm32 only).
 //!
@@ -17,6 +18,7 @@ extern crate std;
 
 pub mod coll;
 pub mod desc;
+pub mod display;
 pub mod obj;
 pub mod text;
 
@@ -25,6 +27,8 @@ mod abi;
 
 #[cfg(test)]
 mod coll_tests;
+#[cfg(test)]
+mod display_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

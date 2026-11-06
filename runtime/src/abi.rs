@@ -1,7 +1,7 @@
 //! The functions generated code calls. A pointer is a `u32` address in linear memory, 0 for
 //! none; each function keeps `obj`'s contract if its arguments do, which codegen guarantees.
 //!
-//! The descriptor table is data codegen emits: a `RawTable` of four (address, length) pairs,
+//! The descriptor table is data codegen emits: a `RawTable` of five (address, length) pairs,
 //! registered once with `rt_init` before any other call.
 
 use crate::desc::Table;
@@ -14,6 +14,7 @@ use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 pub struct RawTable {
     descs: [u32; 2],
     slots: [u32; 2],
+    fields: [u32; 2],
     variants: [u32; 2],
     names: [u32; 2],
 }
@@ -29,6 +30,7 @@ fn table() -> Table<'static> {
         Table {
             descs: array(raw.descs),
             slots: array(raw.slots),
+            fields: array(raw.fields),
             variants: array(raw.variants),
             names: array(raw.names),
         }
