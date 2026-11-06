@@ -16,7 +16,9 @@ source ─► parse ─► check ─► lower (P3) ─► IR ─┬─► interp
 - **The checker still decides what runs.** Codegen accepts only checked, lowered programs.
 - **The host checks and compiles; the guest only runs** (owner decision 2026-11-06). The host is already trusted with every grant, so a second check inside the sandbox adds no safety. Today the guest re-checks the source (W13b snapshots that); with the compiler, the sandbox receives compiled code and nothing parses source inside it. This also resolves open_questions #33: no checking within the sandbox's memory or fuel, and no source copied in per request. Layer 1 (static) moves to the host; layers 2 and 3 are unchanged.
 
-## Decisions, proposed (owner reviews C0)
+## Decisions
+
+Approved by the owner 2026-11-06: 2 (a Rust runtime library), 3 (values: refcounted, copy on write; not WasmGC) and emitting Wasm directly from the IR with no optimizing IR of our own yet. C0 writes up the value layout and runtime API for review before codegen.
 
 1. **Where codegen runs (decided): in the host**, after the host's check. The host emits the program's Wasm and compiles it with Cranelift. Adversarial source is parsed outside the sandbox, so the front end's depth limits and fuzzing (C6) matter: a parser bug is a host bug. Alt: codegen in the guest, returning Wasm bytes.
 2. **Crates:** `lang` stays dependency-free and gains the IR. A new crate `codegen` depends on `lang` and `wasm-encoder` (Bytecode Alliance). A new crate `runtime` (Rust, `no_std` + `alloc`, built to `wasm32-unknown-unknown`) holds value operations; codegen'd code calls it.

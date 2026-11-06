@@ -249,6 +249,9 @@ Each changes `caps.wit` or the language. Recommendation first, then the alternat
   Done: every finding fixed with a test or logged in open_questions.
   Result: WAVE escaping held for every tricky input (tests in `host/tests/snapshot.rs`); one bug fixed (a guest failure during `init` panicked the host inside Tokio, now a startup error); size limits logged as open question 33.
 
+- [ ] **W13d. Idle memory after W13b.** An idle `kio run --listen` server's RSS went from about 11 MB (2866620) to about 91 MB (c3adf24, W13b), before any request. Find where it goes (macOS `vmmap`/`heap`, or `DHAT`): the wizer run, the in-process `precompile_component`, or the pool. Fix if cheap (for example drop the compile engine and its arenas after `deserialize`, or precompile on a thread that exits), else record the cost in docs/perf.md.
+  Done: idle RSS within about 2x of 11 MB, or the cause and its cost recorded; a test or script that prints idle RSS so a regression shows.
+
 ## Later, driven by kio-web
 
 - **Function values.** Route tables and middleware as wrappers (`with_auth(handler)`). Today middleware is a call at the top of `handle`; timeouts, body limits and logging are host concerns.

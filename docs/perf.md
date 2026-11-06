@@ -10,7 +10,7 @@ Measured 2026-11-05 with ApacheBench on an Apple Silicon Mac, 12 cores, 32 GB, `
 
 With keep-alive (`ab -k`) at concurrency 12: 24,100 req/s, p99 1 ms. So without keep-alive the ceiling is opening a TCP connection per request, not kio.
 
-File serving at concurrency 12 (before W13b): 5,880 req/s, p99 2 ms. Host memory stayed at about 14 MB.
+File serving at concurrency 12 (before W13b): 5,880 req/s, p99 2 ms. Host memory stayed at about 14 MB before W13b; since W13b an idle `--listen` server holds about 91 MB (was 11 MB at 2866620), measured 2026-11-06, cause not yet found (likely the in-process wizer and Cranelift compile at startup leaving memory resident). Tracked as W13d.
 
 Each request gets a fresh sandbox. The program is checked once at startup (W13b): the guest is pre-initialized with the checked program, so `Server::handle` takes a median of 175 µs on the serve example (500 µs when each request re-checked), at the cost of about 150 ms more startup. Throughput levels off at the core count, as expected for synchronous handlers run on a worker pool; extra concurrency only queues.
 
