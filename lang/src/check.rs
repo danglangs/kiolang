@@ -38,7 +38,13 @@ pub struct Program {
     /// Return type of each capability method, keyed by (capability, method), such as (`Dir`, `read`).
     pub(crate) cap_methods: HashMap<(String, String), Ty>,
     /// Resolved payload types of every enum, for checking host values.
-    variants: Variants,
+    pub(crate) variants: Variants,
+    pub(crate) fields: Fields,
+    /// Resolved signature of each function, by key.
+    pub(crate) sigs: HashMap<String, Sig>,
+    /// The type of every expression and assignment target, by its span, which no other
+    /// expression has; and the type of each `let`'s local, by the span of the `let`.
+    pub(crate) types: HashMap<Span, Ty>,
 }
 
 impl Program {
@@ -259,13 +265,13 @@ fn nested_path(span: Span) -> Diag {
 const NO_CAP_SYNTAX: &str = "capabilities come only as parameters of `main`";
 
 /// Resolved field names and types of each struct, in declaration order.
-type Fields = HashMap<String, Vec<(String, Ty)>>;
+pub(crate) type Fields = HashMap<String, Vec<(String, Ty)>>;
 
 /// Resolved variant names and payload types of each enum, in declaration order.
-type Variants = HashMap<String, Vec<(String, Vec<Ty>)>>;
+pub(crate) type Variants = HashMap<String, Vec<(String, Vec<Ty>)>>;
 
-/// An enum's name and its variants with payload types, as `Checker::shape` returns.
-type Shape = (String, Vec<(String, Vec<Ty>)>);
+/// An enum's name and its variants with payload types, as `shape` returns.
+pub(crate) type Shape = (String, Vec<(String, Vec<Ty>)>);
 
 /// How a `match` pattern counts toward exhaustiveness.
 #[derive(PartialEq)]
@@ -276,12 +282,13 @@ enum Cover {
     Lit,
 }
 
-struct Sig {
+#[derive(Debug)]
+pub(crate) struct Sig {
     public: bool,
     /// The declaration as written, like `fn f(a: Int, b: Str)`, for hints.
     decl: String,
-    params: Vec<Ty>,
-    ret: Ty,
+    pub(crate) params: Vec<Ty>,
+    pub(crate) ret: Ty,
 }
 
 struct Local {
@@ -622,9 +629,26 @@ fn enum_variants(
 }
 
 /// The index and payload types of variant `v` among `variants`.
-fn variant<'a>(variants: &'a [(String, Vec<Ty>)], v: &str) -> Option<(usize, &'a [Ty])> {
+pub(crate) fn variant<'a>(variants: &'a [(String, Vec<Ty>)], v: &str) -> Option<(usize, &'a [Ty])> {
     let i = variants.iter().position(|(name, _)| name == v)?;
     Some((i, &variants[i].1))
+}
+
+/// The enum's name and variants that `ty` matches on; empty for other types.
+pub(crate) fn shape(variants: &Variants, ty: &Ty) -> Shape {
+    let some = |t: &Ty| vec![("None".to_string(), vec![]), ("Some".to_string(), vec![t.clone()])];
+    match ty {
+        Ty::Enum(en) => (en.clone(), variants[en].clone()),
+        Ty::Option(t) => ("Option".to_string(), some(t)),
+        Ty::Result(t, e) => {
+            let ok = vec![
+                ("Ok".to_string(), vec![(**t).clone()]),
+                ("Err".to_string(), vec![(**e).clone()]),
+            ];
+            ("Result".to_string(), ok)
+        }
+        _ => (String::new(), Vec::new()),
+    }
 }
 
 /// `None`, `Some`, `Ok` and `Err` always mean the constructors, so no binding may take those names.
@@ -944,6 +968,7 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
         })
         .collect();
 
+    let mut types = HashMap::new();
     for ((module, f), sig_err) in fns.iter().zip(sig_errs) {
         let mut c = Checker {
             caps,
@@ -957,8 +982,10 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
             ret: Ty::Unit,
             loops: Vec::new(),
             main_caps: &main_caps,
+            types: HashMap::new(),
         };
         diags.extend(sig_err.or_else(|| c.function(f).err()));
+        types.extend(c.types);
     }
     if !fns.iter().any(|(m, f)| m.is_empty() && f.name == "main") {
         let hint = "add `fn main() { .. }`";
@@ -975,6 +1002,9 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
         structs,
         enums,
         variants,
+        fields,
+        sigs,
+        types,
         cap_methods: (caps.caps.iter())
             .flat_map(|c| {
                 c.methods
@@ -1002,6 +1032,8 @@ struct Checker<'a> {
     loops: Vec<bool>,
     /// Name and type of each capability parameter of `main`.
     main_caps: &'a [(String, String)],
+    /// As `Program::types`.
+    types: HashMap<Span, Ty>,
 }
 
 impl Checker<'_> {
@@ -1121,6 +1153,7 @@ impl Checker<'_> {
                 } else if found == Ty::Never {
                     found = Ty::Unit;
                 }
+                self.types.insert(s.span, found.clone());
                 let local = Local {
                     ty: found,
                     mutable: *mutable,
@@ -1210,6 +1243,13 @@ impl Checker<'_> {
     }
 
     fn expr(&mut self, e: &Expr, expected: Option<&Ty>) -> Result<Ty, Diag> {
+        let ty = self.expr_kind(e, expected)?;
+        let earlier = self.types.insert(e.span, ty.clone());
+        debug_assert!(earlier.is_none(), "two expressions at {:?}", e.span);
+        Ok(ty)
+    }
+
+    fn expr_kind(&mut self, e: &Expr, expected: Option<&Ty>) -> Result<Ty, Diag> {
         match &e.kind {
             ExprKind::Int(_) => Ok(Ty::Int),
             ExprKind::Str(_) => Ok(Ty::Str),
@@ -1309,7 +1349,9 @@ impl Checker<'_> {
                     ty: ty @ Ty::Cap(_), ..
                 }) = self.lookup(name)
                 {
-                    return Ok(ty.clone());
+                    let ty = ty.clone();
+                    self.types.insert(e.span, ty.clone());
+                    return Ok(ty);
                 }
             }
         }
@@ -1505,23 +1547,6 @@ impl Checker<'_> {
         Ok(Ty::Enum(en.to_string()))
     }
 
-    /// The enum's name and variants that `ty` matches on; empty for other types.
-    fn shape(&self, ty: &Ty) -> Shape {
-        let some = |t: &Ty| vec![("None".to_string(), vec![]), ("Some".to_string(), vec![t.clone()])];
-        match ty {
-            Ty::Enum(en) => (en.clone(), self.variants[en].clone()),
-            Ty::Option(t) => ("Option".to_string(), some(t)),
-            Ty::Result(t, e) => {
-                let ok = vec![
-                    ("Ok".to_string(), vec![(**t).clone()]),
-                    ("Err".to_string(), vec![(**e).clone()]),
-                ];
-                ("Result".to_string(), ok)
-            }
-            _ => (String::new(), Vec::new()),
-        }
-    }
-
     fn match_expr(&mut self, scrut: &Expr, arms: &[Arm], expected: Option<&Ty>) -> Result<Ty, Diag> {
         let st = self.expr(scrut, None)?;
         if !matches!(
@@ -1531,7 +1556,7 @@ impl Checker<'_> {
             let hint = "match works on Int, Bool, Str and enums";
             return Err(err(scrut.span, format!("cannot match on {st}"), Some(hint)));
         }
-        let shape = self.shape(&st);
+        let shape = shape(self.variants, &st);
         let mut ty = Ty::Never;
         let mut covers = Vec::new();
         for arm in arms {
@@ -1690,8 +1715,9 @@ impl Checker<'_> {
     }
 
     /// The type of an assignment target: a `let mut` local followed by fields and indexes.
+    /// Recorded like an expression's.
     fn place(&mut self, target: &Expr) -> Result<Ty, Diag> {
-        match &target.kind {
+        let ty = match &target.kind {
             ExprKind::Name(name) => {
                 let Some(local) = self.lookup(name) else {
                     return Err(self.unknown_name(target.span, name));
@@ -1719,7 +1745,9 @@ impl Checker<'_> {
                 "cannot assign to this expression".to_string(),
                 Some("assign to a `let mut` variable, or a field or index of one"),
             )),
-        }
+        }?;
+        self.types.insert(target.span, ty.clone());
+        Ok(ty)
     }
 
     /// `push`, `insert` and `remove` change their receiver, so it must be a place rooted at a
