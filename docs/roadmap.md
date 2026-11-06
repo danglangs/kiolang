@@ -22,7 +22,7 @@ v0 tree-walker ──► P2 copy-on-write ──► P3 lowering ──► byteco
                                                                            about 1.5-3x of Rust
 ```
 
-- **P2** fixes a correctness-of-cost bug, not a constant factor: passing a large value to a function copies it, so loops over helpers go quadratic (W12's JSON parser). In progress.
+- **P2** (done) fixed a correctness-of-cost bug, not a constant factor: passing a large value to a function copied it, so loops over helpers went quadratic. W12's JSON parser on 100 KB went from 1.7 s to 0.58 s, and passing a 10,000-element list to a helper is about 40x faster.
 - **P3 lowering** turns the checked AST into a resolved form: variables as slot numbers, fields and variants as indexes, calls as function indexes. It is the prerequisite for both the VM and a compiler, and alone it is typically a 2-5x speedup for a tree-walker, since most of today's time is string lookups and clones.
 - **Bytecode VM**: worthwhile only if kio keeps interpreting. Inside Wasm it remains an interpreter in a sandbox, so its ceiling is roughly CPython-to-Lua speed.
 - **Compile to Wasm** is how "near native" is reached. kio has a static type system with no GC, no references and no reflection, so lowering to Wasm functions is direct. Wasmtime's Cranelift then compiles that to native code, typically within 1.5-3x of native Rust. The checker and report stay as they are; the host and its enforcement are unchanged, since compiled code still calls the same host functions. This replaces the guest's interpreter, not the sandbox.
