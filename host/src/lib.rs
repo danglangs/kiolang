@@ -1005,16 +1005,37 @@ fn checked_guest(engine: &Engine, files: &[(String, String)]) -> Result<Componen
     // The generated bindings still look up `init`.
     wizer.keep_init_func(true);
     let (mut store, linker) = (new_store(engine, &Limits::default())?, guest_linker(engine)?);
-    let runtime = tokio::runtime::Builder::new_current_thread().build()?;
-    let (wasm, rets) = runtime.block_on(wizer.run_component(&mut store, GUEST_WASM, async |s, c| {
+    let init = wizer.run_component(&mut store, GUEST_WASM, async |s, c| {
         linker.instantiate_async(s, c).await
-    }))?;
+    });
+    let (wasm, rets) = block_on(init)?;
     if matches!(rets.first(), Some(wasmtime::component::Val::Result(Err(_)))) {
         wasmtime::bail!("the guest refused a program the host had checked");
     }
     let native = engine.precompile_component(&wasm)?;
     // SAFETY: `native` was just produced by this engine from the guest and a program checked above.
     unsafe { Component::deserialize(engine, &native) }
+}
+
+/// Drive `future` to completion on this thread with no Tokio runtime entered: WASI's blocking
+/// stream calls (the guest's panic message on stderr) panic inside one, which would turn a guest
+/// failure during `init` into a host panic.
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    struct Wake(std::thread::Thread);
+    impl std::task::Wake for Wake {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = Arc::new(Wake(std::thread::current())).into();
+    let mut cx = std::task::Context::from_waker(&waker);
+    let mut future = std::pin::pin!(future);
+    loop {
+        if let std::task::Poll::Ready(out) = future.as_mut().poll(&mut cx) {
+            return out;
+        }
+        std::thread::park();
+    }
 }
 
 fn guest_linker(engine: &Engine) -> Result<Linker<State>> {
