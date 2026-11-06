@@ -214,6 +214,9 @@ Each changes `caps.wit` or the language. Recommendation first, then the alternat
   - Done: host tests pass; a test shows a `Server` request does not re-check (for example, a test-hooks counter in the guest, or timing in a release test, whichever is simpler and reliable); `kio run` one-shot unchanged; the audit header hash is 64 hex digits and equal across two runs of the same files and different when a module changes; `Server::handle` median on the serve example re-measured and recorded in docs/perf.md, with an `ab` rerun at concurrency 12.
   Result: `Server::handle` median 175 µs (was 500), startup about 150 ms; `ab -c 12` 6,210 req/s (was 5,960). New dependencies: `wasmtime-wizer` (with `wasm-wave`, `logos`) and `sha2`.
 
+- [ ] **W13c. Adversarial review of W13b.** An independent agent attacks the pre-initialized guest: the hand-written WAVE escaping in `checked_guest` (any source bytes: quotes, backslashes, `\u{..}`, control and non-ASCII characters, `}`/`]`/`,` in names, huge files) must either start the server with exactly those files checked or refuse to start; state left in the snapshot leaking into requests (the stored program, `thread_local`s, allocator state, anything a request could observe or change for the next one); `init` callable by a request; the files-equality fallback; fuel and limits during `init`.
+  Done: every finding fixed with a test or logged in open_questions.
+
 ## Later, driven by kio-web
 
 - **Function values.** Route tables and middleware as wrappers (`with_auth(handler)`). Today middleware is a call at the top of `handle`; timeouts, body limits and logging are host concerns.
