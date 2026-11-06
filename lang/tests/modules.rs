@@ -1,3 +1,4 @@
+use lang::ir::{EnumId, EnumRef};
 use lang::{check_files, report, run, CapTable, Caps, Diag, Value};
 
 mod common;
@@ -96,7 +97,7 @@ impl Caps for Stub {
 
     fn call(&mut self, cap: &str, method: &str, args: Vec<Value>) -> Result<Value, String> {
         let strs = |v: &[&str]| Value::List(v.iter().map(|s| Value::Str((*s).into())).collect::<Vec<_>>().into());
-        let ok = |v| Value::Enum("Result".into(), 0, vec![v]);
+        let ok = |v| Value::Enum(EnumRef::Result, 0, vec![v]);
         Ok(match (cap, method) {
             ("req", "method") => Value::Str("GET".into()),
             ("req", "target") => Value::Str(self.target.into()),
@@ -110,7 +111,11 @@ impl Caps for Stub {
                 self.sent.push((*status, body.to_vec()));
                 ok(Value::Unit)
             }
-            ("public", "read") => Value::Enum("Result".into(), 1, vec![Value::Enum("IoErr".into(), 0, vec![])]),
+            ("public", "read") => Value::Enum(
+                EnumRef::Result,
+                1,
+                vec![Value::Enum(EnumRef::User(EnumId(0)), 0, vec![])],
+            ),
             _ => return Err(format!("unsupported call `{cap}.{method}`")),
         })
     }

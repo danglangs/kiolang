@@ -1,12 +1,15 @@
-use crate::ast::*;
-use crate::check::{builtin, key, module_of, Program};
+use crate::check::Program;
+use crate::ir::*;
 use crate::Span;
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
-/// Bounds Rust recursion, and so stack use, for any program.
-const MAX_DEPTH: usize = 3_000;
+/// Bounds Rust recursion, and so stack use: a call nested deeper stops the run with "evaluation
+/// is too deep". Measured (P3c): a release guest on the default 2 MB `--stack` holds 1_141 calls
+/// recursing through loops, the costliest common shape, and 3_271 plain ones. Deep nesting
+/// within each call can still exhaust the stack first, which traps as "stack overflow".
+const MAX_CALLS: usize = 1_000;
 
 /// What the host grants and does for `main`'s capability parameters.
 pub trait Caps {
@@ -27,10 +30,10 @@ pub enum Value {
     List(Rc<Vec<Value>>),
     /// Ordered by key, so `keys()` and iteration are deterministic.
     Map(Rc<BTreeMap<Key, Value>>),
-    /// The struct's name and its field values in declaration order.
-    Struct(String, Vec<Value>),
-    /// The enum's name, the variant's index in declaration order and its payload.
-    Enum(String, usize, Vec<Value>),
+    /// The struct and its field values in declaration order.
+    Struct(StructId, Vec<Value>),
+    /// The enum, the variant's index in declaration order and its payload.
+    Enum(EnumRef, usize, Vec<Value>),
     /// A capability, named by the `main` parameter it came from.
     Cap(String),
 }
@@ -82,41 +85,38 @@ fn fail(span: Span, msg: &str) -> Box<Stop> {
     }))
 }
 
-/// One step from a local to a part of it, with indexes already evaluated.
-#[derive(Clone, Copy)]
-enum Step<'a> {
-    Field(&'a str),
-    /// The index and the span of the expression that indexes.
-    Index(i64, Span),
+fn out_of_bounds(span: Span, i: i64, len: usize) -> Box<Stop> {
+    fail(span, &format!("index {i} out of bounds for length {len}"))
 }
 
-/// Evaluates `main`. Recursion is capped at `MAX_DEPTH` nested expressions, which needs
-/// up to 8 MB of stack in debug builds and 3 MB in release. Callers provide that stack.
+/// Evaluates `main`. Calls nest at most `MAX_CALLS` deep, which natively needs up to about 2 MB
+/// of stack in release builds and 9 MB in debug ones, more with deep nesting in each call.
+/// Callers provide that stack.
 pub fn run(p: &Program, caps: &mut dyn Caps) -> Result<Value, RunErr> {
-    let main = &p.funcs["main"];
-    let mut locals = Vec::new();
-    for param in &main.params {
-        let TypeKind::Named(ty, _) = &param.ty.kind else {
+    let m = &p.ir;
+    let main = &m.funcs[m.main.0 as usize];
+    let mut stack = Vec::new();
+    for param in &main.locals[..main.params as usize] {
+        let Ty::Cap(c) = param.ty else {
             unreachable!("checked parameter");
         };
+        let ty = &m.caps[c.0 as usize].name;
         if !caps.has(&param.name, ty) {
             return Err(RunErr {
                 span: param.span,
                 msg: format!("no grant for `{}: {ty}`", param.name),
             });
         }
-        locals.push((param.name.clone(), Value::Cap(param.name.clone())));
+        stack.push(Value::Cap(param.name.clone()));
     }
+    stack.resize(main.locals.len(), Value::Unit);
     let mut it = Interp {
-        program: p,
-        funcs: &p.funcs,
-        structs: &p.structs,
-        enums: &p.enums,
+        m,
         caps,
-        module: "",
-        locals,
+        stack,
         base: 0,
-        depth: 0,
+        calls: 0,
+        path: Vec::new(),
     };
     match returned(it.block(&main.body)) {
         Ok(v) => Ok(v),
@@ -128,86 +128,72 @@ pub fn run(p: &Program, caps: &mut dyn Caps) -> Result<Value, RunErr> {
 }
 
 struct Interp<'a> {
-    program: &'a Program,
-    funcs: &'a HashMap<String, Fn>,
-    structs: &'a HashMap<String, Struct>,
-    enums: &'a HashMap<String, Enum>,
+    m: &'a Module,
     caps: &'a mut dyn Caps,
-    /// Module of the running function; "" for the root.
-    module: &'a str,
-    /// Locals of all running calls, innermost last; a block truncates it on exit.
-    locals: Vec<(String, Value)>,
-    /// Index of the running function's first local; callers' locals below it are invisible.
+    /// The locals of every running call, innermost last, each frame indexed by `LocalId`.
+    stack: Vec<Value>,
+    /// Where the running call's frame starts in `stack`.
     base: usize,
-    /// Nested `expr` calls in progress.
-    depth: usize,
+    /// Calls in progress, not counting `main`.
+    calls: usize,
+    /// The evaluated steps of places being read or written, innermost last: a field's index
+    /// or an index's value.
+    path: Vec<i64>,
 }
 
-impl Interp<'_> {
-    /// Evaluates `args` in the caller's frame, then starts a frame for `f`.
-    /// Returns the caller's `base`.
-    fn enter(&mut self, f: &Fn, args: &[Expr]) -> Result<usize, Box<Stop>> {
-        let vals = args.iter().map(|a| self.expr(a)).collect::<Result<Vec<_>, _>>()?;
-        let caller = self.base;
-        self.base = self.locals.len();
-        self.locals.extend(f.params.iter().map(|p| p.name.clone()).zip(vals));
-        Ok(caller)
+impl<'a> Interp<'a> {
+    fn local(&mut self, id: LocalId) -> &mut Value {
+        &mut self.stack[self.base + id.0 as usize]
     }
 
-    fn leave(&mut self, caller: usize) {
-        self.locals.truncate(self.base);
-        self.base = caller;
+    /// Runs `b`, then drops its locals, as a block's end does in Rust, so that a list they
+    /// shared is not copied on its next change.
+    fn block(&mut self, b: &'a Block) -> Res {
+        let r = self.block_value(b);
+        for s in &b.stmts {
+            if let StmtKind::Let(id, _) = s.kind {
+                *self.local(id) = Value::Unit;
+            }
+        }
+        r
     }
 
-    fn lookup(&mut self, name: &str) -> &mut Value {
-        let locals = &mut self.locals[self.base..];
-        let local = locals.iter_mut().rev().find(|(n, _)| n == name);
-        &mut local.expect("checked name").1
-    }
-
-    /// A `Stop` skips the truncate; `leave` does it.
-    fn block(&mut self, b: &Block) -> Res {
-        let mark = self.locals.len();
-        self.stmts(&b.stmts)?;
-        let v = match &b.tail {
-            Some(t) => self.expr(t)?,
-            None => Value::Unit,
-        };
-        self.locals.truncate(mark);
-        Ok(v)
-    }
-
-    fn stmts(&mut self, stmts: &[Stmt]) -> Result<(), Box<Stop>> {
-        for s in stmts {
+    fn block_value(&mut self, b: &'a Block) -> Res {
+        for s in &b.stmts {
             self.stmt(s)?;
         }
-        Ok(())
+        match &b.tail {
+            Some(t) => self.expr(t),
+            None => Ok(Value::Unit),
+        }
     }
 
-    fn stmt(&mut self, s: &Stmt) -> Result<(), Box<Stop>> {
+    #[inline(never)]
+    fn stmt(&mut self, s: &'a Stmt) -> Result<(), Box<Stop>> {
         match &s.kind {
-            StmtKind::Let { name, init, .. } => self.let_stmt(name, init),
-            StmtKind::Assign { target, op, value } => self.assign(target, op, value, s.span),
+            StmtKind::Let(id, init) => self.let_stmt(*id, init),
+            StmtKind::Assign(place, op, value) => self.assign(place, *op, value, s.span),
             StmtKind::Return(value) => self.return_stmt(value.as_ref()),
-            StmtKind::While { cond, body } => self.while_stmt(cond, body),
-            StmtKind::Loop { body } => {
+            StmtKind::While(cond, body) => self.while_stmt(cond, body),
+            StmtKind::Loop(body) => {
                 while self.iteration(body)? {}
                 Ok(())
             }
-            StmtKind::For { name, iter, body } => self.for_stmt(name, iter, body),
+            StmtKind::ForList(x, xs, body) => self.for_list(*x, xs, body),
+            StmtKind::ForRange(i, a, b, body) => self.for_range(*i, a, b, body),
             StmtKind::Break => Err(Box::new(Stop::Break)),
             StmtKind::Continue => Err(Box::new(Stop::Continue)),
             StmtKind::Expr(e) => self.expr(e).map(drop),
         }
     }
 
-    fn let_stmt(&mut self, name: &str, init: &Expr) -> Result<(), Box<Stop>> {
+    fn let_stmt(&mut self, id: LocalId, init: &'a Expr) -> Result<(), Box<Stop>> {
         let v = self.expr(init)?;
-        self.locals.push((name.to_string(), v));
+        *self.local(id) = v;
         Ok(())
     }
 
-    fn return_stmt(&mut self, value: Option<&Expr>) -> Result<(), Box<Stop>> {
+    fn return_stmt(&mut self, value: Option<&'a Expr>) -> Result<(), Box<Stop>> {
         let v = match value {
             Some(e) => self.expr(e)?,
             None => Value::Unit,
@@ -215,169 +201,9 @@ impl Interp<'_> {
         Err(Box::new(Stop::Return(v)))
     }
 
-    /// Splits a place into its root local and the steps from it, evaluating indexes in source order.
-    fn path<'e>(&mut self, place: &'e Expr) -> Result<(&'e str, Vec<Step<'e>>), Box<Stop>> {
-        let mut chain = Vec::new();
-        let mut root = place;
-        while let ExprKind::Field(base, _) | ExprKind::Index(base, _) = &root.kind {
-            chain.push(root);
-            root = base;
-        }
-        let ExprKind::Name(name) = &root.kind else {
-            unreachable!("checked place");
-        };
-        let mut steps = Vec::new();
-        for e in chain.into_iter().rev() {
-            steps.push(match &e.kind {
-                ExprKind::Field(_, field) => Step::Field(field),
-                ExprKind::Index(_, index) => {
-                    let Value::Int(i) = self.expr(index)? else {
-                        unreachable!("checked index");
-                    };
-                    Step::Index(i, e.span)
-                }
-                _ => unreachable!("chain holds fields and indexes"),
-            });
-        }
-        Ok((name, steps))
-    }
-
-    /// The part of local `root` that `steps` lead to, to read without copying a shared list.
-    fn view(&self, root: &str, steps: &[Step]) -> Result<&Value, Box<Stop>> {
-        let mut slot = &self.locals[self.base..]
-            .iter()
-            .rev()
-            .find(|(n, _)| n == root)
-            .expect("checked name")
-            .1;
-        for &step in steps {
-            slot = match (step, slot) {
-                (Step::Field(field), Value::Struct(s, vals)) => &vals[field_index(self.structs, s, field)],
-                (Step::Index(i, span), Value::List(vals)) => match usize::try_from(i).ok().and_then(|i| vals.get(i)) {
-                    Some(v) => v,
-                    None => {
-                        return Err(fail(
-                            span,
-                            &format!("index {i} out of bounds for length {}", vals.len()),
-                        ))
-                    }
-                },
-                (Step::Index(i, span), Value::Bytes(b)) => {
-                    if usize::try_from(i).map_or(true, |i| i >= b.len()) {
-                        return Err(fail(span, &format!("index {i} out of bounds for length {}", b.len())));
-                    }
-                    slot
-                }
-                _ => unreachable!("checked place"),
-            };
-        }
-        Ok(slot)
-    }
-
-    /// Like `view`, to write: a shared list on the way is copied first.
-    fn slot(&mut self, root: &str, steps: &[Step]) -> Result<&mut Value, Box<Stop>> {
-        let structs = self.structs;
-        let mut slot = self.lookup(root);
-        for &step in steps {
-            slot = match (step, slot) {
-                (Step::Field(field), Value::Struct(s, vals)) => &mut vals[field_index(structs, s, field)],
-                (Step::Index(i, span), Value::List(vals)) => {
-                    let vals = Rc::make_mut(vals);
-                    let len = vals.len();
-                    match usize::try_from(i).ok().and_then(|i| vals.get_mut(i)) {
-                        Some(v) => v,
-                        None => return Err(fail(span, &format!("index {i} out of bounds for length {len}"))),
-                    }
-                }
-                // A byte is not a `Value`: bounds-check and stay on the `Bytes`, which `read` indexes.
-                (Step::Index(i, span), slot @ Value::Bytes(_)) => {
-                    let Value::Bytes(b) = &*slot else { unreachable!() };
-                    if usize::try_from(i).map_or(true, |i| i >= b.len()) {
-                        return Err(fail(span, &format!("index {i} out of bounds for length {}", b.len())));
-                    }
-                    slot
-                }
-                _ => unreachable!("checked place"),
-            };
-        }
-        Ok(slot)
-    }
-
-    /// Like `path`, for reading `place` in the local instead of from a copy of it. `None`, with
-    /// nothing evaluated, unless `place` is a local with fields and indexes and neither its indexes
-    /// nor the `later` operands can assign: a copy would have been taken before they ran.
-    /// Fails where evaluating a copy would, in the same order. `entry` is the depth `place` is
-    /// evaluated at.
-    fn walk<'e>(
-        &mut self,
-        place: &'e Expr,
-        entry: usize,
-        later: &[Expr],
-    ) -> Result<Option<(&'e str, Vec<Step<'e>>)>, Box<Stop>> {
-        let mut chain = Vec::new();
-        let mut root = place;
-        while let ExprKind::Field(base, _) | ExprKind::Index(base, _) = &root.kind {
-            chain.push(root);
-            root = base;
-        }
-        let ExprKind::Name(name) = &root.kind else {
-            return Ok(None);
-        };
-        let pure_index = |e: &&Expr| !matches!(&e.kind, ExprKind::Index(_, i) if !pure(i));
-        if builtin(name).is_some() || !chain.iter().all(pure_index) || !later.iter().all(pure) {
-            return Ok(None);
-        }
-        chain.push(root);
-        if let Some(node) = chain.get(MAX_DEPTH - entry) {
-            return Err(fail(node.span, "evaluation is too deep"));
-        }
-        let keep = self.depth;
-        let mut steps = Vec::new();
-        for (j, e) in chain.iter().enumerate().rev().skip(1) {
-            steps.push(match &e.kind {
-                ExprKind::Field(_, field) => Step::Field(field),
-                ExprKind::Index(_, index) => {
-                    self.depth = entry + j + 1;
-                    let i = self.expr(index);
-                    self.depth = keep;
-                    let Value::Int(i) = i? else {
-                        unreachable!("checked index");
-                    };
-                    Step::Index(i, e.span)
-                }
-                _ => unreachable!("chain holds fields and indexes"),
-            });
-            self.view(name, &steps)?;
-        }
-        Ok(Some((name, steps)))
-    }
-
-    /// A copy of the field or element `e` names, without copying the rest of its local.
-    fn read(&mut self, e: &Expr) -> Result<Option<Value>, Box<Stop>> {
-        let Some((root, steps)) = self.walk(e, self.depth - 1, &[])? else {
-            return Ok(None);
-        };
-        let (last, parents) = steps.split_last().expect("a field or index has a step");
-        if let (Step::Index(i, _), Value::Bytes(b)) = (*last, self.view(root, parents)?) {
-            return Ok(Some(Value::Int(i64::from(b[i as usize]))));
-        }
-        Ok(Some(self.view(root, &steps)?.clone()))
-    }
-
     #[inline(never)]
-    fn assign(&mut self, target: &Expr, op: &str, value: &Expr, span: Span) -> Result<(), Box<Stop>> {
-        let (root, steps) = self.path(target)?;
-        let mut v = self.expr(value)?;
-        let slot = self.slot(root, &steps)?;
-        if op != "=" {
-            v = binary(&op[..1], slot.clone(), v, span)?;
-        }
-        *slot = v;
-        Ok(())
-    }
-
-    fn while_stmt(&mut self, cond: &Expr, body: &Block) -> Result<(), Box<Stop>> {
-        while self.expr(cond)? == Value::Bool(true) {
+    fn while_stmt(&mut self, cond: &'a Expr, body: &'a Block) -> Result<(), Box<Stop>> {
+        while self.cond(cond)? {
             if !self.iteration(body)? {
                 break;
             }
@@ -385,345 +211,519 @@ impl Interp<'_> {
         Ok(())
     }
 
-    /// Runs `name` over `iter`; a list is the value it had when the loop started.
     #[inline(never)]
-    fn for_stmt(&mut self, name: &str, iter: &Iter, body: &Block) -> Result<(), Box<Stop>> {
-        let items: Box<dyn Iterator<Item = Value>> = match iter {
-            Iter::List(e) => {
-                let Value::List(vals) = self.expr(e)? else {
-                    unreachable!("checked list");
-                };
-                Box::new((0..vals.len()).map(move |i| vals[i].clone()))
-            }
-            Iter::Range(a, b) => {
-                let (Value::Int(a), Value::Int(b)) = (self.expr(a)?, self.expr(b)?) else {
-                    unreachable!("checked range");
-                };
-                Box::new((a..b).map(Value::Int))
-            }
-        };
-        for v in items {
-            self.locals.push((name.to_string(), v));
-            let go = self.iteration(body)?;
-            self.locals.pop();
-            if !go {
+    fn for_range(&mut self, i: LocalId, a: &'a Expr, b: &'a Expr, body: &'a Block) -> Result<(), Box<Stop>> {
+        let (a, b) = (self.int(a)?, self.int(b)?);
+        for n in a..b {
+            *self.local(i) = Value::Int(n);
+            if !self.iteration(body)? {
                 break;
             }
         }
         Ok(())
     }
 
+    /// Runs `x` over `xs` as it was when the loop started.
+    #[inline(never)]
+    fn for_list(&mut self, x: LocalId, xs: &'a Expr, body: &'a Block) -> Result<(), Box<Stop>> {
+        let Value::List(vals) = self.expr(xs)? else {
+            unreachable!("checked list");
+        };
+        let mut r = Ok(());
+        for v in vals.iter() {
+            *self.local(x) = v.clone();
+            match self.iteration(body) {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(s) => {
+                    r = Err(s);
+                    break;
+                }
+            }
+        }
+        *self.local(x) = Value::Unit;
+        r
+    }
+
     /// Runs one pass of a loop body. False when it ends the loop with `break`.
-    fn iteration(&mut self, body: &Block) -> Result<bool, Box<Stop>> {
-        let mark = self.locals.len();
+    fn iteration(&mut self, body: &'a Block) -> Result<bool, Box<Stop>> {
         match self.block(body) {
+            Ok(_) => Ok(true),
             Err(s) => match *s {
-                Stop::Break => {
-                    self.locals.truncate(mark);
-                    Ok(false)
-                }
-                Stop::Continue => {
-                    self.locals.truncate(mark);
-                    Ok(true)
-                }
+                Stop::Break => Ok(false),
+                Stop::Continue => Ok(true),
                 e => Err(Box::new(e)),
             },
-            Ok(_) => Ok(true),
         }
     }
 
-    fn expr(&mut self, e: &Expr) -> Res {
-        if self.depth == MAX_DEPTH {
-            return Err(fail(e.span, "evaluation is too deep"));
-        }
-        self.depth += 1;
-        let v = self.expr_kind(e);
-        self.depth -= 1;
-        v
+    /// Evaluates the indexes of `place` in order, then `value`, then writes it, so a bounds error
+    /// on the way comes after both.
+    #[inline(never)]
+    fn assign(&mut self, place: &'a Place, op: Option<BinOp>, value: &'a Expr, span: Span) -> Result<(), Box<Stop>> {
+        let start = self.path.len();
+        let r = self.assign_at(start, place, op, value, span);
+        self.path.truncate(start);
+        r
     }
 
-    fn expr_kind(&mut self, e: &Expr) -> Res {
+    fn assign_at(
+        &mut self,
+        start: usize,
+        place: &'a Place,
+        op: Option<BinOp>,
+        value: &'a Expr,
+        span: Span,
+    ) -> Result<(), Box<Stop>> {
+        self.place_indexes(place)?;
+        let mut v = self.expr(value)?;
+        let slot = self.slot(place, start)?;
+        if let Some(op) = op {
+            v = binary(op, slot.clone(), v, span)?;
+        }
+        *slot = v;
+        Ok(())
+    }
+
+    /// Pushes the value of each step of `place` to `path`, evaluating indexes in order.
+    fn place_indexes(&mut self, place: &'a Place) -> Result<(), Box<Stop>> {
+        for step in &place.steps {
+            let n = match step {
+                PlaceStep::Field(f) => i64::from(*f),
+                PlaceStep::Index(i, _) => self.int(i)?,
+            };
+            self.path.push(n);
+        }
+        Ok(())
+    }
+
+    /// The part of the local that `place` names, with its steps from `path[start..]`, to write:
+    /// a shared list on the way is copied first.
+    fn slot(&mut self, place: &Place, start: usize) -> Result<&mut Value, Box<Stop>> {
+        let mut slot = &mut self.stack[self.base + place.root.0 as usize];
+        for (step, &n) in place.steps.iter().zip(&self.path[start..]) {
+            slot = match (step, slot) {
+                (PlaceStep::Field(_), Value::Struct(_, vals)) => &mut vals[n as usize],
+                (PlaceStep::Index(_, span), Value::List(vals)) => {
+                    let vals = Rc::make_mut(vals);
+                    let len = vals.len();
+                    match usize::try_from(n).ok().and_then(|i| vals.get_mut(i)) {
+                        Some(v) => v,
+                        None => return Err(out_of_bounds(*span, n, len)),
+                    }
+                }
+                _ => unreachable!("checked place"),
+            };
+        }
+        Ok(slot)
+    }
+
+    /// `push`, `insert` and `remove`: the place's indexes, then the arguments, then the change.
+    #[inline(never)]
+    fn mutate(&mut self, place: &'a Place, op: Mut, args: &'a [Expr], span: Span) -> Res {
+        let start = self.path.len();
+        let r = self.mutate_at(start, place, op, args, span);
+        self.path.truncate(start);
+        r
+    }
+
+    fn mutate_at(&mut self, start: usize, place: &'a Place, op: Mut, args: &'a [Expr], span: Span) -> Res {
+        self.place_indexes(place)?;
+        let a = self.expr(&args[0])?;
+        let b = match args.get(1) {
+            Some(e) => Some(self.expr(e)?),
+            None => None,
+        };
+        match (self.slot(place, start)?, op, a, b) {
+            (Value::List(vals), Mut::ListPush, item, _) => Rc::make_mut(vals).push(item),
+            (Value::Bytes(b), Mut::BytesPush, Value::Int(n), _) => match u8::try_from(n) {
+                Ok(n) => Rc::make_mut(b).push(n),
+                Err(_) => return Err(fail(span, &format!("byte {n} out of range 0..=255"))),
+            },
+            (Value::Map(map), Mut::MapInsert, k, Some(v)) => {
+                Rc::make_mut(map).insert(Key::from_value(k), v);
+            }
+            (Value::Map(map), Mut::MapRemove, k, _) => {
+                Rc::make_mut(map).remove(&Key::from_value(k));
+            }
+            _ => unreachable!("checked mutation"),
+        }
+        Ok(Value::Unit)
+    }
+
+    fn cond(&mut self, e: &'a Expr) -> Result<bool, Box<Stop>> {
+        match self.expr(e)? {
+            Value::Bool(b) => Ok(b),
+            _ => unreachable!("checked Bool"),
+        }
+    }
+
+    fn int(&mut self, e: &'a Expr) -> Result<i64, Box<Stop>> {
+        match self.expr(e)? {
+            Value::Int(n) => Ok(n),
+            _ => unreachable!("checked Int"),
+        }
+    }
+
+    fn expr(&mut self, e: &'a Expr) -> Res {
         match &e.kind {
-            ExprKind::Name(name) if builtin(name).is_some() => Ok(constructor(name, Vec::new())),
-            ExprKind::Name(name) => Ok(self.lookup(name).clone()),
-            ExprKind::Int(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Unit => Ok(literal(e)),
-            ExprKind::Unary(op, x) => self.unary(op, x, e.span),
-            ExprKind::Binary(op @ ("&&" | "||"), a, b) => self.logical(op, a, b),
-            ExprKind::Binary(op, a, b) => self.arith(op, a, b, e.span),
+            ExprKind::Int(n) => Ok(Value::Int(*n)),
+            ExprKind::Bool(b) => Ok(Value::Bool(*b)),
+            ExprKind::Str(s) => Ok(Value::Str(s.clone())),
+            ExprKind::Unit => Ok(Value::Unit),
+            ExprKind::Local(id) => Ok(self.local(*id).clone()),
+            ExprKind::Unary(op, x) => self.unary(*op, x, e.span),
+            ExprKind::Binary(op, a, b) => self.binary(*op, a, b, e.span),
             ExprKind::If(cond, then, els) => self.if_expr(cond, then, els.as_deref()),
             ExprKind::Block(b) => self.block(b),
-            ExprKind::Call(callee, args) => self.call_expr(callee, args),
-            ExprKind::Field(base, field) => match self.read(e)? {
-                Some(v) => Ok(v),
-                None => self.field(base, field),
-            },
-            ExprKind::StructLit(name, inits) => self.struct_lit(&key(self.module, name), inits),
-            ExprKind::Path(en, v) => Ok(self.variant(&self.enum_key(en), v, Vec::new())),
-            ExprKind::Module(m, inner) => match &inner.kind {
-                ExprKind::StructLit(name, inits) => self.struct_lit(&format!("{m}::{name}"), inits),
-                ExprKind::Path(en, v) => Ok(self.variant(&format!("{m}::{en}"), v, Vec::new())),
-                _ => unreachable!("checked module path"),
-            },
+            ExprKind::Call(f, args) => self.call(*f, args, e.span),
+            ExprKind::CapCall(cap, method, args) => self.cap_call(*cap, *method, args, e.span),
+            ExprKind::Builtin(b, recv, args) => self.builtin(*b, recv, args, e.span),
+            ExprKind::Mutate(place, op, args) => self.mutate(place, *op, args, e.span),
+            ExprKind::List(items) => self.list(items),
+            ExprKind::MapNew => Ok(Value::Map(Rc::default())),
+            ExprKind::StructLit(s, inits) => self.struct_lit(*s, inits),
+            ExprKind::Field(..) | ExprKind::Index(..) => self.read(e),
+            ExprKind::Variant(en, i, args) => self.variant(*en, *i, args),
             ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms),
             ExprKind::Try(x) => self.try_expr(x),
-            ExprKind::Method(recv, name, args) => self.method(recv, name, args, e.span),
-            ExprKind::Index(base, index) => match self.read(e)? {
-                Some(v) => Ok(v),
-                None => self.index(base, index, e.span),
-            },
-            ExprKind::List(items) => Ok(Value::List(self.values(items)?.into())),
         }
     }
 
-    /// The capability type of `main`'s parameter `cap`, such as `Dir`.
-    fn cap_type(&self, cap: &str) -> String {
-        let param = self.funcs["main"].params.iter().find(|p| p.name == cap);
-        match param.map(|p| &p.ty.kind) {
-            Some(TypeKind::Named(ty, _)) => ty.clone(),
-            _ => unreachable!("Value::Cap names a main parameter"),
-        }
+    fn unary(&mut self, op: UnOp, x: &'a Expr, span: Span) -> Res {
+        let v = self.expr(x)?;
+        unary(op, v, span)
     }
 
-    /// The key of enum `en` as written in the running module; built-in enums keep their name.
-    fn enum_key(&self, en: &str) -> String {
-        let k = key(self.module, en).into_owned();
-        if self.enums.contains_key(&k) {
-            k
+    /// `&&` and `||` skip the right side when the left decides the result.
+    fn binary(&mut self, op: BinOp, a: &'a Expr, b: &'a Expr, span: Span) -> Res {
+        if let BinOp::And | BinOp::Or = op {
+            let l = self.cond(a)?;
+            return if l == (op == BinOp::Or) {
+                Ok(Value::Bool(l))
+            } else {
+                self.expr(b)
+            };
+        }
+        let l = self.expr(a)?;
+        let r = self.expr(b)?;
+        binary(op, l, r, span)
+    }
+
+    fn if_expr(&mut self, cond: &'a Expr, then: &'a Block, els: Option<&'a Expr>) -> Res {
+        if self.cond(cond)? {
+            self.block(then)
         } else {
-            en.to_string()
+            match els {
+                Some(x) => self.expr(x),
+                None => Ok(Value::Unit),
+            }
         }
     }
 
-    fn values(&mut self, exprs: &[Expr]) -> Result<Vec<Value>, Box<Stop>> {
+    #[inline(never)]
+    fn list(&mut self, items: &'a [Expr]) -> Res {
+        Ok(Value::List(self.values(items)?.into()))
+    }
+
+    #[inline(never)]
+    fn variant(&mut self, en: EnumRef, i: u32, args: &'a [Expr]) -> Res {
+        Ok(Value::Enum(en, i as usize, self.values(args)?))
+    }
+
+    fn values(&mut self, exprs: &'a [Expr]) -> Result<Vec<Value>, Box<Stop>> {
         exprs.iter().map(|x| self.expr(x)).collect()
     }
 
+    /// Evaluates the arguments into the callee's frame, above the caller's.
     #[inline(never)]
-    fn index(&mut self, base: &Expr, index: &Expr, span: Span) -> Res {
-        let (base, Value::Int(i)) = (self.expr(base)?, self.expr(index)?) else {
-            unreachable!("checked index");
-        };
-        let len = match &base {
-            Value::List(vals) => vals.len(),
-            Value::Bytes(b) => b.len(),
-            _ => unreachable!("checked index"),
-        };
-        let Some(at) = usize::try_from(i).ok().filter(|&i| i < len) else {
-            return Err(fail(span, &format!("index {i} out of bounds for length {len}")));
-        };
-        Ok(match base {
-            Value::List(vals) => vals[at].clone(),
-            Value::Bytes(b) => Value::Int(i64::from(b[at])),
-            _ => unreachable!("checked index"),
-        })
-    }
-
-    /// `push`, `insert` and `remove` change their receiver in place; the checker only allows
-    /// them on a place. Other built-in methods work on the value; capability methods go to the host.
-    #[inline(never)]
-    fn method(&mut self, recv: &Expr, name: &str, args: &[Expr], span: Span) -> Res {
-        // A capability could have its own `push`, so only a receiver that is not a capability
-        // takes this path.
-        let on_cap = matches!(&recv.kind, ExprKind::Name(n) if matches!(self.lookup(n), Value::Cap(_)));
-        if matches!(name, "push" | "insert" | "remove") && !on_cap {
-            let (root, steps) = self.path(recv)?;
-            let mut args = self.values(args)?.into_iter();
-            let (a, b) = (args.next(), args.next());
-            match (self.slot(root, &steps)?, name, a, b) {
-                (Value::List(vals), "push", Some(item), _) => Rc::make_mut(vals).push(item),
-                (Value::Bytes(b), "push", Some(Value::Int(n)), _) => match u8::try_from(n) {
-                    Ok(n) => Rc::make_mut(b).push(n),
-                    Err(_) => return Err(fail(span, &format!("byte {n} out of range 0..=255"))),
-                },
-                (Value::Map(map), "insert", Some(k), Some(v)) => {
-                    Rc::make_mut(map).insert(Key::from_value(k), v);
-                }
-                (Value::Map(map), "remove", Some(k), _) => {
-                    Rc::make_mut(map).remove(&Key::from_value(k));
-                }
-                _ => unreachable!("checked mutation"),
-            }
-            return Ok(Value::Unit);
+    fn call(&mut self, f: FuncId, args: &'a [Expr], span: Span) -> Res {
+        if self.calls == MAX_CALLS {
+            return Err(fail(span, "evaluation is too deep"));
         }
-        let place = if on_cap {
-            None
-        } else {
-            self.walk(recv, self.depth, args)?
-        };
-        let Some((root, steps)) = place else {
-            let recv = self.expr(recv)?;
-            let vals = self.values(args)?;
-            if let Value::Cap(cap) = recv {
-                let v = self.caps.call(&cap, name, vals).map_err(|msg| fail(span, &msg))?;
-                // The host is trusted code but checked anyway: a value of the wrong type stops the run.
-                let ty = &self.program.cap_methods[&(self.cap_type(&cap), name.to_string())];
-                if !self.program.fits(&v, ty) {
-                    return Err(fail(span, &format!("host returned a malformed value for `{name}`")));
+        let base = self.stack.len();
+        for a in args {
+            match self.expr(a) {
+                Ok(v) => self.stack.push(v),
+                Err(s) => {
+                    self.stack.truncate(base);
+                    return Err(s);
                 }
-                return Ok(v);
             }
-            return builtin_method(&recv, name, vals, span);
-        };
-        let vals = self.values(args)?;
-        builtin_method(self.view(root, &steps)?, name, vals, span)
+        }
+        let func = &self.m.funcs[f.0 as usize];
+        self.stack.resize(base + func.locals.len(), Value::Unit);
+        let caller = std::mem::replace(&mut self.base, base);
+        self.calls += 1;
+        let r = self.block(&func.body);
+        self.calls -= 1;
+        self.base = caller;
+        self.stack.truncate(base);
+        returned(r)
     }
 
     #[inline(never)]
-    fn field(&mut self, base: &Expr, field: &str) -> Res {
-        let Value::Struct(s, mut vals) = self.expr(base)? else {
-            unreachable!("checked field");
+    fn cap_call(&mut self, cap: LocalId, method: u32, args: &'a [Expr], span: Span) -> Res {
+        let Value::Cap(name) = self.local(cap).clone() else {
+            unreachable!("checked capability");
         };
-        Ok(vals.swap_remove(field_index(self.structs, &s, field)))
+        // A capability is always one of `main`'s parameters, perhaps passed down.
+        let main = &self.m.funcs[self.m.main.0 as usize];
+        let param = main.locals[..main.params as usize].iter().find(|l| l.name == name);
+        let Some(Ty::Cap(c)) = param.map(|l| &l.ty) else {
+            unreachable!("Value::Cap names a main parameter");
+        };
+        let (method, _, ty) = &self.m.caps[c.0 as usize].methods[method as usize];
+        let vals = self.values(args)?;
+        let v = self.caps.call(&name, method, vals).map_err(|msg| fail(span, &msg))?;
+        // The host is trusted code but checked anyway: a value of the wrong type stops the run.
+        if !self.fits(&v, ty) {
+            return Err(fail(span, &format!("host returned a malformed value for `{method}`")));
+        }
+        Ok(v)
+    }
+
+    /// Whether `v` is a value of type `ty`; used to refuse malformed results from the host.
+    fn fits(&self, v: &Value, ty: &Ty) -> bool {
+        match (v, ty) {
+            (Value::Int(_), Ty::Int) | (Value::Bool(_), Ty::Bool) | (Value::Unit, Ty::Unit) => true,
+            (Value::Str(_), Ty::Str) | (Value::Bytes(_), Ty::Bytes) => true,
+            (Value::List(vals), Ty::List(t)) => vals.iter().all(|v| self.fits(v, t)),
+            (Value::Map(m), Ty::Map(k, t)) => m
+                .iter()
+                .all(|(key, v)| self.fits(&key.to_value(), k) && self.fits(v, t)),
+            (Value::Enum(EnumRef::Result, i, vals), Ty::Result(ok, e)) if vals.len() == 1 => match i {
+                0 => self.fits(&vals[0], ok),
+                1 => self.fits(&vals[0], e),
+                _ => false,
+            },
+            (Value::Enum(EnumRef::User(en), i, vals), Ty::Enum(id)) if en == id => {
+                let Some((_, payload)) = self.m.enums[id.0 as usize].variants.get(*i) else {
+                    return false;
+                };
+                vals.len() == payload.len() && vals.iter().zip(payload).all(|(v, t)| self.fits(v, t))
+            }
+            _ => false,
+        }
+    }
+
+    /// A built-in method. A receiver that is part of a local is read in place, unless the
+    /// arguments could change the local, which a copy taken first would not see.
+    #[inline(never)]
+    fn builtin(&mut self, b: Builtin, recv: &'a Expr, args: &'a [Expr], span: Span) -> Res {
+        if in_place(recv) && args.iter().all(pure) {
+            let start = self.path.len();
+            let r = self.builtin_in_place(start, b, recv, args, span);
+            self.path.truncate(start);
+            return r;
+        }
+        let recv = self.expr(recv)?;
+        let arg = self.arg(args)?;
+        builtin(&recv, b, arg, span)
+    }
+
+    fn builtin_in_place(&mut self, start: usize, b: Builtin, recv: &'a Expr, args: &'a [Expr], span: Span) -> Res {
+        let root = self.steps(recv, start)?;
+        let arg = self.arg(args)?;
+        builtin(&self.view(root, &self.path[start..]), b, arg, span)
+    }
+
+    /// The one argument a built-in method may take.
+    fn arg(&mut self, args: &'a [Expr]) -> Result<Option<Value>, Box<Stop>> {
+        match args.first() {
+            Some(a) => Ok(Some(self.expr(a)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// A field or element: read in place when `e` is part of a local, else from its value.
+    #[inline(never)]
+    fn read(&mut self, e: &'a Expr) -> Res {
+        if in_place(e) {
+            let start = self.path.len();
+            let r = self
+                .steps(e, start)
+                .map(|root| self.view(root, &self.path[start..]).into_owned());
+            self.path.truncate(start);
+            return r;
+        }
+        match &e.kind {
+            ExprKind::Field(base, f) => {
+                let Value::Struct(_, mut vals) = self.expr(base)? else {
+                    unreachable!("checked field");
+                };
+                Ok(vals.swap_remove(*f as usize))
+            }
+            ExprKind::Index(base, index) => {
+                let base = self.expr(base)?;
+                let i = self.int(index)?;
+                let len = match &base {
+                    Value::List(vals) => vals.len(),
+                    Value::Bytes(b) => b.len(),
+                    _ => unreachable!("checked index"),
+                };
+                let Some(at) = usize::try_from(i).ok().filter(|&i| i < len) else {
+                    return Err(out_of_bounds(e.span, i, len));
+                };
+                Ok(match base {
+                    Value::List(vals) => vals[at].clone(),
+                    Value::Bytes(b) => Value::Int(i64::from(b[at])),
+                    _ => unreachable!("checked index"),
+                })
+            }
+            _ => unreachable!("a field or index"),
+        }
+    }
+
+    /// Pushes the steps from the root local of `e`, which `in_place` accepts, to `path`,
+    /// evaluating and bounds-checking each index in order. Returns the root.
+    fn steps(&mut self, e: &'a Expr, start: usize) -> Result<LocalId, Box<Stop>> {
+        match &e.kind {
+            ExprKind::Local(id) => Ok(*id),
+            ExprKind::Field(base, f) => {
+                let root = self.steps(base, start)?;
+                self.path.push(i64::from(*f));
+                Ok(root)
+            }
+            ExprKind::Index(base, index) => {
+                let root = self.steps(base, start)?;
+                let i = self.int(index)?;
+                let len = match &*self.view(root, &self.path[start..]) {
+                    Value::List(vals) => vals.len(),
+                    Value::Bytes(b) => b.len(),
+                    _ => unreachable!("checked index"),
+                };
+                if usize::try_from(i).map_or(true, |i| i >= len) {
+                    return Err(out_of_bounds(e.span, i, len));
+                }
+                self.path.push(i);
+                Ok(root)
+            }
+            _ => unreachable!("checked place"),
+        }
+    }
+
+    /// The part of local `root` that `steps`, already bounds-checked, lead to. A byte is not a
+    /// `Value`, so an index into `Bytes` gives a new `Int`.
+    fn view(&self, root: LocalId, steps: &[i64]) -> Cow<'_, Value> {
+        let mut v = &self.stack[self.base + root.0 as usize];
+        for &n in steps {
+            v = match v {
+                Value::Struct(_, vals) => &vals[n as usize],
+                Value::List(vals) => &vals[n as usize],
+                Value::Bytes(b) => return Cow::Owned(Value::Int(i64::from(b[n as usize]))),
+                _ => unreachable!("checked place"),
+            };
+        }
+        Cow::Borrowed(v)
     }
 
     /// Fields are evaluated in source order and stored in declaration order.
     #[inline(never)]
-    fn struct_lit(&mut self, name: &str, inits: &[(String, Expr)]) -> Res {
+    fn struct_lit(&mut self, s: StructId, inits: &'a [(u32, Expr)]) -> Res {
         let mut vals = vec![Value::Unit; inits.len()];
-        for (field, x) in inits {
-            vals[field_index(self.structs, name, field)] = self.expr(x)?;
+        for (f, x) in inits {
+            vals[*f as usize] = self.expr(x)?;
         }
-        Ok(Value::Struct(name.to_string(), vals))
-    }
-
-    #[inline(never)]
-    fn variant(&self, en: &str, v: &str, payload: Vec<Value>) -> Value {
-        let i = variant_index(self.enums, en, v).expect("checked variant");
-        Value::Enum(en.to_string(), i, payload)
+        Ok(Value::Struct(s, vals))
     }
 
     /// `Some` and `Ok` yield their payload; `None` and `Err` return from the function.
-    fn try_expr(&mut self, x: &Expr) -> Res {
+    #[inline(never)]
+    fn try_expr(&mut self, x: &'a Expr) -> Res {
         let Value::Enum(en, i, mut payload) = self.expr(x)? else {
             unreachable!("checked operand");
         };
-        let success = if en == "Option" { "Some" } else { "Ok" };
-        if builtin(success) == Some((en.as_str(), i)) {
+        if i == success(en) {
             return Ok(payload.remove(0));
         }
         Err(Box::new(Stop::Return(Value::Enum(en, i, payload))))
     }
 
-    /// The first arm whose pattern matches runs, with its bindings as locals.
+    /// The first arm whose pattern matches runs, with its bindings in their slots.
     #[inline(never)]
-    fn match_expr(&mut self, scrut: &Expr, arms: &[Arm]) -> Res {
-        let v = self.expr(scrut)?;
-        for arm in arms {
-            let mark = self.locals.len();
-            if self.bind(&arm.pat, &v) {
-                let r = self.expr(&arm.body)?;
-                self.locals.truncate(mark);
-                return Ok(r);
+    fn match_expr(&mut self, scrut: &'a Expr, arms: &'a [Arm]) -> Res {
+        let arm = self.pick(scrut, arms)?;
+        let r = self.expr(&arm.body);
+        // Dropped as at a block's end.
+        match &arm.pat {
+            Pat::Bind(id) => *self.local(*id) = Value::Unit,
+            Pat::Variant(_, binds) => {
+                for id in binds.iter().flatten() {
+                    *self.local(*id) = Value::Unit;
+                }
             }
+            _ => {}
         }
-        unreachable!("checked exhaustive")
+        r
     }
 
-    /// Whether `v` matches `p`; on a match, pushes the pattern's bindings.
-    fn bind(&mut self, p: &Pat, v: &Value) -> bool {
-        match (&p.kind, v) {
-            (PatKind::Wild, _) => true,
-            (PatKind::Int(a), Value::Int(b)) => a == b,
-            (PatKind::Str(a), Value::Str(b)) => **a == **b,
-            (PatKind::Bool(a), Value::Bool(b)) => a == b,
-            (PatKind::Name(n), _) => {
-                if let Value::Enum(en, i, _) = v {
-                    if let Some(j) = variant_index(self.enums, en, n) {
-                        return j == *i;
+    /// The arm that matches `scrut`'s value, with that value bound to the arm's slots.
+    #[inline(never)]
+    fn pick(&mut self, scrut: &'a Expr, arms: &'a [Arm]) -> Result<&'a Arm, Box<Stop>> {
+        let v = self.expr(scrut)?;
+        let arm = arms.iter().find(|a| matches(&a.pat, &v)).expect("checked exhaustive");
+        match (&arm.pat, v) {
+            (Pat::Bind(id), v) => *self.local(*id) = v,
+            (Pat::Variant(_, binds), Value::Enum(_, _, payload)) => {
+                for (b, x) in binds.iter().zip(payload) {
+                    if let Some(id) = b {
+                        *self.local(*id) = x;
                     }
                 }
-                self.locals.push((n.clone(), v.clone()));
-                true
             }
-            (PatKind::Module(_, inner), _) => self.bind(inner, v),
-            (PatKind::Variant(_, name, names), Value::Enum(en, i, payload)) => {
-                if variant_index(self.enums, en, name) != Some(*i) {
-                    return false;
-                }
-                for (n, x) in names.iter().zip(payload) {
-                    self.locals.extend(n.clone().map(|n| (n, x.clone())));
-                }
-                true
-            }
-            _ => unreachable!("checked pattern"),
+            _ => {}
         }
-    }
-
-    fn call_expr(&mut self, callee: &Expr, args: &[Expr]) -> Res {
-        let k = match &callee.kind {
-            ExprKind::Name(name) if builtin(name).is_some() => {
-                let vals = args.iter().map(|a| self.expr(a)).collect::<Result<_, _>>()?;
-                return Ok(constructor(name, vals));
-            }
-            ExprKind::Name(name) => key(self.module, name),
-            ExprKind::Path(en, _) if en == "Map" => return Ok(Value::Map(Rc::default())),
-            ExprKind::Path(en, v) => {
-                let vals = args.iter().map(|a| self.expr(a)).collect::<Result<_, _>>()?;
-                return Ok(self.variant(&self.enum_key(en), v, vals));
-            }
-            ExprKind::Module(m, inner) => match &inner.kind {
-                ExprKind::Name(name) => Cow::Owned(format!("{m}::{name}")),
-                ExprKind::Path(en, v) => {
-                    let vals = args.iter().map(|a| self.expr(a)).collect::<Result<_, _>>()?;
-                    return Ok(self.variant(&format!("{m}::{en}"), v, vals));
-                }
-                _ => unreachable!("checked callee"),
-            },
-            _ => unreachable!("checked callee"),
-        };
-        let funcs = self.funcs;
-        let (k, f) = funcs.get_key_value(&*k).expect("checked function");
-        let caller = self.enter(f, args)?;
-        let module = std::mem::replace(&mut self.module, module_of(k));
-        let result = self.block(&f.body);
-        self.module = module;
-        self.leave(caller);
-        returned(result)
-    }
-
-    fn unary(&mut self, op: &str, x: &Expr, span: Span) -> Res {
-        let v = self.expr(x)?;
-        negate(op, v, span)
-    }
-
-    /// `&&` and `||` skip the right side when the left decides the result.
-    fn logical(&mut self, op: &str, a: &Expr, b: &Expr) -> Res {
-        match self.expr(a)? {
-            Value::Bool(l) if l == (op == "||") => Ok(Value::Bool(l)),
-            _ => self.expr(b),
-        }
-    }
-
-    fn arith(&mut self, op: &str, a: &Expr, b: &Expr, span: Span) -> Res {
-        let l = self.expr(a)?;
-        binary(op, l, self.expr(b)?, span)
-    }
-
-    fn if_expr(&mut self, cond: &Expr, then: &Block, els: Option<&Expr>) -> Res {
-        if self.expr(cond)? == Value::Bool(true) {
-            return self.block(then);
-        }
-        match els.map(|e| &e.kind) {
-            None => Ok(Value::Unit),
-            Some(ExprKind::Block(b)) => self.block(b),
-            Some(ExprKind::If(c, t, e)) => self.if_expr(c, t, e.as_deref()),
-            Some(_) => unreachable!("else is a block or if"),
-        }
+        Ok(arm)
     }
 }
 
-fn field_index(structs: &HashMap<String, Struct>, name: &str, field: &str) -> usize {
-    let fields = &structs[name].fields;
-    fields.iter().position(|f| f.name == field).expect("checked field")
+/// Whether `v` matches `p`.
+fn matches(p: &Pat, v: &Value) -> bool {
+    match (p, v) {
+        (Pat::Wild | Pat::Bind(_), _) => true,
+        (Pat::Int(a), Value::Int(b)) => a == b,
+        (Pat::Str(a), Value::Str(b)) => **a == **b,
+        (Pat::Bool(a), Value::Bool(b)) => a == b,
+        (Pat::Variant(i, _), Value::Enum(_, j, _)) => *i as usize == *j,
+        _ => unreachable!("checked pattern"),
+    }
 }
 
-fn variant_index(enums: &HashMap<String, Enum>, name: &str, variant: &str) -> Option<usize> {
-    if let Some((en, i)) = builtin(variant) {
-        if en == name {
-            return Some(i);
-        }
+/// The variant of `Option` or `Result` that `?` and `unwrap_or` unwrap: `Some` or `Ok`.
+fn success(en: EnumRef) -> usize {
+    match en {
+        EnumRef::Option => 1,
+        _ => 0,
     }
-    enums.get(name)?.variants.iter().position(|v| v.name == variant)
+}
+
+/// Whether `e` is a local, or a part of one reached through fields and indexes that cannot
+/// change it, so it can be read without a copy.
+fn in_place(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Local(_) => true,
+        ExprKind::Field(base, _) => in_place(base),
+        ExprKind::Index(base, index) => in_place(base) && pure(index),
+        _ => false,
+    }
+}
+
+/// True when evaluating `e` cannot change a local: only statements, which only blocks hold,
+/// and mutating methods do. Calls cannot: a callee has its own locals.
+fn pure(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Int(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Unit => true,
+        ExprKind::Local(_) | ExprKind::MapNew => true,
+        ExprKind::Block(_) | ExprKind::If(..) | ExprKind::Match(..) | ExprKind::Mutate(..) => false,
+        ExprKind::Unary(_, x) | ExprKind::Field(x, _) | ExprKind::Try(x) => pure(x),
+        ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) => pure(a) && pure(b),
+        ExprKind::Builtin(_, x, xs) => pure(x) && xs.iter().all(pure),
+        ExprKind::Call(_, xs) | ExprKind::CapCall(_, _, xs) | ExprKind::List(xs) | ExprKind::Variant(_, _, xs) => {
+            xs.iter().all(pure)
+        }
+        ExprKind::StructLit(_, inits) => inits.iter().all(|(_, x)| pure(x)),
+    }
 }
 
 /// A `return` ends the call with its value; errors keep unwinding.
@@ -737,122 +737,100 @@ fn returned(r: Res) -> Res {
     }
 }
 
-fn literal(e: &Expr) -> Value {
-    match &e.kind {
-        ExprKind::Int(n) => Value::Int(*n),
-        ExprKind::Str(s) => Value::Str(s.as_str().into()),
-        ExprKind::Bool(b) => Value::Bool(*b),
-        _ => Value::Unit,
+fn some(v: Value) -> Value {
+    Value::Enum(EnumRef::Option, 1, vec![v])
+}
+
+fn none() -> Value {
+    Value::Enum(EnumRef::Option, 0, Vec::new())
+}
+
+fn str_arg(arg: Option<Value>) -> Rc<str> {
+    match arg {
+        Some(Value::Str(s)) => s,
+        _ => unreachable!("checked argument"),
     }
 }
 
-fn negate(op: &str, x: Value, span: Span) -> Res {
-    match (op, x) {
-        ("-", Value::Int(n)) => n
-            .checked_neg()
-            .map(Value::Int)
-            .ok_or_else(|| fail(span, "Int overflow")),
-        (_, Value::Bool(b)) => Ok(Value::Bool(!b)),
-        _ => unreachable!("checked operand"),
-    }
-}
-
-/// A built-in method on `recv`, which may be part of a local.
-fn builtin_method(recv: &Value, name: &str, mut args: Vec<Value>, span: Span) -> Res {
-    Ok(match (recv, name) {
-        (Value::Int(n), "to_str") => Value::Str(n.to_string().into()),
-        (Value::Str(s), "len") => Value::Int(s.len() as i64),
-        (Value::Str(s), "to_bytes") => Value::Bytes(Rc::new(s.as_bytes().to_vec())),
-        (Value::Str(s), "split") => {
-            let Value::Str(sep) = args.remove(0) else {
-                unreachable!("checked argument");
-            };
+/// Built-in method `b` on `recv`, which may be part of a local, with its argument if it takes one.
+fn builtin(recv: &Value, b: Builtin, arg: Option<Value>, span: Span) -> Res {
+    use Builtin as B;
+    Ok(match (b, recv) {
+        (B::IntToStr, Value::Int(n)) => Value::Str(n.to_string().into()),
+        (B::StrLen, Value::Str(s)) => Value::Int(s.len() as i64),
+        (B::StrToBytes, Value::Str(s)) => Value::Bytes(Rc::new(s.as_bytes().to_vec())),
+        (B::StrSplit, Value::Str(s)) => {
+            let sep = str_arg(arg);
             if sep.is_empty() {
                 return Err(fail(span, "`split` needs a non-empty separator"));
             }
             Value::List(s.split(&*sep).map(|p| Value::Str(p.into())).collect::<Vec<_>>().into())
         }
-        (Value::Str(s), "lines") => Value::List(s.lines().map(|l| Value::Str(l.into())).collect::<Vec<_>>().into()),
-        (Value::Str(s), "trim") => Value::Str(s.trim().into()),
-        (Value::Str(s), "contains" | "starts_with") => {
-            let Value::Str(arg) = args.remove(0) else {
-                unreachable!("checked argument");
-            };
-            Value::Bool(if name == "contains" {
-                s.contains(&*arg)
-            } else {
-                s.starts_with(&*arg)
-            })
-        }
-        (Value::Str(s), "parse_int") => match s.parse::<i64>() {
-            Ok(n) => constructor("Some", vec![Value::Int(n)]),
-            Err(_) => constructor("None", vec![]),
+        (B::StrLines, Value::Str(s)) => Value::List(s.lines().map(|l| Value::Str(l.into())).collect::<Vec<_>>().into()),
+        (B::StrTrim, Value::Str(s)) => Value::Str(s.trim().into()),
+        (B::StrContains, Value::Str(s)) => Value::Bool(s.contains(&*str_arg(arg))),
+        (B::StrStartsWith, Value::Str(s)) => Value::Bool(s.starts_with(&*str_arg(arg))),
+        (B::StrParseInt, Value::Str(s)) => match s.parse::<i64>() {
+            Ok(n) => some(Value::Int(n)),
+            Err(_) => none(),
         },
-        (Value::List(v), "len") => Value::Int(v.len() as i64),
-        (Value::Map(m), "len") => Value::Int(m.len() as i64),
-        (Value::Map(m), "keys") => Value::List(m.keys().map(Key::to_value).collect::<Vec<_>>().into()),
-        (Value::Map(m), "get") => match m.get(&Key::from_value(args.remove(0))) {
-            Some(v) => constructor("Some", vec![v.clone()]),
-            None => constructor("None", vec![]),
-        },
-        (Value::Bytes(b), "len") => Value::Int(b.len() as i64),
-        (Value::Bytes(b), "to_str") => match std::str::from_utf8(b) {
+        (B::BytesLen, Value::Bytes(b)) => Value::Int(b.len() as i64),
+        (B::BytesToStr, Value::Bytes(b)) => match std::str::from_utf8(b) {
             Ok(s) => Value::Str(s.into()),
             Err(_) => return Err(fail(span, "invalid UTF-8")),
         },
-        (Value::Enum(en, i, payload), "unwrap_or") if en == "Option" || en == "Result" => {
-            if builtin("Some") == Some((en.as_str(), *i)) || builtin("Ok") == Some((en.as_str(), *i)) {
+        (B::ListLen, Value::List(v)) => Value::Int(v.len() as i64),
+        (B::MapLen, Value::Map(m)) => Value::Int(m.len() as i64),
+        (B::MapKeys, Value::Map(m)) => Value::List(m.keys().map(Key::to_value).collect::<Vec<_>>().into()),
+        (B::MapGet, Value::Map(m)) => match m.get(&Key::from_value(arg.expect("checked argument"))) {
+            Some(v) => some(v.clone()),
+            None => none(),
+        },
+        (B::OptionUnwrapOr | B::ResultUnwrapOr, Value::Enum(en, i, payload)) => {
+            if *i == success(*en) {
                 payload[0].clone()
             } else {
-                args.remove(0)
+                arg.expect("checked argument")
             }
         }
-        (Value::Enum(en, i, _), "is_some") if en == "Option" => Value::Bool(builtin("Some") == Some((en.as_str(), *i))),
-        (Value::Enum(en, i, _), "is_none") if en == "Option" => Value::Bool(builtin("None") == Some((en.as_str(), *i))),
-        (Value::Enum(en, i, _), "is_ok") if en == "Result" => Value::Bool(builtin("Ok") == Some((en.as_str(), *i))),
-        (Value::Enum(en, i, _), "is_err") if en == "Result" => Value::Bool(builtin("Err") == Some((en.as_str(), *i))),
+        (B::OptionIsSome, Value::Enum(_, i, _)) => Value::Bool(*i == 1),
+        (B::OptionIsNone, Value::Enum(_, i, _)) => Value::Bool(*i == 0),
+        (B::ResultIsOk, Value::Enum(_, i, _)) => Value::Bool(*i == 0),
+        (B::ResultIsErr, Value::Enum(_, i, _)) => Value::Bool(*i == 1),
         _ => unreachable!("checked method"),
     })
 }
 
-fn constructor(name: &str, payload: Vec<Value>) -> Value {
-    let (en, i) = builtin(name).expect("checked constructor");
-    Value::Enum(en.to_string(), i, payload)
-}
-
-/// True when evaluating `e` cannot assign to a local, since only statements do and only
-/// blocks hold them. Calls cannot: a callee has its own locals.
-fn pure(e: &Expr) -> bool {
-    match &e.kind {
-        ExprKind::Int(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Unit => true,
-        ExprKind::Name(_) | ExprKind::Path(..) | ExprKind::Module(..) => true,
-        ExprKind::Block(_) | ExprKind::If(..) | ExprKind::Match(..) => false,
-        ExprKind::Unary(_, x) | ExprKind::Field(x, _) | ExprKind::Try(x) => pure(x),
-        ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) => pure(a) && pure(b),
-        ExprKind::Call(f, xs) | ExprKind::Method(f, _, xs) => pure(f) && xs.iter().all(pure),
-        ExprKind::List(xs) => xs.iter().all(pure),
-        ExprKind::StructLit(_, inits) => inits.iter().all(|(_, x)| pure(x)),
+fn unary(op: UnOp, v: Value, span: Span) -> Res {
+    match (op, v) {
+        (UnOp::Neg, Value::Int(n)) => n
+            .checked_neg()
+            .map(Value::Int)
+            .ok_or_else(|| fail(span, "Int overflow")),
+        (UnOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
+        _ => unreachable!("checked operand"),
     }
 }
 
-fn binary(op: &str, l: Value, r: Value, span: Span) -> Res {
+fn binary(op: BinOp, l: Value, r: Value, span: Span) -> Res {
     let int = |n: Option<i64>| n.map(Value::Int).ok_or_else(|| fail(span, "Int overflow"));
     match (l, r) {
         (Value::Int(a), Value::Int(b)) => match op {
-            "+" => int(a.checked_add(b)),
-            "-" => int(a.checked_sub(b)),
-            "*" => int(a.checked_mul(b)),
-            "/" | "%" if b == 0 => Err(fail(span, "division by zero")),
-            "/" => int(a.checked_div(b)),
-            "%" => int(a.checked_rem(b)),
-            "<" => Ok(Value::Bool(a < b)),
-            "<=" => Ok(Value::Bool(a <= b)),
-            ">" => Ok(Value::Bool(a > b)),
-            ">=" => Ok(Value::Bool(a >= b)),
-            "==" => Ok(Value::Bool(a == b)),
-            _ => Ok(Value::Bool(a != b)),
+            BinOp::Add => int(a.checked_add(b)),
+            BinOp::Sub => int(a.checked_sub(b)),
+            BinOp::Mul => int(a.checked_mul(b)),
+            BinOp::Div | BinOp::Rem if b == 0 => Err(fail(span, "division by zero")),
+            BinOp::Div => int(a.checked_div(b)),
+            BinOp::Rem => int(a.checked_rem(b)),
+            BinOp::Lt => Ok(Value::Bool(a < b)),
+            BinOp::Le => Ok(Value::Bool(a <= b)),
+            BinOp::Gt => Ok(Value::Bool(a > b)),
+            BinOp::Ge => Ok(Value::Bool(a >= b)),
+            BinOp::Eq => Ok(Value::Bool(a == b)),
+            BinOp::Ne => Ok(Value::Bool(a != b)),
+            BinOp::And | BinOp::Or | BinOp::Concat => unreachable!("checked operator"),
         },
-        (Value::Str(a), Value::Str(b)) if op == "+" => Ok(Value::Str([&*a, &*b].concat().into())),
-        (a, b) => Ok(Value::Bool((a == b) == (op == "=="))),
+        (Value::Str(a), Value::Str(b)) if op == BinOp::Concat => Ok(Value::Str([&*a, &*b].concat().into())),
+        (a, b) => Ok(Value::Bool((a == b) == (op == BinOp::Eq))),
     }
 }

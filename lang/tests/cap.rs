@@ -1,3 +1,4 @@
+use lang::ir::{EnumId, EnumRef};
 use lang::{check, run, Caps, RunErr, Value};
 use std::collections::BTreeMap;
 
@@ -30,18 +31,19 @@ impl Caps for StubDir {
             return Ok(Value::Int(7));
         }
         if &*path == "wrong-payload" {
-            return Ok(Value::Enum("Result".into(), 0, vec![Value::Int(5)]));
+            return Ok(Value::Enum(EnumRef::Result, 0, vec![Value::Int(5)]));
         }
         let files = self.files.get_mut(cap).ok_or("not granted")?;
-        let variant = |en: &str, i, payload| Value::Enum(en.to_string(), i, payload);
+        let (result, io_err) = (EnumRef::Result, EnumRef::User(EnumId(0)));
+        let variant = |en, i, payload| Value::Enum(en, i, payload);
         Ok(match (method, args.get(1)) {
             ("read", None) => match files.get(&*path) {
-                Some(b) => variant("Result", 0, vec![Value::Bytes(b.clone().into())]),
-                None => variant("Result", 1, vec![variant("IoErr", 0, vec![])]),
+                Some(b) => variant(result, 0, vec![Value::Bytes(b.clone().into())]),
+                None => variant(result, 1, vec![variant(io_err, 0, vec![])]),
             },
             ("create", Some(Value::Bytes(b))) => {
                 files.insert(path.to_string(), b.to_vec());
-                variant("Result", 0, vec![Value::Unit])
+                variant(result, 0, vec![Value::Unit])
             }
             _ => return Err(format!("unsupported call `{method}`")),
         })
@@ -79,7 +81,7 @@ fn main(input: Dir, out: Dir) -> Result<(), IoErr> {
 #[test]
 fn helper_reads_and_main_writes() {
     let (r, s) = exec(COPY, stub(&[("input", &[("a.txt", b"hi")]), ("out", &[])]));
-    assert_eq!(r.unwrap(), Value::Enum("Result".into(), 0, vec![Value::Unit]));
+    assert_eq!(r.unwrap(), Value::Enum(EnumRef::Result, 0, vec![Value::Unit]));
     assert_eq!(
         s.calls,
         calls(&[("input", "read", "a.txt"), ("out", "create", "b.txt")])
@@ -125,8 +127,8 @@ fn invalid_utf8_is_a_runtime_error() {
 fn try_propagates_not_found() {
     let src = "fn main(d: Dir) -> Result<(), IoErr> { d.read(\"missing\")?; d.create(\"no\", \"x\".to_bytes()) }";
     let (r, s) = exec(src, stub(&[("d", &[])]));
-    let not_found = Value::Enum("IoErr".into(), 0, vec![]);
-    assert_eq!(r.unwrap(), Value::Enum("Result".into(), 1, vec![not_found]));
+    let not_found = Value::Enum(EnumRef::User(EnumId(0)), 0, vec![]);
+    assert_eq!(r.unwrap(), Value::Enum(EnumRef::Result, 1, vec![not_found]));
     assert_eq!(s.calls, calls(&[("d", "read", "missing")]));
 }
 
@@ -179,7 +181,7 @@ fn primer_end_to_end() {
     );
     let csv: &[u8] = b"alice,30\nbob,12\nnot a row\ncarol,x\n";
     let (r, s) = exec(src, stub(&[("input", &[("invoices.csv", csv)]), ("out", &[])]));
-    assert_eq!(r.unwrap(), Value::Enum("Result".into(), 0, vec![Value::Unit]));
+    assert_eq!(r.unwrap(), Value::Enum(EnumRef::Result, 0, vec![Value::Unit]));
     assert_eq!(s.files["out"]["total.txt"], b"42");
     assert_eq!(
         s.calls,

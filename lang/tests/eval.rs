@@ -1,5 +1,6 @@
 mod common;
 
+use lang::ir::{EnumId, EnumRef, StructId};
 use lang::{check, run, CapTable, Caps, RunErr, Value};
 
 struct NoCaps;
@@ -175,13 +176,33 @@ fn evaluation_depth() {
             "fn down(n: Int) -> Int {{ if n == 0 {{ 0 }} else {{ down(n - 1) }} }} fn main() -> Int {{ down({n}) }}"
         )
     };
-    assert_eq!(int(&down(1_000)), Value::Int(0));
-    fails(&down(100_000), "evaluation is too deep");
-    // The deepest nesting the parser accepts still stops cleanly at the budget.
-    let e = format!("{}down(n - 1)", "- ".repeat(58));
-    let nested =
-        format!("fn down(n: Int) -> Int {{ if n == 0 {{ 0 }} else {{ {e} }} }} fn main() -> Int {{ down(100000) }}");
-    fails(&nested, "evaluation is too deep");
+    // `main` calls `down(999)`, which recurses to `down(0)`: 1_000 calls in all.
+    assert_eq!(int(&down(999)), Value::Int(0));
+    let src = down(1_000);
+    let e = exec(&src).unwrap_err();
+    assert_eq!(e.msg, "evaluation is too deep");
+    assert_eq!(&src[e.span.start..e.span.end], "down(n - 1)");
+    // Recursion through `match`, a loop and `?` stops at the same count.
+    let shapes = [
+        "fn down(n: Int) -> Int { match n { 0 => 0, _ => { let x = [down(n - 1)]; x[0] } } }",
+        "fn down(n: Int) -> Int { let mut s = 0; for i in 0..1 { while n > 0 { s = down(n - 1); break; } } s }",
+    ];
+    for f in shapes {
+        assert_eq!(
+            int(&format!("{f} fn main() -> Int {{ down(999) }}")),
+            Value::Int(0),
+            "{f}"
+        );
+        fails(
+            &format!("{f} fn main() -> Int {{ down(100000) }}"),
+            "evaluation is too deep",
+        );
+    }
+    let r = "fn down(n: Int) -> Result<Int, Str> { if n == 0 { return Ok(0); } Ok(down(n - 1)?) }";
+    fails(
+        &format!("{r} fn main() -> Int {{ down(100000).unwrap_or(1) }}"),
+        "evaluation is too deep",
+    );
 }
 
 const P: &str = "struct P { a: Int, b: Q } struct Q { c: Int } ";
@@ -193,10 +214,10 @@ fn p_main(body: &str) -> Value {
 #[test]
 fn struct_value_and_field_read() {
     let v = p_main("fn main() -> Q { let p = P { b: Q { c: 7 }, a: 1 }; p.b }");
-    assert_eq!(v, Value::Struct("Q".into(), vec![Value::Int(7)]));
+    assert_eq!(v, Value::Struct(StructId(1), vec![Value::Int(7)]));
     let v = p_main("fn main() -> P { P { b: Q { c: 7 }, a: 1 } }");
-    let q = Value::Struct("Q".into(), vec![Value::Int(7)]);
-    assert_eq!(v, Value::Struct("P".into(), vec![Value::Int(1), q]));
+    let q = Value::Struct(StructId(1), vec![Value::Int(7)]);
+    assert_eq!(v, Value::Struct(StructId(0), vec![Value::Int(1), q]));
     assert_eq!(
         p_main("fn main() -> Int { P { a: 1, b: Q { c: 7 } }.b.c }"),
         Value::Int(7)
@@ -247,11 +268,14 @@ fn enum_values() {
     let v = s_main("fn main() -> S { S::Pair(3, \"x\") }");
     assert_eq!(
         v,
-        Value::Enum("S".into(), 2, vec![Value::Int(3), Value::Str("x".into())])
+        Value::Enum(EnumRef::User(EnumId(0)), 2, vec![Value::Int(3), Value::Str("x".into())])
     );
-    assert_eq!(s_main("fn main() -> S { S::Done }"), Value::Enum("S".into(), 0, vec![]));
+    assert_eq!(
+        s_main("fn main() -> S { S::Done }"),
+        Value::Enum(EnumRef::User(EnumId(0)), 0, vec![])
+    );
     let v = s_main("fn main() -> S { S::Due(1 + 1) }");
-    assert_eq!(v, Value::Enum("S".into(), 1, vec![Value::Int(2)]));
+    assert_eq!(v, Value::Enum(EnumRef::User(EnumId(0)), 1, vec![Value::Int(2)]));
 }
 
 #[test]
@@ -320,20 +344,20 @@ fn enums_are_copied() {
 }
 
 fn some(v: Value) -> Value {
-    Value::Enum("Option".into(), 1, vec![v])
+    Value::Enum(EnumRef::Option, 1, vec![v])
 }
 
 fn none() -> Value {
-    Value::Enum("Option".into(), 0, vec![])
+    Value::Enum(EnumRef::Option, 0, vec![])
 }
 
 #[test]
 fn option_and_result_values() {
     assert_eq!(int("fn main() -> Option<Int> { Some(1) }"), some(Value::Int(1)));
     assert_eq!(int("fn main() -> Option<Int> { None }"), none());
-    let ok = Value::Enum("Result".into(), 0, vec![Value::Unit]);
+    let ok = Value::Enum(EnumRef::Result, 0, vec![Value::Unit]);
     assert_eq!(int("fn main() -> Result<(), Str> { Ok(()) }"), ok);
-    let err = Value::Enum("Result".into(), 1, vec![Value::Str("e".into())]);
+    let err = Value::Enum(EnumRef::Result, 1, vec![Value::Str("e".into())]);
     assert_eq!(int("fn main() -> Result<(), Str> { return Err(\"e\"); }"), err);
     assert_eq!(int("fn main() -> Option<Int> { let x: Option<Int> = None; x }"), none());
 }
@@ -353,7 +377,7 @@ fn try_propagates_through_calls() {
                fn main() -> Result<Int, Str> { let x = add(\"1\", \"1\")?; add(\"1\", \"z\") }";
     assert_eq!(
         int(src),
-        Value::Enum("Result".into(), 1, vec![Value::Str("bad z".into())])
+        Value::Enum(EnumRef::Result, 1, vec![Value::Str("bad z".into())])
     );
 }
 

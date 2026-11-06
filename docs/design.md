@@ -100,7 +100,7 @@ Defaults per run, or per request under `--listen` (fuel 100 million, 64 MB, 5 s)
 |---|---|---|---|
 | Fuel | 1 billion | `--fuel` | instructions, so infinite loops end |
 | Memory | 256 MB | `--memory` (MB) | guest linear memory |
-| Wasm stack | 2 MB | `--stack` (KB) | recursion; the deepest the depth budget allows needs about 900 KB in a release host, more in a debug one |
+| Wasm stack | 2 MB | `--stack` (KB) | recursion; in a release host, calls 1_000 deep (the interpreter's limit) need up to about 1.8 MB when they recurse through loops |
 | Wall clock | 10 s | `--timeout` | slow hosts and long runs |
 | Host calls | 10,000 | `--calls` | capability calls; at most 64 timed-out calls may still be finishing at once, process-wide |
 | I/O | 100 MB total, 10 MB per read | `--io` | bytes read and written |

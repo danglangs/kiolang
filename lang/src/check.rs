@@ -1,5 +1,6 @@
 use crate::ast::*;
 use crate::eval::Value;
+use crate::ir::{self, EnumRef};
 use crate::parse::parse_file;
 use crate::{Diag, Span};
 use std::borrow::Cow;
@@ -45,6 +46,8 @@ pub struct Program {
     /// The type of every expression and assignment target, by its span, which no other
     /// expression has; and the type of each `let`'s local, by the span of the `let`.
     pub(crate) types: HashMap<Span, Ty>,
+    /// The program lowered, which `run` evaluates.
+    pub(crate) ir: ir::Module,
 }
 
 impl Program {
@@ -86,24 +89,25 @@ impl Program {
                     .collect();
                 format!("{{{}}}", entries.join(", "))
             }
-            Value::Struct(name, vs) => {
-                let fields = self.structs.get(name).map_or(&[][..], |s| &s.fields);
-                let fields: Vec<_> = fields
-                    .iter()
-                    .zip(vs)
-                    .map(|(f, v)| format!("{}: {}", f.name, self.nested(v)))
+            Value::Struct(s, vs) => {
+                let s = &self.ir.structs[s.0 as usize];
+                let fields: Vec<_> = (s.fields.iter().zip(vs))
+                    .map(|((f, _), v)| format!("{f}: {}", self.nested(v)))
                     .collect();
                 if fields.is_empty() {
-                    name.clone()
+                    s.name.clone()
                 } else {
-                    format!("{name} {{ {} }}", fields.join(", "))
+                    format!("{} {{ {} }}", s.name, fields.join(", "))
                 }
             }
             Value::Enum(en, i, vs) => {
-                let variant = match (en.as_str(), self.enums.get(en)) {
-                    (_, Some(e)) => format!("{en}::{}", e.variants[*i].name),
-                    ("Option", None) => ["None", "Some"][*i].to_string(),
-                    _ => ["Ok", "Err"][*i].to_string(),
+                let variant = match en {
+                    EnumRef::User(e) => {
+                        let e = &self.ir.enums[e.0 as usize];
+                        format!("{}::{}", e.name, e.variants[*i].0)
+                    }
+                    EnumRef::Option => ["None", "Some"][*i].to_string(),
+                    EnumRef::Result => ["Ok", "Err"][*i].to_string(),
                 };
                 if vs.is_empty() {
                     variant
@@ -117,30 +121,6 @@ impl Program {
 
     pub(crate) fn is_cap(&self, ty: &str) -> bool {
         self.cap_methods.keys().any(|(c, _)| c == ty)
-    }
-
-    /// Whether `v` is a value of type `ty`; used to refuse malformed results from the host.
-    pub(crate) fn fits(&self, v: &Value, ty: &Ty) -> bool {
-        match (v, ty) {
-            (Value::Int(_), Ty::Int) | (Value::Bool(_), Ty::Bool) | (Value::Unit, Ty::Unit) => true,
-            (Value::Str(_), Ty::Str) | (Value::Bytes(_), Ty::Bytes) => true,
-            (Value::List(vals), Ty::List(t)) => vals.iter().all(|v| self.fits(v, t)),
-            (Value::Map(m), Ty::Map(k, t)) => m
-                .iter()
-                .all(|(key, v)| self.fits(&key.to_value(), k) && self.fits(v, t)),
-            (Value::Enum(en, i, vals), Ty::Result(ok, e)) if en == "Result" && vals.len() == 1 => match i {
-                0 => self.fits(&vals[0], ok),
-                1 => self.fits(&vals[0], e),
-                _ => false,
-            },
-            (Value::Enum(en, i, vals), Ty::Enum(name)) if en == name => {
-                let Some((_, payload)) = self.variants.get(name).and_then(|vs| vs.get(*i)) else {
-                    return false;
-                };
-                vals.len() == payload.len() && vals.iter().zip(payload).all(|(v, t)| self.fits(v, t))
-            }
-            _ => false,
-        }
     }
 }
 
@@ -994,7 +974,7 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
     if !diags.is_empty() {
         return Err(diags);
     }
-    Ok(Program {
+    let mut p = Program {
         funcs: fns
             .into_iter()
             .map(|(m, f)| (key(m, &f.name).into_owned(), f))
@@ -1012,7 +992,17 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
                     .map(|(m, _, ret)| ((c.name.clone(), m.clone()), ret.clone()))
             })
             .collect(),
-    })
+        // Replaced below: lowering reads the rest of the program.
+        ir: ir::Module {
+            funcs: Vec::new(),
+            structs: Vec::new(),
+            enums: Vec::new(),
+            caps: Vec::new(),
+            main: ir::FuncId(0),
+        },
+    };
+    p.ir = crate::lower::lower(&p, caps);
+    Ok(p)
 }
 
 struct Checker<'a> {

@@ -5,6 +5,7 @@ wit_bindgen::generate!({ world: "guest", path: "../caps.wit" });
 use kio::caps::fs::IoErr;
 use kio::caps::net::HttpErr;
 use kio::caps::web::WebErr;
+use lang::ir::{EnumId, EnumRef};
 use lang::{CapTable, Value};
 use std::cell::RefCell;
 use std::collections::btree_map::Entry;
@@ -70,9 +71,9 @@ impl Guest for Component {
                     lines: lang::report(&program).lines().map(String::from).collect(),
                 },
                 // A failed main sends its error alone, so `Err("bad")` reads `bad`, as Rust's Display would.
-                failed: matches!(&v, Value::Enum(en, 1, _) if en == "Result"),
+                failed: matches!(&v, Value::Enum(EnumRef::Result, 1, _)),
                 value: match &v {
-                    Value::Enum(en, 1, payload) if en == "Result" => program.display(&payload[0]),
+                    Value::Enum(EnumRef::Result, 1, payload) => program.display(&payload[0]),
                     _ => program.display(&v),
                 },
             }),
@@ -163,22 +164,24 @@ fn texts(v: &[Value]) -> Result<Vec<String>, String> {
 /// `Result` is variant 0 for `Ok` and 1 for `Err`.
 fn result(r: Result<Value, Value>) -> Value {
     match r {
-        Ok(v) => Value::Enum("Result".into(), 0, vec![v]),
-        Err(e) => Value::Enum("Result".into(), 1, vec![e]),
+        Ok(v) => Value::Enum(EnumRef::Result, 0, vec![v]),
+        Err(e) => Value::Enum(EnumRef::Result, 1, vec![e]),
     }
 }
 
 /// A capability error enum value. Indexes come from the table generated from caps.wit, so
-/// reordering a variant there cannot silently change which error kio code sees.
+/// reordering a variant there cannot silently change which error kio code sees. The lowered
+/// program numbers these enums first, in table order.
 fn err_value(en: &str, case: &str, payload: Vec<Value>) -> Value {
     let table = CapTable::v0();
-    let e = table.enums.iter().find(|e| e.name == en).expect("generated enum");
+    let id = table.enums.iter().position(|e| e.name == en).expect("generated enum");
+    let e = &table.enums[id];
     let i = e
         .variants
         .iter()
         .position(|v| v.name == case)
         .expect("generated variant");
-    Value::Enum(en.into(), i, payload)
+    Value::Enum(EnumRef::User(EnumId(id as u32)), i, payload)
 }
 
 fn io_err(e: IoErr) -> Value {
