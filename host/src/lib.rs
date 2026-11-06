@@ -1013,7 +1013,19 @@ fn checked_guest(engine: &Engine, files: &[(String, String)]) -> Result<Componen
     wizer.init_func(format!("init([{}])", list.join(", ")));
     // The generated bindings still look up `init`.
     wizer.keep_init_func(true);
-    let (mut store, linker) = (new_store(engine, &Limits::default())?, guest_linker(engine)?);
+    // Both compiles below run on throwaway engines, one thread, cheapest settings for the init
+    // run: a parallel optimizing compile peaks near 90 MB of allocator memory that macOS malloc
+    // never hands back, and an idle server kept it (W13d).
+    let build = || {
+        let mut config = config::compile_config();
+        config.parallel_compilation(false);
+        config
+    };
+    let mut quick = build();
+    quick.cranelift_opt_level(wasmtime::OptLevel::None);
+    quick.cranelift_regalloc_algorithm(wasmtime::RegallocAlgorithm::SinglePass);
+    let quick = Engine::new(&quick)?;
+    let (mut store, linker) = (new_store(&quick, &Limits::default())?, guest_linker(&quick)?);
     let init = wizer.run_component(&mut store, GUEST_WASM, async |s, c| {
         linker.instantiate_async(s, c).await
     });
@@ -1021,8 +1033,8 @@ fn checked_guest(engine: &Engine, files: &[(String, String)]) -> Result<Componen
     if matches!(rets.first(), Some(wasmtime::component::Val::Result(Err(_)))) {
         wasmtime::bail!("the guest refused a program the host had checked");
     }
-    let native = engine.precompile_component(&wasm)?;
-    // SAFETY: `native` was just produced by this engine from the guest and a program checked above.
+    let native = Engine::new(&build())?.precompile_component(&wasm)?;
+    // SAFETY: `native` was just produced with these settings from the guest and a program checked above.
     unsafe { Component::deserialize(engine, &native) }
 }
 
