@@ -266,9 +266,10 @@ fn field_assignment_errors() {
 }
 
 #[test]
-fn struct_equality_is_rejected() {
-    let (msg, _) = reject_p("fn main() -> Bool { Q { c: 1 } == Q { c: 1 } }");
-    assert_eq!(msg, "`==` cannot be applied to Q and Q");
+fn struct_equality_is_accepted() {
+    ok(&format!("{P}fn main() -> Bool {{ Q {{ c: 1 }} == Q {{ c: 1 }} }}"));
+    let (msg, _) = reject_p("fn main() -> Bool { Q { c: 1 } == 1 }");
+    assert_eq!(msg, "`==` cannot be applied to Q and Int");
 }
 
 #[test]
@@ -336,9 +337,8 @@ fn variant_expression_errors() {
 }
 
 #[test]
-fn enum_equality_is_rejected() {
-    let (msg, _) = reject_s("fn main() -> Bool { S::Done == S::Done }");
-    assert_eq!(msg, "`==` cannot be applied to S and S");
+fn enum_equality_is_accepted() {
+    ok(&format!("{S}fn main() -> Bool {{ S::Done != S::Done }}"));
 }
 
 #[test]
@@ -519,7 +519,7 @@ fn hints_for_calls_and_operators() {
     assert_eq!(hint("fn main() -> Bool { 1 && 2 }"), "`&&` works on two Bool");
     assert_eq!(
         hint("fn main() -> Bool { 1 == true }"),
-        "`==` works on two Int, two Bool, two Str or two Bytes"
+        "`==` works on two values of one type that holds no capability"
     );
     assert_eq!(
         hint("fn main() { let mut x = true; x += 1; }"),
@@ -575,7 +575,7 @@ fn option_and_result_types() {
     let (msg, _) = reject("fn main() { let x: Option<Int> = Some(\"a\"); }");
     assert_eq!(msg, "expected Int, found Str");
     let (msg, _) = reject("fn main() { let x: Option<Int> = Some(1) == Some(1); }");
-    assert_eq!(msg, "`==` cannot be applied to Option<Int> and Option<Int>");
+    assert_eq!(msg, "expected Option<Int>, found Bool");
 }
 
 #[test]
@@ -806,7 +806,6 @@ fn rule1_expression() {
     );
     assert_rejected("fn main(d: Dir) { Some(d); }", value, AS_VALUE, "d");
     assert_rejected("fn main(d: Dir) { let x = Some(d); }", value, AS_VALUE, "d");
-    assert_rejected("fn main(d: Dir, e: Dir) -> Bool { d == e }", value, AS_VALUE, "d");
 }
 
 #[test]
@@ -970,8 +969,7 @@ fn list_indexing() {
         "only a List or Bytes can be indexed"
     );
     reject("fn main() { let x: Int = [1][0] + [\"a\"][0]; }");
-    let (msg, _) = reject("fn main() { let x = [1, 2]; x == x; }");
-    assert_eq!(msg, "`==` cannot be applied to List<Int> and List<Int>");
+    ok("fn main() { let x = [1, 2]; x == x; }");
 }
 
 #[test]
@@ -1123,8 +1121,7 @@ fn map_methods() {
     );
     let src = format!("{m}let x: Int = m.get(\"a\"); }}");
     assert_eq!(reject(&src).0, "expected Int, found Option<Int>");
-    let (msg, _) = reject(&format!("{m}m == m; }}"));
-    assert_eq!(msg, "`==` cannot be applied to Map<Str, Int> and Map<Str, Int>");
+    ok(&format!("{m}m == m; }}"));
 }
 
 #[test]
@@ -1276,4 +1273,25 @@ fn hint_to_pass_a_capability_in() {
         d.hint.as_deref(),
         Some("`log` is a capability of `main`; take it as a parameter, `log: Http`, and pass it in")
     );
+}
+
+#[test]
+fn structural_equality() {
+    ok("fn main() -> Bool { let r: Result<Int, Str> = Ok(1); let e: Result<Int, Str> = Err(\"e\"); Some(1) == Some(1) && r != e }");
+    ok("fn main() -> Bool { [1, 2] == [1, 2] }");
+    ok("fn main() -> Bool { let a: Map<Str, List<Int>> = Map::new(); a == a }");
+    let (msg, _) = reject("fn main() -> Bool { Some(1) == Some(\"a\") }");
+    assert_eq!(msg, "`==` cannot be applied to Option<Int> and Option<Str>");
+}
+
+#[test]
+fn capabilities_have_no_equality() {
+    for (src, ty) in [
+        ("fn main(d: Dir) -> Bool { d == d }", "Dir"),
+        ("fn main(d: Dir) -> Bool { d != d }", "Dir"),
+    ] {
+        let d = &check(src, &CapTable::v0()).unwrap_err()[0];
+        assert_eq!(d.msg, format!("cannot compare `{ty}` values"));
+        assert_eq!(d.hint.as_deref(), Some("capabilities have no equality"));
+    }
 }

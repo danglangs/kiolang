@@ -376,7 +376,7 @@ fn op_hint(op: &str) -> String {
         "+" => "two Int or two Str",
         "-" | "*" | "/" | "%" | "<" | "<=" | ">" | ">=" => "two Int",
         "&&" | "||" => "two Bool",
-        _ => "two Int, two Bool, two Str or two Bytes",
+        _ => "two values of one type that holds no capability",
     };
     format!("`{op}` works on {accepts}")
 }
@@ -389,15 +389,7 @@ fn binary_ty(op: &str, l: &Ty, r: &Ty) -> Option<Ty> {
         ("+" | "-" | "*" | "/" | "%", Int, Int) => Some(Int),
         ("<" | "<=" | ">" | ">=", Int, Int) => Some(Bool),
         ("&&" | "||", Bool, Bool) => Some(Bool),
-        ("==" | "!=", a, b)
-            if a == b
-                && !matches!(
-                    a,
-                    Never | Cap(_) | Struct(_) | Enum(_) | Option(_) | Result(..) | List(_) | Map(..)
-                ) =>
-        {
-            Some(Bool)
-        }
+        ("==" | "!=", a, b) if a == b && *a != Never && cap_in(a).is_none() => Some(Bool),
         _ => None,
     }
 }
@@ -1227,6 +1219,20 @@ impl Checker<'_> {
                 Ok(want_ty)
             }
             ExprKind::Binary(op, a, b) => {
+                if matches!(*op, "==" | "!=") {
+                    // A capability name is not a value, so catch it before `expr` says so.
+                    for x in [a, b] {
+                        if let ExprKind::Name(n) = &x.kind {
+                            if let Some(Local {
+                                ty: ty @ Ty::Cap(_), ..
+                            }) = self.lookup(n)
+                            {
+                                let hint = Some("capabilities have no equality");
+                                return Err(err(e.span, format!("cannot compare `{ty}` values"), hint));
+                            }
+                        }
+                    }
+                }
                 let (l, r) = (self.expr(a, None)?, self.expr(b, None)?);
                 binary_ty(op, &l, &r).ok_or_else(|| {
                     let msg = format!("`{op}` cannot be applied to {l} and {r}");

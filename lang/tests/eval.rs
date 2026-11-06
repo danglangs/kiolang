@@ -865,3 +865,33 @@ fn option_result_predicates() {
     }";
     assert_eq!(int(src), Value::Int(1111 + 500000 + 7000000));
 }
+
+#[test]
+fn structural_equality() {
+    let pre = "struct P { a: Int, b: Str } enum E { A, B(Int) } ";
+    for (expr, want) in [
+        ("P { a: 1, b: \"x\" } == P { a: 1, b: \"x\" }", true),
+        ("P { a: 1, b: \"x\" } == P { a: 2, b: \"x\" }", false),
+        ("E::B(1) == E::B(1)", true),
+        ("E::B(1) != E::B(2)", true),
+        ("E::A == E::B(1)", false),
+        ("Some(1) == Some(1)", true),
+        (
+            "{ let r: Result<Int, Int> = Ok(1); let e: Result<Int, Int> = Err(1); r == e }",
+            false,
+        ),
+        ("[1, 2] == [1, 2]", true),
+        ("[1, 2] != [1, 2, 3]", true),
+    ] {
+        let src = format!("{pre} fn main() -> Bool {{ {expr} }}");
+        assert_eq!(int(&src), Value::Bool(want), "{expr}");
+    }
+    let src = "fn main() -> Bool {
+        let mut a: Map<Str, Int> = Map::new();
+        let mut b: Map<Str, Int> = Map::new();
+        a.insert(\"k\", 1);
+        b.insert(\"k\", 1);
+        a == b
+    }";
+    assert_eq!(int(src), Value::Bool(true));
+}
