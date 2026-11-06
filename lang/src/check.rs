@@ -1244,8 +1244,11 @@ impl Checker<'_> {
 
     fn expr(&mut self, e: &Expr, expected: Option<&Ty>) -> Result<Ty, Diag> {
         let ty = self.expr_kind(e, expected)?;
-        let earlier = self.types.insert(e.span, ty.clone());
-        debug_assert!(earlier.is_none(), "two expressions at {:?}", e.span);
+        // Lowering reads types back by span, so two expressions sharing one would give one of
+        // them the wrong type: refuse in every build, not only debug ones.
+        if self.types.insert(e.span, ty.clone()).is_some() {
+            panic!("two expressions at {:?}", e.span);
+        }
         Ok(ty)
     }
 
