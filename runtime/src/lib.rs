@@ -18,14 +18,17 @@ extern crate std;
 pub mod coll;
 pub mod desc;
 pub mod obj;
+pub mod text;
 
 #[cfg(target_arch = "wasm32")]
 mod abi;
 
 #[cfg(test)]
+mod coll_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
-mod coll_tests;
+mod text_tests;
 
 #[cfg(target_arch = "wasm32")]
 #[global_allocator]

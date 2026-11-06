@@ -52,7 +52,7 @@ pub type Map = BTreeMap<Key, u64>;
 
 const HEADER: usize = 8;
 const ENUM_SLOTS: usize = 16;
-const BYTES_DATA: usize = 16;
+pub(crate) const BYTES_DATA: usize = 16;
 const _: () = assert!(HEADER.is_multiple_of(align_of::<List>()) && HEADER.is_multiple_of(align_of::<Map>()));
 
 /// A slot's value for pointer `p`.
@@ -122,13 +122,20 @@ pub fn alloc(t: &Table, desc: u32, variant: u32) -> *mut Header {
 
 /// A `Str` or `Bytes` (by `desc`) holding a copy of `b`.
 pub fn new_bytes(desc: u32, b: &[u8]) -> *mut Header {
+    new_bytes_cap(desc, b, b.len())
+}
+
+/// Like `new_bytes`, with room for `cap` bytes (at least `b.len()`) before it must grow.
+pub fn new_bytes_cap(desc: u32, b: &[u8], cap: usize) -> *mut Header {
     assert!(desc == desc::STR || desc == desc::BYTES);
+    assert!(cap >= b.len());
     let len = u32::try_from(b.len()).expect("over 4 GiB");
-    let p = new(BYTES_DATA + b.len(), desc);
-    // SAFETY: `p` has `len` and `cap` at 8 and 12, then room for `b`.
+    let cap = u32::try_from(cap).expect("over 4 GiB");
+    let p = new(BYTES_DATA + cap as usize, desc);
+    // SAFETY: `p` has `len` and `cap` at 8 and 12, then room for `cap` >= `len` bytes.
     unsafe {
         field::<u32>(p, 8).write(len);
-        field::<u32>(p, 12).write(len);
+        field::<u32>(p, 12).write(cap);
         ptr::copy_nonoverlapping(b.as_ptr(), field(p, BYTES_DATA), b.len());
     }
     p
