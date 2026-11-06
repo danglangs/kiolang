@@ -57,7 +57,7 @@ const T: Table = Table {
 /// The live count is global, so tests that check it run one at a time.
 static LOCK: Mutex<()> = Mutex::new(());
 
-fn lock() -> MutexGuard<'static, ()> {
+pub(crate) fn lock() -> MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 

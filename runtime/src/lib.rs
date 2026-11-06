@@ -15,6 +15,7 @@ extern crate alloc;
 #[cfg(not(target_arch = "wasm32"))]
 extern crate std;
 
+pub mod coll;
 pub mod desc;
 pub mod obj;
 
@@ -23,6 +24,8 @@ mod abi;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod coll_tests;
 
 #[cfg(target_arch = "wasm32")]
 #[global_allocator]
