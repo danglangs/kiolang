@@ -21,7 +21,7 @@ pub struct RawTable {
 
 static TABLE: AtomicU32 = AtomicU32::new(0);
 
-fn table() -> Table<'static> {
+pub(crate) fn table() -> Table<'static> {
     let raw = TABLE.load(Relaxed);
     assert!(raw != 0, "rt_init was not called");
     // SAFETY: `rt_init`'s contract.
@@ -48,7 +48,7 @@ fn ptr<T>(a: u32) -> *mut T {
     core::ptr::with_exposed_provenance_mut(a as usize)
 }
 
-fn addr(p: *mut Header) -> u32 {
+pub(crate) fn addr(p: *mut Header) -> u32 {
     p.expose_provenance() as u32
 }
 

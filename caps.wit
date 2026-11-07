@@ -70,3 +70,24 @@ world guest {
   // mistyped grant is an error before any code runs.
   export run: func(files: list<file>, dirs: list<dir-grant>, https: list<http-grant>, incomings: list<incoming-grant>, outgoings: list<outgoing-grant>) -> result<outcome, list<diag>>;
 }
+
+// Compiled kio (docs/codegen.md): the runtime with the program appended, one core module.
+world compiled {
+  import fs;
+  import net;
+  import web;
+  use fs.{dir};
+  use net.{http};
+  use web.{incoming, outgoing};
+
+  // One handle per capability parameter of `main`, in parameter order.
+  variant grant { dir(dir), http(http), incoming(incoming), outgoing(outgoing) }
+  // main's value printed, and whether main returned `Err`.
+  record outcome { value: string, failed: bool }
+
+  // A runtime error at error site `site`, with the values its message shows. Never returns:
+  // the host records it and traps.
+  import trap: func(site: u32, a: s64, b: s64);
+
+  export run: func(grants: list<grant>) -> result<outcome>;
+}

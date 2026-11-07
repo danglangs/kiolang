@@ -19,6 +19,8 @@ kio is a capability-typed language for code AI agents write: the code names what
 lang/    parser, checker, lowering to IR, interpreter. No dependencies.
 guest/   lang built to a wasm32-wasip2 component
 host/    the `kio` binary: Wasmtime, grants, limits, audit log, --listen, mcp
+runtime/ compiled kio's runtime library (no_std), built to runtime.wasm
+codegen/ IR to Wasm, appended to runtime.wasm, wrapped as a `compiled` component
 tools/capgen  generates lang/src/caps_gen.rs from caps.wit
 ```
 

@@ -13,6 +13,8 @@ test-heap = []
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 dlmalloc = { version = "0.2", features = ["global"] }
+# The `compiled` world's glue: the `run` export, the `trap` import and `cabi_realloc`.
+wit-bindgen = { version = "0.63", default-features = false, features = ["macros", "realloc"] }
 
 [dev-dependencies]
 # The interpreter is the reference: display tests take their expected strings from it.

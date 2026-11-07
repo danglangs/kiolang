@@ -5,6 +5,7 @@
 //! - `display`: a value as `kio run` prints it.
 //! - `obj`: object layout, allocation, `inc`, `dec`, `unique`; the safe-to-call Rust layer.
 //! - `abi`: the `extern "C"` functions generated code calls, over `u32` addresses (wasm32 only).
+//! - `entry`: the `compiled` world's `run` export, and the entry codegen fills (wasm32 only).
 //!
 //! `no_std` + `alloc`. On wasm32 the allocator is dlmalloc and a panic is a Wasm trap; natively
 //! (tests) std supplies the system allocator and the panic handler.
@@ -24,6 +25,8 @@ pub mod text;
 
 #[cfg(target_arch = "wasm32")]
 mod abi;
+#[cfg(target_arch = "wasm32")]
+mod entry;
 
 #[cfg(test)]
 mod coll_tests;
@@ -38,10 +41,10 @@ mod text_tests;
 #[global_allocator]
 static ALLOC: dlmalloc::GlobalDlmalloc = dlmalloc::GlobalDlmalloc;
 
-/// A runtime bug or out of memory. C4 replaces this with a call to the `trap` import and an
-/// internal-error site, so it is never mistaken for a program error.
+/// A runtime bug or out of memory: the internal-error site, so it is never mistaken for a
+/// program error.
 #[cfg(target_arch = "wasm32")]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
-    core::arch::wasm32::unreachable()
+    entry::rt_trap(entry::INTERNAL, 0, 0)
 }

@@ -17,7 +17,9 @@ use wasmtime_wasi::{HostMonotonicClock, HostWallClock, WasiCtx, WasiCtxView, Was
 // Trappable imports let a host function stop the run by returning `Err`.
 wasmtime::component::bindgen!({ world: "guest", path: "../caps.wit", imports: { default: trappable } });
 
+mod compiled;
 mod config;
+pub use compiled::Compiled;
 pub use config::MAX_STACK;
 pub mod listen;
 

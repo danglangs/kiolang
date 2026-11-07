@@ -1,0 +1,13 @@
+[package]
+name = "codegen"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Versions match what Wasmtime 50 already uses, so there is one copy of each.
+[dependencies]
+anyhow = "1"
+lang = { path = "../lang" }
+wasm-encoder = { version = "0.261", features = ["wasmparser"] }
+wasmparser = "0.261"
+wit-component = "0.261"

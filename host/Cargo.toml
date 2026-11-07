@@ -18,6 +18,7 @@ test-hooks = []
 
 [dependencies]
 cap-std = "4"
+codegen = { path = "../codegen" }
 http-body-util = "0.1.5"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1.21", features = ["tokio"] }

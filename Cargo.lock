@@ -186,6 +186,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "codegen"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lang",
+ "wasm-encoder 0.261.0",
+ "wasmparser 0.261.0",
+ "wit-component 0.261.0",
+]
+
+[[package]]
 name = "core_detect"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1026,6 +1037,7 @@ name = "kio"
 version = "0.1.0"
 dependencies = [
  "cap-std",
+ "codegen",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -1419,6 +1431,7 @@ version = "0.1.0"
 dependencies = [
  "dlmalloc",
  "lang",
+ "wit-bindgen",
 ]
 
 [[package]]

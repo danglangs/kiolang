@@ -13,7 +13,12 @@ host:   source ─► check ─► lower ─► ir::Module ─► codegen: parse
 
 Runtime and program share one linear memory and one heap, and Cranelift sees them as one module. Component composition (wasm-compose, wac) is not used: components share no memory. Wizer is no longer needed; static data are data segments.
 
-Entry: the runtime exports `run` and calls the program's `main` through a funcref table slot that codegen fills, so the runtime is built without knowing the program.
+How it is built (C2a, proven on `40 + 2`):
+
+1. **runtime.wasm is complete.** `runtime` is built for `wasm32-unknown-unknown` (codegen/build.rs) with `wit_bindgen::generate!` for the `compiled` world: the `run` export, the `trap` import, `cabi_realloc` and the `component-type` custom section are in it. No WASI imports. wit-component's `ComponentEncoder` wraps the final module unchanged.
+2. **Entry: placeholder bodies, not a table slot.** The runtime exports `kio_main() -> i64` (main's value as a slot) and `kio_main_desc() -> i32` (its descriptor), whose bodies call through a `read_volatile` pointer so LLVM keeps them opaque. Codegen finds them by export name and replaces their bodies: `kio_main` calls `rt_init(table)`, then main. Simpler than a funcref slot, and a direct call.
+3. **Appending without shifting.** `wasm_encoder::reencode::Reencode` re-emits the runtime, overriding only the type, function, memory, code and data sections (and the data count) to add after what exists. Imports never change: generated code calls the `rt_trap` export, which keeps the `trap` import in runtime.wasm, so an import is never added. Runtime bodies are copied as raw bytes.
+4. **Static data after the heap's start chunk.** The runtime links stack first (1 MiB), then its data; dlmalloc's first chunk is `__heap_base..__heap_end`, which ends at the initial memory size. Codegen puts the program's data (the descriptor table, later literals) at that old end and raises the memory's minimum by the pages it needs; dlmalloc grows memory above them, so the heap never overlaps them.
 
 **decide 1: compile cost per `kio run`.** Each run compiles runtime plus program with Cranelift (tens of ms). Recommend: Wasmtime's compilation cache keyed by module hash, so an unchanged program is not recompiled.
 
@@ -25,7 +30,7 @@ Entry: the runtime exports `run` and calls the program's `main` through a funcre
 world compiled {
   import kio:caps/fs; import kio:caps/net; import kio:caps/web;   // unchanged
   import trap: func(site: u32, a: s64, b: s64);                   // a runtime error; never returns
-  export run: func(grants: list<grant>) -> result<outcome, _>;    // grants in main's parameter order
+  export run: func(grants: list<grant>) -> result<outcome>;       // grants in main's parameter order
 }
 ```
 

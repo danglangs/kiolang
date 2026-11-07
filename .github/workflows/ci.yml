@@ -19,4 +19,5 @@ jobs:
       - run: cargo build -p guest --target wasm32-wasip2 --release
       - run: cargo clippy -p runtime --target wasm32-unknown-unknown --features test-heap -- -D warnings
       - run: cargo build -p runtime --target wasm32-unknown-unknown --release
+      - run: cargo test -p codegen
       - run: cargo run -p capgen && git diff --exit-code lang/src/caps_gen.rs

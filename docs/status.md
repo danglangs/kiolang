@@ -4,11 +4,11 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 
 ## Now
 
-The compiler ([compiler-todo.md](compiler-todo.md)): P3a IR, P3b lowering and P3c, the interpreter on the IR, done (fib 2.7x faster natively, 3x in Wasm).
+The compiler ([compiler-todo.md](compiler-todo.md)): P3a IR, P3b lowering and P3c, the interpreter on the IR, done (fib 2.7x faster natively, 3x in Wasm). C1 runtime done; C2a compiles `40 + 2` end to end (codegen/, `kio_host::Compiled`).
 
 ## Next
 
-1. C1 runtime (C1a done: objects and refcounts; C1b-d next), then C2-C4 codegen with differential tests against the interpreter. Design: [codegen.md](codegen.md), approved.
+1. C2 codegen: C2a done (`40 + 2` compiled end to end, `Compiled::run`); C2b Int, Bool, control flow, calls next, then C2c the differential harness. Design: [codegen.md](codegen.md), approved.
 2. `Dir` gains `list`, `write`, `remove`, `exists` (caps.wit; agreed in principle, pin first). Unblocks the notes app's PUT and DELETE (web W9a report).
 3. `Option::and_then`/`map`; a bare `return` as a match arm; kio-web helpers (`json_value`, `error`, `body_json`), all from the W9a report.
 
