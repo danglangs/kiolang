@@ -78,5 +78,5 @@ Every task from P3c on re-runs the benchmark set and records it in its result li
 - [ ] **C4. Codegen: capabilities, host calls, runtime errors with spans, depth limit.**
 - [ ] **C5. Integration.** `kio run` and `--listen` run compiled code (the `--listen` snapshot compiles once); the interpreter remains behind a flag for comparison.
 - [ ] **C6. Program generator** for differential testing.
-- [ ] **C7. Adversarial review** of runtime and codegen.
+- [ ] **C7. Adversarial review** of runtime and codegen. Include the `trap` import: every guest-supplied argument is checked on the host (a site outside the table is a host error since C2a's review; add a test that drives an out-of-range site and the runtime's `INTERNAL` panic site).
 - [ ] **C8. Measure** against Rust and Python (roadmap table); update docs/perf.md and docs/roadmap.md.

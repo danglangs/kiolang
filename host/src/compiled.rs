@@ -63,8 +63,12 @@ impl Compiled {
         match world.call_run(&mut store, &[]) {
             Ok(Ok(outcome)) => Ok(Ok(outcome)),
             Ok(Err(())) => wasmtime::bail!("the compiled program refused its grants"),
-            Err(e) => match e.downcast_ref::<Trapped>() {
-                Some(t) => Ok(Err(vec![runtime_err(&wasm.sites[t.site as usize])])),
+            // The site comes from the guest, so it is checked like any guest value: a site
+            // outside the table (the runtime's internal-error site, or a bug) is a host error,
+            // never an index panic.
+            Err(e) => match e.downcast_ref::<Trapped>().map(|t| wasm.sites.get(t.site as usize)) {
+                Some(Some(site)) => Ok(Err(vec![runtime_err(site)])),
+                Some(None) => Err(e.context("compiled program trapped at an unknown error site")),
                 None => Err(e),
             },
         }
