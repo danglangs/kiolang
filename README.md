@@ -8,7 +8,7 @@ Most languages today are not AI-safe: any line can read files, open sockets or s
 
 kio is a fresh language built around that idea, using Rust's ecosystem for speed and tooling. The goal is a general-purpose systems language: near-native speed, no garbage collector, memory and capability safe.
 
-**Status:** v0 works end to end: checking, the authority report, a Wasm sandbox with enforced limits, files, HTTP and serving. Progress: [docs/guest-host-todo.md](docs/guest-host-todo.md), [docs/web-support-todo.md](docs/web-support-todo.md).
+**Status:** v0 works end to end: checking, the authority report, a Wasm sandbox with enforced limits, files, HTTP and serving. A compiler to Wasm runs integer code, calls and control flow within about 2-5x of Rust and 8-38x faster than Python, checked against the interpreter on every test program; `kio run` switches to it once it covers strings, collections and capabilities ([docs/roadmap.md](docs/roadmap.md)). Where work stands: [docs/status.md](docs/status.md).
 
 ## Quickstart
 
@@ -135,11 +135,15 @@ The checker is for early, readable rejection and the authority report. The host 
 
 ## Plan
 
-Three crates:
+```
+source ─► check + report ─► lower ─► IR ─┬─► interpreter (in the sandbox; `kio run` today)
+                                         └─► codegen ─► Wasm + runtime ─► Cranelift ─► native code
+```
 
-- `lang`: parser, checker and interpreter. No I/O, no Wasm dependency, tested natively.
-- `guest`: `lang` plus a thin adapter, built once to `wasm32`. Exports `check(files)` and `run(files, grants)`; see [caps.wit](caps.wit).
-- `host`: the native binary. Embeds Wasmtime and the guest, mints handles, sets limits, implements the host functions.
+- `lang`: parser, checker, lowering, interpreter. No I/O, no dependencies, tested natively.
+- `guest`: `lang` built to `wasm32` as the interpreter component; see [caps.wit](caps.wit).
+- `runtime` and `codegen`: the compiler's runtime library and code generator ([docs/codegen.md](docs/codegen.md)).
+- `host`: the `kio` binary. Wasmtime, grants, limits, host functions.
 
 Steps:
 
@@ -151,7 +155,8 @@ Steps:
 6. Done: an audit log of every host call, and `kio mcp`, which serves the primer and `check` to agents.
 7. Done: `kio run --listen`, one fresh sandbox per request (about 0.2 ms each), with slow-client limits, and [kio-web](https://github.com/danglangs/kio-web), a web framework written in kio ([docs/web-support-todo.md](docs/web-support-todo.md)).
 8. Done: copy-on-write values (passing a value is cheap; semantics unchanged) and the program checked once per server, not per request.
-9. Later: a lowering step, then a compiler to Wasm and attenuation ([docs/roadmap.md](docs/roadmap.md)).
+9. Done: lowering to a typed IR (the interpreter runs it, 3x faster), and a compiler to Wasm for `Int`, `Bool`, control flow and calls, with a differential harness against the interpreter ([docs/compiler-todo.md](docs/compiler-todo.md)).
+10. Next: the compiler for strings, collections, structs and capabilities, then `kio run` compiled by default; later attenuation.
 
 v0 has no closures, globals, reflection or `unsafe`. Capabilities are parameters only. See [docs/language.md](docs/language.md).
 

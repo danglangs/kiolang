@@ -19,14 +19,11 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 - **WebSockets:** deferred; plan is a fresh sandbox per message plus a store, or one per connection when state is in memory.
 - open_questions #34: constants as check-time literals.
 
-## Baseline (2026-11-06, release)
+## Speed (2026-11-06, release, run time; details in [roadmap.md](roadmap.md))
 
-| | fib(32) | 3 M loop |
+| | fib(35) | 30 M loop |
 |---|---|---|
-| kio compiled (C2b; incl. ~10 ms compile) | 0.04 s | 0.016 s |
-| kio, in Wasm | 2.6 s | 0.85 s |
-| kio interpreter, native | 1.07 s | 0.33 s |
-| Python 3.11 | 0.4 s | 0.18 s |
-| Rust | 0.013 s | 0.003 s |
-
-The Wasm interpreter row is the original baseline; on the C2b run it took 0.90 s and 0.58 s (`Kio::run`).
+| Rust | 24 ms | 20 ms |
+| kio compiled (plus ~10 ms compile) | 117 ms | 46 ms |
+| Python 3.11 | 890 ms | 1.76 s |
+| kio interpreter (`kio run` today) | 3.8 s | 5.9 s |

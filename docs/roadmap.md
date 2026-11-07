@@ -1,33 +1,33 @@
 # Roadmap: from v0 to a general language
 
-Where kio stands against its goal of a general-purpose systems language with near-native speed, and what is missing. Measured 2026-11-05 on an Apple Silicon Mac, release builds.
+Where kio stands against its goal of a general-purpose systems language with near-native speed, and what is missing.
 
 ## Speed today
 
-| Program | Native Rust | Python 3.11 | kio | kio vs Rust |
-|---|---|---|---|---|
-| `fib(25)`, calls | 0.34 ms | 7 ms | 120 ms | about 350x |
-| 3 M-iteration loop, arithmetic | 5.7 ms | 169 ms | 850 ms | about 150x |
-| HTTP request, route and JSON, keep-alive | | | 24,100 req/s, p99 1 ms | |
+Measured 2026-11-06 on an Apple Silicon Mac, release builds, best of 3. Compiled times are run time: the ~10 ms compile is measured separately (an empty `main`).
 
-kio times are `kio run` wall time minus about 20 ms of startup. kio is a tree-walking interpreter running inside Wasm: it re-resolves names and copies values as it goes. It is about 5x slower than CPython on compute. For I/O-bound work such as the web example, the interpreter does not dominate: a fresh sandbox per request costs 175 µs in all (docs/perf.md).
+| Program | Rust | Python 3.11 | kio compiled | kio interpreter | compiled vs Rust | compiled vs Python |
+|---|---|---|---|---|---|---|
+| `fib(35)`, calls | 24 ms | 890 ms | 117 ms | 3.8 s | 4.9x slower | 7.6x faster |
+| 30 M-iteration loop | 20 ms | 1.76 s | 46 ms | 5.9 s | 2.3x slower | 38x faster |
+| HTTP request, route and JSON, keep-alive | | | | 24,100 req/s, p99 1 ms | | |
+
+The compiler handles `Int`, `Bool`, control flow and calls today (C2); strings, collections, structs and capabilities follow (C3, C4). Until C5, `kio run` and `--listen` still run the interpreter, which is about 4x slower than CPython on compute. For I/O-bound work such as the web example the interpreter does not dominate: a fresh sandbox per request costs 175 µs in all (docs/perf.md).
+
+The remaining gap to Rust is mostly checks Rust omits: kio traps on every integer overflow (Rust release builds wrap), and Wasm bounds-checks memory. No optimization pass has run yet.
 
 ## The path to near-native
 
 ```
-v0 tree-walker ──► P2 copy-on-write ──► P3 lowering ──► bytecode VM ──► compile to Wasm
-   (today)         values shared,        names, fields     5-20x over      kio source becomes Wasm,
-                   no quadratic copies   and variants      a lowered       which Wasmtime compiles
-                                         resolved once     tree-walker     to native code: within
-                                                                           about 1.5-3x of Rust
+tree-walker ─► P2 copy-on-write ─► P3 lowering ─► interpreter on IR ─► compile to Wasm ─► Cranelift
+                (done)              (done)          (done, 3x)            (C2 done for Int,   native code
+                                                                          Bool, control, calls)
 ```
 
-- **P2** (done) fixed a correctness-of-cost bug, not a constant factor: passing a large value to a function copied it, so loops over helpers went quadratic. W12's JSON parser on 100 KB went from 1.7 s to 0.58 s, and passing a 10,000-element list to a helper is about 40x faster.
-- **P3 lowering** turns the checked AST into a resolved form: variables as slot numbers, fields and variants as indexes, calls as function indexes. It is the prerequisite for both the VM and a compiler, and alone it is typically a 2-5x speedup for a tree-walker, since most of today's time is string lookups and clones.
-- **Bytecode VM**: worthwhile only if kio keeps interpreting. Inside Wasm it remains an interpreter in a sandbox, so its ceiling is roughly CPython-to-Lua speed.
-- **Compile to Wasm** is how "near native" is reached. kio has a static type system with no GC, no references and no reflection, so lowering to Wasm functions is direct. Wasmtime's Cranelift then compiles that to native code, typically within 1.5-3x of native Rust. The checker and report stay as they are; the host and its enforcement are unchanged, since compiled code still calls the same host functions. This replaces the guest's interpreter, not the sandbox.
-
-So: P3 is critical, because the compiler needs it. Decided 2026-11-05: no bytecode VM; P3 then a Wasm backend ([compiler-todo.md](compiler-todo.md)).
+- **P2** fixed a cost bug: passing a large value copied it, so loops over helpers went quadratic.
+- **P3** resolved names, fields and calls to indexes: the interpreter got 3x faster, and the compiler has a typed IR to consume.
+- **The compiler** emits Wasm from that IR, linked with a small runtime (refcounts, strings, collections) in one module; Wasmtime's Cranelift compiles it to native code. The checker, report, sandbox and host enforcement are unchanged: compiled code calls the same host functions. Design: [codegen.md](codegen.md); plan: [compiler-todo.md](compiler-todo.md). Correctness: every corpus program runs compiled and interpreted, and they must agree.
+- **No bytecode VM** (decided 2026-11-05): even a good one stays an interpreter inside a sandbox.
 
 ## What a real app needs that kio lacks
 

@@ -13,39 +13,40 @@ Each layer holds without the one above it. The host enforces every guarantee eve
 ## Components
 
 ```
- Agent writes                 Toolchain                         Runtime
-┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────────────────┐
-│ .kio source: │──▶│ type checker │──▶│ interpreter  │──▶│ Wasmtime sandbox         │
-│ records, fns,│   │ accept/reject│   │ (later: a    │   │                          │
-│ cap params   │   │ + authority  │   │  compiler)   │   │ guest can only call ──┐  │
-└──────────────┘   │   report     │   └──────────────┘   │ imported host fns     │  │
-       ▲           └──────┬───────┘                      └───────────────────────┼──┘
-       └──────────────────┘ errors back                                          ▼
-                            to agent                     ┌──────────────────────────┐
-        ┌──────────────────────────────┐                 │ HOST (Rust)              │
-        │ caps.wit                     │                 │ trusted, hand-written:   │
-        │ generates the cap table and  │────implements──▶│ dir.read / dir.create    │
-        │ the guest and host bindings  │                 │ http.get (allowlisted)   │
-        └──────────────────────────────┘                 │ validates every handle   │
-                                                         └──────────────────────────┘
+ Agent writes          HOST (Rust, trusted)                              SANDBOX (Wasmtime)
+┌──────────────┐   ┌───────────────────────────────────────┐   ┌────────────────────────────┐
+│ .kio source: │──▶│ check ─► report ─► lower ─► IR        │   │ compiled: program.wasm +   │
+│ records, fns,│   │   │ accept/reject         └─► codegen ─┼──▶│ runtime (refcounts, Str,   │
+│ cap params   │   │   ▼ errors back to agent    (C5: default)  │ List, Map), native code    │
+└──────────────┘   │                                       │   │                            │
+                   │ today `kio run`: source ──────────────┼──▶│ interpreter guest (lang)   │
+                   │                                       │   │                            │
+                   │ host functions: dir.read, http.get,   │◀──┼─ the only way out: imports │
+                   │ send, trap; check every handle, path, │   │   from caps.wit            │
+                   │ quota; write the audit log            │   └────────────────────────────┘
+                   └───────────────────────────────────────┘
 ```
 
 | Component | Trusted | Role |
 |---|---|---|
 | `.kio` source | No | Business logic. Capabilities are opaque values that can be passed and called, never created. |
-| Checker | Yes, but runs in the sandbox | Accepts or rejects the program against the capability table. Emits the authority report. Generates no code. |
-| Interpreter | Yes, but runs in the sandbox | Evaluates the checked program. Rust, compiled to `wasm32`. |
+| Checker | Yes | Accepts or rejects the program against the capability table and emits the authority report. Runs in the host (decided 2026-11-06); today the interpreter guest also checks what it runs. |
+| Lowering and codegen | Yes | Turn the checked program into an IR, then Wasm, linked with the runtime. A bug can give a wrong answer, not an escape: the sandbox and the host still enforce every grant. |
+| Runtime | No more than the program | Refcounted values, strings and collections, in the same module as the program. |
+| Interpreter | No more than the program | Runs the IR inside the sandbox: `kio run` today, and the reference the compiler is tested against. |
 | `caps.wit` | Yes | Declares every function that crosses the sandbox wall. Changing it is a security-review event. |
-| Wasmtime | Yes | In-process sandbox. No ambient file, network, env or clock. Fuel, memory and epoch limits. |
+| Wasmtime | Yes | In-process sandbox. No ambient file, network, env or clock. Fuel, memory, stack and epoch limits. |
 | Host functions | Yes | The only code that touches real resources. Each call validates the handle, its scope and quotas. |
 
-Everything runs in one OS process, the `kio` binary. Wasmtime is a library inside it and the guest is a byte blob embedded at build time. The sandbox is a memory wall inside the process. For production, add OS-level isolation as well: a container or VM, plus seccomp.
+Everything runs in one OS process, the `kio` binary. The sandbox is a memory wall inside the process. For production, add OS-level isolation as well: a container or VM, plus seccomp.
 
-## Three crates
+## Crates
 
-- `lang`: parser, checker, interpreter. No I/O, no Wasm dependency. All language tests run natively.
-- `guest`: `lang` plus a thin adapter, built once to `wasm32`. Exports `check(files)` and `run(files, grants)`. Forwards capability calls to the `caps.wit` imports.
-- `host`: the runtime binary. Embeds Wasmtime and the guest bytes, parses grants, mints handles, sets limits, implements the host functions.
+- `lang`: parser, checker, lowering to IR, interpreter. No I/O, no dependencies. All language tests run natively.
+- `guest`: `lang` built to `wasm32` as the interpreter component (`guest` world).
+- `runtime`: compiled kio's runtime library, `no_std`, built to one core module (`compiled` world).
+- `codegen`: IR to Wasm, appended to the runtime and wrapped as a component.
+- `host`: the `kio` binary. Wasmtime, grants, limits, host functions, the audit log, `--listen`, `kio mcp`.
 
 ## Files and who owns them
 
@@ -54,7 +55,7 @@ Everything runs in one OS process, the `kio` binary. Wasmtime is a library insid
 | `caps.wit` | you, by hand, rarely | build step | at build |
 | capability table (Rust) | generated from `caps.wit` by `tools/capgen` (checked in, CI diffs it) | checker, inside the guest | at build |
 | guest and host Rust bindings | generated from `caps.wit` by wit-bindgen | rustc | at build |
-| `prog.kio` | the agent | checker, then interpreter | every run |
+| `prog.kio` | the agent | checker, then interpreter (compiler from C5) | every run |
 | grants (`--dir name=path`) | the operator | host | every run |
 
 Adding a method to `caps.wit` regenerates the capability table, the guest import stub and the host trait. The host no longer compiles until the method is implemented. The three cannot drift.
@@ -62,6 +63,8 @@ Adding a method to `caps.wit` regenerates the capability table, the guest import
 `caps.wit` is one file for the whole toolchain. It says what a `Dir` *can* do. A grant says which directory *this run* gets. The program says which roles it *needs*. Three layers, three owners.
 
 ## One run, step by step
+
+Today `kio run` uses the interpreter guest, as below. Compiled runs (the default from C5) differ in steps 3 to 6 and 9: the host checks, lowers and compiles first, the guest's `run` receives the grants in `main`'s parameter order, and compiled code, not the interpreter, makes the import calls.
 
 ```
 kio run prog.kio --dir input=/srv/jobs/42/in --dir out=/srv/jobs/42/out
@@ -105,11 +108,11 @@ Defaults per run, or per request under `--listen` (fuel 100 million, 64 MB, 5 s)
 | Host calls | 10,000 | `--calls` | capability calls; at most 64 timed-out calls may still be finishing at once, process-wide |
 | I/O | 100 MB total, 10 MB per read | `--io` | bytes read and written |
 
-## Why the checker runs in the guest
+## Where the checker runs
 
-The checker is part of `lang`, and `lang` is what gets compiled to `wasm32`. Running it natively would mean building `lang` twice and parsing adversarial input outside the sandbox. Inside the guest, a parser that overflows or spins costs fuel, not the host.
+Decided 2026-11-06: in the host. The host already holds every grant and enforces every limit, so a second check inside the sandbox adds no safety, and checking there cost the sandbox's memory and fuel on every request (open_questions #33). Adversarial source is then parsed outside the sandbox, so the front end must never panic or recurse without bound: the host runs it on a large stack, and the program generator (compiler C6) fuzzes it.
 
-The consequence: the host never relies on the checker's verdict for safety. The handle table and host functions enforce every guarantee on their own. The checker exists for early, readable rejection and for the authority report.
+The host never relies on the checker for safety. The handle table and host functions enforce every guarantee on their own. The checker exists for early, readable rejection and for the authority report.
 
 ## Where state lives
 
@@ -123,16 +126,16 @@ Only the first is in the language. Every other tier is a capability: named in `m
 
 ## Memory model
 
-Value semantics without a garbage collector or lifetimes. The v0 interpreter clones eagerly and is the reference: later optimizations must not change what a program observes, and the tests that pin copy behavior are what make them safe.
+Value semantics without a garbage collector or lifetimes. The interpreter is the reference: later optimizations, and the compiler, must not change what a program observes; the tests that pin copy behavior and the differential harness are what make them safe.
 
 | Step | Change | Observable behavior |
 |---|---|---|
 | v0 | every assignment, argument and container read clones | reference |
-| copy on write | values share storage with a reference count; any write to shared storage, including `x.f = v` and `xs[i] = v`, copies it first | unchanged |
+| copy on write (done) | values share storage with a reference count; any write to shared storage, including `x.f = v` and `xs[i] = v`, copies it first | unchanged |
 | last-use moves | a variable's last use moves its storage instead of sharing it | unchanged |
 | `&mut` parameters | a callee changes the caller's value; shared storage is still copied first | new feature |
 
-Each step lands in the interpreter before any compiler. No stored references and no shared mutable objects means no cycles, so reference counting never leaks.
+No stored references and no shared mutable objects means no cycles, so reference counting never leaks. Compiled code uses the same model: the runtime holds the counts, codegen inserts the increments and decrements ([codegen.md](codegen.md), Ownership), and every differential test checks that no object is left alive.
 
 `&mut` rules:
 - **No escape.** Parameters only: never stored, returned or put in a container. It cannot outlive the call.
@@ -140,12 +143,10 @@ Each step lands in the interpreter before any compiler. No stored references and
 
 Linked structures use indexes into a `List`. Copies stay implicit, as in Swift's value types. Hylo's explicit-copy default is not adopted, because switching later would change existing programs.
 
-`Program` holds resolved names and types and nothing from the interpreter, so a compiler can consume it.
+Lowering turns a checked `Program` into `ir::Module`, with every name resolved to an index; the interpreter and the compiler both run it.
 
 ## Open questions
 
 - **Attenuation.** `dir.sub("invoices")` would let `main` hand a helper less than it has. It conflicts with "caps are parameters only" because it returns a cap. Options: allow it only in argument position, or make the host mint sub-handles. Deferred to v1.
 - **Relaxing second-class caps.** Storing caps in records would need flow analysis in the checker. Not until there is a program that needs it.
-- **Compiler.** The interpreter is the fastest path to a working v0. A compiler to Wasm removes the interpreter from the trusted set and runs near native: the interpreter costs roughly 30 to 100 times. Language and interfaces stay the same.
 - **Grant format.** CLI flags for v0. A manifest file once there are more than a handful of grants per run.
-- **Modules.** v0 programs are one file. Multi-file programs: the host reads the source files and passes them in, since the guest has no file access, so `check` and `run` take a list of `(path, source)` and `Span` gains a file id. Capability rules are unchanged; a function in another module still gets authority only through its parameters. Nothing in v0 depends on the single-file shape, so this waits until there is a need.

@@ -16,4 +16,4 @@ Each request gets a fresh sandbox. The program is checked once at startup (W13b)
 
 What this implies:
 - The per-request sandbox is not the bottleneck at these rates; a fresh, isolated instance per request costs well under a millisecond.
-- The next win is per-request work inside the guest: the tree-walking interpreter (P2 copy-on-write, P3 lowering, then a bytecode VM).
+- The next win is per-request work inside the guest. P2 (copy-on-write) and P3 (lowering; the interpreter on the IR is 3x faster) are done; the compiler (docs/compiler-todo.md) replaces the interpreter at C5. Compute benchmarks against Rust and Python: docs/roadmap.md.
