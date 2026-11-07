@@ -4,13 +4,14 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 
 ## Now
 
-The compiler ([compiler-todo.md](compiler-todo.md)): P3a IR, P3b lowering and P3c, the interpreter on the IR, done (fib 2.7x faster natively, 3x in Wasm). C1 runtime done; C2a-b compile Int, Bool, control flow and calls (codegen/, `kio_host::Compiled`): fib(32) 22x faster than the interpreter.
+**Checkpoint reached (2026-11-06): compiled kio runs, proven against the interpreter.** P3 (IR, lowering, interpreter on the IR), C0 (design, [codegen.md](codegen.md)), C1 (runtime), C2a-c (pipeline, Int/Bool/control/calls, differential harness) are done. `host/tests/differential.rs` runs every corpus program both ways; any disagreement fails CI. A deliberate codegen bug (`<` as `<=`) was confirmed to fail it.
 
 ## Next
 
-1. C2 codegen: C2a-b done (Int, Bool, control flow, calls compiled; `Compiled::run`); C2c the differential harness next. Design: [codegen.md](codegen.md), approved.
-2. `Dir` gains `list`, `write`, `remove`, `exists` (caps.wit; agreed in principle, pin first). Unblocks the notes app's PUT and DELETE (web W9a report).
-3. `Option::and_then`/`map`; a bare `return` as a match arm; kio-web helpers (`json_value`, `error`, `body_json`), all from the W9a report.
+1. **C3: heap values in codegen** (Str, Bytes, List, Map, structs, enums, `match`, `for` over a list), following codegen.md "Ownership" and "Values". Split before starting; each part grows the harness's "ran both ways" count (46 today) and must keep live objects at 0. Wire the runtime's `rt_live` into the harness here.
+2. C4 (capabilities, host calls, display of every type), C5 (`kio run` and `--listen` compiled by default; the interpreter behind `--interp`; drop wizer, re-measure W13d), C6 (program generator), C7 (adversarial review, including `trap`), C8 (measure, then Perceus-style refcount elision).
+3. `Dir` gains `list`, `write`, `remove`, `exists` (caps.wit; agreed in principle, pin first). Unblocks the notes app's PUT and DELETE (web W9a report).
+4. `Option::and_then`/`map`; a bare `return` as a match arm; kio-web helpers (`json_value`, `error`, `body_json`), from the W9a report.
 
 ## Waiting on the maintainer
 
