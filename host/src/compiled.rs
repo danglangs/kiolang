@@ -22,6 +22,8 @@ use bindings::{Compiled as World, CompiledImports, Outcome};
 #[derive(Debug)]
 struct Trapped {
     site: u32,
+    a: i64,
+    b: i64,
 }
 
 impl std::fmt::Display for Trapped {
@@ -33,9 +35,8 @@ impl std::fmt::Display for Trapped {
 impl std::error::Error for Trapped {}
 
 impl CompiledImports for State {
-    // C2b formats messages that show `a` and `b`.
-    fn trap(&mut self, site: u32, _a: i64, _b: i64) -> Result<()> {
-        Err(wasmtime::Error::new(Trapped { site }))
+    fn trap(&mut self, site: u32, a: i64, b: i64) -> Result<()> {
+        Err(wasmtime::Error::new(Trapped { site, a, b }))
     }
 }
 
@@ -44,7 +45,8 @@ pub struct Compiled;
 
 impl Compiled {
     /// Check `source`, compile it and run `main`: its displayed value, the checker's
-    /// diagnostics, or a runtime error with the interpreter's span and message.
+    /// diagnostics, or a runtime error with the interpreter's span and message. A run stopped
+    /// by a limit is an `Err` whose message is `Kio::explain`'s.
     pub fn run(source: &str, limits: Limits) -> Result<std::result::Result<Outcome, Vec<Diag>>> {
         let caps = lang::CapTable::v0();
         let program = match lang::check(source, &caps) {
@@ -66,20 +68,26 @@ impl Compiled {
             // The site comes from the guest, so it is checked like any guest value: a site
             // outside the table (the runtime's internal-error site, or a bug) is a host error,
             // never an index panic.
-            Err(e) => match e.downcast_ref::<Trapped>().map(|t| wasm.sites.get(t.site as usize)) {
-                Some(Some(site)) => Ok(Err(vec![runtime_err(site)])),
-                Some(None) => Err(e.context("compiled program trapped at an unknown error site")),
-                None => Err(e),
+            Err(e) => match e.downcast_ref::<Trapped>() {
+                Some(t) => match wasm.sites.get(t.site as usize) {
+                    Some(site) => Ok(Err(vec![runtime_err(site, t.a, t.b)])),
+                    None => Err(e.context("compiled program trapped at an unknown error site")),
+                },
+                // A limit, such as deep recursion past `--stack`, reads as it does for `Kio`.
+                None => match crate::limit_trap(&e, &limits) {
+                    Some(msg) => Err(e.context(msg)),
+                    None => Err(e),
+                },
             },
         }
     }
 }
 
-/// The interpreter's error for site `s`, as the diagnostic `Kio::run` gives.
-fn runtime_err(s: &Site) -> Diag {
+/// The interpreter's error for `trap(s, a, b)`, as the diagnostic `Kio::run` gives.
+fn runtime_err(s: &Site, a: i64, b: i64) -> Diag {
     Diag {
         span: s.span,
-        msg: s.msg.to_string(),
+        msg: s.message(a, b),
         hint: None,
     }
 }

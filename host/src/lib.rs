@@ -1086,6 +1086,18 @@ fn new_store(engine: &Engine, limits: &Limits) -> Result<Store<State>> {
     Ok(store)
 }
 
+/// The message for a Wasm trap that is one of `l`'s limits.
+fn limit_trap(e: &wasmtime::Error, l: &Limits) -> Option<String> {
+    Some(match e.downcast_ref::<wasmtime::Trap>()? {
+        wasmtime::Trap::OutOfFuel => format!("out of fuel (limit {}; raise it with --fuel)", l.fuel),
+        wasmtime::Trap::Interrupt => format!("timed out after {} s (raise it with --timeout)", l.timeout_secs),
+        wasmtime::Trap::StackOverflow => {
+            format!("stack overflow (limit {} KB; raise it with --stack)", l.stack >> 10)
+        }
+        _ => return None,
+    })
+}
+
 /// A fresh instance of the embedded guest, for one run: fuel, deadline, call and I/O counters
 /// are not reset, so make a new `Kio` per run.
 pub struct Kio {
@@ -1178,14 +1190,7 @@ impl Kio {
                 l.timeout_secs
             ));
         }
-        Some(match e.downcast_ref::<wasmtime::Trap>()? {
-            wasmtime::Trap::OutOfFuel => format!("out of fuel (limit {}; raise it with --fuel)", l.fuel),
-            wasmtime::Trap::Interrupt => format!("timed out after {} s (raise it with --timeout)", l.timeout_secs),
-            wasmtime::Trap::StackOverflow => {
-                format!("stack overflow (limit {} KB; raise it with --stack)", l.stack >> 10)
-            }
-            _ => return None,
-        })
+        limit_trap(e, l)
     }
 
     /// Parse and check `source`: the report lines, or the diagnostics.

@@ -87,6 +87,8 @@ Every error site has a number; the host keeps `site -> (span, message template)`
 
 Integer checks emitted explicitly, in the interpreter's order: `/` and `%`: divisor 0 is "division by zero", then `MIN / -1` and `MIN % -1` are "Int overflow" (Wasm's `rem_s` gives 0 and `div_s` traps without a site). `-MIN`, `+`, `-`, `*` check overflow. `+=` and `-=` report the statement's span.
 
+How it is built (C2b): `codegen::Site { span, template }`, one per check; the host's `trap` checks the site is in the table, then replaces `{a}` and `{b}` in the template with `trap`'s arguments. Checks are inline, no runtime call: `+` overflows when `(a ^ r) & (b ^ r) < 0`, `-` when `(a ^ b) & (a ^ r) < 0`; `*` when `a != 0` and `r / a != b`, with `a = -1, b = MIN` tested first (that division would trap). Locals: each IR local with a Wasm value type gets a Wasm local, parameters first; `()` locals get none; hidden locals follow. A limit trap (stack overflow, fuel, timeout) from `Compiled::run` carries `Kio::explain`'s message. Function types are deduplicated.
+
 The runtime is built `panic = "abort"` with a panic handler that calls `trap` with an internal-error site, so a runtime bug never looks like a program error. "Host returned a malformed value" becomes unreachable: the canonical ABI enforces types.
 
 ## Host calls
