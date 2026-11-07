@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 use lang::CapTable;
 
+pub mod corpus;
+
 /// The capability table every capability test uses.
 pub fn caps() -> CapTable {
     CapTable::v0()
