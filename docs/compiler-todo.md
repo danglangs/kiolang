@@ -2,6 +2,18 @@
 
 Compile kio to Wasm instead of interpreting it, for near-native speed (docs/roadmap.md). Owner decision 2026-11-05: go from P3 lowering straight to a Wasm backend; no bytecode VM. Tasks run in order, each pinned before handoff, as in lang-todo.md.
 
+## Resuming this work
+
+Read, in order: docs/status.md (where it stands), this file's next open task, [codegen.md](codegen.md) (the approved design; its "How it is built" notes record what the code actually does), then the code it names. Before changing codegen, run `cargo test -p kio --test differential -- --nocapture`: it prints how many programs run both ways and which IR nodes are still unsupported. That list is the work queue.
+
+Facts that are easy to miss:
+- `kio run` and `--listen` still use the interpreter; the compiler is reached only through `kio_host::Compiled::run` until C5.
+- Unsupported IR panics with `unimplemented!("codegen: <kind> <Node>")`; the harness catches and counts it. Never make a program pass by skipping it silently.
+- The harness runs each side with 2 billion fuel on a `4 * MAX_STACK` thread; limit stops on either side are excluded, not compared (decision 6). `Compiled::run` reports a limit trap as `Err` with the host's message; `Kio::run` reports it through `explain`.
+- `rt_unique` on 0 is undefined: never call it on an empty slot. `rt_dec(0)` and `rt_inc(0)` are no-ops.
+- Error sites come from the guest, so the host bounds-checks them (C2a review); keep that for anything else the guest passes.
+- A Wasm `trap` import is the only new function on the sandbox wall; adding another is a one-way door for the maintainer.
+
 ## Shape
 
 ```
@@ -76,9 +88,17 @@ Every task from P3c on re-runs the benchmark set and records it in its result li
   - [x] **C2c. Differential harness.** A test that runs every program in lang/tests (as P3b's corpus test collects them) and examples through both the interpreter and the compiled path where codegen supports the program (an `unimplemented` is skipped and counted), comparing value or error and span; reports how many ran both ways. Live objects 0 at exit once heap values exist (C3).
     Done: the harness runs in CI; every program codegen supports agrees with the interpreter.
     Result: host/tests/differential.rs (corpus collector shared in lang/tests/common/corpus.rs): 46 ran both ways, 45 agreed, 1 excluded by limits, 24 skipped for capabilities, the rest unsupported (mostly Str, List, Map, Option, Result types); about 7 s in debug.
-- [ ] **C3. Codegen: Str, Bytes, List, Map, structs, enums, `match`.**
-- [ ] **C4. Codegen: capabilities, host calls, runtime errors with spans, depth limit.**
-- [ ] **C5. Integration.** `kio run` and `--listen` run compiled code (the `--listen` snapshot compiles once); the interpreter remains behind a flag for comparison.
+- [ ] **C3. Heap values.** Ownership per [codegen.md](codegen.md) "Ownership" is the hard part: every rule there is a test. Use a strong model for C3a and C3b. Split:
+  - [ ] **C3a. Runtime exports and descriptors.** The runtime's operations (runtime/src/text.rs, coll.rs, display.rs) are Rust-only today: add `extern "C"` exports for each `Builtin`, `Mut`, `rt_eq` and construction, over `u32` pointers and `i64` slots, with errors returned as codes that codegen turns into `trap`. Codegen emits the descriptor table (desc.rs `Desc`/`Variant`/`Table`, `repr(C)`: emitted bytes must match that layout exactly; add a test that encodes a table and reads it back through `abi::RawTable`, which C1a left untested). `Option` and `Result` descriptors must be named exactly that (display recognizes them by name). String literals as pinned statics in data segments, interned per module. Expose `rt_live` to the harness and assert live objects 0 after every run that did not trap.
+  - [ ] **C3b. Str and Bytes in codegen**, with the ownership rules: owned temporaries, consuming vs non-consuming positions, spill before an early exit, `rt_dec` then zero a slot at scope end, assignment evaluates, decs the old value, then stores. Every `Builtin` and `Mut` on them; `Concat`; `==`.
+  - [ ] **C3c. List and Map**, including places (`xs[i] = v`, `a.b[i].c = v`: `rt_unique` along the path, storing each result back) and `for x in xs` (the loop's own reference, released on every exit; it is what makes `xs.push` in the body copy).
+  - [ ] **C3d. Structs, enums, `Option`, `Result`, `match`, `?`.** Variant layout per codegen.md; payload-free variants as pinned statics; `?` returns the error object unchanged.
+  - [ ] **C3e. `main` returning any type** (today Int, Bool, `()` only: `kio_main_desc` returns the value's descriptor, and the runtime's `run` displays it; a failed `Result` displays its `Err` payload, as the guest does).
+  Done for each: the differential harness's "ran both ways" count grows, with zero mismatches and zero live objects; unit tests for each ownership rule with a program that would leak or double-free without it.
+- [ ] **C4. Capabilities.** Grants: `Compiled::run` passes `&[]` today. The host checks grants against `main`'s parameters (missing, duplicate, unknown, as the guest does now, same messages) and passes them in parameter order; codegen binds them to `main`'s `Cap` locals. Capability calls through runtime wrappers over the `caps.wit` imports (codegen.md "Host calls": the runtime owns `cabi_realloc`, so a returned `string` or `list<u8>` becomes a `Str`/`Bytes` in place). Error enums by `CapTable` order; `send` with a status that is not a u16 is `Err(WebErr::Invalid)` (guest/src/lib.rs does this today). The audit log and the report check (H8: a call the report did not predict stops the run) must work unchanged.
+  Done: the harness runs the capability programs too (24 skipped today) with fake grants, and they agree; host tests for each grant error; the audit log is identical apart from durations.
+- [ ] **C5. Compiled by default.** `kio run` and `kio run --listen` compile; `--interp` keeps the interpreter. Under `--listen`, compile once in `Server::new` and drop wizer and the snapshot (W13b), so `checked_guest` and the async-stack coupling in `set_stack` go away; re-measure idle RSS and startup (W13d) and request latency (docs/perf.md). `kio run` caches compiled code by program hash (C0 decide 1: Wasmtime's cache). Fuel defaults re-measured so a typical program has the same headroom. `MAX_STACK`'s 8 MB guest link setting can shrink (the runtime's own frames only). Update README, design.md ("One run, step by step"), language.md (deep recursion: compiled code stops at `--stack`), docs/status.md.
+  Done: every host and kio-web test passes compiled; `--interp` gives identical output; the numbers above recorded.
 - [ ] **C6. Program generator** for differential testing.
 - [ ] **C7. Adversarial review** of runtime and codegen. Include the `trap` import: every guest-supplied argument is checked on the host (a site outside the table is a host error since C2a's review; add a test that drives an out-of-range site and the runtime's `INTERNAL` panic site).
 - [ ] **C8. Measure** against Rust and Python (roadmap table); update docs/perf.md and docs/roadmap.md.
