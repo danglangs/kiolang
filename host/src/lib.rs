@@ -1177,7 +1177,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Limits {
-            fuel: 100_000_000,
+            fuel: 10_000_000_000,
             timeout_secs: 10,
             stack: 2 << 20,
             memory: 256 << 20,

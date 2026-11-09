@@ -20,7 +20,7 @@ Since C5 `kio run` and `--listen` run compiled code. Measured on an Apple Silico
 - A first `kio run` compiles the runtime and program with Cranelift (about 25 ms); the compiled code is cached in `~/.cache/kio` (open_questions #75), so a second run of the same program loads it. A cached run is still about 3 ms slower than the interpreter guest was: checking, codegen and loading 0.7 MB of native code.
 - `--listen` compiles once on one thread: a parallel compile starts in about 30 ms but leaves about 20 MB more resident on macOS (W13d). On a quiet machine, before this change: startup 27 ms, idle RSS 49 MB, `ab -k` 60,600 req/s, no keep-alive 21,400 req/s.
 - Without keep-alive the ceiling is still opening a TCP connection per request; with keep-alive, a request costs about 0.2 ms in all.
-- Fuel defaults are a tenth of the interpreter's (100 million per run, 10 million per request): see open_questions #76 for the measurements.
+- Fuel defaults: 10 billion per `kio run` (a few seconds of compiled compute; fib(35) uses 1.1 billion), 10 million per request: see open_questions #76.
 - `cargo test --release --test serve -- --nocapture` prints the `Server::handle` median; `cargo test --release --test idle_rss -- --nocapture` prints idle RSS.
 
 ## Interpreter guest (until C5)
