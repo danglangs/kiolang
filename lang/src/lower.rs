@@ -315,6 +315,33 @@ impl<'a> Lowerer<'a> {
                 _ => unreachable!("checked module path"),
             },
             ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms),
+            ExprKind::IfLet(pat, scrut, then, els) => {
+                let scrut = self.expr(scrut);
+                let mark = self.scope.len();
+                let pat = self.pat(pat, self.checked(scrut.span));
+                let then = Expr {
+                    kind: ir::ExprKind::Block(self.block(then)),
+                    ty: self.ids.ty(ty),
+                    span: then.span,
+                };
+                self.scope.truncate(mark);
+                let els = match els {
+                    Some(x) => self.expr(x),
+                    None => Expr {
+                        kind: ir::ExprKind::Unit,
+                        ty: Ty::Unit,
+                        span: e.span,
+                    },
+                };
+                let arms = vec![
+                    Arm { pat, body: then },
+                    Arm {
+                        pat: Pat::Wild,
+                        body: els,
+                    },
+                ];
+                ir::ExprKind::Match(Box::new(scrut), arms)
+            }
             ExprKind::Try(x) => ir::ExprKind::Try(Box::new(self.expr(x))),
         };
         Expr {
@@ -444,13 +471,10 @@ impl<'a> Lowerer<'a> {
                 None => Pat::Bind(self.bind(n, st, p.span)),
             },
             PatKind::Module(_, inner) => self.pat(inner, st),
-            PatKind::Variant(_, v, names) => {
+            PatKind::Variant(_, v, parts) => {
                 let (_, i) = self.variant(st, v).expect("checked variant");
                 let payload = &shape(&self.p.variants, st).1[i as usize].1;
-                let binds = (names.iter().zip(payload))
-                    .map(|(n, ty)| n.as_ref().map(|n| self.bind(n, ty, p.span)))
-                    .collect();
-                Pat::Variant(i, binds)
+                Pat::Variant(i, parts.iter().zip(payload).map(|(q, ty)| self.pat(q, ty)).collect())
             }
         }
     }

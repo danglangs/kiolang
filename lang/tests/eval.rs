@@ -390,6 +390,55 @@ fn match_on_option_and_result() {
 }
 
 #[test]
+fn nested_patterns() {
+    // Each L4a example; `IoErr` comes from the capability table.
+    let src = "fn f(r: Result<Int, IoErr>) -> Int { match r { Err(IoErr::Exists) => 1, Err(_) => 2, Ok(n) => n } }
+               fn main() -> Int { f(Err(IoErr::Exists)) * 100 + f(Err(IoErr::Denied)) * 10 + f(Ok(7)) }";
+    let p = check(src, &CapTable::v0()).unwrap_or_else(|d| panic!("{d:?}"));
+    assert_eq!(run(&p, &mut NoCaps).unwrap(), Value::Int(127));
+    let src = "fn f(r: Result<Bool, Str>) -> Int { match r { Ok(true) => 1, Ok(false) => 2, Err(_) => 3 } }
+               fn g(o: Option<Int>) -> Int { match o { Some(0) => 1, Some(n) => n, None => -1 } }
+               fn h(o: Option<Option<Int>>) -> Int { match o { Some(Some(x)) => x, Some(None) => 0, None => -1 } }
+               fn main() -> List<Int> { [f(Ok(true)), f(Ok(false)), f(Err(\"e\")), g(Some(0)), g(Some(5)), g(None), h(Some(Some(9))), h(Some(None)), h(None)] }";
+    let want = [1, 2, 3, 1, 5, -1, 9, 0, -1].map(Value::Int).to_vec();
+    assert_eq!(int(src), Value::List(want.into()));
+    let src = "enum Shape { Line(Int, Int), Dot }
+               enum Req { Get(Str, Option<Shape>), Other }
+               fn f(s: Shape) -> Int { match s { Shape::Line(1, _) => 1, Shape::Line(a, b) => a + b, Shape::Dot => 0 } }
+               fn g(r: Req) -> Str { match r { Req::Get(\"GET\", Some(Shape::Line(_, n))) => n.to_str(), Req::Get(\"GET\", _) => \"get\", Req::Get(m, _) => m, Req::Other => \"other\" } }
+               fn main() -> Str { f(Shape::Line(1, 9)).to_str() + f(Shape::Line(2, 3)).to_str() + g(Req::Get(\"GET\", Some(Shape::Line(0, 4)))) + g(Req::Get(\"GET\", None)) + g(Req::Get(\"PUT\", None)) + g(Req::Other) }";
+    assert_eq!(int(src), Value::Str("154getPUTother".into()));
+}
+
+#[test]
+fn nested_bindings_are_scoped_and_moved() {
+    let src = "fn main() -> Int {
+                   let x = 100;
+                   let o: Option<Result<Int, Str>> = Some(Ok(1));
+                   let r = match o { Some(Ok(x)) => x + 1, Some(Err(_)) => 0, None => 0 };
+                   r + x
+               }";
+    assert_eq!(int(src), Value::Int(102));
+    let src = "fn main() -> List<Str> { let o = Some([\"a\"]); match o { Some(xs) => { let mut ys = xs; ys.push(\"b\"); ys }, None => [] } }";
+    assert_eq!(
+        int(src),
+        Value::List(vec![Value::Str("a".into()), Value::Str("b".into())].into())
+    );
+}
+
+#[test]
+fn if_let_runs() {
+    let src = "fn f(o: Option<Int>) -> Int { if let Some(x) = o { x } else { -1 } }
+               fn g(o: Option<Int>) -> Int { let mut n = 0; if let Some(x) = o { n = x; } n }
+               fn h(o: Option<Int>, r: Result<Int, Str>) -> Int { if let Some(x) = o { x } else if let Ok(y) = r { y * 10 } else if o.is_none() { 7 } else { 8 } }
+               fn main() -> List<Int> { [f(Some(3)), f(None), g(Some(4)), g(None), h(Some(1), Ok(2)), h(None, Ok(2)), h(None, Err(\"e\"))] }";
+    let want = [3, -1, 4, 0, 1, 20, 7].map(Value::Int).to_vec();
+    assert_eq!(int(src), Value::List(want.into()));
+    let src = "fn main() -> Int { let x = 5; if let Some(Some(x)) = Some(Some(1)) { x + 10 } else { x } }";
+    assert_eq!(int(src), Value::Int(11));
+}
+
+#[test]
 fn methods() {
     let round = "fn main() -> Str { \"h\u{e9}llo \u{4e16}\".to_bytes().to_str() }";
     assert_eq!(int(round), Value::Str("h\u{e9}llo \u{4e16}".into()));

@@ -125,6 +125,13 @@ fn walk(e: &Expr, visit: &mut dyn FnMut(&Expr)) {
                 walk(els, visit);
             }
         }
+        ExprKind::IfLet(_, s, then, els) => {
+            walk(s, visit);
+            walk_block(then, visit);
+            if let Some(els) = els {
+                walk(els, visit);
+            }
+        }
         ExprKind::Block(b) => walk_block(b, visit),
         ExprKind::Call(f, args) => {
             walk(f, visit);

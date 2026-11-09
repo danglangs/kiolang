@@ -49,6 +49,28 @@ impl Printer<'_> {
     }
 
     /// The name of variant `i` of a value of type `t`.
+    /// Pattern `p` on a value of type `t`.
+    fn pat(&self, p: &Pat, t: &Ty) -> String {
+        match p {
+            Pat::Wild => "_".to_string(),
+            Pat::Bind(x) => self.local(*x),
+            Pat::Int(n) => n.to_string(),
+            Pat::Str(s) => format!("{s:?}"),
+            Pat::Bool(b) => b.to_string(),
+            Pat::Variant(i, ps) if ps.is_empty() => self.variant(t, *i),
+            Pat::Variant(i, ps) => {
+                let tys = match t {
+                    Ty::Option(x) => vec![(**x).clone()],
+                    Ty::Result(x, e) => vec![[x, e][*i as usize].as_ref().clone()],
+                    Ty::Enum(e) => self.m.enums[e.0 as usize].variants[*i as usize].1.clone(),
+                    _ => unreachable!(),
+                };
+                let ps: Vec<_> = ps.iter().zip(&tys).map(|(p, t)| self.pat(p, t)).collect();
+                format!("{}({})", self.variant(t, *i), ps.join(", "))
+            }
+        }
+    }
+
     fn variant(&self, t: &Ty, i: u32) -> String {
         let name = match t {
             Ty::Option(_) => ["None", "Some"][i as usize].to_string(),
@@ -258,24 +280,7 @@ impl Printer<'_> {
                 *out += " {\n";
                 for arm in arms {
                     *out += &"  ".repeat(depth + 1);
-                    *out += &match &arm.pat {
-                        Pat::Wild => "_".to_string(),
-                        Pat::Bind(x) => self.local(*x),
-                        Pat::Int(n) => n.to_string(),
-                        Pat::Str(s) => format!("{s:?}"),
-                        Pat::Bool(b) => b.to_string(),
-                        Pat::Variant(i, binds) => {
-                            let binds: Vec<_> = (binds.iter())
-                                .map(|b| b.map_or("_".to_string(), |x| self.local(x)))
-                                .collect();
-                            let binds = if binds.is_empty() {
-                                String::new()
-                            } else {
-                                format!("({})", binds.join(", "))
-                            };
-                            format!("{}{binds}", self.variant(&scrut.ty, *i))
-                        }
-                    };
+                    *out += &self.pat(&arm.pat, &scrut.ty);
                     *out += " => ";
                     self.expr(out, &arm.body, depth + 1);
                     *out += "\n";
@@ -474,6 +479,47 @@ fn try_and_matches() {
            }
          }
          locals other#1: Int",
+    );
+}
+
+#[test]
+fn nested_patterns_and_if_let() {
+    snapshot(
+        "enum Shape { Dot, Line(Int, Option<Int>) }
+         fn f(r: Result<Shape, IoErr>) -> Int { match r { Ok(Shape::Line(1, Some(n))) => n, Err(IoErr::Exists) => 1, _ => 0 } }
+         fn g(o: Option<Int>) -> Int { if let Some(x) = o { x } else if let None = o { 1 } else { 2 } }
+         fn h(o: Option<Int>) { if let Some(_) = o {} }",
+        "fn f(r#0: Result<Shape, IoErr>) -> Int {
+           match r#0 {
+             Ok[0](Shape::Line[1](1, Some[1](n#1))) => n#1
+             Err[1](IoErr::Exists[4]) => 1
+             _ => 0
+           }
+         }
+         locals n#1: Int
+         fn g(o#0: Option<Int>) -> Int {
+           match o#0 {
+             Some[1](x#1) => {
+               x#1
+             }
+             _ => match o#0 {
+               None[0] => {
+                 1
+               }
+               _ => {
+                 2
+               }
+             }
+           }
+         }
+         locals x#1: Int
+         fn h(o#0: Option<Int>) -> Unit {
+           match o#0 {
+             Some[1](_) => {
+             }
+             _ => ()
+           }
+         }",
     );
 }
 

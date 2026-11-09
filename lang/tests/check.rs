@@ -397,6 +397,136 @@ fn unreachable_arm() {
     reject_s("fn main() { match S::Done { x => 1, Done => 2 }; }");
 }
 
+// Nested patterns and `if let` (L4a).
+
+const MISSING: &str = "add arms for the missing cases, or `_ => ..`";
+
+#[test]
+fn nested_exhaustiveness() {
+    let src = "fn f(r: Result<Int, IoErr>) -> Int { match r { Ok(n) => n, Err(IoErr::NotFound) => 0, Err(IoErr::Exists) => 1 } } fn main() {}";
+    assert_rejected(
+        src,
+        "non-exhaustive `match`: missing Result::Err(IoErr::Denied), Result::Err(IoErr::TooLarge), Result::Err(IoErr::InvalidPath)",
+        MISSING,
+        "r",
+    );
+    let (msg, at) =
+        reject("fn f(o: Option<Option<Int>>) -> Int { match o { Some(Some(x)) => x, None => 0 } } fn main() {}");
+    assert_eq!(
+        (msg.as_str(), at.as_str()),
+        ("non-exhaustive `match`: missing Option::Some(Option::None)", "o")
+    );
+    let (msg, _) = reject("fn f(o: Option<Bool>) -> Int { match o { Some(true) => 1, None => 0 } } fn main() {}");
+    assert_eq!(msg, "non-exhaustive `match`: missing Option::Some(false)");
+    let (msg, _) = reject_s(
+        "fn f(s: S) -> Int { match s { Due(0) => 1, Done => 2, Pair(_, \"a\") => 3, Pair(1, _) => 4 } } fn main() {}",
+    );
+    assert_eq!(msg, "non-exhaustive `match`: missing S::Due");
+    let p = "enum P { Two(Bool, Bool) } ";
+    let (msg, _) = reject(&format!(
+        "{p}fn f(p: P) -> Int {{ match p {{ Two(true, _) => 1, Two(false, true) => 2 }} }} fn main() {{}}"
+    ));
+    assert_eq!(msg, "non-exhaustive `match`: missing P::Two(false, false)");
+    assert_eq!(
+        hint(&format!(
+            "{p}fn f(p: P) -> Int {{ match p {{ Two(_, true) => 1 }} }} fn main() {{}}"
+        )),
+        MISSING
+    );
+    ok(&format!("{p}fn f(p: P) -> Int {{ match p {{ Two(true, _) => 1, Two(_, true) => 2, Two(false, false) => 3 }} }} fn main() {{}}"));
+    ok("fn f(o: Option<Option<Int>>) -> Int { match o { Some(Some(x)) => x, Some(None) => 1, None => 0 } } fn main() {}");
+    ok("fn f(r: Result<Bool, Str>) -> Int { match r { Ok(true) => 1, Ok(false) => 2, Err(\"a\") => 3, Err(_) => 4 } } fn main() {}");
+}
+
+#[test]
+fn nested_unreachable_arm() {
+    let src =
+        "fn f(o: Option<Option<Int>>) -> Int { match o { Some(_) => 1, Some(Some(x)) => x, None => 0 } } fn main() {}";
+    assert_eq!(
+        reject(src),
+        ("unreachable arm".to_string(), "Some(Some(x))".to_string())
+    );
+    assert_eq!(hint(src), "earlier arms match every value it matches; remove it");
+    let p = "enum P { Two(Bool, Bool) } ";
+    let src = format!("{p}fn f(p: P) -> Int {{ match p {{ Two(true, _) => 1, Two(_, true) => 2, Two(true, true) => 3, _ => 4 }} }} fn main() {{}}");
+    assert_eq!(
+        reject(&src),
+        ("unreachable arm".to_string(), "Two(true, true)".to_string())
+    );
+    let (msg, _) = reject_s("fn main() { match S::Due(1) { Due(1) => 1, Due(1) => 2, _ => 3 }; }");
+    assert_eq!(msg, "unreachable arm");
+    let (msg, _) = reject(
+        "fn f(r: Result<Int, Str>) -> Int { match r { Ok(_) => 1, Err(_) => 2, Err(\"a\") => 3 } } fn main() {}",
+    );
+    assert_eq!(msg, "unreachable arm");
+}
+
+#[test]
+fn nested_pattern_bindings() {
+    ok("fn f(r: Result<Option<Str>, Int>) -> Int { match r { Ok(Some(s)) => s.len(), Ok(None) => 0, Err(n) => n } } fn main() {}");
+    let (msg, _) =
+        reject("fn f(o: Option<Option<Int>>) -> Int { match o { Some(Some(x)) => x + \"a\", _ => 0 } } fn main() {}");
+    assert_eq!(msg, "`+` cannot be applied to Int and Str");
+    let (msg, at) = reject("fn f(o: Option<Int>) -> Int { match o { Some(\"a\") => 1, _ => 0 } } fn main() {}");
+    assert_eq!((msg.as_str(), at.as_str()), ("expected Int, found Str", "\"a\""));
+    let (msg, at) = reject_s("fn f(o: Option<S>) -> Int { match o { Some(Pair(x, x)) => 1, _ => 0 } } fn main() {}");
+    assert_eq!((msg.as_str(), at.as_str()), ("`x` is bound twice in this pattern", "x"));
+    assert_eq!(
+        hint(&format!(
+            "{S}fn f(o: Option<S>) -> Int {{ match o {{ Some(Pair(x, x)) => 1, _ => 0 }} }} fn main() {{}}"
+        )),
+        "rename one of them"
+    );
+    let (msg, _) = reject_s("fn f(o: Option<S>) -> Int { match o { Some(Pair(a)) => 1, _ => 0 } } fn main() {}");
+    assert_eq!(msg, "`S::Pair` has 2 values, found 1 bindings");
+    let src = "fn f(o: Option<Int>) -> Int { match o { Some(Some(x)) => x, _ => 0 } } fn main() {}";
+    assert_eq!(
+        reject(src),
+        ("expected Int, found variant `Some`".to_string(), "Some(x)".to_string())
+    );
+    assert_eq!(hint(src), "match Int with a name or `_`");
+}
+
+#[test]
+fn if_let_checks() {
+    ok("fn f(o: Option<Int>) -> Int { if let Some(x) = o { x } else { 0 } } fn main() {}");
+    ok("fn g(x: Int) {} fn f(o: Option<Int>) { if let Some(x) = o { g(x); } } fn main() {}");
+    ok("fn f(o: Option<Int>, r: Result<Int, Str>, b: Bool) -> Int { if let Some(x) = o { x } else if let Ok(y) = r { y } else if b { 1 } else { 2 } } fn main() {}");
+    ok("fn f() -> Int { if let x = 1 { x } else { 0 } } fn main() {}");
+    let (msg, _) = reject("fn f(o: Option<Int>) { if let Some(x) = o { x } } fn main() {}");
+    assert_eq!(msg, "expected (), found Int");
+    let (msg, at) = reject("fn f(o: Option<Int>) -> Int { if let Some(x) = o { x } else { x } } fn main() {}");
+    assert_eq!((msg.as_str(), at.as_str()), ("unknown name `x`", "x"));
+    let (msg, _) = reject("fn f(o: Option<Int>) -> Int { if let Some(x) = o { x } else { \"a\" } } fn main() {}");
+    assert_eq!(msg, "`if` branches have different types: Int and Str");
+    let (msg, at) = reject("fn main() { if let x = [1] {} }");
+    assert_eq!((msg.as_str(), at.as_str()), ("cannot match on List<Int>", "[1]"));
+    let (msg, _) = reject("fn f(o: Option<Int>) { if let Ok(x) = o {} } fn main() {}");
+    assert_eq!(msg, "unknown variant `Option::Ok`");
+}
+
+#[test]
+fn too_complex_match() {
+    let arms: String = (0..3000).map(|i| format!("{i} => 0, ")).collect();
+    let src = format!("fn f(n: Int) -> Int {{ match n {{ {arms}_ => 1 }} }} fn main() {{}}");
+    let diags = check(&src, &CapTable::default()).expect_err("should be rejected");
+    assert_eq!(diags[0].msg, "this `match` is too complex to check");
+    assert_eq!(diags[0].hint.as_deref(), Some("split it into smaller matches"));
+    let arms: String = (0..500).map(|i| format!("{i} => 0, ")).collect();
+    ok(&format!(
+        "fn f(n: Int) -> Int {{ match n {{ {arms}_ => 1 }} }} fn main() {{}}"
+    ));
+    // A payload too wide for the depth limit is refused, not a stack overflow.
+    let n = 2000;
+    let tys = vec!["Int"; n].join(", ");
+    let ones = vec!["1"; n].join(", ");
+    let src = format!("enum W {{ V({tys}) }} fn f(w: W) -> Int {{ match w {{ V({ones}) => 1, V({ones}) => 2, _ => 3 }} }} fn main() {{}}");
+    assert_eq!(
+        check(&src, &CapTable::default()).unwrap_err()[0].msg,
+        "this `match` is too complex to check"
+    );
+}
+
 /// The hint of the single diagnostic for `src`.
 #[track_caller]
 fn hint(src: &str) -> String {

@@ -139,8 +139,10 @@ pub enum ExprKind {
     Unary(&'static str, Box<Expr>),
     /// `op` is the operator text, such as `+` or `&&`.
     Binary(&'static str, Box<Expr>, Box<Expr>),
-    /// The else branch is a `Block` or another `If`.
+    /// The else branch is a `Block`, another `If` or an `IfLet`.
     If(Box<Expr>, Block, Option<Box<Expr>>),
+    /// `if let pat = e { .. } else ..`, with an else branch as for `If`.
+    IfLet(Box<Pat>, Box<Expr>, Block, Option<Box<Expr>>),
     Block(Block),
     Call(Box<Expr>, Vec<Expr>),
     /// `[a, b]`
@@ -181,8 +183,8 @@ pub enum PatKind {
     Int(i64),
     Str(String),
     Bool(bool),
-    /// `Enum::Variant(a, _)` or `Variant(a)`; a `None` binding is `_`.
-    Variant(Option<String>, String, Vec<Option<String>>),
+    /// `Enum::Variant(a, _)` or `Variant(a)`, with a pattern for each payload field.
+    Variant(Option<String>, String, Vec<Pat>),
     /// `web::Status::Paid(x)`: the pattern after `web::`.
     Module(String, Box<Pat>),
 }

@@ -14,6 +14,8 @@ fn show(e: &Expr) -> String {
         ExprKind::Binary(op, a, b) => format!("({op} {} {})", show(a), show(b)),
         ExprKind::If(c, t, None) => format!("(if {} {})", show(c), block(t)),
         ExprKind::If(c, t, Some(e)) => format!("(if {} {} {})", show(c), block(t), show(e)),
+        ExprKind::IfLet(p, x, t, None) => format!("(if-let {} {} {})", pat(p), show(x), block(t)),
+        ExprKind::IfLet(p, x, t, Some(e)) => format!("(if-let {} {} {} {})", pat(p), show(x), block(t), show(e)),
         ExprKind::Block(b) => block(b),
         ExprKind::Call(f, args) => format!("(call {}{})", show(f), list(args)),
         ExprKind::Method(r, m, args) => format!("(.{m} {}{})", show(r), list(args)),
@@ -46,12 +48,10 @@ fn pat(p: &Pat) -> String {
         PatKind::Str(s) => format!("{s:?}"),
         PatKind::Bool(b) => b.to_string(),
         PatKind::Module(m, p) => format!("{m}::{}", pat(p)),
-        PatKind::Variant(e, v, bindings) => {
+        PatKind::Variant(e, v, parts) => {
             let e = e.as_ref().map_or(String::new(), |e| format!("{e}::"));
-            let bindings = bindings
-                .iter()
-                .fold(String::new(), |s, b| s + " " + b.as_deref().unwrap_or("_"));
-            format!("[{e}{v}{bindings}]")
+            let parts = parts.iter().fold(String::new(), |s, p| s + " " + &pat(p));
+            format!("[{e}{v}{parts}]")
         }
     }
 }
@@ -480,6 +480,38 @@ fn match_patterns() {
 }
 
 #[test]
+fn nested_patterns() {
+    assert_eq!(
+        expr("match x { Err(IoErr::Exists) => 1, Ok(true) => 2, Some(Some(y)) => 3, Shape::Line(1, _) => 4, Req(\"GET\", -2) => 5, web::E::A(F::B(z)) => 6 }"),
+        "(match x ([Err [IoErr::Exists]] 1) ([Ok true] 2) ([Some [Some y]] 3) ([Shape::Line 1 _] 4) ([Req \"GET\" -2] 5) (web::[E::A [F::B z]] 6))"
+    );
+    rejected(
+        "fn f() { match x { Some(Some(..)) => 1 } }",
+        "..",
+        "`..` is not supported in patterns",
+        true,
+    );
+    let deep = format!(
+        "fn f() {{ match x {{ {}y{} => 1 }} }}",
+        "Some(".repeat(70),
+        ")".repeat(70)
+    );
+    assert_eq!(fail(&deep).msg, "nesting is too deep");
+}
+
+#[test]
+fn if_let() {
+    assert_eq!(expr("if let Some(y) = x { y }"), "(if-let [Some y] x {tail y})");
+    assert_eq!(
+        expr("if let Ok(E::A(n)) = f() { n } else if c { 1 } else if let None = o { 2 } else { 3 }"),
+        "(if-let [Ok [E::A n]] (call f) {tail n} (if c {tail 1} (if-let None o {tail 2} {tail 3})))"
+    );
+    assert_eq!(body("if let _ = x {} y"), "{(if-let _ x {}); tail y}");
+    assert_eq!(expr("if let P = a == b { 1 }"), "(if-let P (== a b) {tail 1})");
+    assert_eq!(fail("fn f() { if let x { 1 } }").msg, "expected `=`");
+}
+
+#[test]
 fn match_arms() {
     assert_eq!(expr("match x {}"), "(match x)");
     assert_eq!(expr("match x { a => 1, }"), "(match x (a 1))");
@@ -532,18 +564,6 @@ fn rejects_match_syntax() {
         "fn f() { match x { n if n > 1 => 1 } }",
         "if",
         "match guards are not supported",
-        true,
-    );
-    rejected(
-        "fn f() { match x { Some(Inner(y)) => 1 } }",
-        "Inner",
-        "nested patterns are not supported",
-        true,
-    );
-    rejected(
-        "fn f() { match x { E::A(F::B) => 1 } }",
-        "F",
-        "nested patterns are not supported",
         true,
     );
     rejected(

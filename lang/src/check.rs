@@ -256,13 +256,165 @@ pub(crate) type Variants = HashMap<String, Vec<(String, Vec<Ty>)>>;
 /// An enum's name and its variants with payload types, as `shape` returns.
 pub(crate) type Shape = (String, Vec<(String, Vec<Ty>)>);
 
-/// How a `match` pattern counts toward exhaustiveness.
-#[derive(PartialEq)]
-enum Cover {
-    All,
+/// A constructor a pattern tests for. `Int` and `Str` have too many to list.
+#[derive(Clone, PartialEq)]
+enum Ctor {
     Variant(usize),
     Bool(bool),
-    Lit,
+    Int(i64),
+    Str(String),
+}
+
+/// What a pattern matches, for exhaustiveness: every value, or the values a constructor builds
+/// from parts that the inner covers match.
+#[derive(Clone)]
+enum Cover {
+    All,
+    Ctor(Ctor, Vec<Cover>),
+}
+
+/// Exhaustiveness work allowed per `match`, in pattern cells visited, and its recursion depth,
+/// in pattern columns. The check is exponential in the worst case; real matches use a tiny
+/// fraction of either.
+const MATCH_BUDGET: usize = 4_000_000;
+const MATCH_DEPTH: usize = 256;
+
+/// Values that some patterns leave unmatched, as rows of covers; `None` when there are none.
+type Witnesses = Option<Vec<Vec<Cover>>>;
+
+/// The usefulness algorithm of Maranget, "Warnings for pattern matching" (2007), with witnesses.
+struct Usefulness<'a> {
+    variants: &'a Variants,
+    budget: usize,
+    depth: usize,
+}
+
+impl Usefulness<'_> {
+    /// Every constructor of `ty` and the types of its parts; `None` for `Int` and `Str`.
+    fn ctors(&self, ty: &Ty) -> Option<Vec<(Ctor, Vec<Ty>)>> {
+        match ty {
+            Ty::Bool => Some(vec![(Ctor::Bool(true), vec![]), (Ctor::Bool(false), vec![])]),
+            Ty::Enum(_) | Ty::Option(_) | Ty::Result(..) => {
+                let vs = shape(self.variants, ty).1.into_iter().enumerate();
+                Some(vs.map(|(i, (_, tys))| (Ctor::Variant(i), tys)).collect())
+            }
+            _ => None,
+        }
+    }
+
+    /// Values that `q`, a row of covers of types `tys`, matches and no row of `rows` does.
+    /// When `q` is all `Cover::All`, those are the values the rows miss. `Err` when out of budget.
+    fn useful(&mut self, rows: &[Vec<Cover>], q: &[Cover], tys: &[Ty]) -> Result<Witnesses, ()> {
+        if self.depth == MATCH_DEPTH {
+            return Err(());
+        }
+        self.depth += 1;
+        let ws = self.step(rows, q, tys);
+        self.depth -= 1;
+        ws
+    }
+
+    fn step(&mut self, rows: &[Vec<Cover>], q: &[Cover], tys: &[Ty]) -> Result<Witnesses, ()> {
+        if rows.is_empty() {
+            return Ok(Some(vec![q.to_vec()]));
+        }
+        let cost = (rows.len() + 1) * (q.len() + 1);
+        self.budget = self.budget.checked_sub(cost).ok_or(())?;
+        let Some((head, rest)) = q.split_first() else {
+            return Ok(None);
+        };
+        if let Cover::Ctor(c, parts) = head {
+            return self.specialized(rows, c, parts.clone(), rest, tys);
+        }
+        let seen: Vec<&Ctor> = (rows.iter())
+            .filter_map(|r| match &r[0] {
+                Cover::Ctor(c, _) => Some(c),
+                Cover::All => None,
+            })
+            .collect();
+        let all = self.ctors(&tys[0]);
+        if let Some(all) = &all {
+            if all.iter().all(|(c, _)| seen.contains(&c)) {
+                for (c, parts) in all {
+                    let wild = vec![Cover::All; parts.len()];
+                    if let Some(ws) = self.specialized(rows, c, wild, rest, tys)? {
+                        return Ok(Some(ws));
+                    }
+                }
+                return Ok(None);
+            }
+        }
+        // A constructor is missing from the first column: only rows starting with `_` match it.
+        let default: Vec<_> = (rows.iter())
+            .filter(|r| matches!(r[0], Cover::All))
+            .map(|r| r[1..].to_vec())
+            .collect();
+        let Some(ws) = self.useful(&default, rest, &tys[1..])? else {
+            return Ok(None);
+        };
+        let heads = match all {
+            Some(all) if !seen.is_empty() => (all.into_iter())
+                .filter(|(c, _)| !seen.contains(&c))
+                .map(|(c, parts)| Cover::Ctor(c, vec![Cover::All; parts.len()]))
+                .collect(),
+            _ => vec![Cover::All],
+        };
+        Ok(Some(
+            heads.into_iter().map(|h| [vec![h], ws[0].clone()].concat()).collect(),
+        ))
+    }
+
+    /// `useful` for `q` = `c(parts) rest`, over the rows that can match `c`, with `c`'s parts as columns.
+    fn specialized(
+        &mut self,
+        rows: &[Vec<Cover>],
+        c: &Ctor,
+        parts: Vec<Cover>,
+        rest: &[Cover],
+        tys: &[Ty],
+    ) -> Result<Witnesses, ()> {
+        let n = parts.len();
+        let rows: Vec<_> = (rows.iter())
+            .filter_map(|r| match &r[0] {
+                Cover::Ctor(d, ps) if d == c => Some([ps, &r[1..]].concat()),
+                Cover::Ctor(..) => None,
+                Cover::All => Some([&vec![Cover::All; n], &r[1..]].concat()),
+            })
+            .collect();
+        let part_tys = match c {
+            Ctor::Variant(i) => shape(self.variants, &tys[0]).1.swap_remove(*i).1,
+            _ => Vec::new(),
+        };
+        let q = [parts, rest.to_vec()].concat();
+        let ws = self.useful(&rows, &q, &[part_tys, tys[1..].to_vec()].concat())?;
+        Ok(ws.map(|ws| {
+            (ws.into_iter())
+                .map(|mut w| {
+                    let rest = w.split_off(n);
+                    [vec![Cover::Ctor(c.clone(), w)], rest].concat()
+                })
+                .collect()
+        }))
+    }
+
+    /// `c`, a cover of type `ty`, written as a pattern; a variant whose parts are all `_` without them.
+    fn show(&self, c: &Cover, ty: &Ty) -> String {
+        match c {
+            Cover::All => "_".to_string(),
+            Cover::Ctor(Ctor::Bool(b), _) => b.to_string(),
+            Cover::Ctor(Ctor::Int(n), _) => n.to_string(),
+            Cover::Ctor(Ctor::Str(s), _) => format!("{s:?}"),
+            Cover::Ctor(Ctor::Variant(i), parts) => {
+                let (en, vs) = shape(self.variants, ty);
+                let (v, tys) = &vs[*i];
+                if parts.iter().all(|p| matches!(p, Cover::All)) {
+                    return format!("{en}::{v}");
+                }
+                let parts: Vec<_> = parts.iter().zip(tys).map(|(p, t)| self.show(p, t)).collect();
+                format!("{en}::{v}({})", parts.join(", "))
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1302,19 +1454,14 @@ impl Checker<'_> {
             ExprKind::If(cond, then, els) => {
                 want_expr(cond, &self.expr(cond, None)?, &Ty::Bool)?;
                 let t = self.block(then, expected)?;
-                let Some(els) = els else {
-                    want(then.span, &t, &Ty::Unit)?;
-                    return Ok(Ty::Unit);
-                };
-                let f = self.expr(els, expected)?;
-                if t == Ty::Never {
-                    Ok(f)
-                } else if f == Ty::Never || t == f {
-                    Ok(t)
-                } else {
-                    let msg = format!("`if` branches have different types: {t} and {f}");
-                    Err(err(e.span, msg, Some("every branch must have the same type")))
-                }
+                self.else_branch(e, t, then, els.as_deref(), expected)
+            }
+            ExprKind::IfLet(pat, scrut, then, els) => {
+                let st = self.scrutinee(scrut)?;
+                self.bind_pattern(pat, &st)?;
+                let t = self.block(then, expected)?;
+                self.scopes.pop();
+                self.else_branch(e, t, then, els.as_deref(), expected)
             }
             ExprKind::Block(b) => self.block(b, expected),
             ExprKind::Call(callee, args) => self.call(e, callee, args, expected),
@@ -1562,7 +1709,32 @@ impl Checker<'_> {
         Ok(Ty::Enum(en.to_string()))
     }
 
-    fn match_expr(&mut self, scrut: &Expr, arms: &[Arm], expected: Option<&Ty>) -> Result<Ty, Diag> {
+    /// The type of an `if` (`e`) whose then-block has type `t`, given its else branch.
+    fn else_branch(
+        &mut self,
+        e: &Expr,
+        t: Ty,
+        then: &Block,
+        els: Option<&Expr>,
+        expected: Option<&Ty>,
+    ) -> Result<Ty, Diag> {
+        let Some(els) = els else {
+            want(then.span, &t, &Ty::Unit)?;
+            return Ok(Ty::Unit);
+        };
+        let f = self.expr(els, expected)?;
+        if t == Ty::Never {
+            Ok(f)
+        } else if f == Ty::Never || t == f {
+            Ok(t)
+        } else {
+            let msg = format!("`if` branches have different types: {t} and {f}");
+            Err(err(e.span, msg, Some("every branch must have the same type")))
+        }
+    }
+
+    /// The type of a `match` or `if let` scrutinee, which must be one patterns can match.
+    fn scrutinee(&mut self, scrut: &Expr) -> Result<Ty, Diag> {
         let st = self.expr(scrut, None)?;
         if !matches!(
             st,
@@ -1571,18 +1743,43 @@ impl Checker<'_> {
             let hint = "match works on Int, Bool, Str and enums";
             return Err(err(scrut.span, format!("cannot match on {st}"), Some(hint)));
         }
-        let shape = shape(self.variants, &st);
+        Ok(st)
+    }
+
+    /// Checks pattern `p` against `st` and pushes a scope with the names it binds.
+    fn bind_pattern(&mut self, p: &Pat, st: &Ty) -> Result<Cover, Diag> {
+        let mut binds = Vec::new();
+        let cover = self.pattern(p, st, &mut binds)?;
+        let binds = binds.into_iter().map(|(name, ty)| (name, Local { ty, mutable: false }));
+        self.scopes.push(binds.collect());
+        Ok(cover)
+    }
+
+    fn match_expr(&mut self, scrut: &Expr, arms: &[Arm], expected: Option<&Ty>) -> Result<Ty, Diag> {
+        let st = self.scrutinee(scrut)?;
+        let too_complex = |()| {
+            let hint = "split it into smaller matches";
+            err(
+                scrut.span,
+                "this `match` is too complex to check".to_string(),
+                Some(hint),
+            )
+        };
+        let mut u = Usefulness {
+            variants: self.variants,
+            budget: MATCH_BUDGET,
+            depth: 0,
+        };
+        let tys = [st.clone()];
         let mut ty = Ty::Never;
-        let mut covers = Vec::new();
+        let mut rows = Vec::new();
         for arm in arms {
-            if covers.contains(&Cover::All) {
-                let hint = "an earlier arm matches everything";
+            let row = vec![self.bind_pattern(&arm.pat, &st)?];
+            if u.useful(&rows, &row, &tys).map_err(too_complex)?.is_none() {
+                let hint = "earlier arms match every value it matches; remove it";
                 return Err(err(arm.pat.span, "unreachable arm".to_string(), Some(hint)));
             }
-            let (cover, binds) = self.pattern(&arm.pat, &st, &shape)?;
-            covers.push(cover);
-            let binds = binds.into_iter().map(|(name, ty)| (name, Local { ty, mutable: false }));
-            self.scopes.push(binds.collect());
+            rows.push(row);
             let body = self.expr(&arm.body, expected)?;
             self.scopes.pop();
             if ty == Ty::Never {
@@ -1592,44 +1789,37 @@ impl Checker<'_> {
                 return Err(err(arm.body.span, msg, Some("every branch must have the same type")));
             }
         }
-        let seen = |c: Cover| covers.contains(&c) || covers.contains(&Cover::All);
-        let missing: Vec<String> = match &st {
-            Ty::Enum(_) | Ty::Option(_) | Ty::Result(..) => (shape.1.iter().enumerate())
-                .filter(|(i, _)| !seen(Cover::Variant(*i)))
-                .map(|(_, (v, _))| format!("{}::{v}", shape.0))
-                .collect(),
-            Ty::Bool => [true, false]
-                .into_iter()
-                .filter(|b| !seen(Cover::Bool(*b)))
-                .map(|b| b.to_string())
-                .collect(),
-            _ if !covers.contains(&Cover::All) => vec!["_".to_string()],
-            _ => Vec::new(),
+        let Some(missing) = u.useful(&rows, &[Cover::All], &tys).map_err(too_complex)? else {
+            return Ok(ty);
         };
-        if missing.is_empty() {
-            Ok(ty)
-        } else {
-            let msg = format!("non-exhaustive `match`: missing {}", missing.join(", "));
-            let hint = "add arms for the missing cases, or `_ => ..`";
-            Err(err(scrut.span, msg, Some(hint)))
-        }
+        let missing: Vec<_> = missing.iter().map(|w| u.show(&w[0], &st)).collect();
+        let msg = format!("non-exhaustive `match`: missing {}", missing.join(", "));
+        let hint = "add arms for the missing cases, or `_ => ..`";
+        Err(err(scrut.span, msg, Some(hint)))
     }
 
-    /// What the pattern covers and the names it binds, typed against scrutinee type `st`.
-    fn pattern(&self, p: &Pat, st: &Ty, shape: &Shape) -> Result<(Cover, Vec<(String, Ty)>), Diag> {
-        let lit = |ty: Ty| want(p.span, &ty, st).map(|_| (Cover::Lit, Vec::new()));
-        let vs = &shape.1;
+    /// What pattern `p` covers, typed against `st`, the type of the value it matches. Adds the
+    /// names it binds to `binds`, left to right.
+    fn pattern(&self, p: &Pat, st: &Ty, binds: &mut Vec<(String, Ty)>) -> Result<Cover, Diag> {
+        let lit = |ty: Ty, c: Ctor| want(p.span, &ty, st).map(|_| Cover::Ctor(c, Vec::new()));
         match &p.kind {
-            PatKind::Wild => Ok((Cover::All, Vec::new())),
-            PatKind::Int(_) => lit(Ty::Int),
-            PatKind::Str(_) => lit(Ty::Str),
-            PatKind::Bool(b) => want(p.span, &Ty::Bool, st).map(|_| (Cover::Bool(*b), Vec::new())),
-            PatKind::Name(n) => match variant(vs, n) {
-                Some(_) => self.variant_pattern(p, shape, n, &[]),
-                None => Ok((Cover::All, vec![(n.clone(), st.clone())])),
-            },
+            PatKind::Wild => Ok(Cover::All),
+            PatKind::Int(n) => lit(Ty::Int, Ctor::Int(*n)),
+            PatKind::Str(s) => lit(Ty::Str, Ctor::Str(s.clone())),
+            PatKind::Bool(b) => lit(Ty::Bool, Ctor::Bool(*b)),
+            PatKind::Name(n) if variant(&shape(self.variants, st).1, n).is_some() => {
+                self.variant_pattern(p, st, n, &[], binds)
+            }
+            PatKind::Name(n) => {
+                if binds.iter().any(|(b, _)| b == n) {
+                    let msg = format!("`{n}` is bound twice in this pattern");
+                    return Err(err(p.span, msg, Some("rename one of them")));
+                }
+                binds.push((n.clone(), st.clone()));
+                Ok(Cover::All)
+            }
             PatKind::Module(m, inner) => {
-                let PatKind::Variant(Some(named), v, names) = &inner.kind else {
+                let PatKind::Variant(Some(named), v, parts) = &inner.kind else {
                     let hint = "write `web::E::V`, naming the enum";
                     return Err(err(p.span, "expected a module enum variant".to_string(), Some(hint)));
                 };
@@ -1637,50 +1827,55 @@ impl Checker<'_> {
                 if let Some(d) = self.enums.get(&k) {
                     self.home.public(&k, d.public, "enum", p.span)?;
                 }
-                self.enum_pattern(p, st, shape, k, v, names)
+                self.enum_pattern(p, st, k, v, parts, binds)
             }
-            PatKind::Variant(Some(named), v, names) => self.enum_pattern(p, st, shape, self.enum_key(named), v, names),
-            PatKind::Variant(None, v, names) => self.variant_pattern(p, shape, v, names),
+            PatKind::Variant(Some(named), v, parts) => self.enum_pattern(p, st, self.enum_key(named), v, parts, binds),
+            PatKind::Variant(None, v, parts) => self.variant_pattern(p, st, v, parts, binds),
         }
     }
 
-    /// `E::V(..)`, where enum key `k` must be the scrutinee's enum.
+    /// `E::V(..)`, where enum key `k` must be the matched value's enum.
     fn enum_pattern(
         &self,
         p: &Pat,
         st: &Ty,
-        shape: &Shape,
         k: String,
         v: &str,
-        names: &[Option<String>],
-    ) -> Result<(Cover, Vec<(String, Ty)>), Diag> {
-        if k != shape.0 {
+        parts: &[Pat],
+        binds: &mut Vec<(String, Ty)>,
+    ) -> Result<Cover, Diag> {
+        if k != shape(self.variants, st).0 {
             want(p.span, &Ty::Enum(k), st)?;
         }
-        self.variant_pattern(p, shape, v, names)
+        self.variant_pattern(p, st, v, parts, binds)
     }
 
     fn variant_pattern(
         &self,
         p: &Pat,
-        (en, vs): &Shape,
+        st: &Ty,
         v: &str,
-        names: &[Option<String>],
-    ) -> Result<(Cover, Vec<(String, Ty)>), Diag> {
-        let Some((i, payload)) = variant(vs, v) else {
-            return Err(self.unknown_variant(p.span, en, v));
+        parts: &[Pat],
+        binds: &mut Vec<(String, Ty)>,
+    ) -> Result<Cover, Diag> {
+        let (en, vs) = shape(self.variants, st);
+        if en.is_empty() {
+            let hint = format!("match {st} with a name or `_`");
+            return Err(err(p.span, format!("expected {st}, found variant `{v}`"), Some(&hint)));
+        }
+        let Some((i, payload)) = variant(&vs, v) else {
+            return Err(self.unknown_variant(p.span, &en, v));
         };
-        if names.len() != payload.len() {
+        if parts.len() != payload.len() {
             let msg = format!(
                 "`{en}::{v}` has {} values, found {} bindings",
                 payload.len(),
-                names.len()
+                parts.len()
             );
-            return Err(err(p.span, msg, Some(&holds(en, v, payload))));
+            return Err(err(p.span, msg, Some(&holds(&en, v, payload))));
         }
-        let binds = names.iter().zip(payload);
-        let binds = binds.filter_map(|(name, ty)| Some((name.clone()?, ty.clone())));
-        Ok((Cover::Variant(i), binds.collect()))
+        let parts = parts.iter().zip(payload).map(|(q, ty)| self.pattern(q, ty, binds));
+        Ok(Cover::Ctor(Ctor::Variant(i), parts.collect::<Result<_, _>>()?))
     }
 
     /// The type of field `name` of a value of type `ty`.

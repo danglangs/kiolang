@@ -45,7 +45,7 @@ fn main(input: Dir, out: Dir) -> Result<(), IoErr> {
 | Containers | `List<T>`, `Map<K, V>` (key `Int` or `Str`) |
 | Errors | `Option<T>`, `Result<T, E>`, `?` |
 | User types | `struct`, and `enum` with payloads; a type may contain itself only through `List` or `Map` |
-| Control | `if`, `while`, `loop`, `for x in list`, `for i in 0..n`, `match`, `break`, `continue`, `return` |
+| Control | `if`, `if let`, `while`, `loop`, `for x in list`, `for i in 0..n`, `match`, `break`, `continue`, `return` |
 | Functions | free functions, recursion |
 | Capabilities | `Dir`, `Http`, `Kv`, `WsMessage`, `WsSend`, generated from `caps.wit` |
 
@@ -59,7 +59,8 @@ Everything else is rejected with a message that names the kio alternative, for e
 - **Types are explicit where they cannot be read off the value.** `[]`, `Map::new()` and `None` need a declared or expected type: `let mut rows: List<Row> = [];`.
 - **Operators.** `+ - * / %` on `Int`, `+` on `Str`, `== !=` on two values of one type, structurally (structs, enums, `Option`, `Result`, `List`, `Map` included; capabilities have no equality), `< <= > >=` on `Int`, `&& || !` on `Bool`. `/` and `%` truncate toward zero, as in Rust.
 - **Runtime errors stop the run:** `Int` overflow, division by zero, an out-of-bounds index, invalid UTF-8 in `to_str`. Deep recursion stops the run: the interpreter allows calls 1_000 deep ("evaluation is too deep"), and `--stack` sets the limit for the stack they use ("stack overflow"). Nothing wraps or panics silently.
-- **`match` is exhaustive.** Patterns are one level deep: a variant with bindings, a literal, a name or `_`. An arm may be `return`, `break` or `continue` (`None => break,`); it has type `Never`.
+- **`match` is exhaustive.** A pattern is `_`, a name (binds the value), an `Int`, `Str` or `Bool` literal, or a variant whose parts are patterns, at any depth: `Err(IoErr::Exists)`, `Some(Some(x))`, `Shape::Line(1, _)`. Arms are tried in order; a name binds at most once per pattern. Every value must match some arm (`Int` and `Str` need a `_` or name at that position) and every arm must match some value no earlier arm does, else "unreachable arm". A match too large to check is rejected: split it. An arm may be `return`, `break` or `continue` (`None => break,`); it has type `Never`.
+- **`if let PAT = e { .. } else { .. }`** runs the block with `PAT`'s names bound when `e` matches, else the else branch. Without `else` its type is `()`. It chains with `else if` and `else if let`. It need not be exhaustive.
 - **`Str` is UTF-8.** `len()` counts bytes, in constant time. Literal escapes: `\n \r \t \0 \" \\`.
 - **Deterministic.** No clock or randomness. `Map` iterates in key order.
 - **Comments:** `//` only.

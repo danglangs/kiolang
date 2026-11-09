@@ -683,6 +683,13 @@ impl Parser {
         self.enter()?;
         let start = self.span().start;
         self.pos += 1;
+        let pat = if self.eat_kw("let") {
+            let pat = self.pat()?;
+            self.expect("=")?;
+            Some(pat)
+        } else {
+            None
+        };
         let cond = self.cond()?;
         let then = self.block()?;
         let els = if !self.eat_kw("else") {
@@ -697,8 +704,12 @@ impl Parser {
             }))
         };
         self.depth = depth;
+        let kind = match pat {
+            Some(pat) => ExprKind::IfLet(Box::new(pat), Box::new(cond), then, els),
+            None => ExprKind::If(Box::new(cond), then, els),
+        };
         Ok(Expr {
-            kind: ExprKind::If(Box::new(cond), then, els),
+            kind,
             span: self.since(start),
         })
     }
@@ -766,6 +777,14 @@ impl Parser {
     }
 
     fn pat(&mut self) -> Result<Pat, Diag> {
+        let depth = self.depth;
+        self.enter()?;
+        let p = self.pat_inner()?;
+        self.depth = depth;
+        Ok(p)
+    }
+
+    fn pat_inner(&mut self) -> Result<Pat, Diag> {
         let start = self.span().start;
         if let Some(module) = self.module()? {
             let inner = self.pat()?;
@@ -796,9 +815,9 @@ impl Parser {
                 let name = self.ident()?;
                 if self.eat("::") {
                     let variant = self.ident()?;
-                    PatKind::Variant(Some(name), variant, self.bindings()?)
+                    PatKind::Variant(Some(name), variant, self.payload()?)
                 } else if self.at("(") {
-                    PatKind::Variant(None, name, self.bindings()?)
+                    PatKind::Variant(None, name, self.payload()?)
                 } else if name == "_" {
                     PatKind::Wild
                 } else {
@@ -815,24 +834,11 @@ impl Parser {
     }
 
     /// The optional `(a, _)` after a variant pattern.
-    fn bindings(&mut self) -> Result<Vec<Option<String>>, Diag> {
+    fn payload(&mut self) -> Result<Vec<Pat>, Diag> {
         if !self.eat("(") {
             return Ok(Vec::new());
         }
-        self.list(")", Self::binding)
-    }
-
-    fn binding(&mut self) -> Result<Option<String>, Diag> {
-        if self.at("..") {
-            return Err(self.dotdot());
-        }
-        let span = self.span();
-        let name = self.ident()?;
-        if self.at("(") || self.at("::") {
-            let hint = "match the inner value in a separate `match`";
-            return Err(err(span, "nested patterns are not supported", Some(hint)));
-        }
-        Ok((name != "_").then_some(name))
+        self.list(")", Self::pat)
     }
 
     fn dotdot(&self) -> Diag {

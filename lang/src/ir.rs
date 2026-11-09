@@ -184,6 +184,7 @@ pub enum ExprKind {
     Field(Box<Expr>, u32),
     Index(Box<Expr>, Box<Expr>),
     Variant(EnumRef, u32, Vec<Expr>),
+    /// Also `if let`, as its pattern's arm and a `_` arm.
     Match(Box<Expr>, Vec<Arm>),
     /// `e?` on an `Option` or `Result`.
     Try(Box<Expr>),
@@ -272,6 +273,6 @@ pub enum Pat {
     Int(i64),
     Str(String),
     Bool(bool),
-    /// A variant of the scrutinee's enum, with a slot for each bound payload field.
-    Variant(u32, Vec<Option<LocalId>>),
+    /// A variant of the matched value's enum, with a pattern for each payload field.
+    Variant(u32, Vec<Pat>),
 }

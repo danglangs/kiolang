@@ -664,16 +664,29 @@ impl<'a> Interp<'a> {
         let arm = self.pick(scrut, arms)?;
         let r = self.expr(&arm.body);
         // Dropped as at a block's end.
-        match &arm.pat {
-            Pat::Bind(id) => *self.local(*id) = Value::Unit,
-            Pat::Variant(_, binds) => {
-                for id in binds.iter().flatten() {
-                    *self.local(*id) = Value::Unit;
+        self.unbind(&arm.pat);
+        r
+    }
+
+    /// Moves the parts of `v`, which matches `p`, into `p`'s slots, left to right.
+    fn bind(&mut self, p: &Pat, v: Value) {
+        match (p, v) {
+            (Pat::Bind(id), v) => *self.local(*id) = v,
+            (Pat::Variant(_, ps), Value::Enum(_, _, vs)) => {
+                for (p, v) in ps.iter().zip(vs) {
+                    self.bind(p, v);
                 }
             }
             _ => {}
         }
-        r
+    }
+
+    fn unbind(&mut self, p: &Pat) {
+        match p {
+            Pat::Bind(id) => *self.local(*id) = Value::Unit,
+            Pat::Variant(_, ps) => ps.iter().for_each(|p| self.unbind(p)),
+            _ => {}
+        }
     }
 
     /// The arm that matches `scrut`'s value, with that value bound to the arm's slots.
@@ -681,17 +694,7 @@ impl<'a> Interp<'a> {
     fn pick(&mut self, scrut: &'a Expr, arms: &'a [Arm]) -> Result<&'a Arm, Box<Stop>> {
         let v = self.expr(scrut)?;
         let arm = arms.iter().find(|a| matches(&a.pat, &v)).expect("checked exhaustive");
-        match (&arm.pat, v) {
-            (Pat::Bind(id), v) => *self.local(*id) = v,
-            (Pat::Variant(_, binds), Value::Enum(_, _, payload)) => {
-                for (b, x) in binds.iter().zip(payload) {
-                    if let Some(id) = b {
-                        *self.local(*id) = x;
-                    }
-                }
-            }
-            _ => {}
-        }
+        self.bind(&arm.pat, v);
         Ok(arm)
     }
 }
@@ -703,7 +706,9 @@ fn matches(p: &Pat, v: &Value) -> bool {
         (Pat::Int(a), Value::Int(b)) => a == b,
         (Pat::Str(a), Value::Str(b)) => **a == **b,
         (Pat::Bool(a), Value::Bool(b)) => a == b,
-        (Pat::Variant(i, _), Value::Enum(_, j, _)) => *i as usize == *j,
+        (Pat::Variant(i, ps), Value::Enum(_, j, vs)) => {
+            *i as usize == *j && ps.iter().zip(vs).all(|(p, v)| matches(p, v))
+        }
         _ => unreachable!("checked pattern"),
     }
 }
