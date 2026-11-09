@@ -42,8 +42,6 @@ C8 (roadmap.md): word count's map (`BTreeMap` node search, `split`'s allocations
 | Question | Proposal | Blocks |
 |---|---|---|
 | `<` on `Str` | whether to allow it; `Ord` is pinned as `Int` and `Str` only | L7c bounds `Eq`/`Ord` |
-| Fuel accounting | Wasmtime fuel off; codegen counts at loop heads and calls of the program only (changes what `--fuel` counts) | roadmap C8b #7: 10-25% on runtime-heavy code |
-| WebSocket upgrade headers | `WsMessage.target()` and `header(name)` on the `open` event (caps.wit) | a program cannot see the upgrade's path or headers |
 
 ## Speed (C8b4, 2026-11-09, release, run time; all in [roadmap.md](roadmap.md))
 
