@@ -153,7 +153,7 @@ fn equality_on_instances_whose_arguments_allow_it() {
         "struct Box<T> { v: T } fn same<T>(a: Box<T>, b: Box<T>) -> Bool { a == b } fn main() {}",
         "cannot compare `Box<T>` values",
         "a == b",
-        "a type parameter has no `==` yet; take a function for it, like `eq: fn(T, T) -> Bool`",
+        "add the bound: `T: Eq`",
     );
     rejected(
         "struct Box<T> { v: T } fn inc(x: Int) -> Int { x } fn main() -> Bool { Box { v: inc } == Box { v: inc } }",

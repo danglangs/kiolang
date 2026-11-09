@@ -216,6 +216,7 @@ pub enum BinOp {
     Mul,
     Div,
     Rem,
+    /// Order on two `Int`, or on two `Str` by bytes (Rust's `str` order).
     Lt,
     Le,
     Gt,

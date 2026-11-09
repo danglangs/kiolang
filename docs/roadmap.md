@@ -81,7 +81,7 @@ Most-used Rust crates, and kio's answer to each:
 | Regex, text | regex | `split`, `lines`, `trim`, `find`, `replace`, `strip_prefix`, `contains`, `starts_with`, `slice` | No regex. |
 | CLI parsing | clap | none | Needs an `Args` capability; the operator grants argv. |
 | Floats | f64 | `Float` (f64, compiled at Rust's speed) | JSON numbers still need json.kio support. |
-| Abstraction | traits, generics, closures | function values (`fn(T) -> R`, L6a), closures (L6b) and built-ins taking them (`map`, `filter`, `any`, `all`, `and_then`, `map_err`; L6c), compiled (C9); generic functions (L7a) and generic structs and enums (L7b, L7d), monomorphized | Bounds `T: Eq`/`Ord` (L7c) wait on the `<`-on-`Str` decision; no traits. |
+| Abstraction | traits, generics, closures | function values (`fn(T) -> R`, L6a), closures (L6b) and built-ins taking them (`map`, `filter`, `any`, `all`, `and_then`, `map_err`; L6c), compiled (C9); generic functions (L7a) and generic structs and enums (L7b, L7d), monomorphized, with bounds `T: Eq`/`T: Ord` (L7c) | Bounds `T: Eq`/`Ord` (L7c) wait on the `<`-on-`Str` decision; no traits. |
 | Packages | cargo, crates.io | copy one file | A package manager, once there are a few libraries. |
 
 Non-starters today, in order of what blocks a real backend first: an SQL capability and an HTTP client beyond GET.

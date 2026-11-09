@@ -1310,12 +1310,12 @@ impl Gen<'_> {
         }
     }
 
-    /// A `Bool` from strings: `==`, `!=`, `contains` on a `Str` or a `List<Str>`.
+    /// A `Bool` from strings: a comparison, `contains` on a `Str` or a `List<Str>`.
     fn str_bool(&mut self, d: u32) -> String {
         let lists = self.visible(|v| v.ty == Ty::StrList);
         match self.rng.below(4) {
             0 | 1 => {
-                let op = *self.rng.pick(&["==", "!="]);
+                let op = *self.rng.pick(&["==", "!=", "<", "<=", ">", ">="]);
                 format!("({} {op} {})", self.str_read(d), self.str_read(d))
             }
             2 if !lists.is_empty() => {
@@ -1500,6 +1500,9 @@ mod tests {
             "-> Str",
             ": Str",
             "for w",
+            // `<` on two `Str`s (L7e), here with a literal on the left.
+            "\" < ",
+            "\" >= ",
             "\"prefix-shared-key-1\" => ",
         ] {
             assert!(all.matches(m).count() > 10, "{m}: {}", all.matches(m).count());

@@ -173,9 +173,9 @@ Steps:
 8. Done: copy-on-write values (passing a value is cheap; semantics unchanged) and the program checked once per server, not per request.
 9. Done: lowering to a typed IR (the interpreter runs it, 3x faster), and a compiler to Wasm for `Int`, `Bool`, control flow and calls, with a differential harness against the interpreter ([docs/compiler-todo.md](docs/compiler-todo.md)).
 10. Done: the compiler for strings, collections, structs and capabilities; `kio run` and `--listen` compile (C5), and the interpreter is the test oracle only.
-11. Done: `Dir` list/write/remove/exists, `Kv`, WebSockets, grants bound by type and DNS-rebinding defence (D1, K1, WS1, H10, H11); `Float`, slices, function values, closures, generic functions, structs and enums, all compiled (L6-L8, C9-C11); an adversarial review of the runtime and codegen (C7).
+11. Done: `Dir` list/write/remove/exists, `Kv`, WebSockets, grants bound by type and DNS-rebinding defence (D1, K1, WS1, H10, H11); `Float`, slices, function values, closures, generic functions, structs and enums with `Eq`/`Ord` bounds, all compiled (L6-L8, C9-C11); an adversarial review of the runtime and codegen (C7).
 12. Done: a differential harness and program generator (any compiled/interpreted disagreement fails CI), and speed work on strings, refcounts, allocation and borrowed parameters (C6, C8a-C8b4).
-13. Next: more speed (C8); bounds `T: Eq`/`Ord` on generics (L7c, waiting on a decision); later attenuation.
+13. Next: more speed (C8); later attenuation.
 
 There are no globals, reflection, `unsafe`, traits or tuples. Capabilities are parameters only. See [docs/language.md](docs/language.md).
 

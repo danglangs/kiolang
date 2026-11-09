@@ -104,6 +104,13 @@ pub unsafe extern "C" fn rt_eq(desc: u32, a: i64, b: i64) -> bool {
     unsafe { coll::eq(&table(), desc, a as u64, b as u64) }
 }
 
+/// `a.cmp(b)` on two `Str`s by bytes, as Rust's `str`: -1, 0 or 1.
+#[no_mangle]
+pub unsafe extern "C" fn rt_str_cmp(a: u32, b: u32) -> i32 {
+    // SAFETY: the group's contract.
+    unsafe { text::bytes_cmp(obj::bytes(ptr(a)), obj::bytes(ptr(b))) as i32 }
+}
+
 /// `a + b` on `Str`.
 #[no_mangle]
 pub unsafe extern "C" fn rt_concat(a: u32, b: u32) -> u32 {

@@ -706,6 +706,14 @@ fn hints_for_calls_and_operators() {
         hint("fn main() -> Int { 1 - \"a\" }"),
         "`-` works on two Int or two Float"
     );
+    assert_eq!(
+        hint("fn main() -> Bool { \"a\" < 1 }"),
+        "`<` works on two Int, two Float or two Str"
+    );
+    assert_eq!(
+        hint("fn main() -> Bool { [\"a\"] < [\"b\"] }"),
+        "`<` works on two Int, two Float or two Str"
+    );
     assert_eq!(hint("fn main() -> Bool { 1 && 2 }"), "`&&` works on two Bool");
     assert_eq!(
         hint("fn main() -> Bool { 1 == true }"),
@@ -1444,8 +1452,8 @@ fn rust_isms_are_rejected_with_the_kio_way() {
         ),
         (
             "fn f<T: Clone>(x: T) -> T { x } fn main() {}",
-            "type parameter bounds are not supported",
-            "remove the bound: a `T` can be passed, stored and returned without one",
+            "only `Eq` and `Ord` bounds exist",
+            "remove `Clone`: kio values are always copied and displayable",
         ),
         (
             "fn f<T>(x: T) -> T { x.clone() } fn main() {}",

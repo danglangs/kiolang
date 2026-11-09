@@ -788,18 +788,12 @@ fn rejects_closure_syntax() {
 fn generic_functions_and_turbofish() {
     let items = parse("fn pair<A, B>(a: A, b: B) -> List<A> { [a] }").unwrap();
     let Item::Fn(f) = &items[0] else { panic!() };
-    let names: Vec<&str> = f.tparams.iter().map(|(n, _)| n.as_str()).collect();
+    let names: Vec<&str> = f.tparams.iter().map(|t| t.name.as_str()).collect();
     assert_eq!(names, ["A", "B"]);
     assert_eq!(ty(&f.params[1].ty), "B");
     assert_eq!(expr("first::<Int>(xs)"), "(call first::<Int> xs)");
     assert_eq!(expr("first::<List<Int>>"), "first::<List<Int>>");
     assert_eq!(expr("web::first::<Str, Int>(xs)"), "(call web::first::<Str,Int> xs)");
-    rejected_with(
-        "fn f<T: Eq>(x: T) {}",
-        ":",
-        "type parameter bounds are not supported",
-        Some("remove the bound: a `T` can be passed, stored and returned without one"),
-    );
     rejected_with(
         "fn f<>() {}",
         ">",
@@ -818,10 +812,10 @@ fn generic_functions_and_turbofish() {
 fn generic_structs_and_enums() {
     let items = parse("struct Page<T> { items: List<T> } pub enum Tree<K, V> { Leaf, Node(K, V) }").unwrap();
     let Item::Struct(s) = &items[0] else { panic!() };
-    let names: Vec<&str> = s.tparams.iter().map(|(n, _)| n.as_str()).collect();
+    let names: Vec<&str> = s.tparams.iter().map(|t| t.name.as_str()).collect();
     assert_eq!(names, ["T"]);
     let Item::Enum(e) = &items[1] else { panic!() };
-    let names: Vec<&str> = e.tparams.iter().map(|(n, _)| n.as_str()).collect();
+    let names: Vec<&str> = e.tparams.iter().map(|t| t.name.as_str()).collect();
     assert_eq!(names, ["K", "V"]);
     assert_eq!(ty(&e.variants[1].fields[1]), "V");
     rejected_with(
@@ -830,10 +824,40 @@ fn generic_structs_and_enums() {
         "empty type parameters",
         Some("write `struct S { .. }` without `<>`"),
     );
-    rejected_with(
-        "enum E<T: Ord> { A }",
-        ":",
-        "type parameter bounds are not supported",
-        Some("remove the bound: a `T` can be passed, stored and returned without one"),
+}
+
+#[test]
+fn type_parameter_bounds() {
+    let bounds = |src: &str| {
+        let items = parse(src).unwrap();
+        let tparams = match &items[0] {
+            Item::Fn(f) => &f.tparams,
+            Item::Struct(s) => &s.tparams,
+            Item::Enum(e) => &e.tparams,
+            Item::Mod(..) => panic!(),
+        };
+        tparams.iter().map(|t| (t.name.clone(), t.bound)).collect::<Vec<_>>()
+    };
+    let t = |b| ("T".to_string(), b);
+    assert_eq!(bounds("fn f<T: Eq>(x: T) {}"), [t(Some(TBound::Eq))]);
+    assert_eq!(
+        bounds("fn f<T, U: Ord>() {}"),
+        [t(None), ("U".to_string(), Some(TBound::Ord))]
     );
+    assert_eq!(bounds("struct S<T: Eq + Ord> { a: T }"), [t(Some(TBound::Ord))]);
+    assert_eq!(bounds("enum E<T: Ord + Eq> { A(T) }"), [t(Some(TBound::Ord))]);
+    let only = "only `Eq` and `Ord` bounds exist";
+    let copied = Some("remove `Clone`: kio values are always copied and displayable");
+    rejected_with("fn f<T: Clone>() {}", "Clone", only, copied);
+    let shown = Some("remove `Debug`: kio values are always copied and displayable");
+    rejected_with("struct S<T: Eq + Debug> { a: T }", "Debug", only, shown);
+    rejected_with(
+        "enum E<T: PartialOrd> { A }",
+        "PartialOrd",
+        only,
+        Some("write `T: Ord`"),
+    );
+    rejected_with("fn f<T: PartialEq>() {}", "PartialEq", only, Some("write `T: Eq`"));
+    let either = Some("write `T: Eq` or `T: Ord`, or remove the bound");
+    rejected_with("fn f<T: Hash>() {}", "Hash", only, either);
 }

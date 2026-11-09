@@ -1474,6 +1474,46 @@ fn assignment_of_untyped_values() {
     assert_eq!(shown(src), "[3, 0, 0]");
 }
 
+/// `<` on `Str` is Rust's `str` order (L7e): by UTF-8 bytes, a prefix first, uppercase before
+/// lowercase, a multibyte character after every ASCII one.
+#[test]
+fn str_order_is_by_bytes() {
+    let src = r#"fn main() -> List<Bool> {
+                   let e = "";
+                   let long = "longer-than-eight-bytes-";
+                   [
+                     "ab" < "abc", "abc" > "ab", e < "a", e <= e, e >= e, "a" < e,
+                     "B" < "a", "Z" < "a", "a" < "B", "a" <= "B",
+                     "é" > "z", "e" < "é", "aé" < "af", "é" >= "é",
+                     "same" <= "same", "same" >= "same", "same" < "same", "same" > "same",
+                     long + "x" < long + "y", "abcdefgh1" > "abcdefgh", long + "é" > long + "z"
+                   ]
+                 }"#;
+    let want = [
+        "true, true, true, true, true, false",
+        "true, true, false, false",
+        "true, true, false, true",
+        "true, true, false, false",
+        "true, true, true",
+    ];
+    assert_eq!(shown(src), format!("[{}]", want.join(", ")));
+}
+
+/// `sort()` and `<` agree on `Str`.
+#[test]
+fn str_order_matches_sort() {
+    let src = r#"fn main() -> Bool {
+                   let mut xs = ["b", "", "ab", "B", "é", "a", "abc", "Z", "e", "ab"];
+                   xs.sort();
+                   let mut ok = true;
+                   for i in 1..xs.len() {
+                     ok = ok && xs[i - 1] <= xs[i] && !(xs[i] < xs[i - 1]);
+                   }
+                   ok
+                 }"#;
+    assert_eq!(shown(src), "true");
+}
+
 #[test]
 fn slices() {
     let s = |e: &str| shown(&format!("fn main() -> Str {{ {e} }}"));

@@ -13,8 +13,8 @@ pub enum Item {
 pub struct Fn {
     pub public: bool,
     pub name: String,
-    /// Type parameters `<T, U>`, each with its span; empty for a function that is not generic.
-    pub tparams: Vec<(String, Span)>,
+    /// Type parameters `<T, U: Ord>`; empty for a function that is not generic.
+    pub tparams: Vec<TParam>,
     pub params: Vec<Param>,
     /// `()` when the source has no `->`.
     pub ret: Type,
@@ -26,8 +26,8 @@ pub struct Fn {
 pub struct Struct {
     pub public: bool,
     pub name: String,
-    /// Type parameters `<T, U>`, as on `Fn`.
-    pub tparams: Vec<(String, Span)>,
+    /// Type parameters `<T, U: Ord>`, as on `Fn`.
+    pub tparams: Vec<TParam>,
     /// Declared fields, which have the shape of parameters.
     pub fields: Vec<Param>,
     pub span: Span,
@@ -37,10 +37,34 @@ pub struct Struct {
 pub struct Enum {
     pub public: bool,
     pub name: String,
-    /// Type parameters `<T, U>`, as on `Fn`.
-    pub tparams: Vec<(String, Span)>,
+    /// Type parameters `<T, U: Ord>`, as on `Fn`.
+    pub tparams: Vec<TParam>,
     pub variants: Vec<Variant>,
     pub span: Span,
+}
+
+/// A type parameter `T`, `T: Eq` or `T: Ord`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TParam {
+    pub name: String,
+    /// The strongest bound written: `T: Eq + Ord` is `Ord`, which implies `Eq`.
+    pub bound: Option<TBound>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TBound {
+    Eq,
+    Ord,
+}
+
+impl std::fmt::Display for TBound {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(match self {
+            TBound::Eq => "Eq",
+            TBound::Ord => "Ord",
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

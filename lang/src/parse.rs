@@ -25,6 +25,19 @@ fn err(span: Span, msg: &str, hint: Option<&str>) -> Diag {
     }
 }
 
+/// Bound `b`, written on type parameter `t` at `span`, is neither `Eq` nor `Ord`.
+fn unknown_bound(span: Span, t: &str, b: &str) -> Diag {
+    let hint = match b {
+        "PartialEq" => format!("write `{t}: Eq`"),
+        "PartialOrd" => format!("write `{t}: Ord`"),
+        "Clone" | "Copy" | "Debug" | "Display" => {
+            format!("remove `{b}`: kio values are always copied and displayable")
+        }
+        _ => format!("write `{t}: Eq` or `{t}: Ord`, or remove the bound"),
+    };
+    err(span, "only `Eq` and `Ord` bounds exist", Some(&hint))
+}
+
 /// `t` as written, for hints.
 fn type_text(t: &Type) -> String {
     let list = |ts: &[Type]| ts.iter().map(type_text).collect::<Vec<_>>().join(", ");
@@ -283,7 +296,7 @@ impl Parser {
     }
 
     /// `<T, U>` after an item's name; `item` is how it is written without them.
-    fn tparams(&mut self, item: &str) -> Result<Vec<(String, Span)>, Diag> {
+    fn tparams(&mut self, item: &str) -> Result<Vec<TParam>, Diag> {
         if !self.eat("<") {
             return Ok(Vec::new());
         }
@@ -294,15 +307,27 @@ impl Parser {
         self.list(">", Self::tparam)
     }
 
-    /// A type parameter `T`; bounds such as `T: Eq` are not supported yet.
-    fn tparam(&mut self) -> Result<(String, Span), Diag> {
+    /// A type parameter `T`, with bounds `T: Eq`, `T: Ord` or `T: Eq + Ord`; its span is the name's.
+    fn tparam(&mut self) -> Result<TParam, Diag> {
         let start = self.span().start;
         let name = self.ident()?;
-        if self.at(":") {
-            let hint = format!("remove the bound: a `{name}` can be passed, stored and returned without one");
-            return Err(err(self.span(), "type parameter bounds are not supported", Some(&hint)));
+        let span = self.since(start);
+        let mut bound = None;
+        if self.eat(":") {
+            loop {
+                let at = self.span();
+                let b = match self.ident()?.as_str() {
+                    "Eq" => TBound::Eq,
+                    "Ord" => TBound::Ord,
+                    other => return Err(unknown_bound(at, &name, other)),
+                };
+                bound = bound.max(Some(b));
+                if !self.eat("+") {
+                    break;
+                }
+            }
         }
-        Ok((name, self.since(start)))
+        Ok(TParam { name, bound, span })
     }
 
     fn variant(&mut self) -> Result<Variant, Diag> {

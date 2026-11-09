@@ -87,6 +87,7 @@ fn the_runtime_exports_every_operation() {
         "rt_map_new",
         "rt_eq",
         "rt_concat",
+        "rt_str_cmp",
         "rt_int_to_str",
         "rt_str_len",
         "rt_str_to_bytes",

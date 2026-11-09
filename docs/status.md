@@ -4,7 +4,7 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 
 ## Now
 
-Compiled-only kio covers the whole language and every capability; the active stream is speed (C8): code that stays in compiled Wasm is 1.1-2.1x Rust, runtime-heavy code 3-10x (table below). The differential harness runs 398 programs both ways (0 mismatches) and the generator 250 more per CI run.
+Compiled-only kio covers the whole language and every capability; the active stream is speed (C8): code that stays in compiled Wasm is 1.1-2.1x Rust, runtime-heavy code 3-10x (table below). The differential harness runs 404 programs both ways (0 mismatches) and the generator 250 more per CI run.
 
 | Done | Result |
 |---|---|
@@ -28,6 +28,8 @@ Compiled-only kio covers the whole language and every capability; the active str
 | L7a | generic functions `fn f<T>(..)`: inferred from arguments, then the expected type, or `f::<Int>`; `T` opaque and never a capability; monomorphized in lowering (`first<Int>`), so compiled with no codegen change: harness 363 ran both ways, 0 mismatches. Adversarially reviewed (rule 1 holds) |
 | L7b | generic structs and enums (`struct Page<T>`, `enum Tree<T>`): inferred like calls, never holding a capability, one IR type per instance (displayed without arguments); no codegen change: harness 380 ran both ways, 0 mismatches. Adversarially reviewed (rule 1 holds) |
 | L7d | generic types usability: a literal, variant or call its values leave open waits for the expected type (`set(Page { items: [], next: None }, true)`); "expected Tree<Int>, found Other<..>"; the 65th instance through a type that does not grow names that type; `Box::<Int> { .. }` points to the `let`. Harness 398 ran both ways, 0 mismatches |
+| L7e | `< <= > >=` on `Str` by UTF-8 bytes (Rust's `str` order, as `sort()`); compiled through one runtime export `rt_str_cmp` over `text::bytes_cmp`; kiogen generates Str comparisons. Harness 400 ran both ways, 0 mismatches |
+| L7c | bounds `T: Eq`, `T: Ord` on functions, structs and enums: `==`/`contains` and `<`/`sort()` on bounded parameters; type arguments checked at calls, function values, literals, variants and every written type (`Ord`: Int and Str only); bounds pass through callers. Lowering and codegen unchanged. Harness 404 ran both ways, 0 mismatches |
 | C8a | bench/ (`bench/run.sh`): 9 benchmarks and HTTP against Rust, Python and the interpreter, with profiles. Compiled-only code is 1.1-2.3x Rust; runtime-heavy code 3-271x (quadratic `s = s + x`, zero-filled buffers, allocation, refcount and runtime calls, fuel); ranked C8b list in roadmap.md |
 | C8b1 | in-place `Str` append (`s = s + x`, `s += x`) when the count is 1, no zero-filled byte buffers, inline `inc`/`dec`/`unique` and list `len`/`get`/`push` (a runtime-owned `ListBody` layout). Strings 1.37 s to 8.5 ms (2.4x Rust), JSON 554 to 144 ms, closures 36 to 13, list 52 to 28, tree 438 to 284 |
 | C8b2 | last-use moves and borrowed local operands (no inc/dec), word-at-a-time `Str` compare, one descriptor lookup per free, inline `Bytes` paths; kiogen generates strings. Tree 284 to 244 ms, JSON 143 to 101; word count unchanged (83 ms) |

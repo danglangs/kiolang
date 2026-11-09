@@ -313,17 +313,17 @@ fn type_parameters_are_opaque() {
         (
             "fn f<T>(x: T, y: T) -> Bool { x == y }",
             "cannot compare `T` values",
-            "a type parameter has no `==` yet; take a function for it, like `eq: fn(T, T) -> Bool`",
+            "add the bound: `T: Eq`",
         ),
         (
             "fn f<T>(xs: List<T>, y: T) -> Bool { xs.contains(y) }",
             "cannot compare `T` values",
-            "a type parameter has no `==` yet; take a function for it, like `eq: fn(T, T) -> Bool`",
+            "add the bound: `T: Eq`",
         ),
         (
             "fn f<T>(xs: List<T>) -> Bool { xs == xs }",
             "cannot compare `List<T>` values",
-            "a type parameter has no `==` yet; take a function for it, like `eq: fn(T, T) -> Bool`",
+            "add the bound: `T: Eq`",
         ),
         (
             "fn f<T>(x: T) -> Int { x.n }",

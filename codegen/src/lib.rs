@@ -1510,6 +1510,18 @@ impl FuncGen<'_, '_> {
                     }
                 });
             }
+            // `<` on `Str`: the runtime's byte order as -1, 0 or 1, compared with 0.
+            ExprKind::Binary(op @ (BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge), a, b) if a.ty == Ty::Str => {
+                self.rt_op("rt_str_cmp", &[&**a, &**b], None);
+                let mut s = self.sink();
+                s.i32_const(0);
+                match op {
+                    BinOp::Lt => s.i32_lt_s(),
+                    BinOp::Le => s.i32_le_s(),
+                    BinOp::Gt => s.i32_gt_s(),
+                    _ => s.i32_ge_s(),
+                };
+            }
             ExprKind::Binary(op, a, b) => {
                 self.expr(a);
                 self.expr(b);

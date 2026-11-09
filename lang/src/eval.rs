@@ -1074,7 +1074,17 @@ fn binary(op: BinOp, l: Value, r: Value, span: Span) -> Res {
             BinOp::Ne => Value::Bool(a != b),
             _ => unreachable!("checked operator"),
         }),
-        (Value::Str(a), Value::Str(b)) if op == BinOp::Concat => Ok(Value::Str([&*a, &*b].concat().into())),
+        (Value::Str(a), Value::Str(b)) => Ok(match op {
+            BinOp::Concat => Value::Str([&*a, &*b].concat().into()),
+            // Rust's `str` order: by bytes, a prefix first.
+            BinOp::Lt => Value::Bool(a < b),
+            BinOp::Le => Value::Bool(a <= b),
+            BinOp::Gt => Value::Bool(a > b),
+            BinOp::Ge => Value::Bool(a >= b),
+            BinOp::Eq => Value::Bool(a == b),
+            BinOp::Ne => Value::Bool(a != b),
+            _ => unreachable!("checked operator"),
+        }),
         (a, b) => Ok(Value::Bool((a == b) == (op == BinOp::Eq))),
     }
 }
