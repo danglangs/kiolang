@@ -747,6 +747,47 @@ fn known(p: &Ty, sig: &Sig, binds: &[Option<Bound>]) -> Option<Ty> {
     Some(subst(p, &pairs))
 }
 
+/// The module `e` is written in (`web::` before it) and what follows it.
+fn in_module(e: &Expr) -> (Option<&str>, &ExprKind) {
+    match &e.kind {
+        ExprKind::Module(m, inner) => (Some(m), &inner.kind),
+        kind => (None, kind),
+    }
+}
+
+/// Whether `a` could be `p`, a type in a generic signature, once its type parameters are
+/// known.
+fn fits(p: &Ty, a: &Ty) -> bool {
+    match (p, a) {
+        (Ty::Param(_), _) | (_, Ty::Never) => true,
+        (Ty::Option(p), Ty::Option(a)) | (Ty::List(p), Ty::List(a)) => fits(p, a),
+        (Ty::Result(p, q), Ty::Result(a, b)) | (Ty::Map(p, q), Ty::Map(a, b)) => fits(p, a) && fits(q, b),
+        (Ty::Fn(ps, r), Ty::Fn(qs, s)) => {
+            ps.len() == qs.len() && ps.iter().zip(qs).all(|(p, q)| fits(p, q)) && fits(r, s)
+        }
+        (Ty::Struct(n, ps), Ty::Struct(m, qs)) | (Ty::Enum(n, ps), Ty::Enum(m, qs)) => {
+            n == m && ps.iter().zip(qs).all(|(p, q)| fits(p, q))
+        }
+        _ => p == a,
+    }
+}
+
+/// When a use of `g` with unbound type parameters was expected to have type `want` and
+/// cannot: "expected Tree<Int>, found Other<..>", with `..` for each unbound parameter.
+fn not_expected(span: Span, (_, sig): Generic, binds: &[Option<Bound>], want: Option<&Ty>) -> Option<Diag> {
+    let want = want.filter(|w| !fits(&sig.ret, w))?;
+    let pairs: Vec<(String, Ty)> = (sig.tparams.iter().zip(binds))
+        .map(|(t, b)| {
+            (
+                t.clone(),
+                b.as_ref().map_or(Ty::Param("..".to_string()), |b| b.ty.clone()),
+            )
+        })
+        .collect();
+    let found = subst(&sig.ret, &pairs);
+    Some(err(span, format!("expected {want}, found {found}"), None))
+}
+
 /// Whether `ty` mentions type parameter `t`.
 fn mentions(ty: &Ty, t: &str) -> bool {
     match ty {
@@ -1906,8 +1947,8 @@ struct TypeInsts<'a> {
 impl TypeInsts<'_> {
     /// Adds the instances in `ty`, a type named at `span`, and those their fields name. A
     /// generic type with more than `MAX_INSTANCES` instances or a type argument larger than
-    /// `MAX_TYPE_ARG` is refused: at `span` if `ty` names it, else at the declaration whose
-    /// fields keep growing (`struct S<T> { s: List<S<List<T>>> }`).
+    /// `MAX_TYPE_ARG` is refused: at the declaration whose fields keep growing (`struct S<T>
+    /// { s: List<S<List<T>>> }`), else at `span`, where `ty` names it or a type holding it.
     fn add(
         &mut self,
         ty: &Ty,
@@ -1915,7 +1956,10 @@ impl TypeInsts<'_> {
         structs: &HashMap<String, Struct>,
         enums: &HashMap<String, Enum>,
     ) -> Result<(), Diag> {
-        let mut todo: Vec<(Ty, Option<String>)> = vec![(ty.clone(), None)];
+        // Each type to visit with the index in `owners` of the instance whose field holds it;
+        // `owners` holds each owner's key and its own owner's index.
+        let mut owners: Vec<(String, Option<usize>)> = Vec::new();
+        let mut todo: Vec<(Ty, Option<usize>)> = vec![(ty.clone(), None)];
         while let Some((ty, from)) = todo.pop() {
             let mut found = Vec::new();
             apps(&ty, &mut found);
@@ -1928,9 +1972,18 @@ impl TypeInsts<'_> {
                     continue;
                 }
                 if instances.len() == MAX_INSTANCES || args.iter().any(|t| ty_size(t) > MAX_TYPE_ARG) {
-                    let Some(owner) = &from else {
+                    // The owner grows if the chain of owners from `span` to `k` holds a type twice.
+                    let mut chain = HashSet::from([k.as_str()]);
+                    let mut up = from;
+                    let mut grows = false;
+                    while let Some(i) = up {
+                        grows |= !chain.insert(owners[i].0.as_str());
+                        up = owners[i].1;
+                    }
+                    let (Some(i), true) = (from, grows) else {
                         return Err(too_many(span, bare(k), args));
                     };
+                    let owner = owners[i].0.as_str();
                     let at = structs.get(owner).map_or_else(|| enums[owner].span, |s| s.span);
                     let msg = format!("generic type `{}` instantiates without end", bare(owner));
                     let hint = "a field or payload holds this type with larger type arguments; keep them the same";
@@ -1946,7 +1999,9 @@ impl TypeInsts<'_> {
                         .flat_map(|(_, ts)| ts)
                         .collect(),
                 };
-                todo.extend(parts.into_iter().map(|t| (t, Some(k.clone()))));
+                owners.push((k.clone(), from));
+                let at = Some(owners.len() - 1);
+                todo.extend(parts.into_iter().map(|t| (t, at)));
             }
         }
         Ok(())
@@ -3255,15 +3310,21 @@ impl<'a> Checker<'a> {
         if let Some(want) = expected {
             unify(&sig.ret, want, g, &mut binds, (e.span, 0), false)?;
         }
+        let open = |binds: &[Option<Bound>]| {
+            not_expected(e.span, g, binds, expected).unwrap_or_else(|| cannot_infer(e.span, g, binds, true))
+        };
         for i in later {
             let (a, p) = (args[i], &sig.params[i]);
             let t = if let Some(p) = known(p, sig, &binds) {
                 self.value(a, sig, Some(&p))?
+            } else if self.open_use(a) {
+                // Nothing more is known: checked as alone, where it says what it cannot infer.
+                self.value(a, sig, None)?
             } else {
                 // Only the parameter types of a `fn` parameter may be known: enough for a
                 // closure, or for a generic function named as a value.
                 let Ty::Fn(fps, _) = p else {
-                    return Err(cannot_infer(e.span, g, &binds, true));
+                    return Err(open(&binds));
                 };
                 let pts: Option<Vec<Ty>> = fps.iter().map(|t| known(t, sig, &binds)).collect();
                 match (&a.kind, pts) {
@@ -3276,7 +3337,7 @@ impl<'a> Checker<'a> {
                     (ExprKind::Name(_) | ExprKind::Module(..), Some(pts)) => {
                         self.expr(a, Some(&Ty::Fn(pts, Box::new(Ty::Never))))?
                     }
-                    _ => return Err(cannot_infer(e.span, g, &binds, true)),
+                    _ => return Err(open(&binds)),
                 }
             };
             if explicit.is_none() {
@@ -3284,7 +3345,7 @@ impl<'a> Checker<'a> {
             }
             found[i] = Some(t);
         }
-        let tys = all_bound(e.span, g, &binds, true)?;
+        let tys = all_bound(e.span, g, &binds, true).map_err(|_| open(&binds))?;
         let pairs: Vec<(String, Ty)> = sig.tparams.iter().cloned().zip(tys.iter().cloned()).collect();
         for ((a, p), t) in args.iter().zip(&sig.params).zip(found) {
             want_expr(a, &t.expect("every argument is checked"), &subst(p, &pairs))?;
@@ -3335,9 +3396,9 @@ impl<'a> Checker<'a> {
             ExprKind::Name(n) if n == "None" => true,
             ExprKind::Call(f, args) => match &f.kind {
                 ExprKind::Name(n) if n == "Some" => args.first().is_some_and(|x| self.needs_expected(x)),
-                ExprKind::Name(n) => n == "Ok" || n == "Err",
-                ExprKind::Path(m, n) => m == "Map" && n == "new",
-                _ => false,
+                ExprKind::Name(n) if n == "Ok" || n == "Err" => true,
+                ExprKind::Path(m, n) if m == "Map" && n == "new" => true,
+                _ => self.open_use(a),
             },
             // A generic function named as a value.
             ExprKind::Name(n) => {
@@ -3347,16 +3408,68 @@ impl<'a> Checker<'a> {
             }
             // A variant without a payload of a generic enum, such as `Tree::Leaf`.
             ExprKind::Path(en, _) => self.tparams.get(&self.enum_key(en)).is_some_and(|t| !t.is_empty()),
+            ExprKind::StructLit(..) => self.open_use(a),
             ExprKind::Module(m, inner) => match &inner.kind {
                 ExprKind::Name(n) => self
                     .sigs
                     .get(&format!("{m}::{n}"))
                     .is_some_and(|s| !s.tparams.is_empty()),
                 ExprKind::Path(en, _) => self.tparams.get(&format!("{m}::{en}")).is_some_and(|t| !t.is_empty()),
+                ExprKind::StructLit(..) => self.open_use(a),
                 _ => false,
             },
             _ => false,
         }
+    }
+
+    /// Whether `a` is a generic struct literal, a variant of a generic enum with values, or a
+    /// call of a generic function (no turbofish) whose values leave a type parameter of its
+    /// type open: `Box { v: None }`, `E::L("x")` of `E<A, B>`, `empty()` returning `List<T>`.
+    /// Such a use is checked once the expected type is known, as `Some(None)` is.
+    fn open_use(&self, a: &Expr) -> bool {
+        let key_in = |m: Option<&str>, n: &str| match m {
+            Some(m) => format!("{m}::{n}"),
+            None => key(self.home.module, n).into_owned(),
+        };
+        // The type parameters, each value with its declared type, and the use's type for a call.
+        let (tparams, parts, ret): (&[String], Vec<(&Ty, &Expr)>, Option<&Ty>) = match in_module(a) {
+            (m, ExprKind::StructLit(name, inits)) => {
+                let k = key_in(m, name);
+                let (Some(tparams), Some(decl)) = (self.tparams.get(&k), self.fields.get(&k)) else {
+                    return false;
+                };
+                let parts = (inits.iter())
+                    .filter_map(|(f, x)| decl.iter().find(|(n, _)| n == f).map(|(_, t)| (t, x)))
+                    .collect();
+                (tparams, parts, None)
+            }
+            (None, ExprKind::Call(f, args)) => match in_module(f) {
+                (m, ExprKind::Path(en, v)) => {
+                    let en = m.map_or_else(|| self.enum_key(en), |m| format!("{m}::{en}"));
+                    let payload = self.variants.get(&en).and_then(|vs| variant(vs, v));
+                    let (Some(tparams), Some((_, payload))) = (self.tparams.get(&en), payload) else {
+                        return false;
+                    };
+                    (tparams, payload.iter().zip(args).collect(), None)
+                }
+                (m, ExprKind::Name(n)) if builtin(n).is_none() => {
+                    if m.is_none() && self.scopes.iter().any(|s| s.contains_key(n)) {
+                        return false;
+                    }
+                    let Some(sig) = self.sigs.get(&key_in(m, n)) else {
+                        return false;
+                    };
+                    (&sig.tparams, sig.params.iter().zip(args).collect(), Some(&sig.ret))
+                }
+                _ => return false,
+            },
+            _ => return false,
+        };
+        let fixed: Vec<&Ty> = (parts.into_iter())
+            .filter(|(_, x)| !self.needs_expected(x))
+            .map(|(t, _)| t)
+            .collect();
+        (tparams.iter()).any(|t| ret.is_none_or(|r| mentions(r, t)) && !fixed.iter().any(|p| mentions(p, t)))
     }
 
     /// The key and signature of function `name` written with a turbofish, which a local of

@@ -369,3 +369,128 @@ fn instances_of_a_type_are_bounded() {
     let (msg, _, _) = reject(src);
     assert_eq!(msg, "this generic function instantiates without end");
 }
+
+// L7d: a literal, variant or call whose values leave a type parameter open waits for the
+// expected type, as `Some(None)` does.
+
+#[test]
+fn open_literals_variants_and_calls_take_the_expected_type() {
+    let src = "struct Page<T> { items: List<T>, next: Option<Int> }
+               fn set<T>(p: Page<T>, x: T) -> Page<T> { let mut q = p; q.items.push(x); q }
+               fn main() -> Page<Bool> { set(Page { items: [], next: None }, true) }";
+    assert_eq!(shown(src), "Page { items: [true], next: None }");
+    let src = "struct Box<T> { v: T }
+               fn main() -> Box<Box<Option<Int>>> { let b: Box<Box<Option<Int>>> = Box { v: Box { v: None } }; b }";
+    assert_eq!(shown(src), "Box { v: Box { v: None } }");
+    let src = "enum E<A, B> { L(A), R(B), Both(A, B) }
+               fn main() -> E<Option<Int>, E<Str, Int>> { let e: E<Option<Int>, E<Str, Int>> = E::Both(Some(1), E::L(\"x\")); e }";
+    assert_eq!(shown(src), "E::Both(Some(1), E::L(\"x\"))");
+    let src = "struct H<T> { f: fn(T) -> Int }
+               fn apply<T>(h: H<T>, x: T) -> Int { (h.f)(x) }
+               fn main() -> Int { apply(H { f: |s| s.len() }, \"abc\") }";
+    assert_eq!(shown(src), "3");
+    let src = "struct Box<T> { v: T }
+               fn empty<T>() -> List<T> { [] }
+               fn main() -> Box<List<Int>> { let b: Box<List<Int>> = Box { v: empty() }; b }";
+    assert_eq!(shown(src), "Box { v: [] }");
+    // From a parameter, through a list, a module, and a call whose argument fixes only part.
+    let web = "pub struct Box<T> { v: T } pub fn none<T>() -> Option<T> { None }";
+    let src = "mod web;
+               struct Pair<A, B> { a: A, b: B }
+               fn pick<A, B>(a: A, b: Option<B>) -> Pair<A, Option<B>> { Pair { a: a, b: b } }
+               fn take(b: List<web::Box<Option<Str>>>, p: Pair<Int, Option<Str>>) -> Int { b.len() + p.a }
+               fn main() -> Int { take([web::Box { v: web::none() }], pick(1, None)) }";
+    assert_eq!(shown_files(&[("main", src), ("web", web)]), "2");
+    // Still open with no expected type: what the inner use cannot infer.
+    rejected(
+        "struct Box<T> { v: T } fn wrap<T>(x: T) -> Box<T> { Box { v: x } } fn main() { let b = wrap(Box { v: None }); }",
+        "cannot infer `T` for `Box { .. }`",
+        "Box { v: None }",
+        "add a type: `let b: Box<Int> = Box { .. };`",
+    );
+    rejected(
+        "fn empty<T>() -> List<T> { [] } struct Box<T> { v: T } fn main() { let b = Box { v: empty() }; }",
+        "cannot infer `T`",
+        "empty()",
+        "write `empty::<Int>(..)`",
+    );
+    // An annotated closure fixes its type when nothing else does.
+    let src = "struct H<T> { f: fn(T) -> Int }
+               fn wrap<T>(x: T) -> List<T> { [x] }
+               fn main() -> Int { let hs = wrap(H { f: |x: Int| x + 1 }); (hs[0].f)(1) }";
+    assert_eq!(shown(src), "2");
+}
+
+#[test]
+fn a_wrong_type_against_the_expected_one_says_so() {
+    rejected(
+        "enum Tree<T> { Leaf, Node(T) } enum Other<T> { Leaf } fn main() { let t: Tree<Int> = Other::Leaf; }",
+        "expected Tree<Int>, found Other<..>",
+        "Other::Leaf",
+        "",
+    );
+    rejected(
+        "struct Box<T> { v: T } struct Pair<A, B> { a: A, b: List<B> } fn main() { let b: Box<Int> = Pair { a: 1, b: [] }; }",
+        "expected Box<Int>, found Pair<Int, ..>",
+        "Pair { a: 1, b: [] }",
+        "",
+    );
+    rejected(
+        "fn empty<T>() -> List<T> { [] } fn main() { let m: Map<Str, Int> = empty(); }",
+        "expected Map<Str, Int>, found List<..>",
+        "empty()",
+        "",
+    );
+    rejected(
+        "enum Tree<T> { Leaf } fn take(t: Option<Tree<Int>>) {} fn main() { take(Tree::Leaf); }",
+        "expected Option<Tree<Int>>, found Tree<..>",
+        "Tree::Leaf",
+        "",
+    );
+}
+
+#[test]
+fn the_65th_instance_through_a_type_that_does_not_grow_names_the_type() {
+    // 64 instances of `Box` named directly, the 65th through `W`'s field.
+    let mut src = "struct Box<T> { v: T } struct W<T> { b: Box<T> }\n".to_string();
+    for i in 0..64 {
+        src += &format!("struct A{i} {{ }} struct N{i} {{ b: Option<Box<A{i}>> }}\n");
+    }
+    src += "struct A64 { } fn main() { let w: Option<W<A64>> = None; }";
+    rejected(
+        &src,
+        "`Box` has more than 64 instances",
+        "let w: Option<W<A64>> = None;",
+        "use fewer distinct type arguments, or a copy that is not generic for some uses",
+    );
+    // A growing owner is still blamed, even when another type reaches 65 first.
+    let grow = "struct S<T> { b: Box<T>, s: List<S<Option<T>>> }";
+    rejected(
+        &format!("struct Box<T> {{ v: T }} {grow} fn main() {{ let s: Option<S<Int>> = None; }}"),
+        "generic type `S` instantiates without end",
+        grow,
+        "a field or payload holds this type with larger type arguments; keep them the same",
+    );
+}
+
+#[test]
+fn type_arguments_on_a_literal_or_variant_point_to_the_let() {
+    rejected(
+        "struct Box<T> { v: T } fn main() { let b = Box::<Int> { v: 1 }; }",
+        "a struct literal takes no type arguments",
+        "Box::<Int>",
+        "write the type on the `let`: `let b: Box<Int> = ..`",
+    );
+    rejected(
+        "enum Tree<T> { Leaf } fn main() { let t = Tree::<Int>::Leaf; }",
+        "a variant takes no type arguments",
+        "Tree::<Int>",
+        "write the type on the `let`: `let t: Tree<Int> = ..`",
+    );
+    rejected(
+        "struct Pair<A, B> { a: A, b: B } fn main() { let p = Pair::<List<Int>, fn(Str) -> Int> { a: [], b: |s| 1 }; }",
+        "a struct literal takes no type arguments",
+        "Pair::<List<Int>, fn(Str) -> Int>",
+        "write the type on the `let`: `let p: Pair<List<Int>, fn(Str) -> Int> = ..`",
+    );
+}

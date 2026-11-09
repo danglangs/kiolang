@@ -25,6 +25,19 @@ fn err(span: Span, msg: &str, hint: Option<&str>) -> Diag {
     }
 }
 
+/// `t` as written, for hints.
+fn type_text(t: &Type) -> String {
+    let list = |ts: &[Type]| ts.iter().map(type_text).collect::<Vec<_>>().join(", ");
+    match &t.kind {
+        TypeKind::Unit => "()".to_string(),
+        TypeKind::Named(n, args) if args.is_empty() => n.clone(),
+        TypeKind::Named(n, args) => format!("{n}<{}>", list(args)),
+        TypeKind::Module(m, t) => format!("{m}::{}", type_text(t)),
+        TypeKind::Fn(ps, r) if r.kind == TypeKind::Unit => format!("fn({})", list(ps)),
+        TypeKind::Fn(ps, r) => format!("fn({}) -> {}", list(ps), type_text(r)),
+    }
+}
+
 fn reserved_hint(word: &str) -> &'static str {
     match word {
         "impl" | "trait" | "dyn" => "kio has no traits or `impl`; use free functions",
@@ -648,6 +661,23 @@ impl Parser {
                         return Err(err(self.span(), "empty type arguments", Some(&hint)));
                     }
                     let tys = self.list(">", Self::ty)?;
+                    // `Box::<Int> { .. }`, `Tree::<Int>::Leaf`: type arguments go on the `let`.
+                    let what = match self.peek() {
+                        _ if !enum_name.starts_with(|c: char| c.is_uppercase()) => None,
+                        Some(Kind::Sym("{")) if !self.no_struct => Some("a struct literal"),
+                        Some(Kind::Sym("::")) => Some("a variant"),
+                        _ => None,
+                    };
+                    if let Some(what) = what {
+                        let args: Vec<String> = tys.iter().map(type_text).collect();
+                        let local = enum_name.to_lowercase().chars().next().unwrap_or('x');
+                        let hint = format!(
+                            "write the type on the `let`: `let {local}: {enum_name}<{}> = ..`",
+                            args.join(", ")
+                        );
+                        let msg = format!("{what} takes no type arguments");
+                        return Err(err(self.since(start), &msg, Some(&hint)));
+                    }
                     return Ok(Expr {
                         kind: ExprKind::Turbofish(enum_name, tys),
                         span: self.since(start),

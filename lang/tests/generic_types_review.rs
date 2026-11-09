@@ -78,6 +78,95 @@ fn a_capability_never_reaches_a_type_argument() {
 }
 
 #[test]
+fn a_capability_never_reaches_a_deferred_type_argument() {
+    // L7d: literals, variants and calls left open by their values wait for the expected type;
+    // a capability operand elsewhere in the use, or in the expected type, still never binds.
+    let defs = "struct Pair<A, B> { a: A, b: B }
+                struct H<T> { f: fn(T) -> Int }
+                enum E<A, B> { L(A), R(B) }
+                fn none<T>() -> Option<T> { None }
+                fn mk<T>() -> Box<List<T>> { Box { v: [] } }
+                fn take<T>(b: Box<T>, x: T) -> Int { 1 }
+                fn take_o<T>(b: Box<Option<T>>, x: T) -> Int { 1 }
+                fn take_e<T>(e: E<Int, T>, x: T) -> Int { 1 }
+                fn take_h<T>(h: H<T>, x: T) -> Int { 1 }
+                fn take_n<T>(o: Option<T>, x: T) -> Int { 1 }";
+    let cases = [
+        // The deferred value first, the capability operand fixing its type after.
+        ("fn main(d: Dir) { take(Box { v: None }, d); }", CAP_ARG, "d"),
+        ("fn main(d: Dir) { take_o(Box { v: None }, d); }", CAP_ARG, "d"),
+        ("fn main(d: Dir) { take_e(E::L(1), d); }", CAP_ARG, "d"),
+        ("fn main(d: Dir) { take_h(H { f: |x| 1 }, d); }", CAP_ARG, "d"),
+        ("fn main(d: Dir) { take_o(mk(), d); }", CAP_ARG, "d"),
+        ("fn main(d: Dir) { take_n(none(), d); }", CAP_ARG, "d"),
+        (
+            "fn main(d: Dir) { take_o(Box { v: Some(Box { v: None }) }, d); }",
+            CAP_ARG,
+            "d",
+        ),
+        // The capability inside the deferred value: never an operand there.
+        ("fn main(d: Dir) { take_o(Box { v: Some(d) }, 1); }", CAP_VALUE, "d"),
+        (
+            "fn main(d: Dir) { let b: Box<Box<Option<Int>>> = Box { v: Box { v: Some(d) } }; }",
+            CAP_VALUE,
+            "d",
+        ),
+        (
+            "fn main(d: Dir) { let p: Pair<Int, Box<Option<Int>>> = Pair { a: d, b: Box { v: None } }; }",
+            CAP_VALUE,
+            "d",
+        ),
+        (
+            "fn main(d: Dir) { let e: E<Int, E<Int, Int>> = E::R(E::L(d)); }",
+            CAP_VALUE,
+            "d",
+        ),
+        (
+            "fn main(d: Dir) { take_h(H { f: |x| { d.read(\"a\"); 1 } }, \"s\"); }",
+            "closure captures capability `d`",
+            "d",
+        ),
+        // The capability in the expected type: refused where it is written.
+        (
+            "fn main(d: Dir) { let b: Box<Box<Option<Dir>>> = Box { v: Box { v: None } }; }",
+            "`T` cannot be `Option<Dir>`: capabilities are parameters only",
+            "Option<Dir>",
+        ),
+        (
+            "fn main(d: Dir) { let b: Box<List<Dir>> = Box { v: [] }; }",
+            "`T` cannot be `List<Dir>`: capabilities are parameters only",
+            "List<Dir>",
+        ),
+        (
+            "fn main(d: Dir) { let b: Box<Option<Dir>> = Box { v: none() }; }",
+            "`T` cannot be `Option<Dir>`: capabilities are parameters only",
+            "Option<Dir>",
+        ),
+        (
+            "fn main(d: Dir) { let e: E<Int, E<Dir, Int>> = E::R(E::R(1)); }",
+            "`A` cannot be `Dir`: capabilities are parameters only",
+            "Dir",
+        ),
+        // Through a module.
+        (
+            "fn main(d: Dir) { take(web::Box { v: web::none() }, d); }",
+            CAP_ARG,
+            "d",
+        ),
+        ("fn main(d: Dir) { take_n(web::none(), d); }", CAP_ARG, "d"),
+    ];
+    let web = "pub struct Box<T> { v: T } pub fn none<T>() -> Option<T> { None }";
+    for (src, msg, at) in cases {
+        let src = format!("mod web; {BOX} {TREE} {defs} {src}");
+        assert_eq!(
+            rejected(&[("main", &src), ("web", web)]),
+            (msg.to_string(), at.to_string()),
+            "{src}"
+        );
+    }
+}
+
+#[test]
 fn a_capability_never_reaches_a_module_generic_type() {
     let web =
         "pub struct Box<T> { v: T } pub enum Tree<T> { Leaf, Node(T) } pub fn wrap<T>(x: T) -> Box<T> { Box { v: x } }";
