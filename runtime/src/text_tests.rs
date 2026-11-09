@@ -691,3 +691,75 @@ fn keys_order_as_bytes() {
     // SAFETY: the bytes outlive the probe, which is only compared.
     assert_eq!(*unsafe { Key::probe(b"abcdefghij") }, k(b"abcdefghij"));
 }
+
+/// L11 (C14): case mapping, SHA-256, hex and `ct_eq` match lang's, and free what they make.
+#[test]
+fn l11_text() {
+    let _g = lock();
+    let base = obj::live();
+    // SAFETY: live objects of the right kinds.
+    unsafe {
+        for x in [
+            "Hello, World!",
+            "",
+            "stra\u{df}e",
+            "\u{39f}\u{394}\u{39f}\u{3a3}",
+            "\u{130}",
+        ] {
+            let a = s(x);
+            assert_eq!(take(text::to_lowercase(a)), x.to_lowercase());
+            assert_eq!(take(text::to_uppercase(a)), x.to_uppercase());
+            dec(a);
+        }
+        let abc = s("abc");
+        let h = text::sha256(abc);
+        let hex = text::to_hex(h);
+        assert_eq!(
+            take(hex),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let b = text::to_bytes(abc);
+        let h2 = text::sha256(b);
+        assert!(text::ct_eq(h, h2));
+        assert!(!text::ct_eq(h, b));
+        assert!(text::ct_eq(abc, abc));
+        let abd = s("abd");
+        assert!(!text::ct_eq(abc, abd));
+        for p in [abc, h, b, h2, abd] {
+            dec(p);
+        }
+        let e = text::new_bytes(&[]);
+        assert_eq!(take(text::to_hex(e)), "");
+        dec(e);
+    }
+    assert_eq!(obj::live(), base);
+}
+
+/// `extend` appends in place when there is room, else moves to a larger buffer; the argument
+/// is only read.
+#[test]
+fn extend_grows_and_borrows() {
+    let _g = lock();
+    let base = obj::live();
+    // SAFETY: a unique `Bytes`, and another live one.
+    unsafe {
+        let mut b = text::new_bytes(b"ab");
+        let more = text::new_bytes(b"0123456789");
+        for _ in 0..10 {
+            b = text::extend(&T, b, more);
+        }
+        let empty = text::new_bytes(&[]);
+        b = text::extend(&T, b, empty);
+        assert_eq!(text::len(b), 102);
+        assert_eq!(&obj::bytes(b)[..12], b"ab0123456789");
+        assert_eq!(&obj::bytes(b)[92..], b"0123456789");
+        assert_eq!((*more).rc, 1);
+        let room = obj::new_bytes_cap(desc::BYTES, b"x", 8);
+        let same = text::extend(&T, room, more);
+        assert_eq!(obj::bytes(same), b"x0123456789");
+        for p in [b, more, empty, same] {
+            dec(p);
+        }
+    }
+    assert_eq!(obj::live(), base);
+}

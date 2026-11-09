@@ -1484,6 +1484,17 @@ fn method(caps: &CapTable, recv: &Ty, name: &str) -> Option<(Vec<Ty>, Ty)> {
         (Ty::Float, "is_nan" | "is_finite" | "is_infinite") => Some((vec![], Ty::Bool)),
         (Ty::Str, "slice") => Some((vec![Ty::Int, Ty::Int], Ty::Str)),
         (Ty::Bytes, "slice") => Some((vec![Ty::Int, Ty::Int], Ty::Bytes)),
+        (Ty::List(t), "slice") => Some((vec![Ty::Int, Ty::Int], Ty::List(t.clone()))),
+        (Ty::List(_), "reverse") => Some((vec![], Ty::Unit)),
+        (Ty::List(_), "join") => Some((vec![Ty::Str], Ty::Str)),
+        (Ty::Int, "min" | "max") => Some((vec![Ty::Int], Ty::Int)),
+        (Ty::Float, "min" | "max") => Some((vec![Ty::Float], Ty::Float)),
+        (Ty::Str, "to_lowercase" | "to_uppercase") => Some((vec![], Ty::Str)),
+        (Ty::Bytes, "extend") => Some((vec![Ty::Bytes], Ty::Unit)),
+        (Ty::Bytes | Ty::Str, "sha256") => Some((vec![], Ty::Bytes)),
+        (Ty::Bytes, "to_hex") => Some((vec![], Ty::Str)),
+        (Ty::Bytes, "ct_eq") => Some((vec![Ty::Bytes], Ty::Bool)),
+        (Ty::Str, "ct_eq") => Some((vec![Ty::Str], Ty::Bool)),
         (Ty::Str, "parse_json") => Some((vec![], Ty::Result(Box::new(json()), Box::new(Ty::Str)))),
         (Ty::Enum(k, _), _) if k == "Json" => {
             let opt = |t: Ty| Ty::Option(Box::new(t));
@@ -1521,13 +1532,21 @@ fn takes_fn(recv: &Ty, name: &str) -> bool {
         (recv, name),
         (Ty::Option(_), "map" | "and_then")
             | (Ty::Result(..), "map" | "map_err" | "and_then")
-            | (Ty::List(_), "map" | "filter" | "any" | "all")
+            | (
+                Ty::List(_),
+                "map" | "filter" | "any" | "all" | "sort_by" | "sort_by_key"
+            )
+            | (Ty::Option(_) | Ty::Result(..), "unwrap_or_else")
     )
 }
 
 /// How a method that takes a function is declared, as a hint; `U` and `F` are the function's result.
 fn fn_declared(recv: &Ty, name: &str) -> String {
     let decl = match (recv, name) {
+        (Ty::Option(t), "unwrap_or_else") => format!("unwrap_or_else(fn() -> {t}) -> {t}"),
+        (Ty::Result(t, e), "unwrap_or_else") => format!("unwrap_or_else(fn({e}) -> {t}) -> {t}"),
+        (Ty::List(t), "sort_by") => format!("sort_by(fn({t}, {t}) -> Bool)"),
+        (Ty::List(t), "sort_by_key") => format!("sort_by_key(fn({t}) -> K)"),
         (Ty::Option(t), "map") => format!("map(fn({t}) -> U) -> Option<U>"),
         (Ty::Option(t), _) => format!("and_then(fn({t}) -> Option<U>) -> Option<U>"),
         (Ty::Result(t, e), "map") => format!("map(fn({t}) -> U) -> Result<U, {e}>"),
@@ -1562,8 +1581,10 @@ const METHODS: &[&str] = &[
     "at",
     "ceil",
     "contains",
+    "ct_eq",
     "ends_with",
     "err",
+    "extend",
     "filter",
     "find",
     "floor",
@@ -1576,11 +1597,14 @@ const METHODS: &[&str] = &[
     "is_none",
     "is_ok",
     "is_some",
+    "join",
     "keys",
     "len",
     "lines",
     "map",
     "map_err",
+    "max",
+    "min",
     "ok",
     "ok_or",
     "parse_float",
@@ -1590,9 +1614,13 @@ const METHODS: &[&str] = &[
     "push",
     "remove",
     "replace",
+    "reverse",
     "round",
+    "sha256",
     "slice",
     "sort",
+    "sort_by",
+    "sort_by_key",
     "split",
     "sqrt",
     "starts_with",
@@ -1600,11 +1628,15 @@ const METHODS: &[&str] = &[
     "strip_suffix",
     "to_bytes",
     "to_float",
+    "to_hex",
     "to_int",
     "to_json",
+    "to_lowercase",
     "to_str",
+    "to_uppercase",
     "trim",
     "unwrap_or",
+    "unwrap_or_else",
 ];
 
 fn cap_methods<'a>(caps: &'a CapTable, name: &str) -> &'a [(String, Vec<Ty>, Ty)] {
@@ -2698,8 +2730,10 @@ impl<'a> Checker<'a> {
         let recv_ty = self.operand(recv, None)?;
         if matches!(
             (&recv_ty, name),
-            (Ty::List(_), "push" | "sort" | "pop")
-                | (Ty::Bytes, "push")
+            (
+                Ty::List(_),
+                "push" | "sort" | "pop" | "sort_by" | "sort_by_key" | "reverse"
+            ) | (Ty::Bytes, "push" | "extend")
                 | (Ty::Map(..) | Ty::HashMap(..), "insert" | "remove")
         ) {
             self.mutation_target(recv, name, &recv_ty)?;
@@ -2759,6 +2793,12 @@ impl<'a> Checker<'a> {
                 return Err(no_param_equality(e.span, t, p));
             }
         }
+        if let (Ty::List(t), "join") = (&recv_ty, name) {
+            if **t != Ty::Str {
+                let hint = "join works on List<Str>; make one first: `xs.map(|x| x.to_str()).join(sep)`";
+                return Err(err(e.span, format!("cannot join {recv_ty}"), Some(hint)));
+            }
+        }
         if let (Ty::List(t), "sort") = (&recv_ty, name) {
             let hint = match &**t {
                 Ty::Int | Ty::Str => None,
@@ -2791,27 +2831,40 @@ impl<'a> Checker<'a> {
             let msg = format!("`{name}` takes 1 arguments, found {}", args.len());
             return Err(err(e.span, msg, Some(&decl)));
         }
-        let param = match (recv_ty, name) {
-            (Ty::Result(_, err_ty), "map_err") => (**err_ty).clone(),
-            (Ty::Option(t) | Ty::Result(t, _) | Ty::List(t), _) => (**t).clone(),
+        let params = match (recv_ty, name) {
+            (Ty::Option(_), "unwrap_or_else") => vec![],
+            (Ty::Result(_, err_ty), "map_err" | "unwrap_or_else") => vec![(**err_ty).clone()],
+            (Ty::List(t), "sort_by") => vec![(**t).clone(), (**t).clone()],
+            (Ty::Option(t) | Ty::Result(t, _) | Ty::List(t), _) => vec![(**t).clone()],
             _ => unreachable!("takes_fn"),
+        };
+        // The result a closure written here must have, when the method fixes it.
+        let want_ret = match (recv_ty, name) {
+            (Ty::Option(t) | Ty::Result(t, _), "unwrap_or_else") => Some((**t).clone()),
+            (_, "sort_by") => Some(Ty::Bool),
+            _ => None,
         };
         let shape = match (recv_ty, name) {
             (Ty::Option(_), "and_then") => Some(Ty::Option(Box::new(Ty::Never))),
             (Ty::Result(_, err_ty), "and_then") => Some(Ty::Result(Box::new(Ty::Never), err_ty.clone())),
             _ => None,
         };
+        let n = params.len();
+        let arity = match n {
+            1 => "1 parameter".to_string(),
+            n => format!("{n} parameters"),
+        };
         let f = &args[0];
         let found = match &f.kind {
             ExprKind::Closure(ps, body) => {
-                if ps.len() != 1 {
+                if ps.len() != n {
                     let msg = format!(
-                        "`{name}` takes a function of 1 parameter, found a closure of {} parameters",
+                        "`{name}` takes a function of {arity}, found a closure of {} parameters",
                         ps.len()
                     );
                     return Err(err(f.span, msg, Some(&decl)));
                 }
-                let want = (std::slice::from_ref(&param), None);
+                let want = (params.as_slice(), want_ret);
                 let ty = self.closure_with(f, ps, body, Some(want), shape, None)?;
                 self.record(f, &ty);
                 ty
@@ -2822,12 +2875,13 @@ impl<'a> Checker<'a> {
             let msg = format!("`{name}` takes a function, found {found}");
             return Err(err(f.span, msg, Some(&decl)));
         };
-        if ps.len() != 1 {
-            let msg = format!("`{name}` takes a function of 1 parameter, found {found}");
+        if ps.len() != n {
+            let msg = format!("`{name}` takes a function of {arity}, found {found}");
             return Err(err(f.span, msg, Some(&decl)));
         }
-        if ps[0] != param {
-            let msg = format!("`{name}` needs a function taking {param}, found {found}");
+        if *ps != params {
+            let tys: Vec<_> = params.iter().map(Ty::to_string).collect();
+            let msg = format!("`{name}` needs a function taking {}, found {found}", tys.join(", "));
             return Err(err(f.span, msg, Some(&decl)));
         }
         let ret = ret.clone();
@@ -2836,7 +2890,14 @@ impl<'a> Checker<'a> {
             Err(err(f.span, msg, Some(&decl)))
         };
         match (recv_ty, name) {
-            (_, "filter" | "any" | "all") if *ret != Ty::Bool => wrong_ret("Bool".to_string()),
+            (_, "filter" | "any" | "all" | "sort_by") if *ret != Ty::Bool => wrong_ret("Bool".to_string()),
+            (_, "sort_by") => Ok(Ty::Unit),
+            (_, "sort_by_key") => match *ret {
+                Ty::Int | Ty::Str => Ok(Ty::Unit),
+                _ => wrong_ret("Int or Str".to_string()),
+            },
+            (Ty::Option(t) | Ty::Result(t, _), "unwrap_or_else") if ret != *t => wrong_ret(t.to_string()),
+            (Ty::Option(t) | Ty::Result(t, _), "unwrap_or_else") => Ok((**t).clone()),
             (Ty::List(_), "filter") => Ok(recv_ty.clone()),
             (_, "any" | "all") => Ok(Ty::Bool),
             (Ty::List(_), "map") => Ok(Ty::List(ret)),
@@ -3364,7 +3425,8 @@ impl<'a> Checker<'a> {
     /// `let mut` local.
     fn mutation_target(&mut self, recv: &Expr, method: &str, recv_ty: &Ty) -> Result<(), Diag> {
         let (noun, to) = match (recv_ty, method) {
-            (Ty::List(_), "sort") => ("list", ""),
+            (Ty::List(_), "sort" | "sort_by" | "sort_by_key" | "reverse") => ("list", ""),
+            (Ty::Bytes, "extend") => ("bytes", ""),
             (Ty::List(_), "pop") => ("list", " from"),
             (Ty::List(_), _) => ("list", " to"),
             (Ty::Bytes, _) => ("bytes", " to"),

@@ -33,7 +33,7 @@ pub struct Features {
     /// Helpers that call themselves on a decreasing parameter.
     pub recursion: bool,
     /// `List<Int>` locals: literals, copies, indexing (mostly in range), `len`, `push`,
-    /// element assignment and `+=`, `==`, `for x in xs`, `contains`, `sort` and `pop`.
+    /// element assignment and `+=`, `==`, `for x in xs`, `contains`, `sort`, `reverse` and `pop`.
     pub lists: bool,
     /// The struct `S`, the enum `K` and `Option<Int>`: locals, construction, copies, field
     /// reads and writes, `==`, `unwrap_or`, `is_some`, `match` with nested patterns and a
@@ -44,7 +44,8 @@ pub struct Features {
     /// `to_float`, `parse_float`, `abs`, `floor`, `ceil`, `round`, `sqrt` and the `is_` tests.
     pub floats: bool,
     /// `map`, `filter`, `any` and `all` on `List<Int>` values, each with a closure applying one
-    /// operator to the element and a literal or a captured `Int` local.
+    /// operator to the element and a literal or a captured `Int` local; `sort_by` (with
+    /// comparators that are no order too) and `sort_by_key` on `List<Int>` locals.
     pub closures: bool,
     /// `Str` locals, parameters and results: literals, `+`, `+=`, `s = s + a + b` (the
     /// compiler's in-place append) and `s = s + s`, `to_str`, `trim`, `len`, `==`, `contains`,
@@ -656,11 +657,11 @@ impl Gen<'_> {
         }
     }
 
-    /// `push`, an element's `=`, `+=` or `-=`, the whole list's `=`, `for x in xs`, `sort` or
-    /// `pop`.
+    /// `push`, an element's `=`, `+=` or `-=`, the whole list's `=`, `for x in xs`, `sort`,
+    /// `reverse`, `sort_by`, `sort_by_key` or `pop`.
     fn list_stmt(&mut self) -> Option<String> {
         let pad = self.pad();
-        let kind = self.rng.below(8);
+        let kind = self.rng.below(11);
         if kind == 4 || kind == 5 {
             return self.for_list();
         }
@@ -687,6 +688,14 @@ impl Gen<'_> {
                 Some(format!("{pad}{name}[{i}] {op} {e};\n"))
             }
             6 => Some(format!("{pad}{name}.sort();\n")),
+            8 if self.features.closures => {
+                // `<=` and `!=` are no order: the merge sort must still agree (L11).
+                let op = self.rng.pick(&["<", ">", "<=", "!="]);
+                Some(format!("{pad}{name}.sort_by(|a, b| a {op} b);\n"))
+            }
+            9 if self.features.closures => Some(format!("{pad}{name}.sort_by_key({});\n", self.closure(false))),
+            8 | 9 => Some(format!("{pad}{name}.reverse();\n")),
+            10 => Some(format!("{pad}{name}.reverse();\n")),
             7 => {
                 // A pass of an enclosing loop pops again: the list may be shorter by `mult`.
                 let v = self.var(&name);
@@ -1665,7 +1674,7 @@ mod tests {
     #[test]
     fn list_methods_are_generated() {
         let all: String = (0..250).map(|s| super::program(s, &Default::default())).collect();
-        for m in [".sort()", ".pop()", ".contains("] {
+        for m in [".sort()", ".pop()", ".contains(", ".reverse()"] {
             assert!(all.matches(m).count() > 10, "{m}: {}", all.matches(m).count());
         }
     }
@@ -1674,7 +1683,14 @@ mod tests {
     #[test]
     fn closures_are_generated() {
         let all: String = (0..250).map(|s| super::program(s, &Default::default())).collect();
-        for m in [".map(|el| ", ".filter(|el| ", ".any(|el| ", ".all(|el| "] {
+        for m in [
+            ".map(|el| ",
+            ".filter(|el| ",
+            ".any(|el| ",
+            ".all(|el| ",
+            ".sort_by(|a, b| ",
+            ".sort_by_key(|el| ",
+        ] {
             assert!(all.matches(m).count() > 10, "{m}: {}", all.matches(m).count());
         }
     }

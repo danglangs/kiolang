@@ -473,3 +473,75 @@ pub unsafe fn push(t: &Table, b: *mut Header, n: i64) -> Result<*mut Header, Err
         Ok(b)
     }
 }
+
+/// `Str.to_lowercase()`: Rust's Unicode mapping.
+///
+/// # Safety
+/// The module's contract.
+pub unsafe fn to_lowercase(s: *mut Header) -> *mut Header {
+    // SAFETY: the caller's guarantee.
+    unsafe { new_str(&str_of(s).to_lowercase()) }
+}
+
+/// `Str.to_uppercase()`: Rust's Unicode mapping.
+///
+/// # Safety
+/// The module's contract.
+pub unsafe fn to_uppercase(s: *mut Header) -> *mut Header {
+    // SAFETY: the caller's guarantee.
+    unsafe { new_str(&str_of(s).to_uppercase()) }
+}
+
+/// `sha256()` of a `Str` or `Bytes`: a new `Bytes` of 32.
+///
+/// # Safety
+/// The module's contract.
+pub unsafe fn sha256(p: *mut Header) -> *mut Header {
+    // SAFETY: the caller's guarantee.
+    new_bytes(&crate::digest::sha256(unsafe { obj::bytes(p) }))
+}
+
+/// `Bytes.to_hex()`: lowercase, two digits a byte.
+///
+/// # Safety
+/// The module's contract.
+pub unsafe fn to_hex(p: *mut Header) -> *mut Header {
+    // SAFETY: the caller's guarantee.
+    new_str(&crate::digest::to_hex(unsafe { obj::bytes(p) }))
+}
+
+/// `ct_eq` of two `Str`s or two `Bytes` (digest.rs).
+///
+/// # Safety
+/// The module's contract.
+pub unsafe fn ct_eq(a: *mut Header, b: *mut Header) -> bool {
+    // SAFETY: the caller's guarantee.
+    unsafe { crate::digest::ct_eq(obj::bytes(a), obj::bytes(b)) }
+}
+
+/// `bytes.extend(more)`. Returns the `Bytes` to store back, as `push`: `b` itself if it had
+/// room, else a larger copy (at least doubled) and `b` freed. `more` is borrowed and is not `b`.
+///
+/// # Safety
+/// The module's contract; `b` is a `Bytes` with count 1, `more` another `Bytes`.
+pub unsafe fn extend(t: &Table, b: *mut Header, more: *mut Header) -> *mut Header {
+    // SAFETY: the caller's guarantee; `len` and `cap` are at 8 and 12, with `cap` bytes of room.
+    unsafe {
+        debug_assert!((*b).rc == 1 && b != more);
+        let add = obj::bytes(more);
+        let len = *obj::field::<u32>(b, 8) as usize;
+        let cap = *obj::field::<u32>(b, 12) as usize;
+        let needed = len.checked_add(add.len()).expect("over 4 GiB");
+        let len32 = u32::try_from(needed).expect("over 4 GiB");
+        let b = if needed <= cap {
+            b
+        } else {
+            let q = obj::new_bytes_cap(desc::BYTES, obj::bytes(b), grown(needed, cap));
+            obj::dec(t, b);
+            q
+        };
+        core::ptr::copy_nonoverlapping(add.as_ptr(), obj::field(b, obj::BYTES_DATA + len), add.len());
+        *obj::field::<u32>(b, 8) = len32;
+        b
+    }
+}

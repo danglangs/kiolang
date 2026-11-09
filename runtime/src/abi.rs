@@ -577,3 +577,135 @@ unsafe fn unwrap_or(p: u32, success: u32, d: i64) -> i64 {
         v as i64
     }
 }
+
+// L11's built-ins (C14). Non-mutating ones keep the group's contract above; `reverse`,
+// `extend`, `sort_by_key` and the sort's finish change a unique place, as the mutators do.
+
+/// `l.slice(a, b)`, a new list of `l`'s descriptor. Error: out of bounds, with `a`, `b` and the
+/// length as the message's third value (`trap3`).
+#[no_mangle]
+pub unsafe extern "C" fn rt_list_slice(l: u32, a: i64, b: i64, site: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unsafe {
+        match coll::list_slice(&table(), ptr(l), a, b) {
+            Some(p) => addr(p),
+            None => trap3(site, a, b, coll::list_len(ptr(l))),
+        }
+    }
+}
+
+/// `l.join(sep)` on a `List<Str>`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_list_join(l: u32, sep: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unsafe { addr(coll::list_join(ptr(l), ptr(sep))) }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_str_to_lowercase(s: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unsafe { addr(text::to_lowercase(ptr(s))) }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_str_to_uppercase(s: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unsafe { addr(text::to_uppercase(ptr(s))) }
+}
+
+/// `sha256()` of a `Str` or `Bytes`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_sha256(p: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unsafe { addr(text::sha256(ptr(p))) }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_bytes_to_hex(b: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unsafe { addr(text::to_hex(ptr(b))) }
+}
+
+/// `ct_eq` of two `Str`s or two `Bytes`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_ct_eq(a: u32, b: u32) -> bool {
+    // SAFETY: the group's contract.
+    unsafe { text::ct_eq(ptr(a), ptr(b)) }
+}
+
+/// `l.reverse()`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_list_reverse(l: u32) {
+    // SAFETY: the group's contract.
+    unsafe { coll::list_reverse(ptr(l)) }
+}
+
+/// `b.extend(more)`: returns the `Bytes` to store back in the place, as `rt_bytes_push`.
+/// `more` is borrowed, and is not `b` (which is unique).
+#[no_mangle]
+pub unsafe extern "C" fn rt_bytes_extend(b: u32, more: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unsafe { addr(text::extend(&table(), ptr(b), ptr(more))) }
+}
+
+/// `l.sort_by_key(f)`, given `keys`, `f` of each element in order (a `List<Int>` or
+/// `List<Str>`, borrowed).
+#[no_mangle]
+pub unsafe extern "C" fn rt_list_sort_by_key(l: u32, keys: u32) {
+    // SAFETY: the group's contract.
+    unsafe { coll::list_sort_by_key(&table(), ptr(l), ptr(keys)) }
+}
+
+// `l.sort_by(less)`: generated code drives lang/src/sort.rs's merge sort, calling `less`
+// itself between the steps, so the runtime never calls into the program. The sort is a plain
+// allocation, not an object, owned by generated code from `rt_sort_new` to `rt_sort_finish`.
+
+fn sort_state(s: u32) -> *mut crate::sort::MergeSort {
+    core::ptr::with_exposed_provenance_mut(s as usize)
+}
+
+/// A sort of the indexes of list `l`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_sort_new(l: u32) -> u32 {
+    // SAFETY: the group's contract.
+    let n = unsafe { coll::list_len(ptr(l)) } as usize;
+    let s = alloc::boxed::Box::new(crate::sort::MergeSort::new(n));
+    alloc::boxed::Box::into_raw(s).expose_provenance() as u32
+}
+
+/// The sort's next question, does element `a` go before element `b`, as `a << 32 | b`; -1
+/// once sorted.
+///
+/// # Safety
+/// `s` is a live sort from `rt_sort_new`, its last question answered.
+#[no_mangle]
+pub unsafe extern "C" fn rt_sort_next(s: u32) -> i64 {
+    // SAFETY: the caller's guarantee.
+    match unsafe { &mut *sort_state(s) }.question() {
+        Some((a, b)) => ((a as i64) << 32) | b as i64,
+        None => -1,
+    }
+}
+
+/// The answer to the sort's last question: `less(a, b)`, 0 or 1.
+///
+/// # Safety
+/// `s` is a live sort from `rt_sort_new` with a question pending.
+#[no_mangle]
+pub unsafe extern "C" fn rt_sort_answer(s: u32, less: u32) {
+    // SAFETY: the caller's guarantee.
+    unsafe { &mut *sort_state(s) }.answer(less != 0)
+}
+
+/// Puts the unique list `l` in the sorted order and frees the sort.
+///
+/// # Safety
+/// `s` is a sort from `rt_sort_new` of `l`, done (`rt_sort_next` gave -1), freed here once.
+#[no_mangle]
+pub unsafe extern "C" fn rt_sort_finish(s: u32, l: u32) {
+    // SAFETY: the caller's guarantee; `s` came from `Box::into_raw`.
+    unsafe {
+        let s = alloc::boxed::Box::from_raw(sort_state(s));
+        coll::list_permute(ptr(l), &s.order());
+    }
+}

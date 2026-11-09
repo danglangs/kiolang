@@ -891,11 +891,11 @@ fn methods() {
     assert_eq!(hint("fn main() { \"a\".lenn(); }"), "did you mean `len`?");
     assert_eq!(
         hint("fn main() { \"a\".zzzzzz(); }"),
-        "Str has: contains, ends_with, find, len, lines, parse_float, parse_int, parse_json, replace, slice, split, starts_with, strip_prefix, strip_suffix, to_bytes, trim"
+        "Str has: contains, ct_eq, ends_with, find, len, lines, parse_float, parse_int, parse_json, replace, sha256, slice, split, starts_with, strip_prefix, strip_suffix, to_bytes, to_lowercase, to_uppercase, trim"
     );
     ok("fn main() { let a: List<Str> = \"a\".split(\",\"); let b: List<Str> = \"a\".lines(); let c: Str = \"a\".trim(); let d: Bool = \"a\".contains(\"a\") && \"a\".starts_with(\"a\"); let e: Option<Int> = \"1\".parse_int(); }");
     assert_eq!(reject("fn main() { \"a\".split(1); }").0, "expected Str, found Int");
-    assert_eq!(hint("fn main() { 1.zzzzzz(); }"), "Int has: to_float, to_str");
+    assert_eq!(hint("fn main() { 1.zzzzzz(); }"), "Int has: max, min, to_float, to_str");
     assert_eq!(hint("fn main() { true.len(); }"), "Bool has no methods");
     let src = "fn main() { \"a\".len(1); }";
     assert_eq!(reject(src).0, "`len` takes 0 arguments, found 1");
@@ -1271,7 +1271,7 @@ fn builtins_l4b() {
     );
     assert_eq!(
         hint("fn main() { let mut xs = [1]; xs.zzzzzz(); }"),
-        "List<Int> has: all, any, contains, filter, len, map, pop, push, sort"
+        "List<Int> has: all, any, contains, filter, join, len, map, pop, push, reverse, slice, sort, sort_by, sort_by_key"
     );
 }
 
@@ -1587,11 +1587,11 @@ fn result_ok_err_and_option_ok_or() {
     );
     assert_eq!(
         hint("fn f(o: Option<Int>) -> Bool { o.zzzzzz() } fn main() {}"),
-        "Option<Int> has: and_then, is_none, is_some, map, ok_or, unwrap_or"
+        "Option<Int> has: and_then, is_none, is_some, map, ok_or, unwrap_or, unwrap_or_else"
     );
     assert_eq!(
         hint("fn f(o: Result<Int, Str>) -> Bool { o.zzzzzz() } fn main() {}"),
-        "Result<Int, Str> has: and_then, err, is_err, is_ok, map, map_err, ok, unwrap_or"
+        "Result<Int, Str> has: and_then, err, is_err, is_ok, map, map_err, ok, unwrap_or, unwrap_or_else"
     );
 }
 
@@ -2062,7 +2062,7 @@ fn builtins_that_take_functions_reject() {
             "fn main() { [1].sum(); }".to_string(),
             "no method `sum` on List<Int>",
             "[1].sum()",
-            "List<Int> has: all, any, contains, filter, len, map, pop, push, sort",
+            "List<Int> has: all, any, contains, filter, join, len, map, pop, push, reverse, slice, sort, sort_by, sort_by_key",
         ),
     ];
     for (src, msg, at, h) in cases {

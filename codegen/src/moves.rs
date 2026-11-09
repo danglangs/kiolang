@@ -492,7 +492,10 @@ impl Uses<'_> {
             }
             ExprKind::Mutate(place, op, args) => {
                 self.place(place);
-                let key = matches!(op, ir::Mut::MapInsert | ir::Mut::MapRemove);
+                let key = matches!(
+                    op,
+                    ir::Mut::MapInsert | ir::Mut::MapRemove | ir::Mut::ListSortBy | ir::Mut::ListSortByKey
+                );
                 for (i, x) in args.iter().enumerate() {
                     match key && i == 0 {
                         true => self.borrowed(x),

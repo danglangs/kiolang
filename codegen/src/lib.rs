@@ -269,6 +269,8 @@ fn takes_fn(b: Builtin) -> bool {
             | Builtin::ListFilter
             | Builtin::ListAny
             | Builtin::ListAll
+            | Builtin::OptionUnwrapOrElse
+            | Builtin::ResultUnwrapOrElse
     )
 }
 
@@ -1335,8 +1337,12 @@ impl FuncGen<'_, '_> {
         let (mut xs, sites) = self.indexes(place);
         let n = xs.len();
         xs.extend(args);
-        // A map key is borrowed: it is read after the walk, which changes only the root.
-        let key = matches!(op, Mut::MapInsert | Mut::MapRemove);
+        // A map key is borrowed: it is read after the walk, which changes only the root. So is
+        // the function `sort_by` and `sort_by_key` call.
+        let key = matches!(
+            op,
+            Mut::MapInsert | Mut::MapRemove | Mut::ListSortBy | Mut::ListSortByKey
+        );
         let (mark, temps, borrowed) = self.operands_borrowing(&xs, |i| key && i == n);
         let (cur, slot) = self.walk(place, &temps, &sites, place.steps.len(), &mut 0);
         let args: Vec<(&ir::Expr, Option<u32>)> = args.iter().zip(temps[n..].iter().copied()).collect();
@@ -1351,6 +1357,40 @@ impl FuncGen<'_, '_> {
         } else if op == Mut::ListSort {
             self.sink().local_get(cur);
             self.call_rt("rt_list_sort");
+        } else if op == Mut::ListReverse {
+            self.sink().local_get(cur);
+            self.call_rt("rt_list_reverse");
+        } else if let (Mut::ListSortBy | Mut::ListSortByKey, (f, t)) = (op, args[0]) {
+            let (Some(c), Ty::Fn(params, ret)) = (t, &f.ty) else {
+                // `f` is `!`: nothing after it runs.
+                self.sink().unreachable();
+                self.owned.truncate(mark);
+                return;
+            };
+            match op {
+                Mut::ListSortBy => self.sort_by(cur, c, (params, ret), span),
+                _ => self.sort_by_key(cur, c, (params, ret), span),
+            }
+            if !borrowed[n] {
+                self.dec(c);
+            }
+        } else if op == Mut::BytesExtend {
+            // As `push`: the result is the object to store back. The argument is an owned
+            // operand, lent to the runtime and then dropped, never the place's own local: in
+            // `b.extend(b)` it holds a reference, so the walk copies the place first.
+            if let Some(a) = slot {
+                self.sink().local_get(a);
+            }
+            self.sink().local_get(cur);
+            self.get(args[0].0, args[0].1);
+            self.call_rt("rt_bytes_extend");
+            match slot {
+                Some(_) => self.sink().i64_extend_i32_u().i64_store(SLOT),
+                None => self.sink().local_set(cur),
+            };
+            if let Some(t) = args[0].1 {
+                self.dec(t);
+            }
         } else if op == Mut::BytesPush {
             // `rt_bytes_push` returns the object to store back: the same one or a larger one.
             let site = self.site(span, "byte {a} out of range 0..=255");
@@ -1607,6 +1647,15 @@ impl FuncGen<'_, '_> {
             ExprKind::Closure(f, captured) => self.closure(*f, captured),
             ExprKind::CallValue(callee, args) => self.call_value(callee, args),
             ExprKind::Builtin(b, recv, args) if takes_fn(*b) => self.with_fn(*b, recv, &args[0], &e.ty, e.span),
+            ExprKind::Builtin(
+                b @ (Builtin::IntMin | Builtin::IntMax | Builtin::FloatMin | Builtin::FloatMax),
+                recv,
+                args,
+            ) => {
+                self.expr(recv);
+                self.expr(&args[0]);
+                self.min_max(*b);
+            }
             ExprKind::Builtin(b, recv, _) if inline_builtin(*b) => {
                 self.expr(recv);
                 self.scalar_builtin(*b);
@@ -1668,6 +1717,16 @@ impl FuncGen<'_, '_> {
                     Builtin::JsonAsBool => ("rt_json_as_bool", Opt, None),
                     Builtin::JsonAsList => ("rt_json_as_list", Opt, None),
                     Builtin::JsonAsMap => ("rt_json_as_map", Opt, None),
+                    Builtin::ListSlice => ("rt_list_slice", Nothing, Some(SLICE_BOUNDS)),
+                    Builtin::ListJoin => ("rt_list_join", Nothing, None),
+                    Builtin::StrToLowercase => ("rt_str_to_lowercase", Nothing, None),
+                    Builtin::StrToUppercase => ("rt_str_to_uppercase", Nothing, None),
+                    Builtin::StrSha256 | Builtin::BytesSha256 => ("rt_sha256", Nothing, None),
+                    Builtin::BytesToHex => ("rt_bytes_to_hex", Nothing, None),
+                    Builtin::StrCtEq | Builtin::BytesCtEq => ("rt_ct_eq", Nothing, None),
+                    Builtin::IntMin | Builtin::IntMax | Builtin::FloatMin | Builtin::FloatMax => {
+                        unreachable!("min_max")
+                    }
                     Builtin::OptionMap
                     | Builtin::OptionAndThen
                     | Builtin::ResultMap
@@ -1676,7 +1735,9 @@ impl FuncGen<'_, '_> {
                     | Builtin::ListMap
                     | Builtin::ListFilter
                     | Builtin::ListAny
-                    | Builtin::ListAll => unreachable!("with_fn"),
+                    | Builtin::ListAll
+                    | Builtin::OptionUnwrapOrElse
+                    | Builtin::ResultUnwrapOrElse => unreachable!("with_fn"),
                 };
                 let pre = self.pre(pre, &e.ty);
                 let mut sites: Vec<u32> = error.map(|t| self.site(e.span, t)).into_iter().collect();
@@ -1974,6 +2035,7 @@ impl FuncGen<'_, '_> {
             Builtin::ListFilter => self.list_filter(r, c, &recv.ty, sig, ty, span),
             Builtin::ListAny => self.list_any(true, r, c, &recv.ty, sig, span),
             Builtin::ListAll => self.list_any(false, r, c, &recv.ty, sig, span),
+            Builtin::OptionUnwrapOrElse | Builtin::ResultUnwrapOrElse => self.unwrap_or_else(r, c, &recv.ty, sig, ty),
             _ => self.enum_map(b, r, c, &recv.ty, sig, ty),
         }
         self.drop_operands(&[recv, f], &temps, &borrowed);
@@ -2106,6 +2168,97 @@ impl FuncGen<'_, '_> {
         self.sink().else_();
         self.rebuild(r, from, ty, 1 - called);
         self.close();
+    }
+
+    /// `unwrap_or_else` on the `Option` or `Result` in `r`, of type `from`: the payload of a
+    /// `Some` or `Ok` (+1); else the call, on nothing (`None`) or the `Err`'s payload (+1).
+    fn unwrap_or_else(&mut self, r: u32, c: u32, from: &Ty, (params, ret): (&[Ty], &Ty), ty: &Ty) {
+        // `Some` is variant 1, `Ok` variant 0.
+        let ok = matches!(from, Ty::Option(_)) as i32;
+        self.sink().local_get(r).i32_load(VARIANT).i32_const(ok).i32_eq();
+        self.open(Open::If, val_type(ty).map_or(BlockType::Empty, BlockType::Result));
+        self.payload_owned(r, ty);
+        self.sink().else_().local_get(c);
+        if let Ty::Result(_, e) = from {
+            self.payload_owned(r, e);
+        }
+        self.call_through(c, params, ret);
+        self.close();
+    }
+
+    /// `xs.sort_by(f)` on the unique list in `l`, `f` in `c`: lang/src/sort.rs's merge sort,
+    /// driven here so that each question is a call through `f` on the two elements (+1).
+    fn sort_by(&mut self, l: u32, c: u32, (params, ret): (&[Ty], &Ty), span: Span) {
+        let (st, q, i) = (
+            self.temp(ValType::I32),
+            self.temp(ValType::I64),
+            self.temp(ValType::I64),
+        );
+        let site = self.site(span, OUT_OF_BOUNDS);
+        self.sink().local_get(l);
+        self.call_rt("rt_sort_new");
+        self.sink().local_set(st);
+        let brk = self.open(Open::Block, BlockType::Empty);
+        let top = self.open(Open::Loop, BlockType::Empty);
+        self.sink().local_get(st);
+        self.call_rt("rt_sort_next");
+        self.sink().local_tee(q).i64_const(-1).i64_eq();
+        self.br_if(brk);
+        // `rt_sort_answer(st, f(xs[q >> 32], xs[q & 0xffff_ffff]))`
+        self.sink().local_get(st).local_get(c);
+        self.sink().local_get(q).i64_const(32).i64_shr_u().local_set(i);
+        self.list_get(l, i, site, &params[0]);
+        self.slot_out(&params[0]);
+        self.sink().local_get(q).i64_const(0xffff_ffff).i64_and().local_set(i);
+        self.list_get(l, i, site, &params[1]);
+        self.slot_out(&params[1]);
+        self.call_through(c, params, ret);
+        self.call_rt("rt_sort_answer");
+        self.br(top);
+        self.close();
+        self.close();
+        self.sink().local_get(st).local_get(l);
+        self.call_rt("rt_sort_finish");
+    }
+
+    /// `xs.sort_by_key(f)` on the unique list in `l`, `f` in `c`: the keys, `f` of each
+    /// element in order (as `map`), then the runtime's stable sort by them.
+    fn sort_by_key(&mut self, l: u32, c: u32, (params, ret): (&[Ty], &Ty), span: Span) {
+        let keys = self.temp(ValType::I32);
+        let xs = Ty::List(Box::new(params[0].clone()));
+        let ks = Ty::List(Box::new(ret.clone()));
+        self.list_map(l, c, &xs, (params, ret), &ks, span);
+        self.sink().local_set(keys).local_get(l).local_get(keys);
+        self.call_rt("rt_list_sort_by_key");
+        self.dec(keys);
+    }
+
+    /// `a.min(b)` or `a.max(b)` on the two `Int` or `Float` on the stack. `Float` as Rust's:
+    /// a NaN is ignored unless both are; Wasm's `f64.min` orders `-0.0` below `0.0`, as the
+    /// interpreter does.
+    fn min_max(&mut self, b: Builtin) {
+        if let Builtin::IntMin | Builtin::IntMax = b {
+            let [x, y, _] = self.scratch();
+            let mut s = self.sink();
+            s.local_set(y).local_set(x);
+            s.local_get(x).local_get(y).local_get(x).local_get(y);
+            match b {
+                Builtin::IntMin => s.i64_lt_s(),
+                _ => s.i64_gt_s(),
+            };
+            s.select();
+            return;
+        }
+        let (x, y) = (self.temp(ValType::F64), self.temp(ValType::F64));
+        let mut s = self.sink();
+        s.local_set(y).local_set(x).local_get(x).local_get(y);
+        match b {
+            Builtin::FloatMin => s.f64_min(),
+            _ => s.f64_max(),
+        };
+        // NaN only when one is: `y` if `x` is NaN, then `x` if `y` is.
+        s.local_get(y).local_get(x).local_get(x).f64_eq().select();
+        s.local_get(x).local_get(y).local_get(y).f64_eq().select();
     }
 
     /// Pushes the payload of the `Some`, `Ok` or `Err` in `r`, of type `t`, +1.

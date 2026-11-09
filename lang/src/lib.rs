@@ -3,6 +3,7 @@ extern crate alloc;
 pub mod ast;
 mod caps_gen;
 pub mod check;
+pub mod digest;
 pub mod eval;
 pub mod hmap;
 pub mod ir;
@@ -11,6 +12,7 @@ pub mod lex;
 pub mod lower;
 pub mod parse;
 pub mod report;
+pub mod sort;
 
 pub use check::{check, check_files, CapTable, Program};
 pub use eval::{run, Caps, Key, RunErr, Value};

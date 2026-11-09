@@ -6,6 +6,7 @@
 //! - `heap`: the allocator, size-class free lists over dlmalloc.
 //! - `hmap`: `HashMap`'s table, lang/src/hmap.rs itself (one source for both paths).
 //! - `json`: built-in JSON, parsed into and encoded from kio objects.
+//! - `sort`, `digest`: `sort_by`'s merge sort; SHA-256, hex and `ct_eq`. lang's own files.
 //! - `obj`: object layout, allocation, `inc`, `dec`, `unique`; the safe-to-call Rust layer.
 //! - `abi`: the `extern "C"` functions generated code calls, over `u32` addresses (wasm32 only).
 //! - `entry`: the `compiled` world's `run` export, and the entry codegen fills (wasm32 only).
@@ -24,6 +25,8 @@ extern crate std;
 
 pub mod coll;
 pub mod desc;
+#[path = "../../lang/src/digest.rs"]
+pub mod digest;
 pub mod display;
 pub mod float;
 pub mod heap;
@@ -31,6 +34,8 @@ pub mod heap;
 pub mod hmap;
 pub mod json;
 pub mod obj;
+#[path = "../../lang/src/sort.rs"]
+pub mod sort;
 pub mod text;
 
 #[cfg(target_arch = "wasm32")]

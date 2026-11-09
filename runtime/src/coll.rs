@@ -264,6 +264,88 @@ pub unsafe fn list_sort(t: &Table, p: *mut Header) {
     }
 }
 
+/// `xs.sort_by_key(f)` on a unique list, given `keys`, the list of `f`'s results (`Int` or
+/// `Str`) in element order: the elements stably in key order (lang/src/sort.rs, as the
+/// interpreter).
+///
+/// # Safety
+/// `p` is a unique `List`; `keys` a `List<Int>` or `List<Str>` of the same length.
+pub unsafe fn list_sort_by_key(t: &Table, p: *mut Header, keys: *mut Header) {
+    // SAFETY: the caller's guarantee; a `List<Str>` holds live `Str`s.
+    unsafe {
+        let ks = elems(keys);
+        let order = match elem(t, keys) {
+            desc::INT => crate::sort::sort_by(ks.len(), |a, b| Ok::<_, ()>((ks[a] as i64) < (ks[b] as i64))),
+            desc::STR => crate::sort::sort_by(ks.len(), |a, b| {
+                let (x, y) = (bytes(from_slot(ks[a])), bytes(from_slot(ks[b])));
+                Ok(text::bytes_cmp(x, y).is_lt())
+            }),
+            d => panic!("sort_by_key with keys of descriptor {d}"),
+        };
+        list_permute(p, &order.expect("keys compare"));
+    }
+}
+
+/// Reorders unique list `p` so that position `k` holds what was at `order[k]`, a permutation.
+///
+/// # Safety
+/// `p` is a unique `List` of `order.len()` elements.
+pub unsafe fn list_permute(p: *mut Header, order: &[u32]) {
+    // SAFETY: the caller's guarantee.
+    let l = unsafe { elems_mut(p) };
+    assert_eq!(l.len(), order.len(), "a permutation of the list");
+    let sorted: Vec<u64> = order.iter().map(|&i| l[i as usize]).collect();
+    l.copy_from_slice(&sorted);
+}
+
+/// `xs.reverse()` on a unique list.
+///
+/// # Safety
+/// `p` is a unique `List`.
+pub unsafe fn list_reverse(p: *mut Header) {
+    // SAFETY: the caller's guarantee.
+    unsafe { elems_mut(p) }.reverse();
+}
+
+/// `xs.slice(a, b)`: elements `a..b` as a new list of `p`'s descriptor, each shared; `None`
+/// unless `0 <= a <= b <= len`.
+///
+/// # Safety
+/// `p` is a `List`.
+pub unsafe fn list_slice(t: &Table, p: *mut Header, a: i64, b: i64) -> Option<*mut Header> {
+    // SAFETY: the caller's guarantee.
+    unsafe {
+        let l = elems(p);
+        let (x, y) = (usize::try_from(a).ok()?, usize::try_from(b).ok()?);
+        if x > y || y > l.len() {
+            return None;
+        }
+        let d = elem(t, p);
+        let part = l[x..y].iter().map(|&v| share(t, d, v)).collect();
+        Some(obj::new_list((*p).desc, part))
+    }
+}
+
+/// `xs.join(sep)` on a `List<Str>`: a new `Str`.
+///
+/// # Safety
+/// `p` is a `List<Str>`, `sep` a `Str`.
+pub unsafe fn list_join(p: *mut Header, sep: *mut Header) -> *mut Header {
+    // SAFETY: the caller's guarantee.
+    unsafe {
+        let (l, sep) = (elems(p), bytes(sep));
+        let parts = l.iter().map(|&v| bytes(from_slot(v)).len()).sum::<usize>();
+        let mut out = Vec::with_capacity(parts + sep.len() * l.len().saturating_sub(1));
+        for (i, &v) in l.iter().enumerate() {
+            if i > 0 {
+                out.extend_from_slice(sep);
+            }
+            out.extend_from_slice(bytes(from_slot(v)));
+        }
+        obj::new_bytes(desc::STR, &out)
+    }
+}
+
 /// `xs.pop()` on a unique list, as an `Option<T>` of descriptor `option_desc`: the last
 /// element moves into the `Some` (its reference is the `Some`'s now). `none` as `obj::option`'s.
 ///

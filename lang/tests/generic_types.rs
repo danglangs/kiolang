@@ -209,7 +209,7 @@ fn type_parameters_are_checked_as_on_functions() {
         "struct S<T> { a: T } fn f(s: S<Int>) -> Int { s.a.len() } fn main() {}",
         "no method `len` on Int",
         "s.a.len()",
-        "Int has: to_float, to_str",
+        "Int has: max, min, to_float, to_str",
     );
 }
 

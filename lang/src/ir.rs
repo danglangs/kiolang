@@ -322,6 +322,22 @@ pub enum Builtin {
     JsonAsBool,
     JsonAsList,
     JsonAsMap,
+    /// L11. `unwrap_or_else` takes a function value, as `OptionMap`.
+    ListSlice,
+    ListJoin,
+    IntMin,
+    IntMax,
+    FloatMin,
+    FloatMax,
+    StrToLowercase,
+    StrToUppercase,
+    OptionUnwrapOrElse,
+    ResultUnwrapOrElse,
+    BytesSha256,
+    StrSha256,
+    BytesToHex,
+    BytesCtEq,
+    StrCtEq,
 }
 
 /// Every built-in method that changes its receiver.
@@ -333,6 +349,11 @@ pub enum Mut {
     BytesPush,
     MapInsert,
     MapRemove,
+    /// `sort_by` and `sort_by_key` take a function value, their one argument (lang/src/sort.rs).
+    ListSortBy,
+    ListSortByKey,
+    ListReverse,
+    BytesExtend,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -964,3 +964,50 @@ fn map_insert_after_get_releases_the_old_value_of(d: u32) {
     dec(m);
     assert_eq!(obj::live(), before);
 }
+
+/// L11 (C14): `reverse`, `slice` (sharing its elements), `join`, `sort_by_key` and the
+/// permutation `sort_by` ends with.
+#[test]
+fn reverse_slice_join_sort_by_key() {
+    let _l = lock();
+    let before = obj::live();
+    // SAFETY: live, unique lists of the descriptors their names say.
+    unsafe {
+        let xs = ints(&[1, 2, 3, 4]);
+        coll::list_reverse(xs);
+        assert_eq!(contents(xs), [4, 3, 2, 1]);
+        let part = coll::list_slice(&T, xs, 1, 3).unwrap();
+        assert_eq!(contents(part), [3, 2]);
+        assert!(coll::list_slice(&T, xs, 3, 2).is_none());
+        assert!(coll::list_slice(&T, xs, 0, 5).is_none());
+        assert!(coll::list_slice(&T, xs, -1, 1).is_none());
+        let none = coll::list_slice(&T, xs, 4, 4).unwrap();
+        assert_eq!(contents(none), []);
+        let ss = strs(&["b", "a", "c"]);
+        let mid = coll::list_slice(&T, ss, 1, 2).unwrap();
+        let a = coll::list_get(&T, ss, 1).unwrap();
+        assert_eq!(rc(from_slot(a)), 3);
+        dec(from_slot(a));
+        let sep = from_slot(s(", "));
+        let joined = coll::list_join(ss, sep);
+        assert_eq!(obj::bytes(joined), b"b, a, c");
+        let empty = strs(&[]);
+        let nothing = coll::list_join(empty, sep);
+        assert_eq!(obj::bytes(nothing), b"");
+        let keys = ints(&[2, 1, 2]);
+        coll::list_sort_by_key(&T, ss, keys);
+        assert_eq!(
+            (0..3).map(|i| str_at(ss, i)).collect::<alloc::vec::Vec<_>>(),
+            [b"a", b"b", b"c"]
+        );
+        let skeys = strs(&["z", "y", "y", "x"]);
+        coll::list_sort_by_key(&T, xs, skeys);
+        assert_eq!(contents(xs), [1, 3, 2, 4]);
+        coll::list_permute(xs, &[3, 0, 2, 1]);
+        assert_eq!(contents(xs), [4, 1, 2, 3]);
+        for p in [xs, part, none, ss, mid, sep, joined, empty, nothing, keys, skeys] {
+            dec(p);
+        }
+    }
+    assert_eq!(obj::live(), before);
+}

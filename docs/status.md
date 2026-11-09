@@ -4,7 +4,7 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 
 ## Now
 
-Compiled-only kio covers the whole language and every capability; the active stream is speed (C8): code that stays in compiled Wasm is 1.1-2.3x Rust, runtime-heavy code 1.5-8x (closures 2.3x, tree 3.0x, word count 4.3x, built-in JSON 1.5x, JSON in kio 8.3x; table below). The differential harness runs 440 programs both ways (0 mismatches) and the generator 250 more per CI run.
+Compiled-only kio covers the whole language and every capability; the active stream is speed (C8): code that stays in compiled Wasm is 1.1-2.3x Rust, runtime-heavy code 1.5-8x (closures 2.3x, tree 3.0x, word count 4.3x, built-in JSON 1.5x, JSON in kio 8.3x; table below). The differential harness runs 467 programs both ways (0 mismatches) and the generator 250 more per CI run.
 
 | Done | Result |
 |---|---|
@@ -39,6 +39,7 @@ Compiled-only kio covers the whole language and every capability; the active str
 | L9, C12 | built-in JSON: a reserved `Json` enum, `Str.parse_json() -> Result<Json, Str>`, `Json.to_json()`, accessors (`get`, `at`, `as_*`), json.kio's rules and messages, depth 128; the interpreter (lang/src/json.rs) and the runtime (runtime/src/json.rs, building kio objects directly) agree on the harness, a generated-JSON fuzz test and byte mutations. 1 MB parse + encode 17 ms compiled (`serde_json` 7.8 ms, json.kio 82 ms). kio-web has moved to the built-in |
 | C8b5 | less work per operation (fuel stays): generated code pops the size-class free lists, fresh blocks carved 32 at a time from 64 KB chunks, freeing without descriptor copies, `Str` map keys compared by an 8-byte prefix. Tree 185 to 98 ms (fuel 3.78 to 2.21 G), word count 70 to 45, JSON 81 to 66 |
 | L10, C13 | `HashMap<K, V>` (owner-approved): `Map`'s keys and methods, insertion-ordered iteration, order-insensitive `==`, a fixed hash with buckets sorted past 8 entries (100,000 colliding keys in under a second either way; with chains only, out of fuel). One table source (lang/src/hmap.rs) for the interpreter and the runtime; codegen reuses `Map`'s calls. Word count 45 ms on `Map`, 32 on `HashMap` (Rust 5.7); kiogen generates maps; harness 440 ran both ways, 0 mismatches |
+| L11, C14 | built-ins from the links app: `sort_by` (stable, `less(a, b)`), `sort_by_key`, `reverse`, `List.slice`, `join`, `Int`/`Float` `min`/`max`, `to_lowercase`/`to_uppercase`, `unwrap_or_else`, `Bytes.extend`, `sha256`, `to_hex`, `ct_eq`. The merge sort (lang/src/sort.rs) and SHA-256 (lang/src/digest.rs) are one source for both paths; compiled `sort_by` drives the shared sort and calls the comparator itself. Harness 467 ran both ways, 0 mismatches |
 | C8b6 | word count and JSON (fuel stays): one `Map` search for `insert(k, get(k)..)` (the object remembers the entry `get` found), `split` at a one-byte separator sized once, words freed in place, size classes up to 512 bytes. Word count 45.7 to 29.3 ms (fuel 0.68 to 0.43 G), on `HashMap` 31.8 to 25.0, built-in JSON 15.3 to 12.8; tree 97 to 101 (same fuel, #117). Follow-up: `HashMap` searches once too (#118), 25.0 to 23.2 ms (fuel 0.361 to 0.337 G) |
 
 ## Next

@@ -359,6 +359,9 @@ impl<'a> Interp<'a> {
             Some(e) => Some(self.expr(e)?),
             None => None,
         };
+        if let Mut::ListSortBy | Mut::ListSortByKey = op {
+            return self.sort_by(place, start, op, &a, span);
+        }
         match (self.slot(place, start)?, op, a, b) {
             (Value::List(vals), Mut::ListPush, item, _) => Rc::make_mut(vals).push(item),
             (Value::List(vals), Mut::ListSort, ..) => Rc::make_mut(vals).sort_by(|a, b| match (a, b) {
@@ -366,6 +369,8 @@ impl<'a> Interp<'a> {
                 (Value::Str(a), Value::Str(b)) => a.cmp(b),
                 _ => unreachable!("checked sort"),
             }),
+            (Value::List(vals), Mut::ListReverse, ..) => Rc::make_mut(vals).reverse(),
+            (Value::Bytes(b), Mut::BytesExtend, Value::Bytes(more), _) => Rc::make_mut(b).extend_from_slice(&more),
             (Value::List(vals), Mut::ListPop, ..) => {
                 return Ok(match Rc::make_mut(vals).pop() {
                     Some(v) => some(v),
@@ -390,6 +395,36 @@ impl<'a> Interp<'a> {
             }
             _ => unreachable!("checked mutation"),
         }
+        Ok(Value::Unit)
+    }
+
+    /// `sort_by(f)` and `sort_by_key(f)` on the place, whose indexes are in `path[start..]`.
+    /// The list is read, `f` called (`sort_by_key`: once per element, in order; `sort_by`: as
+    /// sort.rs asks), and the sorted list stored back; nothing `f` runs can reach the place.
+    fn sort_by(&mut self, place: &Place, start: usize, op: Mut, f: &Value, span: Span) -> Res {
+        let Value::List(xs) = self.slot(place, start)?.clone() else {
+            unreachable!("checked List");
+        };
+        let order = if op == Mut::ListSortBy {
+            crate::sort::sort_by(xs.len(), |a, b| {
+                match self.apply(f, [xs[a].clone(), xs[b].clone()], span)? {
+                    Value::Bool(less) => Ok::<_, Box<Stop>>(less),
+                    _ => unreachable!("checked Bool"),
+                }
+            })?
+        } else {
+            let keys = (xs.iter())
+                .map(|x| self.apply(f, [x.clone()], span))
+                .collect::<Result<Vec<_>, _>>()?;
+            let less = |a: usize, b: usize| match (&keys[a], &keys[b]) {
+                (Value::Int(x), Value::Int(y)) => Ok::<_, ()>(x < y),
+                (Value::Str(x), Value::Str(y)) => Ok(x < y),
+                _ => unreachable!("checked key"),
+            };
+            crate::sort::sort_by(xs.len(), less).expect("keys compare")
+        };
+        let sorted = order.iter().map(|&i| xs[i as usize].clone()).collect();
+        *self.slot(place, start)? = Value::List(Rc::new(sorted));
         Ok(Value::Unit)
     }
 
@@ -512,8 +547,8 @@ impl<'a> Interp<'a> {
         self.enter(f, base)
     }
 
-    /// Calls the function value `f` on one argument, for the built-ins that take a function.
-    fn apply(&mut self, f: &Value, arg: Value, span: Span) -> Res {
+    /// Calls the function value `f` on `args`, for the built-ins that take a function.
+    fn apply(&mut self, f: &Value, args: impl IntoIterator<Item = Value>, span: Span) -> Res {
         if self.calls == MAX_CALLS {
             return Err(fail(span, "evaluation is too deep"));
         }
@@ -526,7 +561,7 @@ impl<'a> Interp<'a> {
             }
             _ => unreachable!("checked function value"),
         };
-        self.stack.push(arg);
+        self.stack.extend(args);
         self.enter(f, base)
     }
 
@@ -643,25 +678,28 @@ impl<'a> Interp<'a> {
         Ok(match (b, recv) {
             // `None` is variant 0 of `Option`, `Ok` variant 0 of `Result`.
             (B::OptionMap | B::OptionAndThen, Value::Enum(_, 0, _)) => none(),
-            (B::OptionMap, Value::Enum(_, _, mut p)) => some(self.apply(f, p.remove(0), span)?),
-            (B::OptionAndThen, Value::Enum(_, _, mut p)) => self.apply(f, p.remove(0), span)?,
-            (B::ResultMap, Value::Enum(_, 0, mut p)) => ok(self.apply(f, p.remove(0), span)?),
+            (B::OptionMap, Value::Enum(_, _, mut p)) => some(self.apply(f, [p.remove(0)], span)?),
+            (B::OptionAndThen, Value::Enum(_, _, mut p)) => self.apply(f, [p.remove(0)], span)?,
+            (B::ResultMap, Value::Enum(_, 0, mut p)) => ok(self.apply(f, [p.remove(0)], span)?),
             (B::ResultMapErr, Value::Enum(_, 1, mut p)) => {
-                Value::Enum(EnumRef::Result, 1, vec![self.apply(f, p.remove(0), span)?])
+                Value::Enum(EnumRef::Result, 1, vec![self.apply(f, [p.remove(0)], span)?])
             }
-            (B::ResultAndThen, Value::Enum(_, 0, mut p)) => self.apply(f, p.remove(0), span)?,
+            (B::ResultAndThen, Value::Enum(_, 0, mut p)) => self.apply(f, [p.remove(0)], span)?,
             (B::ResultMap | B::ResultMapErr | B::ResultAndThen, r @ Value::Enum(..)) => r,
+            (B::OptionUnwrapOrElse, Value::Enum(_, 0, _)) => self.apply(f, [], span)?,
+            (B::ResultUnwrapOrElse, Value::Enum(_, 1, mut p)) => self.apply(f, [p.remove(0)], span)?,
+            (B::OptionUnwrapOrElse | B::ResultUnwrapOrElse, Value::Enum(_, _, mut p)) => p.remove(0),
             (B::ListMap, Value::List(xs)) => {
                 let mut out = Vec::with_capacity(xs.len());
                 for x in xs.iter() {
-                    out.push(self.apply(f, x.clone(), span)?);
+                    out.push(self.apply(f, [x.clone()], span)?);
                 }
                 Value::List(Rc::new(out))
             }
             (B::ListFilter, Value::List(xs)) => {
                 let mut out = Vec::new();
                 for x in xs.iter() {
-                    if truth(self.apply(f, x.clone(), span)?) {
+                    if truth(self.apply(f, [x.clone()], span)?) {
                         out.push(x.clone());
                     }
                 }
@@ -671,7 +709,7 @@ impl<'a> Interp<'a> {
                 // `any` stops at the first true, `all` at the first false, as Rust's.
                 let stop = b == B::ListAny;
                 for x in xs.iter() {
-                    if truth(self.apply(f, x.clone(), span)?) == stop {
+                    if truth(self.apply(f, [x.clone()], span)?) == stop {
                         return Ok(Value::Bool(stop));
                     }
                 }
@@ -919,7 +957,29 @@ fn takes_fn(b: Builtin) -> bool {
             | B::ListFilter
             | B::ListAny
             | B::ListAll
+            | B::OptionUnwrapOrElse
+            | B::ResultUnwrapOrElse
     )
+}
+
+/// `a.min(b)` (`max` false) or `a.max(b)`, as Rust's: a NaN is ignored unless both are. Rust
+/// leaves the sign of a zero result open; here `-0.0` is the smaller, as Wasm's `f64.min`.
+fn float_min_max(a: f64, b: f64, max: bool) -> f64 {
+    if a.is_nan() {
+        return b;
+    }
+    if b.is_nan() {
+        return a;
+    }
+    let a_first = match a == b {
+        true => a.is_sign_negative() != max,
+        false => (a < b) != max,
+    };
+    if a_first {
+        a
+    } else {
+        b
+    }
 }
 
 fn none() -> Value {
@@ -1065,6 +1125,38 @@ fn builtin(recv: &Value, b: Builtin, (arg, arg2): Args, span: Span) -> Res {
                 Value::Enum(EnumRef::Result, 1, vec![arg.expect("checked argument")])
             }
         }
+        (B::ListSlice, Value::List(v)) => {
+            let (a, b) = slice_range(arg, arg2, v.len(), span)?;
+            Value::List(Rc::new(v[a..b].to_vec()))
+        }
+        (B::ListJoin, Value::List(v)) => {
+            let parts: Vec<&str> = (v.iter())
+                .map(|x| match x {
+                    Value::Str(s) => &**s,
+                    _ => unreachable!("checked List<Str>"),
+                })
+                .collect();
+            Value::Str(parts.join(&*str_arg(arg)).into())
+        }
+        (B::IntMin | B::IntMax, Value::Int(a)) => match (b, arg) {
+            (B::IntMin, Some(Value::Int(x))) => Value::Int(*a.min(&x)),
+            (_, Some(Value::Int(x))) => Value::Int(*a.max(&x)),
+            _ => unreachable!("checked argument"),
+        },
+        (B::FloatMin | B::FloatMax, Value::Float(a)) => match arg {
+            Some(Value::Float(x)) => Value::Float(float_min_max(*a, x, b == B::FloatMax)),
+            _ => unreachable!("checked argument"),
+        },
+        (B::StrToLowercase, Value::Str(s)) => Value::Str(s.to_lowercase().into()),
+        (B::StrToUppercase, Value::Str(s)) => Value::Str(s.to_uppercase().into()),
+        (B::StrSha256, Value::Str(s)) => Value::Bytes(Rc::new(crate::digest::sha256(s.as_bytes()).to_vec())),
+        (B::BytesSha256, Value::Bytes(v)) => Value::Bytes(Rc::new(crate::digest::sha256(v).to_vec())),
+        (B::BytesToHex, Value::Bytes(v)) => Value::Str(crate::digest::to_hex(v).into()),
+        (B::StrCtEq, Value::Str(s)) => Value::Bool(crate::digest::ct_eq(s.as_bytes(), str_arg(arg).as_bytes())),
+        (B::BytesCtEq, Value::Bytes(v)) => match arg {
+            Some(Value::Bytes(w)) => Value::Bool(crate::digest::ct_eq(v, &w)),
+            _ => unreachable!("checked argument"),
+        },
         (B::JsonToJson, j) => Value::Str(crate::json::encode(j).into()),
         (B::JsonGet, Value::Enum(_, i, p)) => match (*i, &p[..]) {
             (crate::json::OBJ, [Value::Map(m)]) => match m.get(&Key::Str(str_arg(arg).to_string())) {
