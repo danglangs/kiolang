@@ -16,7 +16,7 @@ fn cli() -> i32 {
         ["mcp"] => return mcp::serve(),
         ["run", path, ref flags @ ..] => return run(path, flags),
         _ => eprintln!(
-            "kio: a capability-typed language; code names what it needs, the operator grants what that is.\n\nusage: kio check <prog.kio>\n       kio mcp\n       kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr]"
+            "kio: a capability-typed language; code names what it needs, the operator grants what that is.\n\nusage: kio check <prog.kio>\n       kio mcp\n       kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--kv name=path|:memory:]... [--kv-mb mb] [--audit log] [--listen addr]"
         ),
     }
     2
@@ -77,6 +77,8 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     let mut audit = None;
     let mut listen = None;
     let mut dir_paths = Vec::new();
+    let mut kv_specs = Vec::new();
+    let mut kv_mb = 64;
     for pair in flags.chunks(2) {
         let (name, dir) = match pair {
             ["--http", spec] => {
@@ -106,6 +108,20 @@ fn run(path: &str, flags: &[&str]) -> i32 {
                 }
                 continue;
             }
+            ["--kv", spec] => {
+                match spec.split_once('=') {
+                    Some((name, s)) if !name.is_empty() && !s.is_empty() => kv_specs.push((name.into(), s.into())),
+                    _ => return fail(format!("--kv {spec}: expected name=path or name=:memory:")),
+                }
+                continue;
+            }
+            ["--kv-mb", n] => {
+                match n.parse::<u64>().ok().filter(|&v| v > 0) {
+                    Some(v) => kv_mb = v,
+                    None => return fail(format!("--kv-mb {n}: expected a positive integer")),
+                }
+                continue;
+            }
             ["--audit", path] => {
                 // Created below, once the flags that conflict with it are known.
                 audit = Some(path.to_string());
@@ -123,7 +139,7 @@ fn run(path: &str, flags: &[&str]) -> i32 {
                 None => return fail(format!("--dir {spec}: expected name=path")),
             },
             _ => return fail(
-                "usage: kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr]"
+                "usage: kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--kv name=path|:memory:]... [--kv-mb mb] [--audit log] [--listen addr]"
                     .into(),
             ),
         };
@@ -154,10 +170,16 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     .unwrap_or_default();
     let serves = params.iter().any(|(_, ty)| ty == "Incoming" || ty == "Outgoing");
     match (listen, serves) {
-        (Some(addr), true) => return serve(files, dirs, addr, limits),
         (None, true) => return fail("main takes Incoming/Outgoing but there is no address\n  hint: add `--listen 127.0.0.1:8080`".into()),
         (Some(_), false) => return fail("--listen needs a `main` that takes Incoming and Outgoing\n  hint: add `req: Incoming, res: Outgoing` to main, or drop --listen".into()),
-        (None, false) => {}
+        _ => {}
+    }
+    let kvs = match kio_host::kv::open_all(&kv_specs, kv_mb) {
+        Ok(kvs) => kvs,
+        Err(e) => return fail(e),
+    };
+    if let Some(addr) = listen {
+        return serve(files, dirs, kvs, addr, limits);
     }
     let mut kio = match Kio::new(limits) {
         Ok(k) => k,
@@ -169,6 +191,7 @@ fn run(path: &str, flags: &[&str]) -> i32 {
             Err(e) => return fail(format!("--audit {path}: {e}")),
         }
     }
+    kio.grant_kvs(kvs);
     match kio.run_files(&files, dirs, https) {
         Err(e) => {
             // A limit or trap is the guest failing, not a usage error.
@@ -198,14 +221,16 @@ fn run(path: &str, flags: &[&str]) -> i32 {
 fn serve(
     files: Vec<(String, String)>,
     dirs: Vec<(String, cap_std::fs::Dir)>,
+    kvs: kio_host::KvGrants,
     addr: std::net::SocketAddr,
     limits: Limits,
 ) -> i32 {
-    let server = match Server::new(files.clone(), limits) {
+    let mut server = match Server::new(files.clone(), limits) {
         Err(e) => return fail(format!("{e:#}")),
         Ok(Err(diags)) => return print_diags(&files, diags),
         Ok(Ok(s)) => s,
     };
+    server.grant_kvs(kvs);
     match listen::serve(server, dirs, addr) {
         Ok(()) => 0,
         Err(e) => fail(e),

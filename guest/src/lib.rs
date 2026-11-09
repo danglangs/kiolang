@@ -1,8 +1,9 @@
-// The generated `run` export lowers to ten arguments: a string and four lists.
+// The generated `run` export lowers to twelve arguments: a string and five lists.
 #![allow(clippy::too_many_arguments)]
 wit_bindgen::generate!({ world: "guest", path: "../caps.wit" });
 
 use kio::caps::fs::IoErr;
+use kio::caps::kv::KvErr;
 use kio::caps::net::HttpErr;
 use kio::caps::web::WebErr;
 use lang::ir::{EnumId, EnumRef};
@@ -37,6 +38,7 @@ impl Guest for Component {
         https: Vec<HttpGrant>,
         incomings: Vec<IncomingGrant>,
         outgoings: Vec<OutgoingGrant>,
+        kvs: Vec<KvGrant>,
     ) -> Result<Outcome, Vec<Diag>> {
         let program = match CHECKED.take() {
             Some((checked, program)) if same_files(&checked, &files) => program,
@@ -50,7 +52,8 @@ impl Guest for Component {
             .map(|g| (g.name, Grant::Dir(g.dir)))
             .chain(https.into_iter().map(|g| (g.name, Grant::Http(g.http))))
             .chain(incomings.into_iter().map(|g| (g.name, Grant::Incoming(g.incoming))))
-            .chain(outgoings.into_iter().map(|g| (g.name, Grant::Outgoing(g.outgoing))));
+            .chain(outgoings.into_iter().map(|g| (g.name, Grant::Outgoing(g.outgoing))))
+            .chain(kvs.into_iter().map(|g| (g.name, Grant::Kv(g.kv))));
         for (name, grant) in named {
             if !names.contains(&name) {
                 let hint = format!("grant only `main`'s parameters: {}", names.join(", "));
@@ -80,8 +83,8 @@ impl Guest for Component {
             Err(e) => Err(vec![Diag {
                 start: e.span.start as u32,
                 end: e.span.end as u32,
+                hint: grant_hint(&program, &e.msg),
                 message: e.msg,
-                hint: None,
                 file: e.span.file,
             }]),
         }
@@ -93,6 +96,7 @@ enum Grant {
     Http(Http),
     Incoming(Incoming),
     Outgoing(Outgoing),
+    Kv(Kv),
 }
 
 /// The handles granted for one run, by `main` parameter name.
@@ -106,6 +110,7 @@ impl lang::Caps for Grants {
                 | (Some(Grant::Http(_)), "Http")
                 | (Some(Grant::Incoming(_)), "Incoming")
                 | (Some(Grant::Outgoing(_)), "Outgoing")
+                | (Some(Grant::Kv(_)), "Kv")
         )
     }
 
@@ -151,6 +156,26 @@ impl lang::Caps for Grants {
                         .map_err(web_err),
                 ))
             }
+            (Grant::Kv(k), "get", [Value::Str(key)]) => Ok(result(
+                k.get(key)
+                    .map(|v| option(v.map(|b| Value::Bytes(b.into()))))
+                    .map_err(kv_err),
+            )),
+            (Grant::Kv(k), "set", [Value::Str(key), Value::Bytes(value)]) => {
+                Ok(result(k.set(key, value).map(|()| Value::Unit).map_err(kv_err)))
+            }
+            (Grant::Kv(k), "delete", [Value::Str(key)]) => {
+                Ok(result(k.delete(key).map(|()| Value::Unit).map_err(kv_err)))
+            }
+            (Grant::Kv(k), "keys", [Value::Str(prefix)]) => Ok(result(k.keys(prefix).map(strs).map_err(kv_err))),
+            (Grant::Kv(k), "swap", [Value::Str(key), old, new]) => {
+                let (old, new) = (bytes_option(old)?, bytes_option(new)?);
+                Ok(result(
+                    k.swap(key, old.as_deref(), new.as_deref())
+                        .map(Value::Bool)
+                        .map_err(kv_err),
+                ))
+            }
             _ => Err(format!(
                 "unsupported call `{cap}.{method}` with {} arguments",
                 args.len()
@@ -169,6 +194,25 @@ fn texts(v: &[Value]) -> Result<Vec<String>, String> {
         _ => Err("expected a list of Str".to_string()),
     };
     v.iter().map(text).collect()
+}
+
+/// `Option` is variant 0 for `None` and 1 for `Some`.
+fn option(v: Option<Value>) -> Value {
+    match v {
+        None => Value::Enum(EnumRef::Option, 0, vec![]),
+        Some(v) => Value::Enum(EnumRef::Option, 1, vec![v]),
+    }
+}
+
+fn bytes_option(v: &Value) -> Result<Option<Vec<u8>>, String> {
+    match v {
+        Value::Enum(EnumRef::Option, 0, _) => Ok(None),
+        Value::Enum(EnumRef::Option, 1, p) => match p.as_slice() {
+            [Value::Bytes(b)] => Ok(Some(b.to_vec())),
+            _ => Err("expected Option<Bytes>".into()),
+        },
+        _ => Err("expected Option<Bytes>".into()),
+    }
 }
 
 /// `Result` is variant 0 for `Ok` and 1 for `Err`.
@@ -220,6 +264,28 @@ fn web_err(e: WebErr) -> Value {
         WebErr::Invalid => "Invalid",
     };
     err_value("WebErr", case, vec![])
+}
+
+fn kv_err(e: KvErr) -> Value {
+    let case = match e {
+        KvErr::TooLarge => "TooLarge",
+        KvErr::Full => "Full",
+    };
+    err_value("KvErr", case, vec![])
+}
+
+/// The flag that grants the parameter a "no grant for" error names.
+fn grant_hint(program: &lang::Program, msg: &str) -> Option<String> {
+    let (name, ty) = program
+        .main_params()
+        .into_iter()
+        .find(|(n, t)| msg == format!("no grant for `{n}: {t}`"))?;
+    Some(match ty.as_str() {
+        "Dir" => format!("grant it: `--dir {name}=path`"),
+        "Http" => format!("grant it: `--http {name}=host`"),
+        "Kv" => format!("grant it: `--kv {name}=path` or `--kv {name}=:memory:`"),
+        _ => "`--listen` grants Incoming and Outgoing".into(),
+    })
 }
 
 fn grant_diag(message: String, hint: String) -> Diag {

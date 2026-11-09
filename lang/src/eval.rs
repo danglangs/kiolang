@@ -497,6 +497,11 @@ impl<'a> Interp<'a> {
                 1 => self.fits(&vals[0], e),
                 _ => false,
             },
+            (Value::Enum(EnumRef::Option, i, vals), Ty::Option(t)) => match (i, vals.as_slice()) {
+                (0, []) => true,
+                (1, [v]) => self.fits(v, t),
+                _ => false,
+            },
             (Value::Enum(EnumRef::User(en), i, vals), Ty::Enum(id)) if en == id => {
                 let Some((_, payload)) = self.m.enums[id.0 as usize].variants.get(*i) else {
                     return false;

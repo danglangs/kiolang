@@ -119,8 +119,8 @@ The host never relies on the checker for safety. The handle table and host funct
 | Lifetime | Where | How a program reaches it |
 |---|---|---|
 | One run or request | guest memory | `let mut`, `List`, `Map`: the language |
-| Across requests, or across messages on one connection | host memory | a capability such as `Kv` over an in-host map |
-| Across restarts | a directory or another service | `Dir` (flat files, a SQLite file), or a network capability |
+| Across requests, or across messages on one connection | host memory | `Kv` granted `--kv name=:memory:`: one map per grant, shared by every request (K1) |
+| Across restarts | a file, a directory or another service | `Kv` granted `--kv name=path` (an append-only log the host owns and locks), `Dir` (flat files), or a network capability |
 
 Only the first is in the language. Every other tier is a capability: named in `main`, granted by the operator, enforced and logged by the host, like any other I/O. A fresh sandbox per request is what makes the second tier necessary; other languages keep it in process globals, which kio does not have.
 

@@ -1,4 +1,6 @@
-//! Runs the guest component under Wasmtime. `dir` is backed by cap-std; `http` is a ureq client fixed to one granted origin; `incoming` and `outgoing` hold one request and its first response. Every import is counted and, if asked, written to an audit log.
+//! Runs the guest component under Wasmtime. `dir` is backed by cap-std; `http` is a ureq client fixed to one granted origin; `incoming` and `outgoing` hold one request and its first response; `kv` is a store shared across runs (kv.rs). Every import is counted and, if asked, written to an audit log.
+// The generated `call_run` takes a store, the files and five grant lists.
+#![allow(clippy::too_many_arguments)]
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir as RealDir, OpenOptions, OpenOptionsExt};
 use std::collections::{HashMap, HashSet};
@@ -19,6 +21,7 @@ wasmtime::component::bindgen!({ world: "guest", path: "../caps.wit", imports: { 
 
 mod compiled;
 mod config;
+pub mod kv;
 pub use compiled::Compiled;
 pub use config::MAX_STACK;
 pub mod listen;
@@ -1267,7 +1270,12 @@ pub struct Kio {
     /// Test only: a `(parameter, method)` pair to leave out of the authority report.
     #[cfg(feature = "test-hooks")]
     hidden: Option<(String, String)>,
+    /// `Kv` grants for the next run.
+    kvs: KvGrants,
 }
+
+/// Named `Kv` stores. A store outlives runs, so each run gets a handle to the same one.
+pub type KvGrants = Vec<(String, Arc<kv::Store>)>;
 
 impl Drop for Kio {
     fn drop(&mut self) {
@@ -1296,6 +1304,7 @@ impl Kio {
             audit: None,
             #[cfg(feature = "test-hooks")]
             hidden: None,
+            kvs: vec![],
         })
     }
 
@@ -1304,6 +1313,11 @@ impl Kio {
     /// handle does not know its path. Sizes only, never contents.
     pub fn audit(&mut self, out: impl Write + Send + 'static, dir_paths: DirPaths) {
         self.audit = Some((Box::new(out), dir_paths));
+    }
+
+    /// Grant `kvs` by name to the next run, with the other grants `run_*` is given.
+    pub fn grant_kvs(&mut self, kvs: KvGrants) {
+        self.kvs = kvs;
     }
 
     /// Test only: pretend the authority report lacks `cap.method`, so the call is "unexpected".
@@ -1491,6 +1505,9 @@ impl Kio {
         for (name, _) in outgoings {
             grant(name, "Outgoing", None);
         }
+        for (name, store) in &self.kvs {
+            grant(name, "Kv", Some(store.target().to_string()));
+        }
         let l = &self.limits;
         let header = format!(
             r#"{{"event":"start","program_hash":"{}","grants":[{}],"limits":{{"fuel":{},"timeout_secs":{},"stack":{},"memory":{},"calls":{},"io":{}}}}}"#,
@@ -1567,6 +1584,15 @@ impl Kio {
             .into_iter()
             .map(|(name, outgoing)| OutgoingGrant { name, outgoing })
             .collect();
+        let mut kv_grants = Vec::new();
+        for (name, store) in std::mem::take(&mut self.kvs) {
+            let h = self.store.data_mut().table.push(store)?;
+            self.name_handle(h.rep(), &name, "Kv");
+            kv_grants.push(KvGrant {
+                name,
+                kv: Resource::new_own(h.rep()),
+            });
+        }
         self.guest.call_run(
             &mut self.store,
             &file_list(files),
@@ -1574,6 +1600,7 @@ impl Kio {
             &http_grants,
             &incomings,
             &outgoings,
+            &kv_grants,
         )
     }
 }
@@ -1618,6 +1645,8 @@ pub struct Server {
     report: String,
     limits: Limits,
     stop: Arc<AtomicBool>,
+    /// Shared by every request.
+    kvs: KvGrants,
 }
 
 impl Drop for Server {
@@ -1663,7 +1692,13 @@ impl Server {
             report,
             limits,
             stop,
+            kvs: vec![],
         }))
+    }
+
+    /// Grant `kvs` by name to every request; all requests share each store.
+    pub fn grant_kvs(&mut self, kvs: KvGrants) {
+        self.kvs = kvs;
     }
 
     /// The program's files, root first.
@@ -1682,6 +1717,7 @@ impl Server {
     pub fn handle(&self, request: Request, dirs: Vec<(String, RealDir)>) -> std::result::Result<Response, String> {
         let mut kio = self.instance().map_err(|e| format!("cannot start instance: {e:#}"))?;
         kio.store.data_mut().allowed = self.allowed.clone();
+        kio.kvs = self.kvs.clone();
         let (sent, incomings, outgoings) = kio.web_grants(request).map_err(|e| e.to_string())?;
         let result = kio.run_armed(&self.files, dirs, vec![], incomings, outgoings);
         let response = sent.lock().unwrap_or_else(PoisonError::into_inner).take();
@@ -1716,6 +1752,7 @@ impl Server {
             audit: None,
             #[cfg(feature = "test-hooks")]
             hidden: None,
+            kvs: vec![],
         })
     }
 }

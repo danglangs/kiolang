@@ -89,6 +89,46 @@ pub fn v0() -> CapTable {
                     Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("WebErr".into()))),
                 )],
             },
+            CapType {
+                name: "Kv".into(),
+                methods: vec![
+                    method(
+                        "get",
+                        vec![Ty::Str],
+                        Ty::Result(
+                            Box::new(Ty::Option(Box::new(Ty::Bytes))),
+                            Box::new(Ty::Enum("KvErr".into())),
+                        ),
+                    ),
+                    method(
+                        "set",
+                        vec![Ty::Str, Ty::Bytes],
+                        Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("KvErr".into()))),
+                    ),
+                    method(
+                        "delete",
+                        vec![Ty::Str],
+                        Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("KvErr".into()))),
+                    ),
+                    method(
+                        "keys",
+                        vec![Ty::Str],
+                        Ty::Result(
+                            Box::new(Ty::List(Box::new(Ty::Str))),
+                            Box::new(Ty::Enum("KvErr".into())),
+                        ),
+                    ),
+                    method(
+                        "swap",
+                        vec![
+                            Ty::Str,
+                            Ty::Option(Box::new(Ty::Bytes)),
+                            Ty::Option(Box::new(Ty::Bytes)),
+                        ],
+                        Ty::Result(Box::new(Ty::Bool), Box::new(Ty::Enum("KvErr".into()))),
+                    ),
+                ],
+            },
         ],
         enums: vec![
             Enum {
@@ -117,6 +157,12 @@ pub fn v0() -> CapTable {
             Enum {
                 name: "WebErr".into(),
                 variants: vec![case("AlreadySent", vec![]), case("Invalid", vec![])],
+                span: at,
+                public: true,
+            },
+            Enum {
+                name: "KvErr".into(),
+                variants: vec![case("TooLarge", vec![]), case("Full", vec![])],
                 span: at,
                 public: true,
             },

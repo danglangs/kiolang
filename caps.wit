@@ -41,13 +41,29 @@ interface web {
   variant web-err { already-sent, invalid }
 }
 
+interface kv {
+  variant kv-err { too-large, full }
+
+  // A key-value store the host keeps across runs and requests. Keys are 1 to 1,024 bytes.
+  resource kv {
+    get:    func(key: string) -> result<option<list<u8>>, kv-err>;
+    set:    func(key: string, value: list<u8>) -> result<_, kv-err>;
+    delete: func(key: string) -> result<_, kv-err>;               // a missing key is not an error
+    keys:   func(prefix: string) -> result<list<string>, kv-err>; // sorted by bytes
+    // Set `key` to `new` (`none` deletes) only if its value is `old` (`none` = absent), atomically.
+    swap:   func(key: string, old: option<list<u8>>, new: option<list<u8>>) -> result<bool, kv-err>;
+  }
+}
+
 world guest {
   import fs;
   import net;
   import web;
+  import kv;
   use fs.{dir};
   use net.{http};
   use web.{incoming, outgoing};
+  use kv.{kv};
 
   // A source file: `name` is `web.kio` for `mod web;`; the root comes first.
   record file { name: string, source: string }
@@ -63,6 +79,7 @@ world guest {
   record http-grant { name: string, http: http }
   record incoming-grant { name: string, incoming: incoming }
   record outgoing-grant { name: string, outgoing: outgoing }
+  record kv-grant { name: string, kv: kv }
 
   // Parse and check. Needs no handles.
   export check: func(files: list<file>) -> result<report, list<diag>>;
@@ -72,7 +89,7 @@ world guest {
 
   // Check, then run `main` with each grant bound to its parameter by name; a missing or
   // mistyped grant is an error before any code runs.
-  export run: func(files: list<file>, dirs: list<dir-grant>, https: list<http-grant>, incomings: list<incoming-grant>, outgoings: list<outgoing-grant>) -> result<outcome, list<diag>>;
+  export run: func(files: list<file>, dirs: list<dir-grant>, https: list<http-grant>, incomings: list<incoming-grant>, outgoings: list<outgoing-grant>, kvs: list<kv-grant>) -> result<outcome, list<diag>>;
 }
 
 // Compiled kio (docs/codegen.md): the runtime with the program appended, one core module.
@@ -80,12 +97,14 @@ world compiled {
   import fs;
   import net;
   import web;
+  import kv;
   use fs.{dir};
   use net.{http};
   use web.{incoming, outgoing};
+  use kv.{kv};
 
   // One handle per capability parameter of `main`, in parameter order.
-  variant grant { dir(dir), http(http), incoming(incoming), outgoing(outgoing) }
+  variant grant { dir(dir), http(http), incoming(incoming), outgoing(outgoing), kv(kv) }
   // main's value printed, and whether main returned `Err`.
   record outcome { value: string, failed: bool }
 

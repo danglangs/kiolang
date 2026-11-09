@@ -65,6 +65,7 @@ $ curl http://127.0.0.1:8080/hello/kio
 
 ### More
 
+- `--kv store=data.kv` grants a key-value store (`store: Kv`) that outlives runs and is shared by every `--listen` request; `--kv store=:memory:` keeps it for the process only. `swap` updates a key atomically.
 - `--audit log.jsonl` records every host call: capability, method, path, bytes and result. A call the report did not predict stops the run as a checker bug.
 - Every run is bounded: `--fuel`, `--timeout`, `--memory`, `--stack`, `--calls`, `--io`. Each limit's error names the flag that raises it.
 - Errors teach: `did you mean count?`, `declare it with let mut`.
