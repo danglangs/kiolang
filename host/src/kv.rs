@@ -438,7 +438,7 @@ fn read_log(path: &Path) -> std::result::Result<(Log, BTreeMap<String, Vec<u8>>)
     let mut r = &file;
     r.seek(SeekFrom::Start(MAGIC.len() as u64)).map_err(io)?;
     let (end, bad) = replay(
-        &mut BufReader::new(r.take(m.len() - MAGIC.len() as u64)),
+        &mut BufReader::new(r.take(m.len().saturating_sub(MAGIC.len() as u64))),
         &mut map,
         MAGIC.len() as u64,
     )

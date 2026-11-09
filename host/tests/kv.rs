@@ -954,3 +954,63 @@ fn a_reader_follows_a_writer_process_through_compaction() {
     assert_eq!(kio(&["run", &set_token(t.path(), "v5"), "--kv", &rw]).0, 0);
     assert_eq!(get(server.1), (200, "v5".into()));
 }
+
+/// H12 review: the startup refusal reads `main`'s report line, which charges writes made through
+/// helpers, generic functions, module functions and recursion to the parameter `main` passes.
+#[test]
+fn read_only_refusal_sees_writes_through_helpers() {
+    let t = tempfile::tempdir().unwrap();
+    let db = t.path().join("s.kv");
+    let rw = format!("store={}", db.display());
+    let ro = format!("store={}:ro", db.display());
+    assert_eq!(kio(&["run", &set_token(t.path(), "a"), "--kv", &rw]).0, 0);
+    std::fs::write(
+        t.path().join("util.kio"),
+        r#"pub fn w(k: Kv) -> Result<(), KvErr> { k.set("token", "x".to_bytes()) }"#,
+    )
+    .unwrap();
+    let shapes = [
+        ("helper", "fn w(k: Kv) -> Result<(), KvErr> { k.set(\"token\", \"x\".to_bytes()) }\nfn main(store: Kv) -> Result<(), KvErr> { w(store) }", "set"),
+        ("generic", "fn w<T>(x: T, k: Kv) -> Result<(), KvErr> { k.delete(\"token\") }\nfn main(store: Kv) -> Result<(), KvErr> { w::<Int>(1, store) }", "delete"),
+        ("recursion", "fn a(k: Kv, n: Int) -> Result<Bool, KvErr> { if n == 0 { k.swap(\"token\", None, None) } else { b(k, n - 1) } }\nfn b(k: Kv, n: Int) -> Result<Bool, KvErr> { a(k, n) }\nfn main(store: Kv) -> Result<Bool, KvErr> { b(store, 3) }", "swap"),
+        ("module", "mod util;\nfn main(store: Kv) -> Result<(), KvErr> { util::w(store) }", "set"),
+        ("renamed", "fn w(store: Kv) -> Result<(), KvErr> { store.set(\"token\", \"x\".to_bytes()) }\nfn main(auth: Kv) -> Result<(), KvErr> { let r = w(auth); Ok(()) }", "set"),
+    ];
+    for (name, src, method) in shapes {
+        let prog = write(t.path(), &format!("{name}.kio"), src);
+        let grant = if name == "renamed" {
+            ro.replace("store=", "auth=")
+        } else {
+            ro.clone()
+        };
+        let param = if name == "renamed" { "auth" } else { "store" };
+        let (code, _, err) = kio(&["run", &prog, "--kv", &grant]);
+        assert_eq!(code, 2, "{name}: {err}");
+        assert_eq!(
+            err,
+            format!("kio: `{param}` is granted read-only but `main` can call `{param} {method}`\n  hint: drop `:ro` or remove the writes\n"),
+            "{name}"
+        );
+    }
+    // The same file as a reader and a writer, in either order, and twice read-only: one grant.
+    let two = write(
+        t.path(),
+        "two.kio",
+        "fn main(a: Kv, b: Kv) -> Str { let x = a.get(\"token\"); let y = b.get(\"token\"); \"ok\" }",
+    );
+    let a_ro = format!("a={}:ro", db.display());
+    for (x, y) in [
+        (a_ro.as_str(), rw.replace("store=", "b=").as_str()),
+        (rw.replace("store=", "a=").as_str(), ro.replace("store=", "b=").as_str()),
+        (a_ro.as_str(), ro.replace("store=", "b=").as_str()),
+    ] {
+        let (code, _, err) = kio(&["run", &two, "--kv", x, "--kv", y]);
+        assert_eq!(code, 2, "{x} {y}: {err}");
+        assert!(err.contains("the same file as --kv a"), "{x} {y}: {err}");
+    }
+    assert_eq!(
+        std::fs::read(&db).unwrap().len(),
+        8 + 8 + 1 + 4 + 5 + 1,
+        "nothing was written"
+    );
+}
