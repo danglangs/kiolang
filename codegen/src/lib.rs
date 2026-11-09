@@ -658,6 +658,9 @@ impl FuncGen<'_, '_> {
     /// `push`, `insert` and `remove` on a place: the indexes, then the arguments, then the
     /// place made unique along its path, and the change.
     fn mutate(&mut self, place: &ir::Place, op: Mut, args: &[ir::Expr], span: Span) {
+        if matches!(op, Mut::ListSort | Mut::ListPop) {
+            unimplemented!("codegen: mutation {op:?}");
+        }
         let (mut xs, sites) = self.indexes(place);
         let n = xs.len();
         xs.extend(args);
@@ -688,7 +691,8 @@ impl FuncGen<'_, '_> {
             self.call_rt(match op {
                 Mut::ListPush => "rt_list_push",
                 Mut::MapInsert => "rt_map_insert",
-                _ => "rt_map_remove",
+                Mut::MapRemove => "rt_map_remove",
+                op => unreachable!("{op:?} is handled above"),
             });
             if let (Mut::MapInsert | Mut::MapRemove, (k, Some(t))) = (op, args[0]) {
                 if is_ptr(&k.ty) {

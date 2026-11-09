@@ -8,7 +8,7 @@ Read, in order: docs/status.md (where it stands), this file's next open task, [c
 
 Facts that are easy to miss:
 - `kio run` and `--listen` still use the interpreter; the compiler is reached only through `kio_host::Compiled::run` until C5.
-- Unsupported IR panics with `unimplemented!("codegen: <kind> <Node>")`; the harness catches and counts it. Never make a program pass by skipping it silently.
+- Unsupported IR panics with `unimplemented!("codegen: <kind> <Node>")`; the harness catches and counts it, and fails on any other panic. Never make a program pass by skipping it silently.
 - The harness runs each side with 2 billion fuel on a `4 * MAX_STACK` thread; limit stops on either side are excluded, not compared (decision 6). `Compiled::run` reports a limit trap as `Err` with the host's message; `Kio::run` reports it through `explain`.
 - `rt_unique` on 0 is undefined: never call it on an empty slot. `rt_dec(0)` and `rt_inc(0)` are no-ops.
 - Error sites come from the guest, so the host bounds-checks them (C2a review); keep that for anything else the guest passes.

@@ -91,7 +91,10 @@ fn differential() {
             Ok(c) => c,
             Err(p) => {
                 let msg = p.downcast_ref::<String>().cloned().unwrap_or_default();
-                let node = msg.strip_prefix("not implemented: codegen: ").unwrap_or(&msg);
+                // Only an `unimplemented!` node is a skip; any other panic is a codegen bug.
+                let Some(node) = msg.strip_prefix("not implemented: codegen: ") else {
+                    panic!("codegen panicked: {msg}\n{src}");
+                };
                 *unsupported.entry(node.to_string()).or_default() += 1;
                 continue;
             }
