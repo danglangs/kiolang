@@ -521,3 +521,250 @@ fn open_all_refuses_a_locked_file_in_process() {
     });
     assert!(reopened);
 }
+
+/// Adversarial review: a key with quotes, control characters and JSON punctuation is one escaped
+/// JSON string in the audit line, never a second line or field.
+#[test]
+fn audit_escapes_a_hostile_key() {
+    let main = r#"fn main(store: Kv) -> Str {
+      let k = "a\"b\nc\\d\0e\te}{,\"result\":\"ok\"";
+      show(store.set(k, "v".to_bytes()))
+    }"#;
+    let log = Log::default();
+    let mut kio = Kio::new(Limits::default()).unwrap();
+    kio.audit(log.clone(), vec![]);
+    kio.grant_kvs(vec![("store".into(), Arc::new(Store::memory(1 << 20)))]);
+    kio.run(&format!("{SHOW}{main}"), vec![]).unwrap().unwrap();
+    let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    assert_eq!(text.lines().count(), 3, "{text}");
+    assert!(
+        text.lines()
+            .nth(1)
+            .unwrap()
+            .contains(r#""arg":"a\"b\u000ac\\d\u0000e\u0009e}{,\"result\":\"ok\"","bytes":1,"result":"ok""#),
+        "{text}"
+    );
+}
+
+/// Adversarial review: crafted record headers and bodies are refused as corruption at their
+/// offset, never a panic or a wrong replay; only a record cut short at the end is dropped.
+#[test]
+fn replay_refuses_crafted_records_without_panicking() {
+    fn crc32(data: &[u8]) -> u32 {
+        let mut c = !0u32;
+        for &b in data {
+            c ^= u32::from(b);
+            for _ in 0..8 {
+                c = (c >> 1) ^ (0xEDB8_8320 & (c & 1).wrapping_neg());
+            }
+        }
+        !c
+    }
+    fn body(tag: u8, klen: u32, key: &[u8], value: &[u8]) -> Vec<u8> {
+        let mut b = vec![tag];
+        b.extend_from_slice(&klen.to_le_bytes());
+        b.extend_from_slice(key);
+        b.extend_from_slice(value);
+        b
+    }
+    fn framed(len: u32, body: &[u8]) -> Vec<u8> {
+        let mut r = len.to_le_bytes().to_vec();
+        r.extend_from_slice(&crc32(body).to_le_bytes());
+        r.extend_from_slice(body);
+        r
+    }
+    let good = body(1, 1, b"a", b"1");
+    let crafted: Vec<(&str, Vec<u8>)> = vec![
+        ("len 0", framed(0, &good)),
+        ("len u32::MAX", framed(u32::MAX, &good)),
+        ("len over BODY_MAX", framed((1 + 4 + 1024 + (1 << 20)) + 1, &good)),
+        ("tag 3", framed(7, &body(3, 1, b"a", b"1"))),
+        ("klen 0", framed(7, &body(1, 0, b"a", b"1"))),
+        ("klen u32::MAX", framed(7, &body(1, u32::MAX, b"a", b"1"))),
+        ("klen past body", framed(7, &body(1, 3, b"a", b"1"))),
+        ("klen 1025", framed(5 + 1025, &body(1, 1025, &[b'k'; 1025], b""))),
+        ("delete with value", framed(7, &body(2, 1, b"a", b"1"))),
+        ("invalid utf-8 key", framed(7, &body(1, 1, b"\xff", b"1"))),
+        ("bad crc", {
+            let mut r = framed(7, &good);
+            r[4] ^= 1;
+            r
+        }),
+    ];
+    let t = tempfile::tempdir().unwrap();
+    for (i, (what, rec)) in crafted.iter().enumerate() {
+        let db = t.path().join(format!("c{i}.kv"));
+        let mut data = b"kio-kv1\n".to_vec();
+        data.extend_from_slice(rec);
+        std::fs::write(&db, &data).unwrap();
+        let err = open_all(&[("s".into(), db.to_str().unwrap().into())], 1)
+            .err()
+            .unwrap_or_default();
+        assert!(err.contains("is corrupt at byte 8"), "{what}: {err}");
+    }
+
+    // A value holding what looks like a record is just a value, and a record cut short is dropped.
+    let db = t.path().join("value.kv");
+    let mut data = b"kio-kv1\n".to_vec();
+    let inner = framed(7, &body(1, 1, b"z", b"9"));
+    let outer = body(1, 1, b"a", &inner);
+    data.extend_from_slice(&framed(outer.len() as u32, &outer));
+    data.extend_from_slice(&framed(7, &body(1, 1, b"b", b"2"))[..12]);
+    std::fs::write(&db, &data).unwrap();
+    let store = Store::open(&db, 1 << 20).unwrap();
+    let mut kio = Kio::new(Limits::default()).unwrap();
+    kio.grant_kvs(vec![("store".into(), Arc::new(store))]);
+    let main = r#"fn main(store: Kv) -> Str {
+      let n = match store.get("a") { Ok(v) => match v { Some(b) => b.len(), None => 0 }, Err(e) => 0 };
+      n.to_str() + " " + val(store.get("z")) + " " + val(store.get("b"))
+    }"#;
+    let out = kio.run(&format!("{SHOW}{main}"), vec![]).unwrap().unwrap();
+    assert_eq!(out.value, "15 none none");
+    assert_eq!(std::fs::metadata(&db).unwrap().len(), 8 + 8 + 21);
+}
+
+/// Adversarial review: a server-style loop of 1 MB writes keeps the log near its live size, the
+/// compacted store reads back after reopening, and the file stays locked across compactions.
+#[test]
+fn writes_compact_the_log_online() {
+    let t = tempfile::tempdir().unwrap();
+    let db = t.path().join("s.kv");
+    let store = Arc::new(Store::open(&db, 64 << 20).unwrap());
+    let main = r#"fn main(store: Kv) -> Str {
+      let v = big(20).to_bytes();
+      for i in 0..40 { let a = store.set("k", v); let b = store.set("k", "".to_bytes()); }
+      show(store.set("k", "last".to_bytes()))
+    }"#;
+    let mut kio = Kio::new(Limits::default()).unwrap();
+    kio.grant_kvs(vec![("store".into(), store.clone())]);
+    assert_eq!(kio.run(&format!("{SHOW}{main}"), vec![]).unwrap().unwrap().value, "ok");
+    let len = std::fs::metadata(&db).unwrap().len();
+    assert!(len < 4 << 20, "{len}");
+    assert!(!t.path().join("s.kv.tmp").exists());
+    let Err(e) = open_all(&[("b".into(), db.display().to_string())], 1) else {
+        panic!("opened a store another grant holds")
+    };
+    assert!(e.contains("is in use by another process"), "{e}");
+    drop(kio);
+    drop(store);
+    let mut kio = Kio::new(Limits::default()).unwrap();
+    kio.grant_kvs(vec![("store".into(), Arc::new(Store::open(&db, 1 << 20).unwrap()))]);
+    let out = kio.run(
+        &format!("{SHOW}fn main(store: Kv) -> Str {{ val(store.get(\"k\")) }}"),
+        vec![],
+    );
+    assert_eq!(out.unwrap().unwrap().value, "last");
+}
+
+/// Adversarial review: a `--kv` file inside a `--dir` root could be replaced or crafted through
+/// the `Dir`; the run is refused before any code runs.
+#[test]
+fn a_store_inside_a_granted_dir_is_refused() {
+    let t = tempfile::tempdir().unwrap();
+    let prog = write(
+        t.path(),
+        "overlap.kio",
+        r#"fn main(d: Dir, store: Kv) -> Result<(), KvErr> { store.set("a", "1".to_bytes()) }"#,
+    );
+    let data = t.path().join("data");
+    std::fs::create_dir_all(data.join("sub")).unwrap();
+    let dir = format!("d={}", data.display());
+    for db in [data.join("db.log"), data.join("sub/db.log"), data.join("sub/../db.log")] {
+        let (code, out, err) = kio(&["run", &prog, "--dir", &dir, "--kv", &format!("store={}", db.display())]);
+        assert_eq!((code, out.as_str()), (2, ""), "{err}");
+        assert_eq!(
+            err,
+            "kio: `--kv store` is inside `--dir d`\n  hint: keep stores outside granted directories\n"
+        );
+        assert!(!db.exists());
+    }
+    let db = t.path().join("db.log");
+    let (code, _, err) = kio(&["run", &prog, "--dir", &dir, "--kv", &format!("store={}", db.display())]);
+    assert_eq!(code, 0, "{err}");
+}
+
+/// Adversarial review: a symlink planted at `<store>.tmp` is removed, not followed, when the log
+/// is compacted; a symlink at the store path itself is refused, even a dangling one.
+#[test]
+fn compaction_never_follows_a_symlink() {
+    let t = tempfile::tempdir().unwrap();
+    let db = t.path().join("s.kv");
+    let store = Store::open(&db, 1 << 20).unwrap();
+    let mut kio = Kio::new(Limits::default()).unwrap();
+    kio.grant_kvs(vec![("store".into(), Arc::new(store))]);
+    let churn = r#"fn main(store: Kv) -> Str { for i in 0..50 { let r = store.set("k", i.to_str().to_bytes()); } "" }"#;
+    kio.run(churn, vec![]).unwrap().unwrap();
+    drop(kio);
+    let victim = t.path().join("victim.txt");
+    std::fs::write(&victim, "keep").unwrap();
+    std::os::unix::fs::symlink(&victim, t.path().join("s.kv.tmp")).unwrap();
+    drop(Store::open(&db, 1 << 20).unwrap()); // compacts: 50 records, one live
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+    assert!(std::fs::symlink_metadata(&db).unwrap().is_file());
+    assert_eq!(std::fs::metadata(&db).unwrap().len(), 8 + 8 + 5 + 1 + 2);
+    assert!(std::fs::symlink_metadata(t.path().join("s.kv.tmp")).is_err());
+
+    let link = t.path().join("link.kv");
+    let target = t.path().join("missing.kv");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let Err(e) = Store::open(&link, 1 << 20) else {
+        panic!("opened a symlink")
+    };
+    assert_eq!(
+        e,
+        format!(
+            "{} is a symbolic link\n  hint: grant the file it points to",
+            link.display()
+        )
+    );
+    assert!(!target.exists());
+}
+
+/// Adversarial review: a refused `keys` is charged to `--io` like a refused `Dir.list`, and an
+/// over-long prefix is refused before any work.
+#[test]
+fn too_large_keys_is_charged() {
+    let main = r#"fn main(store: Kv) -> Str {
+      for i in 0..10001 { let r = store.set("k" + i.to_str(), "".to_bytes()); }
+      let over = match store.keys("k") { Ok(ks) => ks.len().to_str(), Err(e) => "too-large" };
+      let long = match store.keys(big(10) + "x") { Ok(ks) => ks.len().to_str(), Err(e) => "too-large" };
+      over + " " + long
+    }"#;
+    let log = Log::default();
+    let mut kio = Kio::new(Limits {
+        calls: 20_000,
+        ..Limits::default()
+    })
+    .unwrap();
+    kio.audit(log.clone(), vec![]);
+    kio.grant_kvs(vec![("store".into(), Arc::new(Store::memory(64 << 20)))]);
+    let out = kio.run(&format!("{SHOW}{main}"), vec![]).unwrap().unwrap();
+    assert_eq!(out.value, "too-large too-large");
+    let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    let keys: Vec<&str> = text.lines().filter(|l| l.contains(r#""method":"keys""#)).collect();
+    assert_eq!(keys.len(), 2);
+    for l in keys {
+        assert!(l.contains(r#""bytes":10000,"result":"too-large""#), "{l}");
+    }
+}
+
+/// Adversarial review: a tail of zeros, as a power loss leaves, is dropped like a record cut
+/// short; anything non-zero after the last record is still corruption.
+#[test]
+fn replay_drops_a_zero_filled_tail() {
+    let t = tempfile::tempdir().unwrap();
+    let db = two_records(t.path());
+    let mut data = std::fs::read(&db).unwrap();
+    data.extend_from_slice(&[0; 12]);
+    std::fs::write(&db, &data).unwrap();
+    assert_eq!(read_ab(t.path(), &db).1, "12ok\n");
+    assert_eq!(std::fs::metadata(&db).unwrap().len(), 8 + 3 * 15);
+
+    let mut data = std::fs::read(&db).unwrap();
+    data.extend_from_slice(&[0; 12]);
+    data.push(1);
+    std::fs::write(&db, &data).unwrap();
+    let (code, _, err) = read_ab(t.path(), &db);
+    assert_eq!(code, 2);
+    assert!(err.contains("is corrupt at byte 53"), "{err}");
+}

@@ -77,7 +77,7 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     let mut audit = None;
     let mut listen = None;
     let mut dir_paths = Vec::new();
-    let mut kv_specs = Vec::new();
+    let mut kv_specs: Vec<(String, String)> = Vec::new();
     let mut kv_mb = 64;
     for pair in flags.chunks(2) {
         let (name, dir) = match pair {
@@ -182,6 +182,21 @@ fn run(path: &str, flags: &[&str]) -> i32 {
         (None, _, true) => return fail("main takes WsMessage/WsSend but there is no address\n  hint: add `--listen 127.0.0.1:8080`".into()),
         (Some(_), false, false) => return fail("--listen needs a `main` that takes Incoming and Outgoing, or WsMessage and WsSend\n  hint: add `req: Incoming, res: Outgoing` (HTTP) or `msg: WsMessage, conn: WsSend` (WebSocket) to main, or drop --listen".into()),
         _ => {}
+    }
+    // A program that can write a store's log through a `Dir` could replace or craft it.
+    for (name, spec) in kv_specs.iter().filter(|(_, s)| s != ":memory:") {
+        let parent = std::path::Path::new(spec.as_str()).parent();
+        let parent = parent.filter(|p| !p.as_os_str().is_empty()).unwrap_or(".".as_ref());
+        let Ok(parent) = std::fs::canonicalize(parent) else {
+            continue;
+        };
+        for (d, dir) in &dir_paths {
+            if std::fs::canonicalize(dir).is_ok_and(|root| parent.starts_with(root)) {
+                return fail(format!(
+                    "`--kv {name}` is inside `--dir {d}`\n  hint: keep stores outside granted directories"
+                ));
+            }
+        }
     }
     let kvs = match kio_host::kv::open_all(&kv_specs, kv_mb) {
         Ok(kvs) => kvs,

@@ -14,7 +14,7 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 | C3a, C3b | runtime exports, descriptor table, literals, leak check; Str and Bytes compiled with refcounts. Harness 46 to 70 ran both ways, 0 mismatches, 0 leaked |
 | C6a, C6b | generator: 300 programs both ways per CI run; front-end fuzzing, 210,000 inputs, no panic |
 | D1 | `Dir` `list`/`write`/`remove`/`exists`; adversarial review done, fixes merged |
-| K1 | `Kv` capability, `--kv name=:memory:` or a file; adversarial review pending |
+| K1 | `Kv` capability, `--kv name=:memory:` or a file; adversarial review done, fixes merged |
 | WS1 | WebSockets under `--listen`, a fresh sandbox per event; 7,800 echo events/s on one connection; adversarial review pending |
 | kio-web | `api.kio` JSON helpers |
 
@@ -22,7 +22,7 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 
 1. **C3c-e: heap values in codegen** (C3a runtime exports and descriptors, C3b Str and Bytes, done), pinned in compiler-todo.md. Each part grows the harness's "ran both ways" count (46 at the checkpoint) and keeps live objects at 0.
 2. C4 (capabilities, grants, host calls), C5 (`kio run` and `--listen` compiled by default; the interpreter behind `--interp`; drop wizer, re-measure W13d), C6 (program generator), C7 (adversarial review, including `trap`), C8 (measure, then Perceus-style refcount elision).
-3. Adversarial reviews of WS1 and K1, kio-web notes on `Dir.write`/`remove`/`list` and `Kv`.
+3. WS1 adversarial review; HTTP grants bound by type, as WebSocket grants are (`fn main(request: Incoming)` fails every request today; open_questions #48).
 4. `Option::and_then`/`map` (needs function values; not yet pinned). kio-web helpers move to `api.kio` (in progress), which L3b made possible.
 
 ## Waiting on the maintainer
