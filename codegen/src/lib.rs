@@ -27,6 +27,8 @@ const PAGE: u32 = 1 << 16;
 pub struct Wasm {
     pub component: Vec<u8>,
     pub sites: Vec<Site>,
+    /// The linear memory the module starts with, in bytes: the runtime's and the program's data.
+    pub memory: usize,
 }
 
 /// A runtime error the program can raise, by the number generated code passes to `trap`.
@@ -81,6 +83,7 @@ pub fn compile(m: &Module) -> Result<Wasm> {
         data: (data_addr, data),
         elems,
     };
+    let memory = (rt.pages + app.extra_pages()) as usize * PAGE as usize;
     let mut module = wasm_encoder::Module::new();
     app.parse_core_module(&mut module, Parser::new(0), RUNTIME)
         .map_err(|e| anyhow!("re-encoding the runtime: {e}"))?;
@@ -90,7 +93,11 @@ pub fn compile(m: &Module) -> Result<Wasm> {
         .validate(true)
         .encode()
         .context("wrapping the module as a component")?;
-    Ok(Wasm { component, sites })
+    Ok(Wasm {
+        component,
+        sites,
+        memory,
+    })
 }
 
 /// What codegen needs to know of runtime.wasm before appending to it.
@@ -343,6 +350,8 @@ fn func<'m>(
         locals,
         first_decl: params.len() as u32,
         decls,
+        live: Vec::new(),
+        free: Vec::new(),
         scratch: None,
         owned,
         depth: 0,
@@ -373,6 +382,12 @@ struct FuncGen<'a, 'm> {
     /// Wasm locals after the parameters: the IR's, then hidden ones.
     decls: Vec<ValType>,
     first_decl: u32,
+    /// Hidden locals in use, in the order taken. Every one taken while an expression or a
+    /// statement is generated is dead when it ends (its value is on the stack or consumed), so
+    /// it then goes to `free`, to be taken again: a function with many calls stays under Wasm's
+    /// 50,000 locals.
+    live: Vec<u32>,
+    free: Vec<u32>,
     /// Three `i64` locals an integer check uses, after its operands are on the stack.
     scratch: Option<[u32; 3]>,
     /// The Wasm locals that hold an owned pointer at this point of the code, outermost scope
@@ -552,14 +567,38 @@ impl FuncGen<'_, '_> {
         slot_out(&mut self.sink(), t);
     }
 
+    /// A hidden local of type `t`, free until the expression or statement being generated ends.
+    /// Nothing reads it before setting it.
     fn temp(&mut self, t: ValType) -> u32 {
+        let l = match self
+            .free
+            .iter()
+            .rposition(|&l| self.decls[(l - self.first_decl) as usize] == t)
+        {
+            Some(i) => self.free.swap_remove(i),
+            None => self.new_local(t),
+        };
+        self.live.push(l);
+        l
+    }
+
+    fn new_local(&mut self, t: ValType) -> u32 {
         self.decls.push(t);
         self.first_decl + self.decls.len() as u32 - 1
     }
 
+    /// Frees the hidden locals taken since `live` had length `mark`.
+    fn free_since(&mut self, mark: usize) {
+        for l in self.live.drain(mark..) {
+            debug_assert!(!self.owned.contains(&l), "a freed hidden local is still owned");
+            self.free.push(l);
+        }
+    }
+
     fn scratch(&mut self) -> [u32; 3] {
         if self.scratch.is_none() {
-            self.scratch = Some([0; 3].map(|_| self.temp(ValType::I64)));
+            // Shared by every integer check, so never freed.
+            self.scratch = Some([0; 3].map(|_| self.new_local(ValType::I64)));
         }
         self.scratch.unwrap()
     }
@@ -614,6 +653,12 @@ impl FuncGen<'_, '_> {
     }
 
     fn stmt(&mut self, s: &ir::Stmt) {
+        let mark = self.live.len();
+        self.stmt_kind(s);
+        self.free_since(mark);
+    }
+
+    fn stmt_kind(&mut self, s: &ir::Stmt) {
         match &s.kind {
             StmtKind::Let(id, init) => {
                 self.expr(init);
@@ -985,6 +1030,12 @@ impl FuncGen<'_, '_> {
     /// Leaves `e`'s value on the stack, if its type has one. An expression of type `!` ends
     /// with `unreachable`, so any context's types check.
     fn expr(&mut self, e: &ir::Expr) {
+        let mark = self.live.len();
+        self.expr_kind(e);
+        self.free_since(mark);
+    }
+
+    fn expr_kind(&mut self, e: &ir::Expr) {
         match &e.kind {
             ExprKind::Int(n) => {
                 self.sink().i64_const(*n);

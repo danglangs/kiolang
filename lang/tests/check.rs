@@ -133,6 +133,40 @@ fn duplicates() {
     assert_eq!((msg.as_str(), at.as_str()), ("duplicate parameter `a`", "a: Int"));
 }
 
+/// Wasm allows 1,000 parameters, and a function used as a value takes itself too: 999 at most,
+/// a closure's captures included.
+#[test]
+fn too_many_parameters() {
+    let params = |n: usize| (0..n).map(|i| format!("p{i}: Int")).collect::<Vec<_>>().join(", ");
+    ok(&format!("fn f({}) {{}} fn main() {{}}", params(999)));
+    let src = format!("fn f({}) {{}} fn main() {{}}", params(1001));
+    let diags = check(&src, &CapTable::default()).expect_err("too many");
+    let d = &diags[0];
+    assert_eq!(d.msg, "`f` takes 1001 parameters; at most 999");
+    assert_eq!(&src[d.span.start..d.span.end], "p999: Int");
+    assert_eq!(d.hint.as_deref(), Some("pass a struct instead"));
+
+    // 500 captures and 500 parameters: too many once lifted.
+    let lets: String = (0..500).map(|i| format!("let c{i} = {i}; ")).collect();
+    let uses: Vec<String> = (0..500).map(|i| format!("c{i}")).collect();
+    let ps: Vec<String> = (0..500).map(|i| format!("q{i}: Int")).collect();
+    let closure = format!("|{}| [{}]", ps.join(", "), uses.join(", "));
+    let src = format!("fn main() {{ {lets}let f = {closure}; }}");
+    let diags = check(&src, &CapTable::default()).expect_err("too many");
+    let d = &diags[0];
+    assert_eq!(
+        d.msg,
+        "this closure takes 500 parameters and captures 500 locals; at most 999"
+    );
+    assert_eq!(&src[d.span.start..d.span.end], closure);
+    assert_eq!(d.hint.as_deref(), Some("pass a struct instead"));
+    ok(&format!(
+        "fn main() {{ {lets}let f = |{}| [{}]; }}",
+        ps[..499].join(", "),
+        uses.join(", ")
+    ));
+}
+
 #[test]
 fn main_rules() {
     let (msg, _) = reject("fn f() {}");

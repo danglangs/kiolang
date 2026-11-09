@@ -770,6 +770,15 @@ fn cap_type_ok(ty: &Ty, span: Span, place: Place) -> Result<(), Diag> {
     Err(err(span, msg, Some(&hint)))
 }
 
+/// The most parameters a function takes, captures included for a closure: Wasm allows 1,000,
+/// and a function used as a value takes one more, itself.
+const MAX_PARAMS: usize = 999;
+
+fn too_many_params(span: Span, what: String) -> Diag {
+    let msg = format!("{what}; at most {MAX_PARAMS}");
+    err(span, msg, Some("pass a struct instead"))
+}
+
 fn signature(
     f: &Fn,
     sigs: &HashMap<String, Sig>,
@@ -781,6 +790,10 @@ fn signature(
     if sigs.contains_key(&*key(scope.module, &f.name)) {
         let msg = format!("duplicate function `{}`", f.name);
         return Err(err(f.span, msg, Some("rename one of them")));
+    }
+    if let Some(p) = f.params.get(MAX_PARAMS) {
+        let what = format!("`{}` takes {} parameters", f.name, f.params.len());
+        return Err(too_many_params(p.span, what));
     }
     let mut params = Vec::new();
     for (i, p) in f.params.iter().enumerate() {
@@ -2589,6 +2602,13 @@ impl<'a> Checker<'a> {
         self.try_shape = outer_shape;
         let ret = std::mem::replace(&mut self.ret, outer_ret);
         let found = found?;
+        if params.len() + frame.captures.len() > MAX_PARAMS {
+            let (p, c) = (params.len(), frame.captures.len());
+            return Err(too_many_params(
+                e.span,
+                format!("this closure takes {p} parameters and captures {c} locals"),
+            ));
+        }
         let ret = match ret {
             // No expected type and no `return`: the body's type; `()` if it never finishes.
             Ty::Never if found == Ty::Never => Ty::Unit,

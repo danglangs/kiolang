@@ -77,6 +77,7 @@ Everything else is rejected with a message that names the kio alternative, for e
   }
   ```
 - **Closures.** `|x: Int| x + n`, `|a, b| { .. }` and `|| e` are values of `fn` type. A parameter without a type takes it from the expected `fn` type (of a parameter, field, annotated `let`, list element or assigned place); with none, write it. The return type is the body's. Every outer local the body uses is copied into the closure when it is created: a later change to the local is not seen, and the closure cannot assign to it ("`n` is captured by copy and cannot be assigned"). `return` returns from the closure; `break` and `continue` cannot leave it. `||` after a value is logical or; where an expression starts it begins a closure with no parameters. A closure has no `-> T` and no `move`. One prints as `<closure>`.
+- **At most 999 parameters** per function, and per closure counting the locals it captures (Wasm's limit is 1,000; a function value takes itself too). Past that: "pass a struct instead".
 
   ```
   fn adder(n: Int) -> fn(Int) -> Int { |x| x + n }

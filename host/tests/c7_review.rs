@@ -173,8 +173,10 @@ fn out_of_memory_in_a_host_result_is_explained() {
     assert!(text.contains(r#"{"event":"end","outcome":"error","calls":1"#), "{text}");
 }
 
-/// Wasm validators cap a function at 1,000 parameters and 50,000 locals; a checked program past
-/// either is refused with an error, never a panic. (The interpreter runs it: a C7 finding.)
+/// Wasm validators cap a function at 1,000 parameters and 50,000 locals; codegen panicked or
+/// produced an invalid module past either (the interpreter ran it: a C7 finding). The checker now
+/// refuses more than 999 parameters, on both paths; hidden locals are reused (C7a), so 17,000
+/// calls of three arguments in one function (51,000 hidden locals before) compile.
 #[test]
 fn a_function_past_the_wasm_limits_is_an_error_not_a_panic() {
     let n = 1001;
@@ -186,9 +188,12 @@ fn a_function_past_the_wasm_limits_is_an_error_not_a_panic() {
         n - 1,
         args.join(", ")
     );
-    assert_eq!(interpreted(&src), Ok(("1000".into(), false)));
-    let e = host_error(Kio::new(Limits::default()).unwrap().run(&src, vec![]));
-    assert!(e.starts_with("wrapping the module as a component"), "{e}");
+    let (msg, ..) = both(&src).unwrap_err();
+    assert_eq!(msg, "`g` takes 1001 parameters; at most 999");
+
+    let calls: String = (0..17_000).map(|i| format!("    s += g({i}, 2, 3);\n")).collect();
+    let src = format!("fn g(a: Int, b: Int, c: Int) -> Int {{ a + b - c }}\nfn main() -> Int {{\n    let mut s = 0;\n{calls}    s\n}}");
+    assert_eq!(both(&src), Ok(("144474500".into(), false)));
 }
 
 /// A `!`-typed index expression in a place write (`xs[{ return 7; }][0] = v`): the interpreter
@@ -204,5 +209,73 @@ fn a_never_typed_index_in_a_place_write() {
     ];
     for src in cases {
         assert_eq!(both(src), Ok(("7".into(), false)), "{src}");
+    }
+}
+
+/// `--memory` below the module's initial memory (18 pages: the runtime's data and stack) was
+/// Wasmtime's "memory minimum size of 18 pages exceeds memory limits", and a server's was the
+/// pool's "module memory does not fit in pooling allocator requirements"; now both are out of
+/// memory, naming what the program starts with (C7a).
+#[test]
+fn memory_below_the_initial_memory_is_out_of_memory() {
+    let limits = Limits {
+        memory: 1 << 20,
+        ..Limits::default()
+    };
+    let want = "out of memory: the program starts with 2 MB (limit 1 MB; raise it with --memory)";
+    let mut c = Kio::new(limits).unwrap();
+    let e = c.run("fn main() -> Int { 1 }", vec![]).unwrap_err();
+    assert_eq!(c.explain(&e).as_deref(), Some(want), "{e:#}");
+
+    let src =
+        r#"fn main(req: Incoming, res: Outgoing) -> Result<(), WebErr> { res.send(200, [], [], "hi".to_bytes()) }"#;
+    let e = kio_host::Server::new(vec![("main".into(), src.into())], limits)
+        .err()
+        .expect("refused");
+    assert_eq!(format!("{e:#}"), want);
+}
+
+/// C7a (4): the C7 equality bug's class, a 64-bit slot read through a 32-bit `usize`, is
+/// invisible to the runtime's native unit tests. Every runtime operation that takes, returns,
+/// stores, orders or displays a slot, here with `Int`s that agree in their low 32 bits
+/// (4294967297, 1, -4294967295) and `Float`s whose low 32 bits are all 0 (1.5, 2.5), compiled
+/// against the interpreter.
+#[test]
+fn every_slot_keeps_its_high_bits() {
+    let decls = "struct P { a: Int, f: Float }
+enum E { A(Int, Float) }
+struct L { xs: List<Int>, p: Option<Int> }
+struct F { fs: List<Float>, p: Option<Float>, x: Float }
+struct M { a: Option<Int>, b: Option<Int>, keys: List<Int>, m: Map<Int, Int> }
+struct N { a: Option<Float>, b: Option<Float>, m: Map<Int, Float> }
+struct O { a: Int, b: Result<Float, Int>, c: Result<Int, Float>, d: Float, e: Option<Int>, f: Option<Float> }
+struct S { p: P, e: E, n: Int, f: Float }
+struct T { a: List<Int>, b: Bool, c: Bool, s: Float, t: Int }";
+    let cases = [
+        // `rt_eq` through each container, and `contains`.
+        "List<Bool> { [[4294967297] == [1], [1.5] == [2.5], [4294967297].contains(1), [2.5].contains(1.5)] }",
+        "List<Bool> { [Some(4294967297) == Some(1), Some(Some(2.5)) == Some(Some(1.5)), P { a: 1, f: 1.5 } == P { a: 4294967297, f: 1.5 }] }",
+        "List<Bool> { let r: Result<Int, Float> = Err(1.5); let s: Result<Int, Float> = Err(2.5); [r == s, E::A(1, 1.5) == E::A(-4294967295, 1.5)] }",
+        // A list: push, get, set, `+=`, pop, sort, display.
+        "L { let mut xs = [4294967297, 1]; xs.push(-4294967295); xs[1] = xs[0] + 1; xs[2] += 4294967296; let p = xs.pop(); xs.sort(); L { xs: xs, p: p } }",
+        "List<Int> { let mut xs = [-4294967295, 4294967297, 1, 8589934593]; xs.sort(); xs }",
+        "F { let mut fs = [1.5]; fs.push(2.5); fs[0] = fs[1] + 1.0; let p = fs.pop(); F { x: fs[0], fs: fs, p: p } }",
+        // A map: insert, get, remove, keys, equality, display.
+        "M { let mut m: Map<Int, Int> = Map::new(); m.insert(4294967297, 1); m.insert(1, 4294967297); m.insert(-4294967295, 2); M { a: m.get(1), b: m.get(4294967297), keys: m.keys(), m: m } }",
+        "N { let mut m: Map<Int, Float> = Map::new(); m.insert(4294967297, 1.5); m.insert(1, 2.5); m.remove(4294967297); N { a: m.get(1), b: m.get(4294967297), m: m } }",
+        "Bool { let mut m: Map<Int, Int> = Map::new(); m.insert(1, 0); let mut n: Map<Int, Int> = Map::new(); n.insert(4294967297, 0); m == n }",
+        // `Option` and `Result` built-ins.
+        "O { let o: Option<Int> = None; let r: Result<Float, Int> = Err(4294967297); let s: Result<Int, Float> = Ok(-4294967295); O { a: o.unwrap_or(4294967297), b: Some(2.5).ok_or(4294967297), c: o.ok_or(1.5), d: r.unwrap_or(2.5), e: r.err(), f: Some(1.5).map(|f| f + 1.0).and_then(|f| r.ok().map(|g| g + f)) } }",
+        "List<Option<Int>> { let r: Result<Int, Str> = Ok(-4294967295); [r.ok(), Some(r.unwrap_or(1)), Some(4294967297).and_then(|x| Some(x + 1))] }",
+        // Fields, payloads, `match`, closures over slots, `for`.
+        "S { let p = P { a: 4294967297, f: 2.5 }; let e = E::A(-4294967295, 1.5); let n = match e { E::A(x, _) => x }; S { n: n, f: p.f, p: p, e: e } }",
+        "List<Int> { let k = 4294967296; let f = |x: Int| x + k; [1, 4294967297].map(f) }",
+        "T { let xs = [4294967297, 1, -4294967295]; let mut s = 0.0; for f in [1.5, 2.5] { s = s + f; } let mut t = 0; for x in xs { t = t + x; } T { a: xs.filter(|x| x == 1), b: xs.any(|x| x == 4294967297), c: xs.all(|x| x != 1), s: s, t: t } }",
+    ];
+    for case in cases {
+        let (ret, body) = case.split_once(' ').unwrap();
+        let src = format!("{decls}\nfn main() -> {ret} {body}");
+        let r = both(&src);
+        assert!(r.is_ok(), "{src}: {r:?}");
     }
 }

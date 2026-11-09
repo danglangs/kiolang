@@ -39,8 +39,9 @@ pub struct Statics<'m> {
     strs: HashMap<String, u32>,
     /// The address of the pinned object of each (descriptor, payload-free variant) used.
     pins: HashMap<(u32, u32), u32>,
-    /// The descriptor of each type that has one beyond the scalars.
-    tys: Vec<(Ty, u32)>,
+    /// The descriptor of each type that has one beyond the scalars, by the type's `Debug` text
+    /// (`ir::Ty` has no `Hash`; its `Debug` is structural, so equal types have equal text).
+    tys: HashMap<String, u32>,
     descs: Vec<[u32; 5]>,
     slots: Vec<u32>,
     fields: Vec<[u32; 2]>,
@@ -67,7 +68,7 @@ impl<'m> Statics<'m> {
             literals: Vec::new(),
             strs: HashMap::new(),
             pins: HashMap::new(),
-            tys: Vec::new(),
+            tys: HashMap::new(),
             descs: (0..SCALARS).map(|tag| [tag, 0, 0, 0, 0]).collect(),
             slots: Vec::new(),
             fields: Vec::new(),
@@ -101,13 +102,14 @@ impl<'m> Statics<'m> {
             Ty::Cap(_) | Ty::Never => unreachable!("{t:?} has no descriptor"),
             _ => {}
         }
-        if let Some((_, i)) = self.tys.iter().find(|(u, _)| u == t) {
-            return *i;
+        let key = format!("{t:?}");
+        if let Some(&i) = self.tys.get(&key) {
+            return i;
         }
         // Reserved first, so a recursive type's parts can refer to it; filled after them.
         let i = self.descs.len() as u32;
         self.descs.push([0; 5]);
-        self.tys.push((t.clone(), i));
+        self.tys.insert(key, i);
         let m = self.m;
         self.descs[i as usize] = match t {
             Ty::List(e) => [LIST, self.desc(e), 0, 0, 0],

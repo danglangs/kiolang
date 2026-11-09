@@ -77,6 +77,7 @@ struct Program {
 fn compile(
     engine: &Engine,
     files: &[(String, String)],
+    limits: &Limits,
     cache: Option<&PathBuf>,
     edit: impl FnOnce(&mut lang::ir::Module),
 ) -> Result<std::result::Result<Program, Vec<Diag>>> {
@@ -90,6 +91,16 @@ fn compile(
     let mut module = lang::lower::lower(&program, &caps);
     edit(&mut module);
     let wasm = generate(&module)?;
+    // Wasmtime's own refusal names pages ("memory minimum size of 18 pages exceeds memory
+    // limits"), or the pool's requirements for a server.
+    if wasm.memory > limits.memory {
+        let msg = format!(
+            "out of memory: the program starts with {} MB (limit {} MB; raise it with --memory)",
+            wasm.memory.div_ceil(1 << 20),
+            limits.memory >> 20
+        );
+        return Err(wasmtime::Error::msg(Stopped(msg)));
+    }
     let component = match cache {
         Some(dir) => crate::cache::component(engine, &wasm.component, dir)?,
         None => Component::new(engine, &wasm.component)?,
@@ -430,7 +441,7 @@ impl Kio {
         edit: impl FnOnce(&mut lang::ir::Module),
     ) -> Result<RunResult> {
         // Compiled before the store exists, so compiling is not charged to the run.
-        let checked = compile(&self.engine, files, self.cache.as_ref(), edit)?;
+        let checked = compile(&self.engine, files, &self.limits, self.cache.as_ref(), edit)?;
         let mut store = new_store(&self.engine, &self.limits)?;
         #[cfg(feature = "test-hooks")]
         {
@@ -507,7 +518,7 @@ impl Server {
         // server idles (W13d): 28 MB idle RSS against 48 MB, for startup in about 160 ms, not 30.
         config.parallel_compilation(false);
         let engine = Engine::new(&config)?;
-        let program = match compile(&engine, &files, None, |_| {})? {
+        let program = match compile(&engine, &files, &limits, None, |_| {})? {
             Ok(p) => p,
             Err(diags) => return Ok(Err(diags)),
         };

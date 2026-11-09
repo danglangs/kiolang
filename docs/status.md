@@ -24,10 +24,11 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 | C9a | `fn` values and closures compiled: harness 300 ran both ways, 0 unsupported, 0 mismatches (left: capabilities, C4); a call through a value costs ~10 ns over a direct call (10 M: 144 ms vs 44 ms, incl. compiling) |
 | C5 | compiled only: `kio run` and `--listen` compile; the guest crate, its world, wizer and WASI are gone; the interpreter is the native test oracle (`Interp`). On-disk compile cache; fuel defaults a tenth. `Server::handle` 170 to 32 µs, `--listen` startup 0.95 to 0.17 s, idle RSS 66 to 28 MB. Programs with `fn` values fail "not compiled yet" until C9a/C9b |
 | C9b | L6c's built-ins taking functions compiled inline: harness 351 ran both ways, 0 unsupported, 0 mismatches, 0 leaked; kiogen generates them; 1 M `map` then `filter` 51 ms compiled vs 233 ms interpreted (a hand-written `for` 39 ms) |
+| C7a | C7 review follow-ups: hidden locals reused (17,000 calls in one function compile), more than 999 parameters a checker error, `--memory` below the initial memory reported as out of memory, a high-bits differential test over runtime slots, `Statics::desc` hashed (4,000 structs 263 to 226 ms) |
 
 ## Next
 
-1. C7a follow-ups; C8 (measure against Rust and Python, then refcount elision).
+1. C8 (measure against Rust and Python, then refcount elision).
 2. L7 generics (owner-approved), interpreter first, then its compiler task.
 
 ## Waiting on the maintainer
