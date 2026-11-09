@@ -942,6 +942,23 @@ fn l12_rust_forms_teach() {
     }
 }
 
+/// fuzz_front found `for (` with no `)` before the end stepping past the last token (a panic).
+#[test]
+fn for_tuple_at_the_end_of_input() {
+    rejected_with(
+        "fn f() { for (k, v",
+        "(k, v",
+        "kio has no tuples",
+        Some("loop over `m.keys()` and `get`"),
+    );
+    rejected_with(
+        "fn f() { for (k, v v m {  { } }",
+        "(k, v v m {  { } }",
+        "kio has no tuples",
+        Some("loop over `m.keys()` and `get`"),
+    );
+}
+
 #[test]
 fn l15_struct_update_parses() {
     let e = |src: &str| match &parse(&format!("fn f() {{ {src}; }}")).unwrap()[0] {

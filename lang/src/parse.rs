@@ -193,7 +193,9 @@ impl Parser {
     }
 
     fn prev_end(&self) -> usize {
-        self.toks[self.pos - 1].span.end
+        // Clamped: a recovery that stepped past the last token must still give a span, not panic.
+        let last = self.pos.min(self.toks.len()).saturating_sub(1);
+        self.toks.get(last).map_or(0, |t| t.span.end)
     }
 
     /// Spans from `start` to the end of the last consumed token.
@@ -583,7 +585,8 @@ impl Parser {
             while !self.at(")") && self.peek().is_some() {
                 self.pos += 1;
             }
-            self.pos += 1;
+            // Past the `)` if there is one: at the end of the input there is nothing to step over.
+            self.eat(")");
             let hint = "loop over `m.keys()` and `get`";
             return Err(err(self.since(start), "kio has no tuples", Some(hint)));
         }
