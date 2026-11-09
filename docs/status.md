@@ -4,7 +4,7 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 
 ## Now
 
-Compiled-only kio covers the whole language and every capability; the active stream is speed (C8): code that stays in compiled Wasm is 1.1-2.1x Rust, runtime-heavy code 2.3-8x (table below). The differential harness runs 440 programs both ways (0 mismatches) and the generator 250 more per CI run.
+Compiled-only kio covers the whole language and every capability; the active stream is speed (C8): code that stays in compiled Wasm is 1.1-2.3x Rust, runtime-heavy code 1.5-8x (closures 2.3x, tree 3.0x, word count 4.3x, built-in JSON 1.5x, JSON in kio 8.3x; table below). The differential harness runs 440 programs both ways (0 mismatches) and the generator 250 more per CI run.
 
 | Done | Result |
 |---|---|
@@ -15,7 +15,7 @@ Compiled-only kio covers the whole language and every capability; the active str
 | D1, K1 | `Dir` `list`/`write`/`remove`/`exists`; `Kv` (`--kv name=:memory:` or a file). Both adversarially reviewed, fixes merged |
 | WS1 | WebSockets under `--listen`, a fresh sandbox per event; 7,800 echo events/s on one connection. Adversarially reviewed, fixes in (Origin check and `--ws-origin`; `close` always follows `open`) |
 | WS1b | `WsMessage.target()` and `header(name)`: every event of a connection sees its upgrade request (caps.wit, owner-approved); kio-web `examples/ws/` routes by path and checks a token |
-| kio-web | `api.kio`; notes on Dir and on Kv, 22 checks each |
+| kio-web | `api.kio`; notes on Dir and on Kv, 22 checks each; a generic `Route<A>` router (`dispatch`); a WebSocket example routed by path with bearer-token auth; json.kio removed for the built-in `Json` |
 | C10, C11 | `Float` and `slice` compiled; harness 267 ran both ways, 0 mismatches (left: `fn` values, C9, and capabilities, C4); kiogen generates floats; float loops compiled run at Rust's speed past ~20 ms of compiling (10 M multiply-adds 39 ms vs 1.49 s interpreted, Rust 20 ms) |
 | C4 | capabilities in compiled code: every caps.wit method, host-checked grants shared with the interpreter path, same host functions, quotas, report check and audit log. Harness 252 to 278 ran both ways (26 capability programs, compared with their audit logs); a forged handle is refused by the handle table |
 | L6a | `fn(T) -> R` types and function items as values, called as `f(x)` or `(e)(x)`; no capability inside a `fn` type; compiled in C9a |
@@ -35,24 +35,24 @@ Compiled-only kio covers the whole language and every capability; the active str
 | C8b2 | last-use moves and borrowed local operands (no inc/dec), word-at-a-time `Str` compare, one descriptor lookup per free, inline `Bytes` paths; kiogen generates strings. Tree 284 to 244 ms, JSON 143 to 101; word count unchanged (83 ms) |
 | C8b3 | size-class free lists (8-64 bytes) over dlmalloc, handed back past 256 KB or when memory runs out. Tree 243 to 179 ms, JSON 100 to 82, word count 83 to 75, strings 7.9 to 5.2 |
 | C8b4 | borrowed parameters (a pointer parameter only read in place is passed without an inc; optimistic fixpoint, `fn`-value wrappers adapt) and `Str` map lookups without a key copy. Word count 74 to 70 ms, JSON 83 to 80, tree 179 to 185 (same count, code moved) |
-| L9, C12 | built-in JSON: a reserved `Json` enum, `Str.parse_json() -> Result<Json, Str>`, `Json.to_json()`, accessors (`get`, `at`, `as_*`), json.kio's rules and messages, depth 128; the interpreter (lang/src/json.rs) and the runtime (runtime/src/json.rs, building kio objects directly) agree on the harness, a generated-JSON fuzz test and byte mutations. 1 MB parse + encode 17 ms compiled (`serde_json` 7.8 ms, json.kio 82 ms). kio-web still declares its own `Json` and is refused until it moves to the built-in |
+| L9, C12 | built-in JSON: a reserved `Json` enum, `Str.parse_json() -> Result<Json, Str>`, `Json.to_json()`, accessors (`get`, `at`, `as_*`), json.kio's rules and messages, depth 128; the interpreter (lang/src/json.rs) and the runtime (runtime/src/json.rs, building kio objects directly) agree on the harness, a generated-JSON fuzz test and byte mutations. 1 MB parse + encode 17 ms compiled (`serde_json` 7.8 ms, json.kio 82 ms). kio-web has moved to the built-in |
 | C8b5 | less work per operation (fuel stays): generated code pops the size-class free lists, fresh blocks carved 32 at a time from 64 KB chunks, freeing without descriptor copies, `Str` map keys compared by an 8-byte prefix. Tree 185 to 98 ms (fuel 3.78 to 2.21 G), word count 70 to 45, JSON 81 to 66 |
 | L10, C13 | `HashMap<K, V>` (owner-approved): `Map`'s keys and methods, insertion-ordered iteration, order-insensitive `==`, a fixed hash with buckets sorted past 8 entries (100,000 colliding keys in under a second either way; with chains only, out of fuel). One table source (lang/src/hmap.rs) for the interpreter and the runtime; codegen reuses `Map`'s calls. Word count 45 ms on `Map`, 32 on `HashMap` (Rust 5.7); kiogen generates maps; harness 440 ran both ways, 0 mismatches |
 | C8b6 | word count and JSON (fuel stays): one `Map` search for `insert(k, get(k)..)` (the object remembers the entry `get` found), `split` at a one-byte separator sized once, words freed in place, size classes up to 512 bytes. Word count 45.7 to 29.3 ms (fuel 0.68 to 0.43 G), on `HashMap` 31.8 to 25.0, built-in JSON 15.3 to 12.8; tree 97 to 101 (same fuel, #117) |
 
 ## Next
 
-C8 (roadmap.md): freeing (54% of tree); tree's 4-5% from the larger size classes (#117); `HashMap`'s double search for `insert(k, get(k) + 1)` (needs `get_key_value` in hmap.rs, #116); borrowed match bindings of a borrowed scrutinee (tree).
+C8 (roadmap.md): freeing (54% of tree); tree's 4-5% from the larger size classes (#117); `HashMap`'s double search for `insert(k, get(k) + 1)` (needs `get_key_value` in hmap.rs, #116); borrowed match bindings of a borrowed scrutinee (tree). Then a target app (roadmap.md): an HTTP client beyond GET and an SQL capability come first.
 
 ## Waiting on the maintainer
 
-Nothing.
+Nothing blocks work. One open owner question: constants (open_questions #34).
 
-## Speed (C8b5, 2026-11-09, release, run time; all in [roadmap.md](roadmap.md))
+## Speed (C8b5 with C8b6 marked, 2026-11-09, release, run time; all in [roadmap.md](roadmap.md))
 
 | | fib(35) | 30 M loop | tree | JSON 1 MB | 100 k concatenations |
 |---|---|---|---|---|---|
 | Rust | 23 ms | 97 ms | 33 ms | 8.0 ms | 4.6 ms |
-| kio compiled (plus 20-25 ms compile, cached) | 53-57 ms | 106 ms | 98 ms (C8b6: 101) | 66 ms (built-in JSON, C8b6: 13 ms) | 5.2 ms (C8b6: 4.8) |
+| kio compiled (plus 20-25 ms compile, cached) | 53-57 ms | 106 ms | 98 ms (C8b6: 101) | 66 ms (json.kio); built-in JSON 13 ms (C8b6) | 5.2 ms (C8b6: 4.8) |
 | Python 3.13 | 704 ms | 933 ms | 2.87 s | 17 ms | 7.2 ms |
 | kio interpreter (the test oracle) | 1.54 s | 1.27 s | 1.03 s | 812 ms | 1.57 s |

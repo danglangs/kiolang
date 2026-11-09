@@ -7,7 +7,7 @@ KIO_WEB=path/to/kio-web bench/run.sh      # builds, writes inputs, prints the ta
 RUNS=1 ONLY=fib,tree NO_INTERP=1 bench/run.sh   # a quick subset
 ```
 
-Needs Rust, Python 3, `ab` (ApacheBench, on macOS by default) and a kio-web checkout (default `../kio-web` beside this repo) for `json.kio` and the HTTP example.
+Needs Rust, Python 3, `ab` (ApacheBench, on macOS by default) and a kio-web checkout (default `../kio-web` beside this repo) for the HTTP example, and for `json.kio` (the JSON-in-kio row), which kio-web removed after L9: `bench/run.sh` needs a pre-removal copy.
 
 | Path | What |
 |---|---|

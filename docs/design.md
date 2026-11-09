@@ -30,7 +30,7 @@ Each layer holds without the one above it. The host enforces every guarantee eve
 | `.kio` source | No | Business logic. Capabilities are opaque values that can be passed and called, never created. |
 | Checker | Yes | Accepts or rejects the program against the capability table and emits the authority report. Runs in the host (decided 2026-11-06), once per run or once per server. |
 | Lowering and codegen | Yes | Turn the checked program into an IR, then Wasm, linked with the runtime. A bug can give a wrong answer, not an escape: the sandbox and the host still enforce every grant. |
-| Runtime | No more than the program | Refcounted values, strings and collections, in the same module as the program. |
+| Runtime | No more than the program | Refcounted values, strings, collections, `Json` and `HashMap` (one table source, lang/src/hmap.rs, shared with the interpreter), in the same module as the program. Small blocks come from size-class free lists over dlmalloc ([codegen.md](codegen.md) "How it is built" 18, 20). |
 | Interpreter | Not shipped | Runs the IR natively in tests only: the reference compiled code must match (differential tests). |
 | `caps.wit` | Yes | Declares every function that crosses the sandbox wall. Changing it is a security-review event. |
 | Wasmtime | Yes | In-process sandbox. No ambient file, network, env or clock. Fuel, memory, stack and epoch limits. |
@@ -90,7 +90,7 @@ kio run prog.kio --dir input=/srv/jobs/42/in --dir out=/srv/jobs/42/out
 
 **Kv.** `--kv name=:memory:` or a file: one store per grant, shared by every request; mutations go to an append-only log the host owns and locks, compacted when it grows ([open_questions](open_questions.md) #41-46).
 
-**Serving.** `--listen` binds `Incoming`/`Outgoing` (HTTP) or `WsMessage`/`WsSend` (WebSockets) to `main`'s parameters by type, whatever their names. On a loopback bind a request's `Host` must be `localhost`, `127.0.0.1`, `[::1]` or a `--host` name (DNS rebinding); a WebSocket upgrade from a browser needs a same-host `Origin` or `--ws-origin`.
+**Serving.** `--listen` binds `Incoming`/`Outgoing` (HTTP) or `WsMessage`/`WsSend` (WebSockets) to `main`'s parameters by type, whatever their names. On a loopback bind a request's `Host` must be `localhost`, `127.0.0.1`, `[::1]` or a `--host` name (DNS rebinding); a WebSocket upgrade from a browser needs a same-host `Origin` or `--ws-origin`. The upgrade request's target and headers are kept for the connection's life and read by every event through `WsMessage.target`/`header` (WS1b).
 
 **Limits.** Wasmtime fuel bounds instructions. Epoch interruption bounds wall-clock, because fuel does not tick while a host call waits on a slow server. Each host call also has its own timeout and the run has a host-call count and total I/O byte budget.
 

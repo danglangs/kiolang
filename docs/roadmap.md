@@ -54,7 +54,7 @@ Rust and Python are idiomatic: Rust's string building appends in place (`push_st
 | 2 | Done (C8b1): no zero-fill of `Str`/`Bytes` data | up to 2x on concatenation now, ~5% after #1 | strings, json; `__bzero` gone from the profile |
 | 3 | Done (C8b1): `rt_inc`/`rt_dec`/`rt_unique` fast paths and list `len`/`get`/`push` inline; closures 36 to 13 ms, list 52 to 28, tree 438 to 284 | 1.5-2x on closures, list, tree; removes most of the fuel/epoch share | closures, list, tree rows; calls per run (profile) |
 | 4 | Done (C8b2, C8b4): last-use moves and borrowed local operands; C8b4 borrowed parameters (JSON 83 to 80, tree unchanged). With inline `Bytes` paths and one descriptor lookup per free, tree 284 to 244 ms, JSON 143 to 101 | 1.3-2x on JSON parse, tree | json, tree rows; `rt_inc`/`rt_dec` share of the profile |
-| 5 | Done in part (C8b3): a free list per size class (8-64 bytes) over dlmalloc; tree 243 to 179 ms, JSON 100 to 82, word count 83 to 75, strings 7.9 to 5.2. C8b5: fresh blocks carved from 64 KB chunks, 32 at a time, and popped inline by generated code; tree 185 to 98 ms. Not done: a list's buffer inline in its object; freeing (54% of tree) is the next cost | 1.5x on tree, word count | tree, word count; `malloc`/`free` share |
+| 5 | Done in part (C8b3): a free list per size class (8-64 bytes) over dlmalloc; tree 243 to 179 ms, JSON 100 to 82, word count 83 to 75, strings 7.9 to 5.2. C8b5: fresh blocks carved from 64 KB chunks, 32 at a time, and popped inline by generated code; tree 185 to 98 ms. C8b6: classes up to 512 bytes (JSON fuel -9%; tree 4-5% slower, #117). Not done: a list's buffer inline in its object; freeing (54% of tree) is the next cost | 1.5x on tree, word count | tree, word count; `malloc`/`free` share |
 | 6 | Done (C8b2): word-at-a-time `Str` `==` and order; word count unchanged (85 to 83 ms): its words differ in the first byte, and the time is `BTreeMap`'s linear search within nodes, a key copy per lookup (gone in C8b4: 74 to 70 ms), `split`'s allocations. C8b5: a `Str` key's first 8 bytes compared as one number, the compare inlined into the search: 70 to 45 ms. C8b6: `insert(k, get(k)..)` searches once on `Map` (#116), `split` cheaper: 45 to 29 ms. Left: the search itself (39%), `HashMap` still searches twice | word count 1.3-2x | word count row; `memcmp` share |
 | 7 | Cheaper work limit: Wasmtime fuel off, codegen counting at loop heads and calls of the program only (an owner decision: it changes what `--fuel` counts). Declined 2026-11-09 (#98): fuel stays, and C8b5 cut the operations it counts (tree 3.78 to 2.21 G); fuel and epochs still cost 26-36% of runtime-heavy runs | 10-25% on runtime-heavy code, after #3 less | a scratch no-fuel build is the bound (bench/README.md) |
 
@@ -77,19 +77,20 @@ Most-used Rust crates, and kio's answer to each:
 
 | Need | Rust | kio today | Gap |
 |---|---|---|---|
-| HTTP server | axum, hyper, tokio | `--listen` plus kio-web | Done for buffered request/response, and WebSockets with a fresh sandbox per message (WS1). No streaming or HTTP/2; a WebSocket program cannot see the upgrade's headers. |
+| HTTP server | axum, hyper, tokio | `--listen` plus kio-web | Done for buffered request/response, and WebSockets with a fresh sandbox per message (WS1). WebSocket programs see the upgrade's path and headers (WS1b). No streaming or HTTP/2. |
 | HTTP client | reqwest | `Http.get` | GET only: POST, headers and JSON bodies need `caps.wit` methods. |
 | Async | tokio | none: a sandbox per request | Fine per request. Concurrent upstream calls inside one handler need host-side async (web decision 4). |
-| Serialization | serde, serde_json | built-in `Json` (L9, C12), an untyped tree, 2.2x `serde_json` | Typed decode into structs needs a derive or traits; generics alone do not give it. |
+| Serialization | serde, serde_json | built-in `Json` (L9, C12), an untyped tree: `parse_json`, `to_json`, accessors; 1.5x `serde_json`, 1.4x faster than Python's `json` | Typed decode into structs needs a derive or traits; generics alone do not give it. |
 | Database | sqlx, diesel, redis | `Kv` (K1): get/set/delete/keys/swap, in memory or an append-only file the host owns | No SQL. A `Sql` capability (`caps.wit`, owner decision): the host holds the connection pool, the program gets a capability scoped to one database. |
 | Time, randomness, UUIDs | chrono, rand, uuid | none, by design (deterministic) | A `Clock` and `Rng` capability: granted explicitly, logged, and replayable. |
 | Crypto, hashing | ring, sha2, jsonwebtoken | none | Pure functions, so built-ins in `lang` (no capability needed), or host functions for speed. |
+| Collections | `HashMap`, `BTreeMap`, tuples | `List`, `Map` (key order), `HashMap` (insertion order, L10, C13), `Int` or `Str` keys | No sets, tuples, `contains_key` or `for` over a map (open_questions #114). |
 | Errors | anyhow, thiserror | `Result`, `?`, enums | No conversion between error types (`From`). |
 | Logging, metrics | tracing | the audit log covers host calls | A `Log` capability for application logs. |
 | Regex, text | regex | `split`, `lines`, `trim`, `find`, `replace`, `strip_prefix`, `contains`, `starts_with`, `slice` | No regex. |
 | CLI parsing | clap | none | Needs an `Args` capability; the operator grants argv. |
 | Floats | f64 | `Float` (f64, compiled at Rust's speed) | |
-| Abstraction | traits, generics, closures | function values (`fn(T) -> R`, L6a), closures (L6b) and built-ins taking them (`map`, `filter`, `any`, `all`, `and_then`, `map_err`; L6c), compiled (C9); generic functions (L7a) and generic structs and enums (L7b, L7d), monomorphized, with bounds `T: Eq`/`T: Ord` (L7c) | Bounds `T: Eq`/`Ord` (L7c) wait on the `<`-on-`Str` decision; no traits. |
+| Abstraction | traits, generics, closures | function values (`fn(T) -> R`, L6a), closures (L6b) and built-ins taking them (`map`, `filter`, `any`, `all`, `and_then`, `map_err`; L6c), compiled (C9); generic functions (L7a) and generic structs and enums (L7b, L7d), monomorphized, with bounds `T: Eq`/`T: Ord` (L7c) | No traits: a bound is `Eq` or `Ord` only, `Ord` for `Int` and `Str`. |
 | Packages | cargo, crates.io | copy one file | A package manager, once there are a few libraries. |
 
 Non-starters today, in order of what blocks a real backend first: an SQL capability and an HTTP client beyond GET.

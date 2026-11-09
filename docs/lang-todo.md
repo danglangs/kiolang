@@ -13,7 +13,7 @@ Build the `lang` crate: parser, checker, authority report and interpreter for th
 
 ## Layout
 
-As of task 3; later tasks added `ir.rs` and `lower.rs` (P3) and `tests/`.
+As of task 3; later tasks added `ir.rs` and `lower.rs` (P3), `json.rs` (L9), `hmap.rs` (L10, shared with the runtime) and `tests/`.
 
 ```
 Cargo.toml          workspace, members = ["lang"]
