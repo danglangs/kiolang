@@ -153,10 +153,7 @@ fn unique_copies_only_when_shared() {
         let copy = obj::unique(&T, list);
         assert_ne!(copy, list);
         assert_eq!((rc(list), rc(copy)), (1, 1));
-        let elems: Vec<_> = (*obj::field::<obj::List>(copy, 8))
-            .iter()
-            .map(|&v| from_slot(v))
-            .collect();
+        let elems: Vec<_> = obj::elems(copy).iter().map(|&v| from_slot(v)).collect();
         assert_eq!(elems, [a, b], "elements shared, not copied");
         assert_eq!((rc(a), rc(b)), (2, 2));
 

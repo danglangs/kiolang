@@ -317,7 +317,7 @@ extern "C" {
 unsafe fn string_list(l: u32) -> Vec<[u32; 2]> {
     // SAFETY: the caller's guarantee; each element is a live `Str`.
     unsafe {
-        let list = &*obj::field::<obj::List>(ptr(l), 8);
+        let list = obj::elems(ptr(l));
         list.iter()
             .map(|&s| {
                 let b = obj::bytes(obj::from_slot(s));

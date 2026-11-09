@@ -413,6 +413,46 @@ fn bytes_push_copies_when_shared() {
     assert_eq!(value(src), "1043");
 }
 
+/// `s = s + x` and `s += x` grow `s` in place only when it holds the only reference (C8b1): a
+/// string shared by another local keeps its value.
+#[test]
+fn append_copies_a_shared_string() {
+    let src = r#"fn main() -> Str { let mut s = ""; for i in 0..10 { s = s + i.to_str(); }
+        let t = s; s = s + "x"; let u = s; s += "y"; t + "|" + u + "|" + s }"#;
+    assert_eq!(value(src), "0123456789|0123456789x|0123456789xy");
+}
+
+/// `s = s + s`: each read of `s` holds its own reference, so the string is copied, never grown
+/// under its own bytes. A part that reassigns `s` leaves the old value to the first read alone.
+#[test]
+fn append_of_itself() {
+    let src = r#"fn main() -> Str { let mut s = 1.to_str(); for i in 0..5 { s = s + s; s += s; s = s + "-" + s; }
+        let mut t = 0.to_str(); t = t + "c" + t + t;
+        let mut u = 7.to_str(); u = u + "x"; u = u + if true { u = "z"; "q" } else { "w" } + u;
+        s.len().to_str() + "|" + s.slice(0, 9) + "|" + t + "|" + u }"#;
+    assert_eq!(value(src), "37449|1111-1111|0c00|7xqz");
+}
+
+/// A literal is pinned: appending to a local holding one copies it, and the literal is unchanged.
+#[test]
+fn append_to_a_literal_copies_it() {
+    let src = r#"fn f() -> Str { let mut s = "lit"; s = s + "x"; s += "y"; s }
+        fn main() -> Str { let a = f(); let b = f(); a + b + "lit" }"#;
+    assert_eq!(value(src), "litxylitxylit");
+}
+
+/// `xs[i] += x` and `p.f += x` append to the element or field, unique after the place's walk;
+/// a list sharing the element keeps its value.
+#[test]
+fn append_to_an_element_or_field() {
+    let src = r#"struct P { s: Str }
+        fn main() -> Str { let mut xs = [1.to_str()]; for i in 0..5 { xs[0] += i.to_str(); }
+        let ys = xs; xs[0] += "!"; let z = xs[0]; xs[0] += "?";
+        let mut p = P { s: "a" }; for i in 0..3 { p.s += i.to_str(); } let q = p; p.s += "!";
+        ys[0] + "|" + z + "|" + xs[0] + "|" + q.s + "|" + p.s }"#;
+    assert_eq!(value(src), "101234|101234!|101234!?|a012|a012!");
+}
+
 // List and Map (C3c). As above, each ownership rule has a test that leaks, frees too early or
 // gives a wrong value without it.
 

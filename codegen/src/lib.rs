@@ -311,6 +311,94 @@ fn slot_out(s: &mut InstructionSink, t: &Ty) {
     }
 }
 
+/// For `x = value`, if `value` is `x + a + b ..` (concatenations nested to the left, ending in
+/// a read of `x`): the read of `x`, then `a`, `b`, .. in evaluation order.
+fn appended(x: ir::LocalId, value: &ir::Expr) -> Option<Vec<&ir::Expr>> {
+    let mut parts = Vec::new();
+    let mut e = value;
+    while let ExprKind::Binary(BinOp::Concat, a, b) = &e.kind {
+        parts.push(&**b);
+        e = a;
+    }
+    if parts.is_empty() || e.kind != ExprKind::Local(x) {
+        return None;
+    }
+    parts.push(e);
+    parts.reverse();
+    Some(parts)
+}
+
+/// A `List` object's `ListBody` (runtime/src/obj.rs): its elements' address, `len` and `cap`.
+const LIST_ELEMS: wasm_encoder::MemArg = wasm_encoder::MemArg {
+    offset: 8,
+    align: 2,
+    memory_index: 0,
+};
+const LIST_LEN: wasm_encoder::MemArg = wasm_encoder::MemArg {
+    offset: 12,
+    align: 2,
+    memory_index: 0,
+};
+const LIST_CAP: wasm_encoder::MemArg = wasm_encoder::MemArg {
+    offset: 16,
+    align: 2,
+    memory_index: 0,
+};
+
+/// An object's reference count, at byte 0.
+const RC: wasm_encoder::MemArg = wasm_encoder::MemArg {
+    offset: 0,
+    align: 2,
+    memory_index: 0,
+};
+/// Counts below this take the inline paths of `inc` and `dec`. Any other count, a pinned
+/// object's (`u32::MAX`), or one a test build's runtime checks (0, poisoned), goes to the
+/// runtime, so the inline paths change only counts the runtime would change the same way.
+const FAST_RC: u32 = 0x8000_0000;
+
+/// `rt_inc` of the pointer in local `p`, inline: `r` is a scratch `i32` local. A count in
+/// `1..FAST_RC` gains one here; a pinned object is skipped; anything else calls the runtime.
+fn inc(s: &mut InstructionSink, rt: &Runtime, p: u32, r: u32) {
+    s.local_get(p).if_(BlockType::Empty);
+    s.local_get(p)
+        .i32_load(RC)
+        .local_tee(r)
+        .i32_const(1)
+        .i32_sub()
+        .i32_const((FAST_RC - 1) as i32)
+        .i32_lt_u();
+    s.if_(BlockType::Empty)
+        .local_get(p)
+        .local_get(r)
+        .i32_const(1)
+        .i32_add()
+        .i32_store(RC);
+    s.else_().local_get(r).i32_const(-1).i32_ne().if_(BlockType::Empty);
+    s.local_get(p).call(rt.export("rt_inc")).end().end().end();
+}
+
+/// `rt_dec` of the pointer in local `p`, inline as `inc`: a count in `2..FAST_RC` loses one
+/// here; a pinned object is skipped; the last reference (count 1, which frees) and anything
+/// else call the runtime.
+fn dec(s: &mut InstructionSink, rt: &Runtime, p: u32, r: u32) {
+    s.local_get(p).if_(BlockType::Empty);
+    s.local_get(p)
+        .i32_load(RC)
+        .local_tee(r)
+        .i32_const(2)
+        .i32_sub()
+        .i32_const((FAST_RC - 2) as i32)
+        .i32_lt_u();
+    s.if_(BlockType::Empty)
+        .local_get(p)
+        .local_get(r)
+        .i32_const(1)
+        .i32_sub()
+        .i32_store(RC);
+    s.else_().local_get(r).i32_const(-1).i32_ne().if_(BlockType::Empty);
+    s.local_get(p).call(rt.export("rt_dec")).end().end().end();
+}
+
 fn func<'m>(
     rt: &Runtime,
     m: &'m Module,
@@ -353,6 +441,8 @@ fn func<'m>(
         live: Vec::new(),
         free: Vec::new(),
         scratch: None,
+        rc_scratch: None,
+        list_scratch: None,
         owned,
         depth: 0,
         loops: Vec::new(),
@@ -390,6 +480,10 @@ struct FuncGen<'a, 'm> {
     free: Vec<u32>,
     /// Three `i64` locals an integer check uses, after its operands are on the stack.
     scratch: Option<[u32; 3]>,
+    /// Two `i32` locals for the inline `inc`, `dec` and `unique`: a pointer and its count.
+    rc_scratch: Option<[u32; 2]>,
+    /// Three for the inline list operations: a list (`i32`), a length (`i32`), a slot (`i64`).
+    list_scratch: Option<[u32; 3]>,
     /// The Wasm locals that hold an owned pointer at this point of the code, outermost scope
     /// first: parameters, then each `let` once it has run, and hidden locals holding the
     /// operands evaluated so far. A scope's end releases its part; an exit releases the part
@@ -436,14 +530,136 @@ impl FuncGen<'_, '_> {
 
     /// Calls runtime export `name`.
     fn call_rt(&mut self, name: &str) {
-        let f = self.rt.export(name);
-        self.sink().call(f);
+        match name {
+            "rt_list_len" => self.list_len(),
+            "rt_list_push" => self.list_push(),
+            _ => {
+                let f = self.rt.export(name);
+                self.sink().call(f);
+            }
+        }
+    }
+
+    /// `rt_list_len`, inline: the list on the stack becomes its length (`ListBody`'s `len`).
+    fn list_len(&mut self) {
+        self.sink().i32_load(LIST_LEN).i64_extend_i32_u();
+    }
+
+    /// `rt_list_push` of the unique list and the slot on the stack, inline when the list has
+    /// room: the slot is stored after the last element and `len` grows by one, as `Vec::push`
+    /// does without growing. Otherwise the runtime pushes (and grows the buffer).
+    fn list_push(&mut self) {
+        let [l, n, v] = self.list_scratch();
+        let f = self.rt.export("rt_list_push");
+        let mut s = self.sink();
+        s.local_set(v).local_set(l);
+        s.local_get(l)
+            .i32_load(LIST_LEN)
+            .local_tee(n)
+            .local_get(l)
+            .i32_load(LIST_CAP)
+            .i32_lt_u();
+        s.if_(BlockType::Empty);
+        s.local_get(l)
+            .i32_load(LIST_ELEMS)
+            .local_get(n)
+            .i32_const(3)
+            .i32_shl()
+            .i32_add();
+        s.local_get(v).i64_store(SLOT);
+        s.local_get(l).local_get(n).i32_const(1).i32_add().i32_store(LIST_LEN);
+        s.else_().local_get(l).local_get(v).call(f).end();
+    }
+
+    /// `rt_list_get` of list `l` at index `i` (locals), inline when `i` is in bounds: pushes the
+    /// element as a slot, +1 if `t`, the element type, is a pointer. Out of bounds, the runtime
+    /// reports the error at `site`.
+    fn list_get(&mut self, l: u32, i: u32, site: u32, t: &Ty) {
+        let f = self.rt.export("rt_list_get");
+        let mut s = self.sink();
+        s.local_get(i)
+            .local_get(l)
+            .i32_load(LIST_LEN)
+            .i64_extend_i32_u()
+            .i64_lt_u();
+        s.if_(BlockType::Result(ValType::I64));
+        s.local_get(l)
+            .i32_load(LIST_ELEMS)
+            .local_get(i)
+            .i32_wrap_i64()
+            .i32_const(3)
+            .i32_shl()
+            .i32_add();
+        s.i64_load(SLOT);
+        if is_ptr(t) {
+            let [_, _, v] = self.list_scratch();
+            self.sink().local_tee(v).i32_wrap_i64();
+            self.inc_top();
+            self.sink().local_get(v);
+        }
+        let mut s = self.sink();
+        s.else_().local_get(l).local_get(i).i32_const(site as i32).call(f).end();
+    }
+
+    /// Three locals for the inline list operations: a list (`i32`), a length (`i32`) and a
+    /// slot (`i64`). As `rc_scratch`, they hold no kio code.
+    fn list_scratch(&mut self) -> [u32; 3] {
+        if self.list_scratch.is_none() {
+            let (l, n, v) = (
+                self.new_local(ValType::I32),
+                self.new_local(ValType::I32),
+                self.new_local(ValType::I64),
+            );
+            self.list_scratch = Some([l, n, v]);
+        }
+        self.list_scratch.unwrap()
+    }
+
+    /// The pointer and count locals of the inline reference counting. The code using them
+    /// holds no kio code, so one pair serves the whole function.
+    fn rc_scratch(&mut self) -> [u32; 2] {
+        if self.rc_scratch.is_none() {
+            self.rc_scratch = Some([0; 2].map(|_| self.new_local(ValType::I32)));
+        }
+        self.rc_scratch.unwrap()
     }
 
     /// Drops the reference in local `l`.
     fn dec(&mut self, l: u32) {
-        self.sink().local_get(l);
-        self.call_rt("rt_dec");
+        let [_, r] = self.rc_scratch();
+        let rt = self.rt;
+        dec(&mut self.sink(), rt, l, r);
+    }
+
+    /// Adds a reference to the object in local `l`.
+    fn inc(&mut self, l: u32) {
+        let [_, r] = self.rc_scratch();
+        let rt = self.rt;
+        inc(&mut self.sink(), rt, l, r);
+    }
+
+    /// `rt_inc` of the pointer on the stack, which it pops.
+    fn inc_top(&mut self) {
+        let [p, _] = self.rc_scratch();
+        self.sink().local_set(p);
+        self.inc(p);
+    }
+
+    /// `rt_dec` of the pointer on the stack, which it pops.
+    fn dec_top(&mut self) {
+        let [p, _] = self.rc_scratch();
+        self.sink().local_set(p);
+        self.dec(p);
+    }
+
+    /// `rt_unique` of the pointer on the stack (not 0), inline when its count is 1.
+    fn unique_top(&mut self) {
+        let [p, _] = self.rc_scratch();
+        let f = self.rt.export("rt_unique");
+        let mut s = self.sink();
+        s.local_tee(p).i32_load(RC).i32_const(1).i32_eq();
+        s.if_(BlockType::Result(ValType::I32)).local_get(p);
+        s.else_().local_get(p).call(f).end();
     }
 
     /// Drops the references in `owned[mark..]`, for an exit that leaves those scopes. Code
@@ -677,22 +893,25 @@ impl FuncGen<'_, '_> {
                     return self.expr(value);
                 };
                 match op {
-                    // The value first, then the old one dropped.
-                    None => {
-                        self.expr(value);
-                        if is_ptr(&value.ty) {
-                            self.dec(l);
+                    None => match appended(place.root, value) {
+                        Some(parts) => self.append(l, parts),
+                        // The value first, then the old one dropped.
+                        None => {
+                            self.expr(value);
+                            if is_ptr(&value.ty) {
+                                self.dec(l);
+                            }
                         }
-                    }
+                    },
                     Some(BinOp::Concat) => {
-                        // `x + value`, borrowing both, as the runtime does; then the old `x`
-                        // and the value are dropped.
+                        // `x + value`: the value first, then `rt_str_append` takes the old `x`
+                        // (growing it in place if `x` held its only reference) and borrows the
+                        // value, which is then dropped.
                         let v = self.temp(ValType::I32);
                         self.expr(value);
                         self.sink().local_set(v).local_get(l).local_get(v);
-                        self.call_rt("rt_concat");
+                        self.call_rt("rt_str_append");
                         self.dec(v);
-                        self.dec(l);
                     }
                     Some(op @ (BinOp::FAdd | BinOp::FSub)) => {
                         let v = self.temp(ValType::F64);
@@ -766,12 +985,33 @@ impl FuncGen<'_, '_> {
             StmtKind::Expr(e) => {
                 self.expr(e);
                 if is_ptr(&e.ty) {
-                    self.call_rt("rt_dec");
+                    self.dec_top();
                 } else if val_type(&e.ty).is_some() {
                     self.sink().drop();
                 }
             }
         }
+    }
+
+    /// `x = x + a + b ..` (`parts` is `[x, a, b, ..]`, the read of `x` first): the parts in
+    /// order as operands, then `x`'s own reference dropped (`x` is reassigned here, and nothing
+    /// runs before the store but runtime calls that return or trap), then `rt_str_append` per
+    /// part, which takes the read's reference: when that is the only one left, the string grows
+    /// in place. A part that reads `x` holds a reference of its own, so the old value is then
+    /// shared and copied, as is a pinned literal; after a part that reassigns `x`, the read
+    /// holds the old value's only reference. Leaves the result to store.
+    fn append(&mut self, l: u32, parts: Vec<&ir::Expr>) {
+        let (mark, temps) = self.operands(&parts);
+        self.dec(l);
+        self.get(parts[0], temps[0]);
+        for (x, t) in parts.iter().zip(&temps).skip(1) {
+            self.get(x, *t);
+            self.call_rt("rt_str_append");
+        }
+        for t in temps.iter().skip(1).flatten() {
+            self.dec(*t);
+        }
+        self.owned.truncate(mark);
     }
 
     fn br_if(&mut self, level: u32) {
@@ -808,8 +1048,7 @@ impl FuncGen<'_, '_> {
         if let Some(x) = x {
             // In bounds: the list cannot change while the loop holds it.
             let site = self.site(span, OUT_OF_BOUNDS);
-            self.sink().local_get(list).local_get(i).i32_const(site as i32);
-            self.call_rt("rt_list_get");
+            self.list_get(list, i, site, ty);
             self.slot_out(ty);
             self.sink().local_set(x);
         }
@@ -863,13 +1102,12 @@ impl FuncGen<'_, '_> {
             (Some(op), Some(v)) => {
                 self.sink().local_get(a).local_get(a).i64_load(SLOT);
                 if op == BinOp::Concat {
-                    // `old + v`, borrowing both; then both are dropped.
-                    let old = self.temp(ValType::I32);
-                    self.sink().i32_wrap_i64().local_tee(old).local_get(v);
-                    self.call_rt("rt_concat");
+                    // `old + v`: `rt_str_append` takes the slot's reference to `old` (growing
+                    // it in place if that was the only one) and borrows `v`, then dropped.
+                    self.sink().i32_wrap_i64().local_get(v);
+                    self.call_rt("rt_str_append");
                     self.sink().i64_extend_i32_u().i64_store(SLOT);
                     self.dec(v);
-                    self.dec(old);
                 } else if matches!(op, BinOp::FAdd | BinOp::FSub) {
                     self.sink().f64_reinterpret_i64().local_get(v);
                     self.float_op(op);
@@ -967,7 +1205,7 @@ impl FuncGen<'_, '_> {
     ) -> (u32, Option<u32>) {
         let root = self.local(place.root).expect("a container local");
         self.sink().local_get(root);
-        self.call_rt("rt_unique");
+        self.unique_top();
         self.sink().local_set(root);
         if n == 0 {
             return (root, None);
@@ -977,7 +1215,7 @@ impl FuncGen<'_, '_> {
         for step in &place.steps[..n] {
             self.step_slot(step, cur, a, temps, sites, k);
             self.sink().local_get(a).local_get(a).i64_load(SLOT).i32_wrap_i64();
-            self.call_rt("rt_unique");
+            self.unique_top();
             self.sink().local_tee(cur).i64_extend_i32_u().i64_store(SLOT);
         }
         (cur, Some(a))
@@ -1057,12 +1295,11 @@ impl FuncGen<'_, '_> {
             ExprKind::Unit => {}
             ExprKind::Local(id) => {
                 if let Some(l) = self.local(*id) {
-                    self.sink().local_get(l);
                     if is_ptr(&e.ty) {
                         // A copy: the local keeps its own reference.
-                        self.call_rt("rt_inc");
-                        self.sink().local_get(l);
+                        self.inc(l);
                     }
+                    self.sink().local_get(l);
                 }
             }
             ExprKind::Unary(UnOp::Not, x) => {
@@ -1235,7 +1472,13 @@ impl FuncGen<'_, '_> {
             ExprKind::Index(base, i) => {
                 // The element is +1, as a slot.
                 let site = self.site(e.span, OUT_OF_BOUNDS);
-                self.rt_op("rt_list_get", &[&**base, &**i], Some(site));
+                self.borrowing(&[&**base, &**i], |g, temps| match temps {
+                    [Some(l), Some(i)] => g.list_get(*l, *i, site, &e.ty),
+                    // An operand of type `!`: the code after it is unreachable.
+                    _ => {
+                        g.sink().unreachable();
+                    }
+                });
                 self.slot_out(&e.ty);
             }
             ExprKind::List(items) => {
@@ -1339,7 +1582,7 @@ impl FuncGen<'_, '_> {
             let Some(x) = self.local(*id) else { continue };
             if is_ptr(&l.ty) {
                 self.sink().local_get(x);
-                self.call_rt("rt_inc");
+                self.inc_top();
             }
             self.sink().local_get(o).local_get(x);
             self.slot_in(&l.ty);
@@ -1418,10 +1661,9 @@ impl FuncGen<'_, '_> {
 
     /// Pushes element `i` of list `r` as a slot, +1. In bounds: nothing changes `r` while a
     /// built-in holds it.
-    fn list_slot(&mut self, r: u32, i: u32, span: Span) {
+    fn list_slot(&mut self, r: u32, i: u32, xs: &Ty, span: Span) {
         let site = self.site(span, OUT_OF_BOUNDS);
-        self.sink().local_get(r).local_get(i).i32_const(site as i32);
-        self.call_rt("rt_list_get");
+        self.list_get(r, i, site, elem(xs));
     }
 
     /// Ends a pass of `list_loop`'s loop and the loop.
@@ -1444,7 +1686,7 @@ impl FuncGen<'_, '_> {
         self.sink().local_set(out);
         let (i, _, top) = self.list_loop(r);
         self.sink().local_get(out).local_get(c);
-        self.list_slot(r, i, span);
+        self.list_slot(r, i, xs, span);
         self.slot_out(elem(xs));
         self.call_through(c, params, ret);
         self.slot_in(ret);
@@ -1463,14 +1705,14 @@ impl FuncGen<'_, '_> {
         self.call_rt("rt_list_new");
         self.sink().local_set(out);
         let (i, _, top) = self.list_loop(r);
-        self.list_slot(r, i, span);
+        self.list_slot(r, i, xs, span);
         self.sink().local_set(x).local_get(c).local_get(x);
         self.slot_out(t);
         self.call_through(c, params, ret);
         self.open(Open::If, BlockType::Empty);
         if is_ptr(t) {
             self.sink().local_get(x).i32_wrap_i64();
-            self.call_rt("rt_inc");
+            self.inc_top();
         }
         self.sink().local_get(out).local_get(x);
         self.call_rt("rt_list_push");
@@ -1485,7 +1727,7 @@ impl FuncGen<'_, '_> {
         self.sink().i32_const(!any as i32).local_set(res);
         let (i, brk, top) = self.list_loop(r);
         self.sink().local_get(c);
-        self.list_slot(r, i, span);
+        self.list_slot(r, i, xs, span);
         self.slot_out(elem(xs));
         self.call_through(c, params, ret);
         self.sink().local_tee(res);
@@ -1539,7 +1781,7 @@ impl FuncGen<'_, '_> {
         if is_ptr(t) {
             let v = self.temp(ValType::I32);
             self.sink().local_tee(v);
-            self.call_rt("rt_inc");
+            self.inc_top();
             self.sink().local_get(v);
         }
     }
@@ -1553,7 +1795,7 @@ impl FuncGen<'_, '_> {
             self.sink().i32_const(none as i32);
         } else if from == to {
             self.sink().local_get(r);
-            self.call_rt("rt_inc");
+            self.inc_top();
             self.sink().local_get(r);
         } else {
             let t = &payload(self.m, from, v as u32)[0];
@@ -1588,7 +1830,7 @@ impl FuncGen<'_, '_> {
         if is_ptr(ty) {
             let v = self.temp(ValType::I32);
             self.sink().local_tee(v);
-            self.call_rt("rt_inc");
+            self.inc_top();
             self.sink().local_get(v);
         }
         if let Some(b) = b {
@@ -1721,7 +1963,7 @@ impl FuncGen<'_, '_> {
                 self.sink().local_set(l);
                 if is_ptr(ty) {
                     self.sink().local_get(l);
-                    self.call_rt("rt_inc");
+                    self.inc_top();
                     self.owned.push(l);
                 }
             }
@@ -1764,12 +2006,12 @@ impl FuncGen<'_, '_> {
             }
             t if t == ret => {
                 self.sink().local_get(s).local_tee(r);
-                self.call_rt("rt_inc");
+                self.inc_top();
             }
             Ty::Result(_, err) => {
                 if is_ptr(err) {
                     self.sink().local_get(s).i64_load(slot_at(ENUM_SLOTS)).i32_wrap_i64();
-                    self.call_rt("rt_inc");
+                    self.inc_top();
                 }
                 let desc = self.statics.desc(ret);
                 self.sink().i32_const(desc as i32).i32_const(1);
@@ -1790,7 +2032,7 @@ impl FuncGen<'_, '_> {
         if is_ptr(ty) {
             let v = self.temp(ValType::I32);
             self.sink().local_tee(v);
-            self.call_rt("rt_inc");
+            self.inc_top();
             self.sink().local_get(v);
         }
         self.owned.pop();
@@ -1981,12 +2223,15 @@ fn wrapper(rt: &Runtime, m: &Module, f: ir::FuncId, captures: usize) -> (FuncSig
     let (caps, params) = func.locals[..func.params as usize].split_at(captures);
     let params: Vec<Ty> = params.iter().map(|l| l.ty.clone()).collect();
     let sig = value_sig(&params, &func.ret);
-    let mut body = Function::new([]);
+    // Two locals after the parameters for the inline `inc`: a pointer and its count.
+    let (p, r) = (sig.0.len() as u32, sig.0.len() as u32 + 1);
+    let mut body = Function::new([(2, ValType::I32)]);
     let mut s = body.instructions();
     for (i, l) in caps.iter().enumerate() {
         let at = slot_at(ENUM_SLOTS + 8 * i as u64);
         if is_ptr(&l.ty) {
-            s.local_get(0).i64_load(at).i32_wrap_i64().call(rt.export("rt_inc"));
+            s.local_get(0).i64_load(at).i32_wrap_i64().local_set(p);
+            inc(&mut s, rt, p, r);
         }
         if val_type(&l.ty).is_some() {
             s.local_get(0).i64_load(at);

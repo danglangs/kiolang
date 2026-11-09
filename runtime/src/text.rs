@@ -84,6 +84,49 @@ pub unsafe fn concat(a: *mut Header, b: *mut Header) -> *mut Header {
     }
 }
 
+/// The capacity to grow to for `needed` bytes from capacity `cap`: at least double, so a run
+/// of appends copies O(final length) bytes in all.
+fn grown(needed: usize, cap: usize) -> usize {
+    // Doubling stops at 1 GiB: twice that would not fit a `Layout` on wasm32.
+    needed.max(cap.saturating_mul(2).min(1 << 30)).max(16)
+}
+
+/// `a + b` on `Str`s for `a = a + b`, taking `a`'s reference and borrowing `b`. If this is
+/// `a`'s only reference, `b` is appended to `a` itself (in its spare capacity, or after moving
+/// it to a buffer at least twice as large); otherwise (shared or pinned) the result is a new
+/// `Str` with room to grow, and `a` is dropped. Returns the result, count 1.
+///
+/// `a` and `b` may be one object: the caller then holds two references, so it is copied, never
+/// grown under `b`.
+///
+/// # Safety
+/// The module's contract.
+pub unsafe fn append(t: &Table, a: *mut Header, b: *mut Header) -> *mut Header {
+    // SAFETY: the caller's guarantee; `a` has `len` and `cap` at 8 and 12 and `cap` bytes of
+    // room. `b` stays live and unchanged until its bytes are copied: only an `a` with count 1,
+    // which is then not `b`, is written or freed before that.
+    unsafe {
+        let add = obj::bytes(b);
+        let len = *obj::field::<u32>(a, 8) as usize;
+        let cap = *obj::field::<u32>(a, 12) as usize;
+        let needed = len.checked_add(add.len()).expect("over 4 GiB");
+        let a = if (*a).rc == 1 && a != b {
+            if needed <= cap {
+                a
+            } else {
+                obj::regrow(a, grown(needed, cap))
+            }
+        } else {
+            let q = obj::new_bytes_cap(desc::STR, obj::bytes(a), grown(needed, len));
+            obj::dec(t, a);
+            q
+        };
+        core::ptr::copy_nonoverlapping(add.as_ptr(), obj::field(a, obj::BYTES_DATA + len), add.len());
+        *obj::field::<u32>(a, 8) = u32::try_from(needed).expect("over 4 GiB");
+        a
+    }
+}
+
 /// `Str.to_bytes()`.
 ///
 /// # Safety

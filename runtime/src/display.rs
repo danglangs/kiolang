@@ -7,7 +7,7 @@
 //! so a deep value costs heap, not stack.
 
 use crate::desc::{self, Desc, Table};
-use crate::obj::{self, field, from_slot, Header, Key, List, Map, HEADER};
+use crate::obj::{self, field, from_slot, Header, Key, Map, HEADER};
 use alloc::vec::Vec;
 use core::fmt::Write;
 
@@ -91,7 +91,7 @@ unsafe fn expand<'a>(t: &Table<'a>, d: u32, v: u64, out: &mut Vec<u8>, work: &mu
             Desc::Bytes => write(format_args!("<{} bytes>", obj::bytes(p).len())),
             Desc::List { elem } => {
                 work.push(Item::Text(b"]"));
-                let items = (*field::<List>(p, HEADER)).iter().map(|&e| (elem, e));
+                let items = obj::elems(p).iter().map(|&e| (elem, e));
                 separated(work, items.rev(), |work, (d, e)| work.push(Item::Val(d, e)));
                 work.push(Item::Text(b"["));
             }

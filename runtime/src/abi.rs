@@ -111,6 +111,14 @@ pub unsafe extern "C" fn rt_concat(a: u32, b: u32) -> u32 {
     unsafe { addr(text::concat(ptr(a), ptr(b))) }
 }
 
+/// `a + b` on `Str` for `a = a + b`: takes `a`'s reference, borrows `b`, and returns the
+/// result, which is `a` itself grown in place if that was its only reference.
+#[no_mangle]
+pub unsafe extern "C" fn rt_str_append(a: u32, b: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unsafe { addr(text::append(&table(), ptr(a), ptr(b))) }
+}
+
 #[no_mangle]
 pub extern "C" fn rt_int_to_str(n: i64) -> u32 {
     addr(text::int_to_str(n))

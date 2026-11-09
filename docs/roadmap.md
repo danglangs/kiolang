@@ -4,24 +4,26 @@ Where kio stands against its goal of a general-purpose systems language with nea
 
 ## Speed today
 
-C8a, 2026-11-09: Apple M3 Max (16 cores, 64 GB), load average 2.5-6, release builds, rustc 1.99.1 `-O`, Python 3.13.2; best of 5, each column's startup subtracted (kio's cached start is 7 ms). Compile time is separate: a program's first `kio run` compiles the runtime and the program (about 20-30 ms), later runs load the cache. Runs pass a huge `--fuel`: `fib` needs 1.1 G and the loop 2.1 G against the default 100 M. Programs, method and rerunning: [bench/](../bench/README.md).
+C8b1, 2026-11-09: Apple M3 Max (16 cores, 64 GB), load average 4-8 (another job running), release builds, rustc 1.99.1 `-O`, Python 3.13.2; best of 5, each column's startup subtracted (kio's cached start is 7 ms). Compile time is separate: a program's first `kio run` compiles the runtime and the program (about 20-30 ms), later runs load the cache. Runs pass a huge `--fuel` (the default is 10 G since C8a). Programs, method and rerunning: [bench/](../bench/README.md). The C8a column is the run before C8b1 (in-place append, no zero-fill, inline refcounts and list access).
 
-| Benchmark | Rust | Python | kio compiled | compile | kio interpreted | compiled vs Rust | vs Python |
-|---|---|---|---|---|---|---|---|
-| `fib(35)`, calls | 23 ms | 712 ms | 54 ms | 20 ms | 1.62 s | 2.3x slower | 13x faster |
-| 30 M-iteration integer loop | 97 ms | 944 ms | 110 ms | 20 ms | 1.37 s | 1.1x slower | 8.6x faster |
-| Mandelbrot 400x400, 100 iterations | 11 ms | 320 ms | 14 ms | 22 ms | 985 ms | 1.2x slower | 22x faster |
-| 1 M push, sort, index and `for` sums | 17 ms | 368 ms | 52 ms | 22 ms | 198 ms | 3.0x slower | 7.0x faster |
-| tree of 2^20 leaves built and folded | 36 ms | 3.39 s | 450 ms | 28 ms | 1.07 s | 12x slower | 7.5x faster |
-| `map`/`filter` with closures, 1 M | 2.6 ms | 81 ms | 37 ms | 21 ms | 102 ms | 14x slower | 2.2x faster |
-| word count, 1 MB of text | 7.1 ms | 18 ms | 99 ms | 21 ms | 69 ms | 14x slower | 5.6x slower |
-| JSON parse + encode, 1 MB (json.kio) | 8.2 ms | 19 ms | 567 ms | 21 ms | 848 ms | 69x slower | 30x slower |
-| 100 k `s = s + i.to_str() + ","` | 5.5 ms | 12 ms | 1.49 s | 32 ms | 1.60 s | 271x slower | 119x slower |
-| HTTP `GET /hello/kio`, `ab -k -c 12` | 217,000 req/s (hyper) | 27,000 req/s (`http.server`) | 72,000 req/s (kio-web, `--listen`) | once at startup | | 3x fewer | 2.7x more |
+| Benchmark | Rust | Python | kio compiled | C8a | compile | kio interpreted | compiled vs Rust | vs Python |
+|---|---|---|---|---|---|---|---|---|
+| `fib(35)`, calls | 24 ms | 732 ms | 56 ms | 54 ms | 21 ms | 1.62 s | 2.4x slower | 13x faster |
+| 30 M-iteration integer loop | 97 ms | 928 ms | 111 ms | 110 ms | 21 ms | 1.32 s | 1.1x slower | 8.4x faster |
+| Mandelbrot 400x400, 100 iterations | 12 ms | 333 ms | 15 ms | 14 ms | 25 ms | 1.08 s | 1.2x slower | 22x faster |
+| 1 M push, sort, index and `for` sums | 16 ms | 366 ms | 28 ms | 52 ms | 21 ms | 196 ms | 1.7x slower | 13x faster |
+| tree of 2^20 leaves built and folded | 33 ms | 2.87 s | 284 ms | 438 ms | 23 ms | 1.05 s | 8.6x slower | 10x faster |
+| `map`/`filter` with closures, 1 M | 4.2 ms | 79 ms | 13 ms | 36 ms | 21 ms | 101 ms | 3.2x slower | 5.9x faster |
+| word count, 1 MB of text | 6.0 ms | 17 ms | 85 ms | 98 ms | 22 ms | 65 ms | 14x slower | 5.1x slower |
+| JSON parse + encode, 1 MB (json.kio) | 7.5 ms | 16 ms | 144 ms | 554 ms | 22 ms | 868 ms | 19x slower | 9.0x slower |
+| 100 k `s = s + i.to_str() + ","` | 3.5 ms | 7.0 ms | 8.5 ms | 1.37 s | 21 ms | 1.57 s | 2.4x slower | 1.2x slower |
+| HTTP `GET /hello/kio`, `ab -k -c 12` | 239,000 req/s (hyper) | 31,700 req/s (`http.server`) | 75,900 req/s (kio-web, `--listen`) | 72,000 | once at startup | | 3.2x fewer | 2.4x more |
+
+JSON is from a second run (load 4-7): in the full run, under load 8, it measured 189 ms with Rust at 12 ms. String building now needs about 0.1-0.12 G fuel (116 G before: every concatenation copied and zero-filled the whole string).
 
 Rust and Python are idiomatic: Rust's string building appends in place (`push_str`), word count uses a `HashMap`, JSON is `serde_json::Value`; Python's `+=` on a string and `dict` are built in C. Every version prints the same number.
 
-**Where the time goes.** Code that stays in compiled Wasm (integers, floats, calls) runs within 1.1-2.3x of Rust; overflow checks cost Rust itself 23% on `fib`, 0% on the loop. Everything that calls the runtime is 3-270x slower, and word count is slower than the interpreter (99 against 69 ms). Profiles (`bench/profile.py`, macOS `sample` with JIT frames named):
+**Where the time went (C8a, before C8b1).** Code that stays in compiled Wasm (integers, floats, calls) runs within 1.1-2.3x of Rust; overflow checks cost Rust itself 23% on `fib`, 0% on the loop. Everything that calls the runtime is 3-270x slower, and word count is slower than the interpreter (99 against 69 ms). Profiles (`bench/profile.py`, macOS `sample` with JIT frames named):
 
 - **String building** (271x): 99% in `rt_concat`. `s = s + x` copies `s` every time (quadratic: 59 GB moved for a 0.6 MB result), and the copy's buffer is zero-filled first: 52% `memmove`, 47% `bzero`. Wasmtime charges fuel per byte of `memory.copy` and `memory.fill`: the run uses 116 G fuel, so the default 100 M stops a program after about 100 MB copied or zeroed.
 - **JSON** (69x): about half `json::encode`, nearly all `rt_concat` (`out = out + encode(x)`, the same quadratic copy and zero-fill); half `json::parse`, where `BTreeMap` inserts, allocation and `rt_inc`/`rt_dec` of the `Bytes` passed to `byte(b, i)` for every byte dominate. `rt_dec` is 27% inclusive.
@@ -34,9 +36,9 @@ Rust and Python are idiomatic: Rust's string building appends in place (`push_st
 
 | # | Change | Expected | Measure |
 |---|---|---|---|
-| 1 | In-place `Str`/`Bytes` append when `s` is unique and dead after (`s = s + x` reuses `s`, capacity doubling) | strings 100x+, JSON encode 5-10x | strings, json rows; strings' `fuel_used` (`--audit`) from 116 G to under 10 M |
-| 2 | No zero-fill of `Str`/`Bytes` data (`alloc`, not `alloc_zeroed`, for byte buffers) | up to 2x on concatenation now, ~5% after #1 | strings, json; `__bzero` gone from the profile |
-| 3 | Inline the hot runtime paths in codegen: `rt_inc`/`rt_dec` fast path (rc test, decrement), `rt_unique`, `List<Int>` `get`/`push` on the buffer | 1.5-2x on closures, list, tree; removes most of the fuel/epoch share | closures, list, tree rows; calls per run (profile) |
+| 1 | Done (C8b1): in-place `Str` append when `s` is unique and dead after (`s = s + x` reuses `s`, capacity doubling); strings 1.37 s to 8.5 ms, JSON 554 to 144 ms | strings 100x+, JSON encode 5-10x | strings, json rows; strings' `fuel_used` (`--audit`) from 116 G to under 10 M |
+| 2 | Done (C8b1): no zero-fill of `Str`/`Bytes` data | up to 2x on concatenation now, ~5% after #1 | strings, json; `__bzero` gone from the profile |
+| 3 | Done (C8b1): `rt_inc`/`rt_dec`/`rt_unique` fast paths and list `len`/`get`/`push` inline; closures 36 to 13 ms, list 52 to 28, tree 438 to 284 | 1.5-2x on closures, list, tree; removes most of the fuel/epoch share | closures, list, tree rows; calls per run (profile) |
 | 4 | Borrowed parameters and Perceus-style elision of `inc`/`dec` pairs at last uses | 1.3-2x on JSON parse, tree | json, tree rows; `rt_inc`/`rt_dec` share of the profile |
 | 5 | Fewer allocations: a list's buffer inline in its object, a small-object free list per size class over dlmalloc | 1.5x on tree, word count | tree, word count; `malloc`/`free` share |
 | 6 | Word-at-a-time `memcmp`/`eq` for `Str` in the runtime | word count 1.3-2x | word count row; `memcmp` share |

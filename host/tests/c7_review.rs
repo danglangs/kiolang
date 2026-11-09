@@ -120,11 +120,14 @@ fn a_bogus_pointer_argument_does_not_crash_the_host() {
             // The bogus object read as a path: an empty or garbage string, refused.
             Ok(Ok(o)) => assert_eq!((o.value.as_str(), o.failed), ("IoErr::InvalidPath", true)),
             Ok(Err(d)) => panic!("a program error: {}", d[0].message),
-            // The runtime noticed (a handle is not an object): its internal-error site.
+            // The runtime noticed (a handle is not an object): its internal-error site. Or the
+            // canonical ABI did: the list read as a `Str` has its elements' address as its
+            // length (C8b1's `ListBody`), past the end of memory.
             Err(e) => {
                 let e = format!("{e:#}");
                 assert!(
-                    e.starts_with("compiled program trapped at an unknown error site"),
+                    e.starts_with("compiled program trapped at an unknown error site")
+                        || e.ends_with("string pointer/length out of bounds of memory"),
                     "{e}"
                 );
             }

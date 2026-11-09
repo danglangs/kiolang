@@ -11,7 +11,7 @@
 //! name says.
 
 use crate::desc::{self, Desc, Table};
-use crate::obj::{self, bytes, field, from_slot, to_slot, Header, Key, List, Map};
+use crate::obj::{self, bytes, elems, elems_mut, field, from_slot, to_slot, Header, Key, Map};
 use alloc::vec::Vec;
 
 /// A program error. Codegen turns it into a `trap`: `index {index} out of bounds for length {len}`.
@@ -21,11 +21,6 @@ pub enum Error {
 }
 
 const BODY: usize = 8;
-
-unsafe fn list<'a>(p: *mut Header) -> &'a mut List {
-    // SAFETY: a `List` object holds its `List` at BODY.
-    unsafe { &mut *field(p, BODY) }
-}
 
 unsafe fn map<'a>(p: *mut Header) -> &'a mut Map {
     // SAFETY: a `Map` object holds its `Map` at BODY.
@@ -93,7 +88,7 @@ pub fn list_new(desc: u32, elems: Vec<u64>) -> *mut Header {
 /// `p` is a `List`.
 pub unsafe fn list_len(p: *mut Header) -> i64 {
     // SAFETY: the caller's guarantee.
-    unsafe { list(p) }.len() as i64
+    unsafe { elems(p) }.len() as i64
 }
 
 /// `xs[i]`, owned: a pointer element gains a reference.
@@ -103,7 +98,7 @@ pub unsafe fn list_len(p: *mut Header) -> i64 {
 pub unsafe fn list_get(t: &Table, p: *mut Header, i: i64) -> Result<u64, Error> {
     // SAFETY: the caller's guarantee.
     unsafe {
-        let l = list(p);
+        let l = elems(p);
         let v = l[at(i, l.len())?];
         Ok(share(t, elem(t, p), v))
     }
@@ -116,7 +111,7 @@ pub unsafe fn list_get(t: &Table, p: *mut Header, i: i64) -> Result<u64, Error> 
 /// `p` is a unique `List`.
 pub unsafe fn list_slot(p: *mut Header, i: i64) -> Result<*mut u64, Error> {
     // SAFETY: the caller's guarantee.
-    let l = unsafe { list(p) };
+    let l = unsafe { elems_mut(p) };
     let i = at(i, l.len())?;
     Ok(&mut l[i])
 }
@@ -129,7 +124,7 @@ pub unsafe fn list_slot(p: *mut Header, i: i64) -> Result<*mut u64, Error> {
 pub unsafe fn list_set(t: &Table, p: *mut Header, i: i64, v: u64) -> Result<(), Error> {
     // SAFETY: the caller's guarantee.
     unsafe {
-        let l = list(p);
+        let l = elems_mut(p);
         let i = at(i, l.len())?;
         let old = core::mem::replace(&mut l[i], v);
         release(t, elem(t, p), old);
@@ -143,7 +138,7 @@ pub unsafe fn list_set(t: &Table, p: *mut Header, i: i64, v: u64) -> Result<(), 
 /// `p` is a unique `List`.
 pub unsafe fn list_push(p: *mut Header, v: u64) {
     // SAFETY: the caller's guarantee.
-    unsafe { list(p) }.push(v);
+    unsafe { obj::list_mut(p) }.push(v);
 }
 
 /// An empty map of descriptor `desc`.
@@ -200,7 +195,7 @@ pub unsafe fn list_contains(t: &Table, p: *mut Header, v: u64) -> bool {
     // SAFETY: the caller's guarantee.
     unsafe {
         let d = elem(t, p);
-        list(p).iter().any(|&x| eq(t, d, x, v))
+        elems(p).iter().any(|&x| eq(t, d, x, v))
     }
 }
 
@@ -213,8 +208,8 @@ pub unsafe fn list_sort(t: &Table, p: *mut Header) {
     // SAFETY: the caller's guarantee; a `List<Str>` holds live `Str`s.
     unsafe {
         match elem(t, p) {
-            desc::INT => list(p).sort_by_key(|&v| v as i64),
-            desc::STR => list(p).sort_by(|&a, &b| bytes(from_slot(a)).cmp(bytes(from_slot(b)))),
+            desc::INT => elems_mut(p).sort_by_key(|&v| v as i64),
+            desc::STR => elems_mut(p).sort_by(|&a, &b| bytes(from_slot(a)).cmp(bytes(from_slot(b)))),
             d => panic!("sort of a List of descriptor {d}"),
         }
     }
@@ -228,7 +223,7 @@ pub unsafe fn list_sort(t: &Table, p: *mut Header) {
 /// `None` of it.
 pub unsafe fn list_pop(t: &Table, p: *mut Header, option_desc: u32, none: *mut Header) -> *mut Header {
     // SAFETY: the caller's guarantee.
-    unsafe { obj::option(t, option_desc, none, list(p).pop()) }
+    unsafe { obj::option(t, option_desc, none, obj::list_mut(p).pop()) }
 }
 
 /// The payload of `Option` or `Result` object `p`, shared, if it is variant `v`.
@@ -343,7 +338,7 @@ unsafe fn eq_one(t: &Table, work: &mut Vec<(u32, u64, u64)>, d: u32, a: u64, b: 
             Desc::Str | Desc::Bytes => a == b || bytes(a) == bytes(b),
             // Shared references: `a` and `b` may be one object.
             Desc::List { elem } => {
-                let (x, y) = (&*field::<List>(a, BODY), &*field::<List>(b, BODY));
+                let (x, y) = (elems(a), elems(b));
                 x.len() == y.len() && {
                     work.extend(x.iter().zip(y.iter()).map(|(&x, &y)| (elem, x, y)));
                     true

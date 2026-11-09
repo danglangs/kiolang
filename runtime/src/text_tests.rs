@@ -88,7 +88,7 @@ fn take(p: *mut Header) -> String {
 /// A `List<Str>`'s contents, then frees it.
 fn take_list(p: *mut Header) -> Vec<String> {
     // SAFETY: `p` is a live `List<Str>` owned here.
-    let v: Vec<*mut Header> = unsafe { (*obj::field::<obj::List>(p, 8)).iter().map(|&x| from_slot(x)).collect() };
+    let v: Vec<*mut Header> = unsafe { obj::elems(p).iter().map(|&x| from_slot(x)).collect() };
     let out = v
         .iter()
         .map(|&e| {
@@ -294,6 +294,51 @@ fn bytes_index_and_push() {
         let t = text::push(&T, t, 99).unwrap();
         assert_eq!(obj::bytes(t), b"abc");
         dec(t);
+    }
+    assert_eq!(obj::live(), base);
+}
+
+#[test]
+fn append_in_place_only_when_unique() {
+    let _g = lock();
+    let base = obj::live();
+    // SAFETY: every pointer is a live `Str` owned here; `append` takes its first argument.
+    unsafe {
+        // Unique: grows in place, capacity doubling, so few moves.
+        let x = s("xy");
+        let mut a = s("");
+        let mut moves = 0;
+        for i in 0..1000 {
+            let before = a;
+            a = text::append(&T, a, x);
+            moves += (a != before) as u32;
+            assert_eq!(text::len(a), 2 * (i + 1));
+        }
+        assert!(moves < 12, "{moves} moves");
+        assert!(obj::bytes(a).chunks(2).all(|c| c == b"xy"));
+        dec(a);
+        // Shared: `t` keeps its value; the result is a new object.
+        let a = s("ab");
+        obj::inc(a);
+        let t = a;
+        let r = text::append(&T, a, x);
+        assert_ne!(r, t);
+        assert_eq!((obj::bytes(t), obj::bytes(r)), (&b"ab"[..], &b"abxy"[..]));
+        assert_eq!((*t).rc, 1);
+        // `a = a + a`: two references to one object, so it is copied.
+        obj::inc(r);
+        let rr = text::append(&T, r, r);
+        assert_eq!(obj::bytes(rr), b"abxyabxy");
+        assert_eq!(obj::bytes(r), b"abxy");
+        // A pinned literal is copied and never written.
+        let lit = s("lit");
+        (*lit).rc = obj::PINNED;
+        let l2 = text::append(&T, lit, x);
+        assert_eq!((obj::bytes(lit), obj::bytes(l2)), (&b"lit"[..], &b"litxy"[..]));
+        (*lit).rc = 1;
+        for p in [t, r, rr, l2, lit, x] {
+            dec(p);
+        }
     }
     assert_eq!(obj::live(), base);
 }

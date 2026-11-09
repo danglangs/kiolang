@@ -6,7 +6,7 @@
 //! Record      [rc u32][desc u32][slot 0]..[slot n-1]
 //! Enum        [rc][desc][variant u32][0 u32][slot 0]..     the slots of that variant
 //! Str, Bytes  [rc][desc][len u32][cap u32][bytes; cap]
-//! List        [rc][desc][List]
+//! List        [rc][desc][ListBody: elements, len, cap]
 //! Map         [rc][desc][Map]
 //! Fn          [rc][desc][table index u32][0 u32][capture 0]..
 //! ```
@@ -51,10 +51,119 @@ pub enum Key {
 pub type List = Vec<u64>;
 pub type Map = BTreeMap<Key, u64>;
 
+/// How a `List` object holds its elements: the parts of a `Vec<u64>`, in a layout fixed here
+/// (`Vec`'s own is not), so generated code may read them. On wasm32 the elements' address is
+/// at byte 8 of the object, `len` at 12 and `cap` at 16; codegen reads `len` and the elements
+/// and, for a `push` with room, writes an element and `len`.
+#[repr(C)]
+pub struct ListBody {
+    ptr: *mut u64,
+    len: usize,
+    cap: usize,
+}
+
+#[cfg(target_arch = "wasm32")]
+const _: () =
+    assert!(HEADER + core::mem::offset_of!(ListBody, len) == 12 && HEADER + core::mem::offset_of!(ListBody, cap) == 16);
+
 pub(crate) const HEADER: usize = 8;
 const ENUM_SLOTS: usize = 16;
 pub(crate) const BYTES_DATA: usize = 16;
-const _: () = assert!(HEADER.is_multiple_of(align_of::<List>()) && HEADER.is_multiple_of(align_of::<Map>()));
+const _: () = assert!(HEADER.is_multiple_of(align_of::<ListBody>()) && HEADER.is_multiple_of(align_of::<Map>()));
+
+impl ListBody {
+    fn of(v: List) -> ListBody {
+        let mut v = core::mem::ManuallyDrop::new(v);
+        ListBody {
+            ptr: v.as_mut_ptr(),
+            len: v.len(),
+            cap: v.capacity(),
+        }
+    }
+}
+
+/// The `ListBody` of `List` object `p`.
+///
+/// # Safety
+/// `p` is a `List`.
+unsafe fn body(p: *mut Header) -> *mut ListBody {
+    // SAFETY: the caller's guarantee.
+    unsafe { field(p, HEADER) }
+}
+
+/// The elements of `List` `p`.
+///
+/// # Safety
+/// `p` is a `List` that outlives `'a` unchanged.
+pub unsafe fn elems<'a>(p: *mut Header) -> &'a [u64] {
+    // SAFETY: the caller's guarantee; `ptr` and `len` are a `Vec`'s.
+    unsafe {
+        let b = &*body(p);
+        core::slice::from_raw_parts(b.ptr, b.len)
+    }
+}
+
+/// The elements of `List` `p`, to change.
+///
+/// # Safety
+/// `p` is a `List` that outlives `'a`, and nothing else reads or changes its elements
+/// meanwhile.
+pub unsafe fn elems_mut<'a>(p: *mut Header) -> &'a mut [u64] {
+    // SAFETY: the caller's guarantee; `ptr` and `len` are a `Vec`'s.
+    unsafe {
+        let b = &*body(p);
+        core::slice::from_raw_parts_mut(b.ptr, b.len)
+    }
+}
+
+/// `List` `p`'s elements as the `Vec` they are, to change its length; written back when the
+/// guard drops.
+///
+/// # Safety
+/// `p` is a `List` that outlives `'a`, and nothing else reads or changes it meanwhile.
+pub unsafe fn list_mut<'a>(p: *mut Header) -> ListMut<'a> {
+    // SAFETY: the caller's guarantee; the parts are a `Vec`'s, which the guard owns until it
+    // puts them back.
+    unsafe {
+        let b = &*body(p);
+        ListMut {
+            body: body(p),
+            v: core::mem::ManuallyDrop::new(Vec::from_raw_parts(b.ptr, b.len, b.cap)),
+            _p: core::marker::PhantomData,
+        }
+    }
+}
+
+/// `list_mut`'s guard.
+pub struct ListMut<'a> {
+    body: *mut ListBody,
+    v: core::mem::ManuallyDrop<List>,
+    _p: core::marker::PhantomData<&'a mut List>,
+}
+
+impl core::ops::Deref for ListMut<'_> {
+    type Target = List;
+    fn deref(&self) -> &List {
+        &self.v
+    }
+}
+
+impl core::ops::DerefMut for ListMut<'_> {
+    fn deref_mut(&mut self) -> &mut List {
+        &mut self.v
+    }
+}
+
+impl Drop for ListMut<'_> {
+    fn drop(&mut self) {
+        // SAFETY: `body` is the list's, which this guard's `list_mut` contract keeps for us;
+        // the `Vec` moves back into it.
+        unsafe {
+            self.body
+                .write(ListBody::of(core::mem::ManuallyDrop::take(&mut self.v)))
+        }
+    }
+}
 
 /// A slot's value for pointer `p`.
 pub fn to_slot(p: *mut Header) -> u64 {
@@ -92,11 +201,20 @@ fn layout(size: usize) -> Layout {
     Layout::from_size_align(size, 8).unwrap()
 }
 
-/// A fresh object of `size` zeroed bytes, `rc` 1.
-fn new(size: usize, desc: u32) -> *mut Header {
+/// A fresh object of `size` bytes, `rc` 1. The bytes after the header are zero if `zeroed`,
+/// else uninitialized for the caller to write: a `List`'s or `Map`'s body, a copy's bytes, or
+/// a `Str`'s or `Bytes`' header and the bytes below its `len` (those above it are never read).
+fn new(size: usize, desc: u32, zeroed: bool) -> *mut Header {
     let layout = layout(size);
     // SAFETY: `size` is at least HEADER, so not zero.
-    let p = unsafe { alloc_zeroed(layout) }.cast::<Header>();
+    let p = unsafe {
+        if zeroed {
+            alloc_zeroed(layout)
+        } else {
+            alloc::alloc::alloc(layout)
+        }
+    }
+    .cast::<Header>();
     if p.is_null() {
         handle_alloc_error(layout);
     }
@@ -115,7 +233,7 @@ pub fn alloc(t: &Table, desc: u32, variant: u32) -> *mut Header {
         Desc::Fn { slots, .. } => (ENUM_SLOTS, slots.len, true),
         d => panic!("rt_alloc of {d:?}"),
     };
-    let p = new(off + 8 * n as usize, desc);
+    let p = new(off + 8 * n as usize, desc, true);
     if is_enum {
         // SAFETY: an enum object has its variant at HEADER.
         unsafe { field::<u32>(p, HEADER).write(variant) };
@@ -157,14 +275,30 @@ pub fn new_bytes_cap(desc: u32, b: &[u8], cap: usize) -> *mut Header {
     assert!(cap >= b.len());
     let len = u32::try_from(b.len()).expect("over 4 GiB");
     let cap = u32::try_from(cap).expect("over 4 GiB");
-    let p = new(BYTES_DATA + cap as usize, desc);
-    // SAFETY: `p` has `len` and `cap` at 8 and 12, then room for `cap` >= `len` bytes.
+    let p = new(BYTES_DATA + cap as usize, desc, false);
+    // SAFETY: `p` has `len` and `cap` at 8 and 12, then room for `cap` >= `len` bytes: the
+    // first `len` are written here, the rest are never read.
     unsafe {
         field::<u32>(p, 8).write(len);
         field::<u32>(p, 12).write(cap);
         ptr::copy_nonoverlapping(b.as_ptr(), field(p, BYTES_DATA), b.len());
     }
     p
+}
+
+/// `Str` or `Bytes` `p`, which has no other reference, moved to a buffer with room for `cap`
+/// bytes (at least its length); `p` is freed.
+///
+/// # Safety
+/// The module's contract; `p` is a `Str` or `Bytes` with count 1.
+pub unsafe fn regrow(p: *mut Header, cap: usize) -> *mut Header {
+    // SAFETY: the caller's guarantee; nothing else refers to `p`, so freeing it is ours.
+    unsafe {
+        assert!((*p).rc == 1);
+        let q = new_bytes_cap((*p).desc, bytes(p), cap);
+        free_memory(p, BYTES_DATA + *field::<u32>(p, 12) as usize);
+        q
+    }
 }
 
 /// Room for the `len` bytes of a `Str` or `Bytes` that `adopt` turns into one: the address
@@ -211,15 +345,15 @@ pub unsafe fn bytes<'a>(p: *mut Header) -> &'a [u8] {
 
 /// A `List` with descriptor `desc`, owning its elements' references.
 pub fn new_list(desc: u32, v: List) -> *mut Header {
-    let p = new(HEADER + size_of::<List>(), desc);
-    // SAFETY: room for a `List` at HEADER, aligned (asserted above).
-    unsafe { field::<List>(p, HEADER).write(v) };
+    let p = new(HEADER + size_of::<ListBody>(), desc, false);
+    // SAFETY: room for a `ListBody` at HEADER, aligned (asserted above).
+    unsafe { body(p).write(ListBody::of(v)) };
     p
 }
 
 /// A `Map` with descriptor `desc`, owning its values' references.
 pub fn new_map(desc: u32, m: Map) -> *mut Header {
-    let p = new(HEADER + size_of::<Map>(), desc);
+    let p = new(HEADER + size_of::<Map>(), desc, false);
     // SAFETY: room for a `Map` at HEADER, aligned (asserted above).
     unsafe { field::<Map>(p, HEADER).write(m) };
     p
@@ -293,7 +427,10 @@ unsafe fn free(t: &Table, mut p: *mut Header) {
                 }
             });
             match t.desc((*p).desc) {
-                Desc::List { .. } => ptr::drop_in_place(field::<List>(p, HEADER)),
+                Desc::List { .. } => {
+                    let b = body(p).read();
+                    drop(Vec::from_raw_parts(b.ptr, b.len, b.cap))
+                }
                 Desc::Map { .. } => ptr::drop_in_place(field::<Map>(p, HEADER)),
                 _ => {}
             }
@@ -331,9 +468,13 @@ unsafe fn copy(t: &Table, p: *mut Header) -> *mut Header {
     unsafe {
         let size = size(t, p);
         let desc = (*p).desc;
-        let q = new(size, desc);
+        if let Desc::Str | Desc::Bytes = t.desc(desc) {
+            // Only the bytes below `len` are initialized; the copy keeps the capacity.
+            return new_bytes_cap(desc, bytes(p), size - BYTES_DATA);
+        }
+        let q = new(size, desc, false);
         match t.desc(desc) {
-            Desc::List { .. } => field::<List>(q, HEADER).write((*field::<List>(p, HEADER)).clone()),
+            Desc::List { .. } => body(q).write(ListBody::of(elems(p).to_vec())),
             Desc::Map { .. } => field::<Map>(q, HEADER).write((*field::<Map>(p, HEADER)).clone()),
             _ => ptr::copy_nonoverlapping(field::<u8>(p, HEADER), field(q, HEADER), size - HEADER),
         }
@@ -347,7 +488,7 @@ unsafe fn ptrs(t: &Table, p: *mut Header, mut f: impl FnMut(*mut Header)) {
     // SAFETY: `p` is live and laid out as its descriptor says.
     unsafe {
         match t.desc((*p).desc) {
-            Desc::List { elem } if t.is_ptr(elem) => (*field::<List>(p, HEADER)).iter().for_each(|&v| f(from_slot(v))),
+            Desc::List { elem } if t.is_ptr(elem) => elems(p).iter().for_each(|&v| f(from_slot(v))),
             Desc::Map { value, .. } if t.is_ptr(value) => {
                 (*field::<Map>(p, HEADER)).values().for_each(|&v| f(from_slot(v)))
             }
@@ -383,7 +524,7 @@ unsafe fn size(t: &Table, p: *mut Header) -> usize {
     unsafe {
         match t.desc((*p).desc) {
             Desc::Str | Desc::Bytes => BYTES_DATA + *field::<u32>(p, 12) as usize,
-            Desc::List { .. } => HEADER + size_of::<List>(),
+            Desc::List { .. } => HEADER + size_of::<ListBody>(),
             Desc::Map { .. } => HEADER + size_of::<Map>(),
             Desc::Record { .. } | Desc::Enum { .. } | Desc::Fn { .. } => {
                 let (off, slots) = record(t, p);
