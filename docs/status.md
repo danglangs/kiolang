@@ -44,7 +44,7 @@ Compiled-only kio covers the whole language and every capability; the active str
 
 ## Next
 
-C8 (roadmap.md): freeing (54% of tree); tree's 4-5% from the larger size classes (#117); `HashMap`'s double search for `insert(k, get(k) + 1)` (needs `get_key_value` in hmap.rs, #116); borrowed match bindings of a borrowed scrutinee (tree). Then a target app (roadmap.md): an HTTP client beyond GET and an SQL capability come first.
+C8 (roadmap.md): freeing (54% of tree); tree's 4-5% from the larger size classes (#117); borrowed match bindings of a borrowed scrutinee (tree). The links target app (kio-web examples/links) gave L11, L12, H12, W14 (done); its remaining gaps wait on the maintainer: Kv `scan` and `add`, `Rng`/`Clock`/`Log` capabilities, `|` patterns, let-else, struct update, constants.
 
 ## Waiting on the maintainer
 
