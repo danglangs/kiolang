@@ -9,9 +9,16 @@
 //! entries, a `BTreeMap` from key to entry. The hash is fixed and unkeyed (kio has no
 //! randomness), so keys can be built to share a bucket; a sorted bucket keeps each operation
 //! O(log n) then.
+//!
+//! The map remembers the entry its last `get` found (`last`), so `m.insert(k, m.get(k)..)`
+//! hashes and searches once: `insert` compares its key with that entry's first. `last` is
+//! cleared by every operation that moves or removes entries (`remove`, compaction, which growth
+//! does too) and a copy starts without it, so it always names a live entry; an insert still
+//! checks the key there, so a wrong `last` could cost a search but never a wrong answer.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use core::cell::Cell;
 
 /// A key: ordered, for sorted buckets, and hashed.
 pub trait HashKey: Ord + Clone {
@@ -107,13 +114,27 @@ struct Entry<K, V> {
     kv: Option<(K, V)>,
 }
 
-#[derive(Clone)]
 pub struct HashMap<K, V> {
     entries: Vec<Entry<K, V>>,
     /// Per bucket: `EMPTY`, the first entry of its chain, or `TREE | i`.
     heads: Vec<u32>,
     trees: Vec<BTreeMap<K, u32>>,
     len: usize,
+    /// The entry the last `get` found, or `EMPTY`.
+    last: Cell<u32>,
+}
+
+/// A copy remembers no entry.
+impl<K: Clone, V: Clone> Clone for HashMap<K, V> {
+    fn clone(&self) -> Self {
+        HashMap {
+            entries: self.entries.clone(),
+            heads: self.heads.clone(),
+            trees: self.trees.clone(),
+            len: self.len,
+            last: Cell::new(EMPTY),
+        }
+    }
 }
 
 /// The sorted bucket a head names, if it names one.
@@ -134,6 +155,7 @@ impl<K: HashKey, V> HashMap<K, V> {
             heads: Vec::new(),
             trees: Vec::new(),
             len: 0,
+            last: Cell::new(EMPTY),
         }
     }
 
@@ -158,26 +180,63 @@ impl<K: HashKey, V> HashMap<K, V> {
         self.iter().map(|(_, v)| v)
     }
 
+    /// The value of `k`; the entry is remembered for an `insert` of the same key.
     pub fn get(&self, k: &K) -> Option<&V> {
-        let i = self.find(k, k.hash())?;
-        self.entries[i].kv.as_ref().map(|(_, v)| v)
-    }
-
-    pub fn get_mut(&mut self, k: &K) -> Option<&mut V> {
-        let i = self.find(k, k.hash())?;
-        self.entries[i].kv.as_mut().map(|(_, v)| v)
+        let i = self.find(k, k.hash());
+        self.last.set(i.map_or(EMPTY, |i| i as u32));
+        self.entries[i?].kv.as_ref().map(|(_, v)| v)
     }
 
     /// Sets `k` to `v`. A key already present keeps its place and its value is returned; a new
     /// one goes last.
     pub fn insert(&mut self, k: K, v: V) -> Option<V> {
-        let hash = k.hash();
-        if let Some(i) = self.find(&k, hash) {
-            return self.entries[i].kv.as_mut().map(|(_, old)| core::mem::replace(old, v));
+        match self.replace(&k, v) {
+            Ok(old) => Some(old),
+            Err((hash, v)) => {
+                self.push(hash, k, v);
+                None
+            }
         }
+    }
+
+    /// `insert` for a key borrowed: `own` makes the key to keep (equal to `k`), called only if
+    /// `k` is new.
+    pub fn insert_with(&mut self, k: &K, own: impl FnOnce() -> K, v: V) -> Option<V> {
+        match self.replace(k, v) {
+            Ok(old) => Some(old),
+            Err((hash, v)) => {
+                let k = own();
+                debug_assert!(k.hash() == hash);
+                self.push(hash, k, v);
+                None
+            }
+        }
+    }
+
+    /// Replaces `k`'s value with `v`, returning the old one; if `k` is absent, gives back its
+    /// hash and `v`. Tries the remembered entry first, then hashes and searches once.
+    fn replace(&mut self, k: &K, v: V) -> Result<V, (u64, V)> {
+        if let Some(e) = self.entries.get_mut(self.last.get() as usize) {
+            if let Some((x, old)) = &mut e.kv {
+                if x == k {
+                    return Ok(core::mem::replace(old, v));
+                }
+            }
+        }
+        let hash = k.hash();
+        match self.find(k, hash) {
+            Some(i) => match &mut self.entries[i].kv {
+                Some((_, old)) => Ok(core::mem::replace(old, v)),
+                None => unreachable!("find returns live entries"),
+            },
+            None => Err((hash, v)),
+        }
+    }
+
+    /// Adds `k`, absent, with hash `hash`, last.
+    fn push(&mut self, hash: u64, k: K, v: V) {
         if self.entries.len() == self.heads.len() {
-            self.entries.retain(|e| e.kv.is_some());
-            self.rebuild((2 * self.len).next_power_of_two().max(8));
+            self.compact();
         }
         assert!(self.entries.len() < (TREE - 1) as usize, "HashMap too large");
         self.entries.push(Entry {
@@ -187,11 +246,11 @@ impl<K: HashKey, V> HashMap<K, V> {
         });
         self.len += 1;
         self.link(self.entries.len() - 1);
-        None
     }
 
     /// Removes `k`, returning its value if it was present.
     pub fn remove(&mut self, k: &K) -> Option<V> {
+        self.last.set(EMPTY);
         let hash = k.hash();
         let i = self.find(k, hash)?;
         let b = self.bucket(hash);
@@ -204,10 +263,17 @@ impl<K: HashKey, V> HashMap<K, V> {
         let (_, v) = self.entries[i].kv.take()?;
         self.len -= 1;
         if 2 * (self.entries.len() - self.len) > self.entries.len() {
-            self.entries.retain(|e| e.kv.is_some());
-            self.rebuild((2 * self.len).next_power_of_two().max(8));
+            self.compact();
         }
         Some(v)
+    }
+
+    /// Drops the holes and indexes what is left, with room to double: entries move, so the
+    /// remembered one is forgotten.
+    fn compact(&mut self) {
+        self.last.set(EMPTY);
+        self.entries.retain(|e| e.kv.is_some());
+        self.rebuild((2 * self.len).next_power_of_two().max(8));
     }
 
     fn bucket(&self, hash: u64) -> usize {
@@ -296,6 +362,13 @@ impl<K: HashKey, V> HashMap<K, V> {
         self.trees.len()
     }
 
+    /// For tests: `None` if no entry is remembered, else the remembered entry's key, `None` if
+    /// it names no live entry.
+    pub fn remembered(&self) -> Option<Option<&K>> {
+        let i = self.last.get();
+        (i != EMPTY).then(|| self.entries.get(i as usize)?.kv.as_ref().map(|(k, _)| k))
+    }
+
     /// The number of buckets, for tests.
     pub fn buckets(&self) -> usize {
         self.heads.len()
@@ -368,6 +441,79 @@ mod tests {
                     assert_eq!(m.get(&k), want.iter().find(|(y, _)| *y == k).map(|(_, v)| v));
                 }
             }
+            if classes == 1 {
+                assert!(m.sorted_buckets() > 0);
+            }
+        }
+    }
+
+    /// The entry `get` remembers, against a model: random gets, inserts (half on the key last
+    /// got), removes and copies, with keys in few hash classes (sorted buckets), and key ranges
+    /// that grow and shrink so growth drops holes from before the remembered entry. What the map remembers must be the key the model's last `get`
+    /// found, unless something since forgot it; each clear of `last` is needed to pass.
+    #[test]
+    fn remembered_entry_matches_a_model() {
+        let rounds = if cfg!(miri) { 1_500 } else { 50_000 };
+        for classes in [1, 3, 1 << 20] {
+            let mut seed = 0x9e37_79b9_7f4a_7c15_u64 ^ classes;
+            let mut rand = move |n: u64| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed % n
+            };
+            let key = |x: u64| K(x as u32, classes as u32);
+            let mut m: HashMap<K, u64> = HashMap::new();
+            let mut want: Vec<(K, u64)> = Vec::new();
+            // The key the last `get` found, until an operation that may forget it.
+            let mut remembered: Option<K> = None;
+            let mut got = key(0);
+            // Growths that dropped holes while an entry was remembered; compactions by removes.
+            let (mut grew, mut compacted) = (0, 0);
+            for step in 0..rounds {
+                let span = [8, 60, 300][(step / 500) as usize % 3];
+                let k = if rand(2) == 0 { got } else { key(rand(span)) };
+                let pos = want.iter().position(|(x, _)| *x == k);
+                match rand(8) {
+                    0..=2 => {
+                        assert_eq!(m.get(&k), pos.map(|p| &want[p].1), "step {step}");
+                        remembered = pos.map(|_| k);
+                        assert_eq!(m.remembered(), remembered.as_ref().map(Some), "step {step}");
+                        got = k;
+                    }
+                    3..=5 => {
+                        let entries = m.entries.len();
+                        let old = match pos {
+                            Some(p) => Some(core::mem::replace(&mut want[p].1, step)),
+                            None => {
+                                want.push((k, step));
+                                None
+                            }
+                        };
+                        assert_eq!(m.insert(k, step), old, "step {step}");
+                        if remembered.is_some() && m.entries.len() < entries + usize::from(old.is_none()) {
+                            grew += 1;
+                        }
+                    }
+                    6 => {
+                        let entries = m.entries.len();
+                        assert_eq!(m.remove(&k), pos.map(|p| want.remove(p).1), "step {step}");
+                        remembered = None;
+                        if m.entries.len() < entries {
+                            compacted += 1;
+                        }
+                    }
+                    _ => {
+                        m = m.clone();
+                        remembered = None;
+                    }
+                }
+                // Remembered or not, never an entry other than the model's, a hole or past the end.
+                let ok = m.remembered().is_none_or(|k| k.is_some() && k == remembered.as_ref());
+                assert!(ok, "step {step}");
+                assert!(m.iter().map(|(k, v)| (*k, *v)).eq(want.iter().copied()), "step {step}");
+            }
+            assert!(grew > 0 && compacted > 0, "{grew} growths, {compacted} compactions");
             if classes == 1 {
                 assert!(m.sorted_buckets() > 0);
             }

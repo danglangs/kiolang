@@ -333,9 +333,9 @@ pub unsafe fn map_insert(t: &Table, p: *mut Header, k: u64, v: u64) {
         // A key already present is found without copying it, and kept.
         let probe = probe(key, k);
         if hashed {
-            match hash_map(p).get_mut(&probe) {
-                Some(slot) => release(t, value, core::mem::replace(slot, v)),
-                None => drop(hash_map(p).insert(key_of(key, k), v)),
+            // One search; the entry the last `get` found first (hmap.rs).
+            if let Some(old) = hash_map(p).insert_with(&probe, || key_of(key, k), v) {
+                release(t, value, old);
             }
             return;
         }

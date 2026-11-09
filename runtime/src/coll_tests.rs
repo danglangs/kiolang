@@ -854,12 +854,18 @@ fn hash_map_frees_what_it_holds() {
 }
 
 /// `m.insert(k, ..)` after `m.get(k)` reuses the entry `get` found (C8b6), and only then:
-/// random gets, inserts, removes and copies on `Map<Str, Int>` against a model, half of them on
-/// the key last got. 40 keys besides the odd ones (`""`, longer than a word, equal 8-byte
-/// prefixes), so inserts and removes split and merge nodes. Miri checks that every remembered
-/// entry used is still valid.
+/// random gets, inserts, removes and copies on `Map<Str, Int>` and `HashMap<Str, Int>` against
+/// a model, half of them on the key last got. 40 keys besides the odd ones (`""`, longer than a
+/// word, equal 8-byte prefixes), so inserts and removes split and merge nodes (a `HashMap` grows
+/// and compacts). Miri checks that every remembered entry used is still valid.
 #[test]
 fn map_insert_after_get_matches_a_model() {
+    for d in [MAP_STR_INT, HASH_STR_INT] {
+        map_insert_after_get_matches_a_model_of(d);
+    }
+}
+
+fn map_insert_after_get_matches_a_model_of(d: u32) {
     let _l = lock();
     let before = obj::live();
     let mut names: alloc::vec::Vec<alloc::string::String> =
@@ -868,7 +874,7 @@ fn map_insert_after_get_matches_a_model() {
             .to_vec();
     names.extend((0..40).map(|i| alloc::format!("k{i}")));
     let n = if cfg!(miri) { 1_500 } else { 50_000 };
-    let m = coll::map_new(&T, MAP_STR_INT);
+    let m = coll::map_new(&T, d);
     let mut model = alloc::collections::BTreeMap::new();
     let mut x = 3u64;
     let mut next = |k: usize| {
@@ -880,7 +886,7 @@ fn map_insert_after_get_matches_a_model() {
         f(k);
         dec(from_slot(k));
     };
-    // SAFETY: `m` is a `Map<Str, Int>`, unique when changed; each key is a live `Str`.
+    // SAFETY: `m` is a map from `Str` to `Int`, unique when changed; each key is a live `Str`.
     unsafe {
         let get = |m: *mut Header, k: &str| {
             let k = s(k);
@@ -934,11 +940,17 @@ fn map_insert_after_get_matches_a_model() {
 /// An insert that reuses the entry `get` found releases the value it replaces.
 #[test]
 fn map_insert_after_get_releases_the_old_value() {
+    for d in [MAP_INT_STR, HASH_INT_STR] {
+        map_insert_after_get_releases_the_old_value_of(d);
+    }
+}
+
+fn map_insert_after_get_releases_the_old_value_of(d: u32) {
     let _l = lock();
     let before = obj::live();
-    let m = coll::map_new(&T, MAP_INT_STR);
+    let m = coll::map_new(&T, d);
     let (a, b) = (from_slot(s("a")), from_slot(s("b")));
-    // SAFETY: `m` is a unique `Map<Int, Str>`.
+    // SAFETY: `m` is a unique map from `Int` to `Str`.
     unsafe {
         obj::inc(a);
         coll::map_insert(&T, m, 7, to_slot(a));
