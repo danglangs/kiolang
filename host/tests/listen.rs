@@ -338,3 +338,58 @@ fn audit_and_http_are_refused_with_listen() {
     }
     assert!(!log.exists());
 }
+
+/// H10: `Incoming` and `Outgoing` bind by type, so any parameter names serve.
+#[test]
+fn http_grants_bind_by_type() {
+    let public = tempfile::tempdir().unwrap();
+    let app = public
+        .path()
+        .join("..")
+        .join(format!("bytype-{}.kio", std::process::id()));
+    std::fs::write(
+        &app,
+        r#"fn main(request: Incoming, response: Outgoing, public: Dir) -> Result<(), WebErr> {
+            response.send(200, [], [], request.target().to_bytes())
+        }"#,
+    )
+    .unwrap();
+    let kio = start_app(app.to_str().unwrap(), public.path());
+    let got = send(kio.port, "GET", "/x", b"");
+    std::fs::remove_file(&app).unwrap();
+    assert_eq!(got, (200, b"/x".to_vec()));
+}
+
+/// H10: zero or two of either HTTP grant is refused at startup with a hint.
+#[test]
+fn wrong_http_grant_counts_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    for (i, (params, body)) in [
+        (
+            "a: Incoming, b: Incoming, res: Outgoing",
+            "res.send(200, [], [], \"\".to_bytes())",
+        ),
+        ("req: Incoming", "Ok(())"),
+        (
+            "res: Outgoing, a: Incoming, b: Outgoing",
+            "res.send(200, [], [], \"\".to_bytes())",
+        ),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let app = dir.path().join(format!("bad{i}.kio"));
+        std::fs::write(&app, format!("fn main({params}) -> Result<(), WebErr> {{ {body} }}")).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_kio"))
+            .args(["run", app.to_str().unwrap(), "--listen", "127.0.0.1:0"])
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{params}: {err}");
+        assert!(err.contains("takes one Incoming and one Outgoing"), "{params}: {err}");
+        assert!(
+            err.contains("hint: write `fn main(request: Incoming, response: Outgoing, ..)`"),
+            "{err}"
+        );
+    }
+}

@@ -1436,20 +1436,21 @@ impl Kio {
         dirs: Vec<(String, RealDir)>,
         request: Request,
     ) -> Result<(RunResult, Option<Response>)> {
-        let (sent, handles) = self.web_grants(request)?;
+        let (sent, handles) = self.web_grants(request, ("req", "res"))?;
         let outcome = self.run_all(&[single(source)], dirs, vec![], handles)?;
         let response = sent.lock().unwrap_or_else(PoisonError::into_inner).take();
         Ok((outcome, response))
     }
 
-    /// The `req` and `res` grants for one request, and the slot `res.send` fills.
-    fn web_grants(&mut self, request: Request) -> Result<(Sent, Handles)> {
+    /// The `Incoming` and `Outgoing` grants for one request, named `names`, and the slot the
+    /// `Outgoing` fills.
+    fn web_grants(&mut self, request: Request, names: (&str, &str)) -> Result<(Sent, Handles)> {
         let sent = Sent::default();
         let req = self.store.data_mut().table.push(request)?;
         let res = self.store.data_mut().table.push(sent.clone())?;
         let handles = Handles {
-            incomings: vec![("req".to_string(), Resource::new_own(req.rep()))],
-            outgoings: vec![("res".to_string(), Resource::new_own(res.rep()))],
+            incomings: vec![(names.0.to_string(), Resource::new_own(req.rep()))],
+            outgoings: vec![(names.1.to_string(), Resource::new_own(res.rep()))],
             ..Handles::default()
         };
         Ok((sent, handles))
@@ -1706,6 +1707,8 @@ pub struct Server {
     kvs: KvGrants,
     /// `main`'s `WsMessage` and `WsSend` parameter names, for a WebSocket server.
     ws: Option<(String, String)>,
+    /// `main`'s `Incoming` and `Outgoing` parameter names, for an HTTP server.
+    http: (String, String),
 }
 
 impl Drop for Server {
@@ -1732,6 +1735,10 @@ impl Server {
         let params = program.main_params();
         let param = |ty: &str| params.iter().find(|(_, t)| t == ty).map(|(n, _)| n.clone());
         let ws = param("WsMessage").zip(param("WsSend"));
+        let http = (
+            param("Incoming").unwrap_or("req".into()),
+            param("Outgoing").unwrap_or("res".into()),
+        );
         let mut pool = PoolingAllocationConfig::new();
         pool.total_component_instances(POOL_INSTANCES)
             .total_core_instances(POOL_INSTANCES)
@@ -1756,6 +1763,7 @@ impl Server {
             stop,
             kvs: vec![],
             ws,
+            http,
         }))
     }
 
@@ -1780,7 +1788,7 @@ impl Server {
     pub fn handle(&self, request: Request, dirs: Vec<(String, RealDir)>) -> std::result::Result<Response, String> {
         let mut sent = Sent::default();
         let result = self.run_fresh(dirs, |kio| {
-            let (s, handles) = kio.web_grants(request)?;
+            let (s, handles) = kio.web_grants(request, (&self.http.0, &self.http.1))?;
             sent = s;
             Ok(handles)
         })?;

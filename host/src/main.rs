@@ -177,6 +177,9 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     if ws && (takes("WsMessage"), takes("WsSend")) != (1, 1) {
         return fail("a WebSocket server's main takes one WsMessage and one WsSend\n  hint: write `fn main(msg: WsMessage, conn: WsSend, ..)`".into());
     }
+    if http && (takes("Incoming"), takes("Outgoing")) != (1, 1) {
+        return fail("an HTTP server's main takes one Incoming and one Outgoing\n  hint: write `fn main(request: Incoming, response: Outgoing, ..)`".into());
+    }
     match (listen, http, ws) {
         (None, true, _) => return fail("main takes Incoming/Outgoing but there is no address\n  hint: add `--listen 127.0.0.1:8080`".into()),
         (None, _, true) => return fail("main takes WsMessage/WsSend but there is no address\n  hint: add `--listen 127.0.0.1:8080`".into()),
