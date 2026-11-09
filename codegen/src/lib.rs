@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use wasm_encoder::reencode::{self, Reencode};
 use wasm_encoder::{
-    BlockType, CodeSection, ConstExpr, DataSection, Encode, Function, Ieee64, Instruction, InstructionSink,
-    MemorySection, TypeSection, ValType,
+    BlockType, CodeSection, ConstExpr, DataSection, ElementSection, Elements, Encode, Function, Ieee64, Instruction,
+    InstructionSink, MemorySection, TableSection, TypeSection, ValType,
 };
 use wasmparser::{Parser, Payload};
 
@@ -53,20 +53,20 @@ impl Site {
 pub fn compile(m: &Module) -> Result<Wasm> {
     let rt = Runtime::scan(RUNTIME)?;
     let data_addr = rt.pages * PAGE;
-    let mut statics = Statics::new(m, data_addr);
+    let mut statics = Statics::new(m, data_addr, rt.table);
     let mut sites = Vec::new();
     let mut types: Vec<FuncSig> = Vec::new();
     let mut funcs = Vec::new();
     for f in &m.funcs {
-        let (sig, body) = func(&rt, m, &mut statics, f, &mut sites);
-        let ty = match types.iter().position(|t| *t == sig) {
-            Some(i) => i,
-            None => {
-                types.push(sig);
-                types.len() - 1
-            }
-        };
-        funcs.push((rt.types + ty as u32, body));
+        let (sig, body) = func(&rt, m, &mut statics, &mut types, f, &mut sites);
+        funcs.push((rt.types + type_index(&mut types, sig), body));
+    }
+    // A wrapper per function used as a value, after the program's functions, in table order.
+    let mut elems = Vec::new();
+    for &(f, captures) in statics.elems() {
+        let (sig, body) = wrapper(&rt, m, f, captures);
+        elems.push(rt.funcs + funcs.len() as u32);
+        funcs.push((rt.types + type_index(&mut types, sig), body));
     }
     let main = &m.funcs[m.main.0 as usize];
     let main_desc = entry_desc(&mut statics, &main.ret);
@@ -79,6 +79,7 @@ pub fn compile(m: &Module) -> Result<Wasm> {
         entry: entry(&rt, table, main_index, main),
         entry_desc: main_desc,
         data: (data_addr, data),
+        elems,
     };
     let mut module = wasm_encoder::Module::new();
     app.parse_core_module(&mut module, Parser::new(0), RUNTIME)
@@ -99,6 +100,8 @@ struct Runtime {
     funcs: u32,
     imported: u32,
     pages: u32,
+    /// The size of the runtime's table, the first entry the program's functions take.
+    table: u32,
     exports: HashMap<String, u32>,
 }
 
@@ -109,6 +112,7 @@ impl Runtime {
             funcs: 0,
             imported: 0,
             pages: 0,
+            table: 0,
             exports: HashMap::new(),
         };
         for payload in Parser::new(0).parse_all(wasm) {
@@ -123,6 +127,10 @@ impl Runtime {
                 Payload::MemorySection(s) => {
                     let m = s.into_iter().next().context("the runtime has no memory")??;
                     rt.pages = u32::try_from(m.initial)?;
+                }
+                Payload::TableSection(s) => {
+                    let t = s.into_iter().next().context("the runtime has no table")??;
+                    rt.table = u32::try_from(t.ty.initial)?;
                 }
                 Payload::ExportSection(s) => {
                     for e in s {
@@ -144,6 +152,22 @@ impl Runtime {
 /// A Wasm function type.
 type FuncSig = (Vec<ValType>, Vec<ValType>);
 
+/// The index of `sig` among the program's types, added if new.
+fn type_index(types: &mut Vec<FuncSig>, sig: FuncSig) -> u32 {
+    let i = types.iter().position(|t| *t == sig).unwrap_or_else(|| {
+        types.push(sig);
+        types.len() - 1
+    });
+    i as u32
+}
+
+/// The Wasm type of a call through a `fn(params) -> ret` value: the function object, then the
+/// parameters. Every table entry of that `fn` type has it.
+fn value_sig(params: &[Ty], ret: &Ty) -> FuncSig {
+    let params = std::iter::once(ValType::I32).chain(params.iter().filter_map(val_type));
+    (params.collect(), val_type(ret).into_iter().collect())
+}
+
 /// The value type of a kio type, if it has one: `()` and `!` have none.
 fn val_type(t: &Ty) -> Option<ValType> {
     match t {
@@ -151,7 +175,7 @@ fn val_type(t: &Ty) -> Option<ValType> {
         Ty::Bool => Some(ValType::I32),
         Ty::Float => Some(ValType::F64),
         Ty::Str | Ty::Bytes | Ty::List(_) | Ty::Map(..) => Some(ValType::I32),
-        Ty::Struct(_) | Ty::Enum(_) | Ty::Option(_) | Ty::Result(..) => Some(ValType::I32),
+        Ty::Struct(_) | Ty::Enum(_) | Ty::Option(_) | Ty::Result(..) | Ty::Fn(..) => Some(ValType::I32),
         // A handle in the component's table, never counted.
         Ty::Cap(_) => Some(ValType::I32),
         Ty::Unit | Ty::Never => None,
@@ -164,7 +188,15 @@ fn val_type(t: &Ty) -> Option<ValType> {
 fn is_ptr(t: &Ty) -> bool {
     matches!(
         t,
-        Ty::Str | Ty::Bytes | Ty::List(_) | Ty::Map(..) | Ty::Struct(_) | Ty::Enum(_) | Ty::Option(_) | Ty::Result(..)
+        Ty::Str
+            | Ty::Bytes
+            | Ty::List(_)
+            | Ty::Map(..)
+            | Ty::Struct(_)
+            | Ty::Enum(_)
+            | Ty::Option(_)
+            | Ty::Result(..)
+            | Ty::Fn(..)
     )
 }
 
@@ -241,6 +273,22 @@ fn snake(name: &str) -> String {
     s
 }
 
+/// Turns a slot on the stack into a value of type `t`.
+fn slot_out(s: &mut InstructionSink, t: &Ty) {
+    match val_type(t) {
+        Some(ValType::I64) => {}
+        Some(ValType::F64) => {
+            s.f64_reinterpret_i64();
+        }
+        Some(_) => {
+            s.i32_wrap_i64();
+        }
+        None => {
+            s.drop();
+        }
+    }
+}
+
 /// The variant name of an IR node, for `unimplemented`.
 fn node(n: &impl Debug) -> String {
     let s = format!("{n:?}");
@@ -251,6 +299,7 @@ fn func<'m>(
     rt: &Runtime,
     m: &'m Module,
     statics: &mut Statics<'m>,
+    types: &mut Vec<FuncSig>,
     f: &'m ir::Func,
     sites: &mut Vec<Site>,
 ) -> (FuncSig, Function) {
@@ -280,6 +329,7 @@ fn func<'m>(
         f,
         ret: &f.ret,
         statics,
+        types,
         sites,
         locals,
         first_decl: params.len() as u32,
@@ -306,6 +356,8 @@ struct FuncGen<'a, 'm> {
     /// The function's return type, which `?` returns a `None` or `Err` of.
     ret: &'m Ty,
     statics: &'a mut Statics<'m>,
+    /// The program's function types, which a call through a `fn` value adds to.
+    types: &'a mut Vec<FuncSig>,
     sites: &'a mut Vec<Site>,
     /// The Wasm local of each IR local, `None` for those without a value.
     locals: Vec<Option<u32>>,
@@ -488,18 +540,7 @@ impl FuncGen<'_, '_> {
 
     /// Turns a slot on the stack into a value of type `t`.
     fn slot_out(&mut self, t: &Ty) {
-        match val_type(t) {
-            Some(ValType::I64) => {}
-            Some(ValType::F64) => {
-                self.sink().f64_reinterpret_i64();
-            }
-            Some(_) => {
-                self.sink().i32_wrap_i64();
-            }
-            None => {
-                self.sink().drop();
-            }
-        }
+        slot_out(&mut self.sink(), t);
     }
 
     fn temp(&mut self, t: ValType) -> u32 {
@@ -1034,6 +1075,16 @@ impl FuncGen<'_, '_> {
                 let index = self.rt.funcs + f.0;
                 self.sink().call(index);
             }
+            ExprKind::FnRef(f) => {
+                let a = self.statics.pinned_fn(*f, None);
+                self.sink().i32_const(a as i32);
+            }
+            ExprKind::Closure(f, captured) if captured.is_empty() => {
+                let a = self.statics.pinned_fn(*f, Some(0));
+                self.sink().i32_const(a as i32);
+            }
+            ExprKind::Closure(f, captured) => self.closure(*f, captured),
+            ExprKind::CallValue(callee, args) => self.call_value(callee, args),
             ExprKind::Builtin(b, recv, _) if inline_builtin(*b) => {
                 self.expr(recv);
                 self.scalar_builtin(*b);
@@ -1205,6 +1256,49 @@ impl FuncGen<'_, '_> {
         }
         self.owned.pop();
         self.sink().local_get(o);
+    }
+
+    /// A closure lifted to `f`: a new function object holding a copy (+1) of each captured
+    /// local in its slots, which the object owns until it is freed. Nothing here can exit, so
+    /// the object needs no place in `owned` while it is filled.
+    fn closure(&mut self, f: ir::FuncId, captured: &[ir::LocalId]) {
+        let (desc, elem) = self.statics.func(f, Some(captured.len()));
+        let o = self.temp(ValType::I32);
+        self.sink().i32_const(desc as i32).i32_const(elem as i32);
+        self.call_rt("rt_alloc");
+        self.sink().local_set(o);
+        let m = self.m;
+        for (i, (id, l)) in captured.iter().zip(&m.funcs[f.0 as usize].locals).enumerate() {
+            let Some(x) = self.local(*id) else { continue };
+            if is_ptr(&l.ty) {
+                self.sink().local_get(x);
+                self.call_rt("rt_inc");
+            }
+            self.sink().local_get(o).local_get(x);
+            self.slot_in(&l.ty);
+            self.sink().i64_store(slot_at(ENUM_SLOTS + 8 * i as u64));
+        }
+        self.sink().local_get(o);
+    }
+
+    /// `callee(args)`: the callee, then the arguments, each held as an operand; then a
+    /// `call_indirect` through the callee's table entry, passing the callee (borrowed, for its
+    /// captures) and the arguments (consumed); then the callee is dropped.
+    fn call_value(&mut self, callee: &ir::Expr, args: &[ir::Expr]) {
+        let Ty::Fn(params, ret) = &callee.ty else {
+            return self.expr(callee); // `!`: nothing after it runs
+        };
+        let xs: Vec<&ir::Expr> = std::iter::once(callee).chain(args).collect();
+        let (mark, temps) = self.operands(&xs);
+        let c = temps[0].expect("a fn value");
+        self.sink().local_get(c);
+        for (x, t) in args.iter().zip(&temps[1..]) {
+            self.get(x, *t);
+        }
+        self.owned.truncate(mark);
+        let ty = self.rt.types + type_index(self.types, value_sig(params, ret));
+        self.sink().local_get(c).i32_load(VARIANT).call_indirect(0, ty);
+        self.dec(c);
     }
 
     /// `base.f`: a new reference to the field's value. A base that is a local, or a field of
@@ -1613,6 +1707,32 @@ fn entry_desc(statics: &mut Statics, ret: &Ty) -> Function {
     f
 }
 
+/// The table entry of function `f` used as a value: takes the function object and `f`'s own
+/// parameters, and calls `f` with a new reference to each capture in the object first.
+fn wrapper(rt: &Runtime, m: &Module, f: ir::FuncId, captures: usize) -> (FuncSig, Function) {
+    let func = &m.funcs[f.0 as usize];
+    let (caps, params) = func.locals[..func.params as usize].split_at(captures);
+    let params: Vec<Ty> = params.iter().map(|l| l.ty.clone()).collect();
+    let sig = value_sig(&params, &func.ret);
+    let mut body = Function::new([]);
+    let mut s = body.instructions();
+    for (i, l) in caps.iter().enumerate() {
+        let at = slot_at(ENUM_SLOTS + 8 * i as u64);
+        if is_ptr(&l.ty) {
+            s.local_get(0).i64_load(at).i32_wrap_i64().call(rt.export("rt_inc"));
+        }
+        if val_type(&l.ty).is_some() {
+            s.local_get(0).i64_load(at);
+            slot_out(&mut s, &l.ty);
+        }
+    }
+    for i in 1..sig.0.len() as u32 {
+        s.local_get(i);
+    }
+    s.call(rt.funcs + f.0).end();
+    (sig, body)
+}
+
 /// Re-encodes the runtime with the program appended.
 struct Append<'a> {
     rt: &'a Runtime,
@@ -1623,6 +1743,8 @@ struct Append<'a> {
     entry_desc: Function,
     /// The program's data: its address, at the old end of memory, and its bytes.
     data: (u32, Vec<u8>),
+    /// The functions of the program's table entries, which follow the runtime's in table 0.
+    elems: Vec<u32>,
 }
 
 impl Append<'_> {
@@ -1652,6 +1774,36 @@ impl Reencode for Append<'_> {
         reencode::utils::parse_function_section(self, funcs, s)?;
         for (ty, _) in &self.funcs {
             funcs.function(*ty);
+        }
+        Ok(())
+    }
+
+    fn parse_table_section(&mut self, tables: &mut TableSection, s: wasmparser::TableSectionReader<'_>) -> ReResult {
+        for (i, t) in s.into_iter().enumerate() {
+            let t = t?;
+            let mut ty = self.table_type(t.ty)?;
+            if i == 0 {
+                let n = self.elems.len() as u64;
+                ty.minimum += n;
+                ty.maximum = ty.maximum.map(|m| m + n);
+            }
+            match t.init {
+                wasmparser::TableInit::RefNull => tables.table(ty),
+                wasmparser::TableInit::Expr(e) => tables.table_with_init(ty, &self.const_expr(e)?),
+            };
+        }
+        Ok(())
+    }
+
+    fn parse_element_section(
+        &mut self,
+        elems: &mut ElementSection,
+        s: wasmparser::ElementSectionReader<'_>,
+    ) -> ReResult {
+        reencode::utils::parse_element_section(self, elems, s)?;
+        if !self.elems.is_empty() {
+            let at = ConstExpr::i32_const(self.rt.table as i32);
+            elems.active(Some(0), &at, Elements::Functions(self.elems.as_slice().into()));
         }
         Ok(())
     }

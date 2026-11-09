@@ -369,6 +369,7 @@ unsafe fn eq_one(t: &Table, work: &mut Vec<(u32, u64, u64)>, d: u32, a: u64, b: 
                 }
                 true
             }
+            Desc::Fn { .. } => panic!("functions have no equality"),
         }
     }
 }

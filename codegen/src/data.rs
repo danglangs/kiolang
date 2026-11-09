@@ -3,7 +3,8 @@
 //!
 //! ```text
 //! base   literals, each a pinned Str [u32::MAX][STR][len][len][bytes], padded to 8 bytes,
-//!        and payload-free variants, each a pinned enum [u32::MAX][desc][variant][0]
+//!        payload-free variants, each a pinned enum [u32::MAX][desc][variant][0], and
+//!        functions used as values without captures, each [u32::MAX][desc][table index][0]
 //! table  RawTable: (address, count) of each array below, in this order
 //!        descs     [tag, 4 words] per descriptor: runtime/src/desc.rs `Desc`, repr(C, u32)
 //!        slots     u32 per record or variant slot
@@ -14,8 +15,11 @@
 //!
 //! A literal's address is fixed when it is added and the table goes last, so both can grow
 //! until `finish`.
+//!
+//! Also the program's entries in the Wasm table, from `table` on: one per function used as a
+//! value, which codegen fills with a wrapper calling it (lib.rs `wrapper`).
 
-use lang::ir::{Block, Expr, ExprKind, Module, Pat, PlaceStep, StmtKind, Ty};
+use lang::ir::{Block, Expr, ExprKind, FuncId, Module, Pat, PlaceStep, StmtKind, Ty};
 use std::collections::HashMap;
 
 // `Desc` tags, in declaration order; the first six (`Unit` to `Float`) are also the scalar
@@ -26,6 +30,7 @@ const LIST: u32 = 6;
 const MAP: u32 = 7;
 const RECORD: u32 = 8;
 const ENUM: u32 = 9;
+const FN: u32 = 10;
 
 pub struct Statics<'m> {
     m: &'m Module,
@@ -42,11 +47,20 @@ pub struct Statics<'m> {
     variants: Vec<[u32; 4]>,
     names: Vec<u8>,
     interned: HashMap<String, [u32; 2]>,
+    /// The first table entry the program's functions take.
+    table: u32,
+    /// Each function used as a value, in table order, with its captures' count.
+    elems: Vec<(FuncId, usize)>,
+    /// The descriptor and table entry of each function in `elems`, by its id.
+    funcs: HashMap<u32, (u32, u32)>,
+    /// The address of the pinned object of each function used as a value without captures.
+    fn_pins: HashMap<u32, u32>,
 }
 
 impl<'m> Statics<'m> {
-    /// The scalar descriptors, and every type and string literal in `m`.
-    pub fn new(m: &'m Module, base: u32) -> Self {
+    /// The scalar descriptors, and every type and string literal in `m`; table entries from
+    /// `table` on.
+    pub fn new(m: &'m Module, base: u32, table: u32) -> Self {
         let mut s = Statics {
             m,
             base,
@@ -60,6 +74,10 @@ impl<'m> Statics<'m> {
             variants: Vec::new(),
             names: Vec::new(),
             interned: HashMap::new(),
+            table,
+            elems: Vec::new(),
+            funcs: HashMap::new(),
+            fn_pins: HashMap::new(),
         };
         for f in &m.funcs {
             for l in &f.locals {
@@ -81,7 +99,6 @@ impl<'m> Statics<'m> {
             Ty::Str => return STR,
             Ty::Bytes => return 4,
             Ty::Cap(_) | Ty::Never => unreachable!("{t:?} has no descriptor"),
-            Ty::Fn(..) => unimplemented!("codegen: type {}", crate::node(t)),
             _ => {}
         }
         if let Some((_, i)) = self.tys.iter().find(|(u, _)| u == t) {
@@ -119,6 +136,8 @@ impl<'m> Statics<'m> {
                 "Result",
                 &[("Ok".into(), vec![(**t).clone()]), ("Err".into(), vec![(**e).clone()])],
             ),
+            // Any `fn` value: the object's own descriptor names it and its captures.
+            Ty::Fn(..) => [FN, 0, 0, 0, 0],
             _ => unreachable!("a scalar"),
         };
         i
@@ -153,6 +172,51 @@ impl<'m> Statics<'m> {
         }
         self.pins.insert((desc, variant), a);
         a
+    }
+
+    /// The descriptor and table entry of function `f` as a value: a function item (`captures`
+    /// `None`), displayed `<fn name>`, or a closure lifted to `f` whose first `n` parameters
+    /// are its captures, displayed `<closure>`, its slots the captures. Added if new.
+    pub fn func(&mut self, f: FuncId, captures: Option<usize>) -> (u32, u32) {
+        if let Some(&d) = self.funcs.get(&f.0) {
+            return d;
+        }
+        let func = &self.m.funcs[f.0 as usize];
+        let n = captures.unwrap_or(0);
+        let slots: Vec<u32> = func.locals[..n].iter().map(|l| self.desc(&l.ty)).collect();
+        let [off, len] = match captures {
+            None => self.name(&format!("<fn {}>", func.name)),
+            Some(_) => self.name("<closure>"),
+        };
+        let start = self.slots.len() as u32;
+        self.fields.extend(slots.iter().map(|_| [0, 0]));
+        self.slots.extend(slots);
+        let desc = self.descs.len() as u32;
+        self.descs.push([FN, off, len, start, n as u32]);
+        let elem = self.table + self.elems.len() as u32;
+        self.elems.push((f, n));
+        self.funcs.insert(f.0, (desc, elem));
+        (desc, elem)
+    }
+
+    /// The address of the pinned object of function `f` as a value with no captures (a
+    /// function item, or a closure that captures nothing), added if new.
+    pub fn pinned_fn(&mut self, f: FuncId, captures: Option<usize>) -> u32 {
+        if let Some(&a) = self.fn_pins.get(&f.0) {
+            return a;
+        }
+        let (desc, elem) = self.func(f, captures);
+        let a = self.base + self.literals.len() as u32;
+        for w in [u32::MAX, desc, elem, 0] {
+            self.literals.extend(w.to_le_bytes());
+        }
+        self.fn_pins.insert(f.0, a);
+        a
+    }
+
+    /// Each function used as a value so far, in table order, and its captures' count.
+    pub fn elems(&self) -> &[(FuncId, usize)] {
+        &self.elems
     }
 
     /// The data, to be placed at `base`, and the address of its `RawTable` for `rt_init`.
@@ -277,10 +341,9 @@ impl<'m> Statics<'m> {
             | ExprKind::Bool(_)
             | ExprKind::Unit
             | ExprKind::Local(_)
-            | ExprKind::MapNew => {}
-            ExprKind::FnRef(_) | ExprKind::CallValue(..) | ExprKind::Closure(..) => {
-                unimplemented!("codegen: expression {}", crate::node(&e.kind))
-            }
+            | ExprKind::MapNew
+            | ExprKind::FnRef(_)
+            | ExprKind::Closure(..) => {}
             ExprKind::Unary(_, x) | ExprKind::Field(x, _) | ExprKind::Try(x) => self.expr(x),
             ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) => {
                 self.expr(a);
@@ -297,7 +360,7 @@ impl<'m> Statics<'m> {
             ExprKind::Call(_, xs) | ExprKind::CapCall(_, _, xs) | ExprKind::List(xs) | ExprKind::Variant(_, _, xs) => {
                 exprs(xs, self)
             }
-            ExprKind::Builtin(_, x, xs) => {
+            ExprKind::Builtin(_, x, xs) | ExprKind::CallValue(x, xs) => {
                 self.expr(x);
                 exprs(xs, self);
             }

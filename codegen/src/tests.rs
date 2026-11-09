@@ -24,9 +24,9 @@ fn the_component_validates() {
 }
 
 #[test]
-#[should_panic(expected = "codegen: type Fn")]
+#[should_panic(expected = "codegen: builtin ListAny")]
 fn unsupported_ir_names_the_node() {
-    let _ = compile(&module("fn f() {} fn main() { let g = f; }"));
+    let _ = compile(&module("fn main() -> Bool { [1].any(|x| x > 0) }"));
 }
 
 /// Every caps.wit method, called from a program: the runtime has a wrapper for each
@@ -129,7 +129,7 @@ fn the_runtime_exports_every_operation() {
 
 #[test]
 fn the_descriptor_table_reads_back_through_the_runtime() {
-    use lang::ir::{EnumId, StructId};
+    use lang::ir::{EnumId, FuncId, StructId};
     use runtime::desc::{Desc, RawTable};
     use runtime::display::display;
     use runtime::obj::{self, to_slot, Header, PINNED};
@@ -138,7 +138,10 @@ fn the_descriptor_table_reads_back_through_the_runtime() {
         r#"
 struct Tree { name: Str, kids: List<Tree> }
 enum Shape { Dot, Line(Int, Tree) }
+fn id(x: Int) -> Int { x }
 fn main() -> Int {
+    let k = "a";
+    let f = |x: Int| k;
     let t = Tree { name: "a", kids: [] };
     let s = Shape::Line(1, t);
     let o: Option<Int> = Some(5);
@@ -148,7 +151,8 @@ fn main() -> Int {
     );
     // Not page-aligned, so an address relative to the data would show.
     const BASE: u32 = 24;
-    let mut s = Statics::new(&m, BASE);
+    const TABLE: u32 = 46;
+    let mut s = Statics::new(&m, BASE, TABLE);
     let tree = s.desc(&Ty::Struct(StructId(0)));
     let shape = s.desc(&Ty::Enum(EnumId(m.enums.len() as u32 - 1)));
     let list_tree = s.desc(&Ty::List(Box::new(Ty::Struct(StructId(0)))));
@@ -168,6 +172,13 @@ fn main() -> Int {
         (BASE + 48, BASE + 48)
     );
     let dot = s.pinned(&Ty::Enum(EnumId(m.enums.len() as u32 - 1)), 0);
+    let func = |name: &str| FuncId(m.funcs.iter().position(|f| f.name.contains(name)).unwrap() as u32);
+    let fn_ty = s.desc(&Ty::Fn(vec![Ty::Int], Box::new(Ty::Str)));
+    let item = s.pinned_fn(func("id"), None);
+    assert_eq!(s.pinned_fn(func("id"), None), item, "one pinned object per function");
+    let (closure, elem) = s.func(func("closure"), Some(1));
+    assert_eq!(s.elems(), [(func("id"), 0), (func("closure"), 1)]);
+    assert_eq!(elem, TABLE + 1);
     let (data, table) = s.finish();
 
     // Memory as Wasm sees it: address `x` is byte `x` of `buf`, which is 8-aligned.
@@ -186,8 +197,9 @@ fn main() -> Int {
         t.descs[..6],
         [Desc::Unit, Desc::Int, Desc::Bool, Desc::Str, Desc::Bytes, Desc::Float]
     );
-    // The program's six other types, all added from the module: the lookups above added none.
-    assert_eq!(t.descs.len(), 12);
+    // The program's seven other types, all added from the module: the lookups above added
+    // none. Then the two functions used as values.
+    assert_eq!(t.descs.len(), 15);
     let Desc::Record { name, slots } = t.desc(tree) else {
         panic!("{:?}", t.desc(tree))
     };
@@ -254,6 +266,32 @@ fn main() -> Int {
         obj::dec(&t, s);
         assert_eq!(((*at(none)).rc, (*at(dot)).rc), (PINNED, PINNED));
     }
+    // Function values: a pinned item and a closure owning its capture, each displayed through
+    // a `fn` type's descriptor, which names neither.
+    let Desc::Fn { name, slots } = t.desc(fn_ty) else {
+        panic!("{:?}", t.desc(fn_ty))
+    };
+    assert_eq!((name.len, slots.len), (0, 0));
+    let Desc::Fn { name, slots } = t.desc(closure) else {
+        panic!("{:?}", t.desc(closure))
+    };
+    assert_eq!(
+        (t.name(name), t.slots(slots)),
+        (b"<closure>".as_slice(), [3].as_slice())
+    );
+    let c = obj::alloc(&t, closure, elem);
+    // SAFETY: `item` is a pinned function object in `buf`; `c` a fresh closure with one `Str` slot.
+    unsafe {
+        let d = (*at(item)).desc;
+        assert_eq!(((*at(item)).rc, *obj::field::<u32>(at(item), 8)), (PINNED, TABLE));
+        assert!(matches!(t.desc(d), Desc::Fn { name, .. } if t.name(name) == b"<fn id>"));
+        let s = display(&t, fn_ty, to_slot(at(item)));
+        assert_eq!(obj::bytes(s), b"<fn id>");
+        obj::dec(&t, s);
+        assert_eq!(*obj::field::<u32>(c, 8), elem);
+        *obj::slot(&t, c, 0) = to_slot(obj::new_bytes(3, b"k"));
+    }
+    assert_eq!(show(fn_ty, c), "<closure>");
     assert_eq!(obj::live(), before);
     // SAFETY: a pinned static is never freed.
     assert_eq!(unsafe { (*at(a)).rc }, PINNED);

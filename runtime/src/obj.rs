@@ -8,6 +8,7 @@
 //! Str, Bytes  [rc][desc][len u32][cap u32][bytes; cap]
 //! List        [rc][desc][List]
 //! Map         [rc][desc][Map]
+//! Fn          [rc][desc][table index u32][0 u32][capture 0]..
 //! ```
 //!
 //! A slot or element holds an `Int` as its bits, a `Bool` as 0 or 1, `()` as 0, and a pointer
@@ -105,11 +106,13 @@ fn new(size: usize, desc: u32) -> *mut Header {
     p
 }
 
-/// A struct, or variant `variant` of an enum, every slot 0. Fill the slots with `slot`.
+/// A struct, variant `variant` of an enum, or a closure calling table entry `variant`, every
+/// slot 0. Fill the slots with `slot`.
 pub fn alloc(t: &Table, desc: u32, variant: u32) -> *mut Header {
     let (off, n, is_enum) = match t.desc(desc) {
         Desc::Record { slots, .. } => (HEADER, slots.len, false),
         Desc::Enum { variants, .. } => (ENUM_SLOTS, t.variant(variants, variant).slots.len, true),
+        Desc::Fn { slots, .. } => (ENUM_SLOTS, slots.len, true),
         d => panic!("rt_alloc of {d:?}"),
     };
     let p = new(off + 8 * n as usize, desc);
@@ -348,7 +351,7 @@ unsafe fn ptrs(t: &Table, p: *mut Header, mut f: impl FnMut(*mut Header)) {
             Desc::Map { value, .. } if t.is_ptr(value) => {
                 (*field::<Map>(p, HEADER)).values().for_each(|&v| f(from_slot(v)))
             }
-            Desc::Record { .. } | Desc::Enum { .. } => {
+            Desc::Record { .. } | Desc::Enum { .. } | Desc::Fn { .. } => {
                 let (off, slots) = record(t, p);
                 for (i, &d) in slots.iter().enumerate() {
                     if t.is_ptr(d) {
@@ -361,13 +364,14 @@ unsafe fn ptrs(t: &Table, p: *mut Header, mut f: impl FnMut(*mut Header)) {
     }
 }
 
-/// A struct's or enum variant's first slot offset and slot descriptors.
+/// A struct's, enum variant's or closure's first slot offset and slot descriptors.
 pub(crate) unsafe fn record<'t>(t: &Table<'t>, p: *mut Header) -> (usize, &'t [u32]) {
     // SAFETY: `p` is live; an enum has its variant at HEADER.
     unsafe {
         match t.desc((*p).desc) {
             Desc::Record { slots, .. } => (HEADER, t.slots(slots)),
             Desc::Enum { variants, .. } => (ENUM_SLOTS, t.slots(t.variant(variants, *field(p, HEADER)).slots)),
+            Desc::Fn { slots, .. } => (ENUM_SLOTS, t.slots(slots)),
             d => panic!("{d:?} has no slots"),
         }
     }
@@ -381,7 +385,7 @@ unsafe fn size(t: &Table, p: *mut Header) -> usize {
             Desc::Str | Desc::Bytes => BYTES_DATA + *field::<u32>(p, 12) as usize,
             Desc::List { .. } => HEADER + size_of::<List>(),
             Desc::Map { .. } => HEADER + size_of::<Map>(),
-            Desc::Record { .. } | Desc::Enum { .. } => {
+            Desc::Record { .. } | Desc::Enum { .. } | Desc::Fn { .. } => {
                 let (off, slots) = record(t, p);
                 off + 8 * slots.len()
             }

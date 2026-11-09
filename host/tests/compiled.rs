@@ -1127,3 +1127,131 @@ fn slices_and_their_errors() {
         assert_eq!((m.as_str(), &src[start..end]), (msg, call));
     }
 }
+
+/// A closure holds its own reference (+1) to each capture, released when the closure dies:
+/// the captured value outlives the closure and the closure outlives its scope's locals.
+#[test]
+fn closure_copies_and_releases_its_captures() {
+    let src = r#"fn make(s: Str) -> fn(Int) -> Str { let t = s + "!"; |n| t + n.to_str() }
+        fn main() -> Str {
+            let s = "a" + "b";
+            let mut out = "";
+            if true { let f = |x: Int| s + x.to_str(); out += f(1); }
+            let g = make(s);
+            out + s + g(2)
+        }"#;
+    assert_eq!(value(src), "ab1abab!2");
+}
+
+/// The callee of a call through a value is dropped after the call: a fresh closure from a
+/// call, or one read from a list.
+#[test]
+fn callee_is_dropped_after_the_call() {
+    let src = r#"fn adder(n: Int) -> fn(Str) -> Str { let p = n.to_str() + ":"; |s| p + s }
+        fn main() -> Str {
+            let fs = [adder(7), adder(8)];
+            let mut out = "";
+            for i in 0..3 { out += adder(i)("x" + "") + (fs[i % 2])("y" + ""); }
+            out
+        }"#;
+    assert_eq!(value(src), "0:x7:y1:x8:y2:x7:y");
+}
+
+/// Closures in struct fields and lists, called after the locals they captured are gone.
+#[test]
+fn closures_stored_and_called_later() {
+    let src = r#"struct Op { name: Str, run: fn(Str) -> Str }
+        fn ops() -> List<Op> {
+            let k = "k" + "";
+            [Op { name: "add" + "", run: |x| x + k }, Op { name: "dup", run: |x| x + x }]
+        }
+        fn main() -> Str {
+            let mut out = "";
+            let os = ops();
+            for op in os { out += op.name + "=" + (op.run)("a" + "") + " "; }
+            let o = os[0];
+            let fs: List<fn(Str) -> Str> = [o.run, |x| x];
+            out + (fs[0])("b") + (os[1].run)("c")
+        }"#;
+    assert_eq!(value(src), "add=ak dup=aa bkcc");
+}
+
+/// A closure returning a closure: the inner one captures the outer's parameter and, through
+/// the outer, a local of `main`.
+#[test]
+fn closure_returning_a_closure() {
+    let src = r#"fn main() -> Str {
+            let a = "a" + "";
+            let add = |x: Str| |y: Str| x + y + a;
+            let f = add("x" + "");
+            let g = add("z" + "");
+            let nested = |x: Str| { let b = "b" + ""; let h = |y: Str| x + y + a + b; h("1") };
+            f("y" + "") + g("w") + add("p")("q") + nested("n" + "")
+        }"#;
+    assert_eq!(value(src), "xyazwapqan1ab");
+}
+
+/// A function used as a value is one pinned object: copied and dropped any number of times,
+/// never freed, and displayed `<fn name>`; a closure displays `<closure>`.
+#[test]
+fn function_items_are_pinned() {
+    let src = r#"fn double(x: Int) -> Int { x * 2 }
+        fn main() -> Int {
+            let mut n = 0;
+            for i in 0..1000 { let f = double; let fs = [f, double]; let g = fs[1]; n += g(i) - f(i); n += (fs[0])(1); }
+            n
+        }"#;
+    assert_eq!(value(src), "2000");
+    let src = "fn double(x: Int) -> Int { x * 2 } fn main() -> List<fn(Int) -> Int> { [double] }";
+    assert_eq!(value(src), "[<fn double>]");
+    assert_eq!(value("fn f() {} fn main() -> fn() { f }"), "<fn f>");
+    let src = r#"struct H { f: fn(Int) -> Int, g: Option<fn() -> Str> }
+        fn main() -> H { let s = "s" + ""; H { f: |x| x, g: Some(|| s) } }"#;
+    assert_eq!(value(src), "H { f: <closure>, g: Some(<closure>) }");
+}
+
+/// Each call through a closure gives the lifted function its own reference to each capture,
+/// so a closure called many times keeps its captures and leaks nothing.
+#[test]
+fn closure_called_in_a_loop() {
+    let src = r#"fn main() -> Int {
+            let s = "abc" + "";
+            let xs = [1, 2];
+            let f = |i: Int| s.len() + xs.len() + i;
+            let mut n = 0;
+            for i in 0..1000 { n += f(i); }
+            n + s.len()
+        }"#;
+    assert_eq!(value(src), "504503");
+}
+
+/// Captures and parameters of every kind of value: `()`, `Bool`, `Float`, and a closure.
+#[test]
+fn closures_over_scalars_and_unit() {
+    let src = r#"fn main() -> Str {
+            let u = ();
+            let b = true;
+            let x = 1.5;
+            let inner = |n: Int| n + 1;
+            let f = |v: (), y: Float| { let w = u; if b { (x + y).to_str() + inner(1).to_str() } else { "" } };
+            let g = || f((), 2.0);
+            g() + f(u, 0.25)
+        }"#;
+    assert_eq!(value(src), "3.521.752");
+}
+
+/// Recursion through `fn` values is bounded by `--stack`, as direct recursion.
+#[test]
+fn deep_recursion_through_values_is_a_stack_overflow() {
+    let t = std::thread::Builder::new().stack_size(4 * kio_host::MAX_STACK);
+    t.spawn(|| {
+        let src = "fn spin(f: fn(Int) -> Int, n: Int) -> Int { if n == 0 { 0 } else { let g = |x: Int| spin(f, x); 1 + g(n - 1) } }
+            fn main() -> Int { spin(|x| x, 10000000) }";
+        let e = Compiled::run(src, Limits::default()).unwrap_err();
+        assert_eq!(e.to_string(), "stack overflow (limit 2048 KB; raise it with --stack)");
+        assert_eq!(value(&src.replace("10000000", "300")), "300");
+    })
+    .unwrap()
+    .join()
+    .unwrap();
+}

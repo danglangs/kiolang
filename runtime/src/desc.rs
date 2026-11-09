@@ -56,6 +56,13 @@ pub enum Desc {
         name: Name,
         variants: Slice,
     },
+    /// A function value: `[rc][desc][table index u32][0 u32][slot 0]..`, its slots the
+    /// closure's captures. `name` is what display prints (`<fn f>`, `<closure>`). A `fn` type's
+    /// own descriptor has no name and no slots: display and freeing use the object's.
+    Fn {
+        name: Name,
+        slots: Slice,
+    },
 }
 
 /// Bytes `off..off + len` of `Table::names`.

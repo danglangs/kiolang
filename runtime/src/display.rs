@@ -3,7 +3,8 @@
 //! A top-level `Str` is bare; everything else is its source form, with nested strings quoted
 //! as Rust's `{:?}`, `Bytes` as `<N bytes>`, a struct as `Name { f: v }` (no braces when it has
 //! no fields), an enum as `Name::Variant(a, b)`, and `Option` and `Result` as `Some(x)`, `None`,
-//! `Ok(x)`, `Err(x)`. A work stack, not recursion, so a deep value costs heap, not stack.
+//! `Ok(x)`, `Err(x)`, and a function as `<fn f>` or `<closure>`. A work stack, not recursion,
+//! so a deep value costs heap, not stack.
 
 use crate::desc::{self, Desc, Table};
 use crate::obj::{self, field, from_slot, Header, Key, List, Map, HEADER};
@@ -137,6 +138,13 @@ unsafe fn expand<'a>(t: &Table<'a>, d: u32, v: u64, out: &mut Vec<u8>, work: &mu
                     work.push(Item::Text(b"::"));
                     work.push(Item::Text(t.name(name)));
                 }
+            }
+            // `d` may be a `fn` type's, which has no name: the object's own has it.
+            Desc::Fn { .. } => {
+                let Desc::Fn { name, .. } = t.desc((*p).desc) else {
+                    panic!("a fn value that is not a function object")
+                };
+                work.push(Item::Text(t.name(name)));
             }
         }
     }

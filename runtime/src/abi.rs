@@ -40,7 +40,8 @@ pub unsafe extern "C" fn rt_init(table: u32) {
     TABLE.store(table, Relaxed);
 }
 
-/// A struct, or variant `variant` of an enum, with count 1 and every slot 0.
+/// A struct, variant `variant` of an enum, or a closure calling table entry `variant`, with
+/// count 1 and every slot 0.
 #[no_mangle]
 pub extern "C" fn rt_alloc(desc: u32, variant: u32) -> u32 {
     addr(obj::alloc(&table(), desc, variant))

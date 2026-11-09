@@ -6,13 +6,17 @@ use std::sync::{Mutex, MutexGuard};
 
 // struct Inner { name: Str, n: Int }   struct Outer { items: List<Inner> }
 // enum Chain { End, Link(Chain) }      Map<Str, Inner>
+// fn(Int) -> Int                       a closure capturing (Str, Int)    List<fn(Int) -> Int>
 const LIST_INNER: u32 = 6;
 const INNER: u32 = 7;
 const OUTER: u32 = 8;
 const CHAIN: u32 = 9;
 const MAP: u32 = 10;
+const FN: u32 = 11;
+const CLOSURE: u32 = 12;
+const LIST_FN: u32 = 13;
 
-const DESCS: [Desc; 11] = [
+const DESCS: [Desc; 14] = [
     Desc::Unit,
     Desc::Int,
     Desc::Bool,
@@ -36,9 +40,18 @@ const DESCS: [Desc; 11] = [
         key: desc::STR,
         value: INNER,
     },
+    Desc::Fn {
+        name: Name { off: 0, len: 0 },
+        slots: Slice { start: 0, len: 0 },
+    },
+    Desc::Fn {
+        name: Name { off: 22, len: 9 },
+        slots: Slice { start: 4, len: 2 },
+    },
+    Desc::List { elem: FN },
 ];
-const SLOTS: [u32; 4] = [desc::STR, desc::INT, LIST_INNER, CHAIN];
-const FIELDS: [Name; 4] = [Name { off: 0, len: 0 }; 4];
+const SLOTS: [u32; 6] = [desc::STR, desc::INT, LIST_INNER, CHAIN, desc::STR, desc::INT];
+const FIELDS: [Name; 6] = [Name { off: 0, len: 0 }; 6];
 const VARIANTS: [Variant; 2] = [
     Variant {
         name: Name { off: 15, len: 3 },
@@ -54,7 +67,7 @@ const T: Table = Table {
     slots: &SLOTS,
     fields: &FIELDS,
     variants: &VARIANTS,
-    names: b"InnerOuterChainEndLink",
+    names: b"InnerOuterChainEndLink<closure>",
 };
 
 /// The live count is global, so tests that check it run one at a time.
@@ -158,6 +171,38 @@ fn unique_copies_only_when_shared() {
 
         obj::dec(&T, a2);
         obj::dec(&T, copy);
+        obj::dec(&T, list);
+    }
+    assert_eq!(obj::live(), before);
+}
+
+/// A closure frees its captures with it, is copied like a record, and displays as `<closure>`
+/// through a `fn` type's descriptor, which has no name of its own.
+#[test]
+fn closure_holds_its_captures() {
+    let _l = lock();
+    let before = obj::live();
+    let name = obj::new_bytes(desc::STR, b"cap");
+    let c = obj::alloc(&T, CLOSURE, 7);
+    // SAFETY: every pointer is live; each step's reference counts are asserted.
+    unsafe {
+        assert_eq!(*obj::field::<u32>(c, 8), 7, "the table index");
+        *obj::slot(&T, c, 0) = to_slot(name);
+        *obj::slot(&T, c, 1) = 5;
+        obj::inc(c);
+        let copy = obj::unique(&T, c);
+        assert_ne!(copy, c);
+        assert_eq!(
+            (rc(name), *obj::field::<u32>(copy, 8), *obj::slot(&T, copy, 1)),
+            (2, 7, 5)
+        );
+        obj::dec(&T, copy);
+        assert_eq!(rc(name), 1);
+
+        let list = obj::new_list(LIST_FN, vec![to_slot(c)]);
+        let shown = crate::display::display(&T, LIST_FN, to_slot(list));
+        assert_eq!(obj::bytes(shown), b"[<closure>]");
+        obj::dec(&T, shown);
         obj::dec(&T, list);
     }
     assert_eq!(obj::live(), before);
