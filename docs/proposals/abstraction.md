@@ -1,6 +1,6 @@
 # Proposal: function values, generics, floats
 
-**Decided by the owner 2026-11-08:** 1A (fn items and closures, no capabilities inside) and 2A (monomorphized generics, bounds `Eq` and `Ord` only). 3 (floats) still open. Tasks: L6 and L7 in lang-todo.md.
+**Decided by the owner 2026-11-08:** 1A (fn items and closures, no capabilities inside) and 2A (monomorphized generics, bounds `Eq` and `Ord` only). 3 (floats) approved the same day. Tasks: L6, L7, L8 in lang-todo.md.
 
 The largest language gaps (roadmap.md "What a real app needs"). Each changes what programs can rely on, so each is a one-way door. Recommendations first.
 
