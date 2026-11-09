@@ -31,7 +31,10 @@ fn kio(r: &Resolve, t: &Option<Type>) -> Result<String> {
                 format!("Ty::Result(Box::new({ok}), {})", boxed(err)?)
             }
             TypeDefKind::Variant(_) | TypeDefKind::Enum(_) => {
-                format!("Ty::Enum(\"{}\".into())", pascal(r.types[*id].name.as_ref().unwrap()))
+                format!(
+                    "Ty::Enum(\"{}\".into(), vec![])",
+                    pascal(r.types[*id].name.as_ref().unwrap())
+                )
             }
             k => bail!("unsupported WIT type `{}`", k.as_str()),
         },
@@ -77,7 +80,7 @@ fn main() -> Result<()> {
                         cs += &format!("case(\"{}\", vec![{fields}]),", pascal(&c.name));
                     }
                     enums +=
-                        &format!("Enum {{ name: \"{name}\".into(), variants: vec![{cs}], span: at, public: true }},");
+                        &format!("Enum {{ name: \"{name}\".into(), tparams: vec![], variants: vec![{cs}], span: at, public: true }},");
                 }
                 TypeDefKind::Enum(e) => {
                     let mut cs = String::new();
@@ -85,7 +88,7 @@ fn main() -> Result<()> {
                         cs += &format!("case(\"{}\", vec![]),", pascal(&c.name));
                     }
                     enums +=
-                        &format!("Enum {{ name: \"{name}\".into(), variants: vec![{cs}], span: at, public: true }},");
+                        &format!("Enum {{ name: \"{name}\".into(), tparams: vec![], variants: vec![{cs}], span: at, public: true }},");
                 }
                 k => bail!("unsupported WIT declaration `{name}`: {}", k.as_str()),
             }

@@ -21,13 +21,19 @@ pub fn lower(p: &Program, caps: &CapTable) -> Module {
     };
     // A generic function becomes one function per instance, made when a use is lowered.
     let funcs = sorted(p.funcs.keys().filter(|k| p.sigs[*k].tparams.is_empty()).collect());
-    let structs = sorted(p.structs.keys().collect());
+    // So is a generic type: one struct or enum per instance, made when its type is lowered.
+    let plain = |k: &&String| p.tparams[*k].is_empty();
+    let structs = sorted(p.structs.keys().filter(plain).collect());
     let mut enums: Vec<String> = caps.enums.iter().map(|e| e.name.clone()).collect();
-    enums.extend(sorted(p.enums.keys().filter(|k| !enums.contains(k)).collect()));
+    enums.extend(sorted(
+        p.enums.keys().filter(|k| !enums.contains(k) && plain(k)).collect(),
+    ));
+    let structs: Vec<check::Ty> = structs.into_iter().map(|k| check::Ty::Struct(k, Vec::new())).collect();
+    let enums: Vec<check::Ty> = enums.into_iter().map(|k| check::Ty::Enum(k, Vec::new())).collect();
     let ids = Ids {
         funcs: index(&funcs),
-        structs: index(&structs),
-        enums: index(&enums),
+        structs: Types::new(structs),
+        enums: Types::new(enums),
         caps: index(&caps.caps.iter().map(|c| c.name.clone()).collect::<Vec<_>>()),
         lifted: RefCell::new(Vec::new()),
         instances: RefCell::new(HashMap::new()),
@@ -49,22 +55,33 @@ pub fn lower(p: &Program, caps: &CapTable) -> Module {
             .into_iter()
             .map(|f| f.expect("lifted closure or instance")),
     );
+    // A type's parts can name more instances; `check` proved there are finitely many. Display
+    // shows an instance's name without its type arguments, as Rust's derived `Debug` does.
+    let (mut structs, mut enums) = (Vec::new(), Vec::new());
+    loop {
+        let s = ids.structs.list.borrow().get(structs.len()).cloned();
+        let e = ids.enums.list.borrow().get(enums.len()).cloned();
+        match (s, e) {
+            (Some(ref ty @ check::Ty::Struct(ref k, _)), _) => structs.push(StructDef {
+                fields: (check::fields_of(&p.fields, &p.tparams, ty).iter())
+                    .map(|(n, t)| (n.clone(), ids.held(t)))
+                    .collect(),
+                name: k.clone(),
+            }),
+            (_, Some(ref ty @ check::Ty::Enum(ref k, _))) => enums.push(EnumDef {
+                variants: (shape(&p.variants, &p.tparams, ty).1.iter())
+                    .map(|(n, ts)| (n.clone(), ts.iter().map(|t| ids.held(t)).collect()))
+                    .collect(),
+                name: k.clone(),
+            }),
+            (None, None) => break,
+            _ => unreachable!("structs and enums"),
+        }
+    }
     Module {
         funcs: lowered,
-        structs: (structs.iter())
-            .map(|k| StructDef {
-                name: k.clone(),
-                fields: p.fields[k].iter().map(|(n, t)| (n.clone(), ids.ty(t))).collect(),
-            })
-            .collect(),
-        enums: (enums.iter())
-            .map(|k| EnumDef {
-                name: k.clone(),
-                variants: (p.variants[k].iter())
-                    .map(|(n, ts)| (n.clone(), ts.iter().map(|t| ids.ty(t)).collect()))
-                    .collect(),
-            })
-            .collect(),
+        structs,
+        enums,
         caps: (caps.caps.iter())
             .map(|c| CapDef {
                 name: c.name.clone(),
@@ -81,11 +98,39 @@ fn index(keys: &[String]) -> HashMap<String, u32> {
     keys.iter().enumerate().map(|(i, k)| (k.clone(), i as u32)).collect()
 }
 
+/// The structs or enums of the module: each type, generic ones by instance, and its id.
+struct Types {
+    list: RefCell<Vec<check::Ty>>,
+    ids: RefCell<HashMap<check::Ty, u32>>,
+}
+
+impl Types {
+    fn new(list: Vec<check::Ty>) -> Types {
+        let ids = list.iter().enumerate().map(|(i, t)| (t.clone(), i as u32)).collect();
+        Types {
+            list: RefCell::new(list),
+            ids: RefCell::new(ids),
+        }
+    }
+
+    /// The id of `ty`, which holds no type parameter; a new one if it is a new instance.
+    fn id(&self, ty: &check::Ty) -> u32 {
+        if let Some(&i) = self.ids.borrow().get(ty) {
+            return i;
+        }
+        let mut list = self.list.borrow_mut();
+        list.push(ty.clone());
+        let i = list.len() as u32 - 1;
+        self.ids.borrow_mut().insert(ty.clone(), i);
+        i
+    }
+}
+
 /// The id of every function, struct, enum and capability, by key.
 struct Ids {
     funcs: HashMap<String, u32>,
-    structs: HashMap<String, u32>,
-    enums: HashMap<String, u32>,
+    structs: Types,
+    enums: Types,
     caps: HashMap<String, u32>,
     /// Closures lifted to functions and instances of generic functions, which follow the
     /// named ones in the order they are found; `None` until lowered.
@@ -129,8 +174,8 @@ impl Ids {
             check::Ty::Str => Ty::Str,
             check::Ty::Bytes => Ty::Bytes,
             check::Ty::Unit => Ty::Unit,
-            check::Ty::Struct(k) => Ty::Struct(StructId(self.structs[k])),
-            check::Ty::Enum(k) => Ty::Enum(EnumId(self.enums[k])),
+            check::Ty::Struct(..) => Ty::Struct(StructId(self.structs.id(t))),
+            check::Ty::Enum(..) => Ty::Enum(EnumId(self.enums.id(t))),
             check::Ty::Option(t) => Ty::Option(inner(t)),
             check::Ty::Result(t, e) => Ty::Result(inner(t), inner(e)),
             check::Ty::List(t) => Ty::List(inner(t)),
@@ -332,7 +377,7 @@ impl<'a> Lowerer<'a> {
 
     /// The index of field `name` in the struct that the expression at `base` has.
     fn field(&self, base: Span, name: &str) -> u32 {
-        let check::Ty::Struct(s) = self.checked(base) else {
+        let check::Ty::Struct(s, _) = self.checked(base) else {
             unreachable!("checked field");
         };
         self.p.fields[&s]
@@ -343,11 +388,11 @@ impl<'a> Lowerer<'a> {
 
     /// The enum of a value of type `ty`, and the index of its variant `v`.
     fn variant(&self, ty: &check::Ty, v: &str) -> Option<(EnumRef, u32)> {
-        let (i, _) = variant(&shape(&self.p.variants, ty).1, v)?;
+        let (i, _) = variant(&shape(&self.p.variants, &self.p.tparams, ty).1, v)?;
         let en = match ty {
             check::Ty::Option(_) => EnumRef::Option,
             check::Ty::Result(..) => EnumRef::Result,
-            check::Ty::Enum(k) => EnumRef::User(EnumId(self.ids.enums[k])),
+            check::Ty::Enum(..) => EnumRef::User(EnumId(self.ids.enums.id(ty))),
             _ => unreachable!("only enums have variants"),
         };
         Some((en, i as u32))
@@ -550,7 +595,7 @@ impl<'a> Lowerer<'a> {
 
     /// Fields keep source order, which is evaluation order.
     fn struct_lit(&mut self, ty: &check::Ty, inits: &'a [(String, ast::Expr)]) -> ir::ExprKind {
-        let check::Ty::Struct(k) = ty else {
+        let check::Ty::Struct(k, _) = ty else {
             unreachable!("checked struct literal");
         };
         let fields = &self.p.fields[k];
@@ -560,7 +605,7 @@ impl<'a> Lowerer<'a> {
                 (field as u32, self.expr(x))
             })
             .collect();
-        ir::ExprKind::StructLit(StructId(self.ids.structs[k]), inits)
+        ir::ExprKind::StructLit(StructId(self.ids.structs.id(ty)), inits)
     }
 
     fn method(&mut self, recv: &'a ast::Expr, name: &str, args: &'a [ast::Expr]) -> ir::ExprKind {
@@ -674,7 +719,7 @@ impl<'a> Lowerer<'a> {
             PatKind::Module(_, inner) => self.pat(inner, st),
             PatKind::Variant(_, v, parts) => {
                 let (_, i) = self.variant(st, v).expect("checked variant");
-                let payload = &shape(&self.p.variants, st).1[i as usize].1;
+                let payload = &shape(&self.p.variants, &self.p.tparams, st).1[i as usize].1;
                 Pat::Variant(i, parts.iter().zip(payload).map(|(q, ty)| self.pat(q, ty)).collect())
             }
         }

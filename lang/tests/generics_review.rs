@@ -190,10 +190,18 @@ fn opaque_values_of_every_kind_round_trip() {
 
 #[test]
 fn type_parameter_names_that_are_not_types() {
-    // Not refused as built-in types: a value name is another namespace. Documented as found.
-    for t in ["Some", "None", "Ok", "Err", "Never", "Fn"] {
+    // Not refused as built-in types: a value name is another namespace.
+    for t in ["Never", "Fn"] {
         let src = format!("fn f<{t}>(x: {t}) -> {t} {{ x }} fn main() -> Int {{ f(1) }}");
         assert_eq!(shown(&src), "1", "{t}");
+    }
+    // The built-in constructors are refused since L7b, as in a struct or enum.
+    for t in ["Some", "None", "Ok", "Err"] {
+        for item in [format!("fn f<{t}>() {{}}"), format!("struct S<{t}> {{ a: Int }}")] {
+            let src = format!("{item} fn main() {{}}");
+            let (msg, at) = rejected(&[("main", &src)]);
+            assert_eq!((msg, at), (format!("`{t}` is a built-in constructor"), t.to_string()));
+        }
     }
     // A type parameter hides nothing from another module: `web::Row` still resolves.
     let root = "mod web; fn f<Row>(x: Row) -> Int { let r = web::Row { b: 1 }; r.b } fn main() -> Int { f(1) }";
@@ -209,13 +217,40 @@ fn type_parameter_names_that_are_not_types() {
 }
 
 #[test]
-fn a_wide_type_argument_is_refused_as_instantiating_without_end() {
+fn a_wide_type_argument_is_refused_as_too_large() {
     // 2000 parameters in one hand-written `fn` type pass the 256-constructor bound meant for
-    // recursion; the message is wrong for it (review finding).
+    // recursion; since L7b it has its own message (review finding).
     let src = format!(
         "fn id<T>(x: T) -> T {{ x }} fn main() {{ id::<fn({}) -> Int>({{ return; }}); }}",
         vec!["Int"; 2000].join(", ")
     );
-    let (msg, _) = rejected(&[("main", &src)]);
-    assert_eq!(msg, "this generic function instantiates without end");
+    let (msg, at) = rejected(&[("main", &src)]);
+    assert_eq!(msg, "a type argument of `id` is too large: 2002 types, at most 256");
+    assert!(at.starts_with("id::<fn(Int"));
+    // The 65th instance named directly, not through recursion.
+    let types: Vec<String> = (0..65).map(|n| format!("struct S{n} {{ a: Int }}")).collect();
+    let calls: Vec<String> = (0..65).map(|n| format!("id(S{n} {{ a: 1 }});")).collect();
+    let src = format!(
+        "{} fn id<T>(x: T) -> T {{ x }} fn main() {{ {} }}",
+        types.join(" "),
+        calls.join(" ")
+    );
+    let (msg, at) = rejected(&[("main", &src)]);
+    assert_eq!(msg, "`id` has more than 64 instances");
+    assert_eq!(at, "id");
+}
+
+#[test]
+fn a_module_function_value_is_deferred_like_a_plain_name() {
+    // Review finding: `web::id` waited for the other arguments only when written `id`.
+    let root = "mod web; fn ap<T>(f: fn(T) -> T, x: T) -> T { f(x) } fn main() -> Int { ap(web::id, 2) + ap(web::id::<Int>, 3) }";
+    let p = check_files(
+        &[("main", root), ("web", "pub fn id<T>(x: T) -> T { x }")],
+        &CapTable::default(),
+    )
+    .unwrap_or_else(|d| panic!("{d:?}"));
+    assert_eq!(
+        common::big_stack(move || p.display(&run(&p, &mut NoCaps).unwrap())),
+        "5"
+    );
 }

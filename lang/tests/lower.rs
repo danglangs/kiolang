@@ -974,6 +974,42 @@ impl Types<'_> {
     }
 }
 
+/// A generic struct or enum becomes one IR struct or enum per instance, after the types that
+/// are not generic, named without its type arguments (display shows that name). The generic
+/// type itself is not lowered.
+#[test]
+fn generic_types_are_monomorphized() {
+    let src = "struct Page<T> { items: List<T>, next: Option<Int> }
+               enum Tree<T> { Leaf, Node(List<Tree<T>>, T) }
+               struct Plain { p: Page<Str> }
+               fn main() -> Int {
+                 let t: Tree<Int> = Tree::Leaf;
+                 let p = Page { items: [1], next: None };
+                 p.items.len()
+               }";
+    let caps = CapTable::default();
+    let p = check(src, &caps).unwrap_or_else(|d| panic!("{d:?}"));
+    let m = lower(&p, &caps);
+    let structs: Vec<_> = (m.structs.iter())
+        .map(|s| format!("{} {:?}", s.name, s.fields))
+        .collect();
+    assert_eq!(
+        structs,
+        [
+            "Plain [(\"p\", Struct(StructId(2)))]",
+            "Page [(\"items\", List(Int)), (\"next\", Option(Int))]",
+            "Page [(\"items\", List(Str)), (\"next\", Option(Int))]",
+        ]
+    );
+    let enums: Vec<_> = (m.enums.iter())
+        .map(|e| format!("{} {:?}", e.name, e.variants))
+        .collect();
+    assert_eq!(
+        enums,
+        ["Tree [(\"Leaf\", []), (\"Node\", [List(Enum(EnumId(0))), Int])]"]
+    );
+}
+
 /// Every program in lang/tests and examples/ that checks also lowers, with consistent types.
 #[test]
 fn every_test_program_and_example_lowers() {

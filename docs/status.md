@@ -25,7 +25,8 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 | C5 | compiled only: `kio run` and `--listen` compile; the guest crate, its world, wizer and WASI are gone; the interpreter is the native test oracle (`Interp`). On-disk compile cache; fuel defaults a tenth. `Server::handle` 170 to 32 µs, `--listen` startup 0.95 to 0.17 s, idle RSS 66 to 28 MB. Programs with `fn` values fail "not compiled yet" until C9a/C9b |
 | C9b | L6c's built-ins taking functions compiled inline: harness 351 ran both ways, 0 unsupported, 0 mismatches, 0 leaked; kiogen generates them; 1 M `map` then `filter` 51 ms compiled vs 233 ms interpreted (a hand-written `for` 39 ms) |
 | C7a | C7 review follow-ups: hidden locals reused (17,000 calls in one function compile), more than 999 parameters a checker error, `--memory` below the initial memory reported as out of memory, a high-bits differential test over runtime slots, `Statics::desc` hashed (4,000 structs 263 to 226 ms) |
-| L7a | generic functions `fn f<T>(..)`: inferred from arguments, then the expected type, or `f::<Int>`; `T` opaque and never a capability; monomorphized in lowering (`first<Int>`), so compiled with no codegen change: harness 363 ran both ways, 0 mismatches. Needs its adversarial review (rule 1) |
+| L7a | generic functions `fn f<T>(..)`: inferred from arguments, then the expected type, or `f::<Int>`; `T` opaque and never a capability; monomorphized in lowering (`first<Int>`), so compiled with no codegen change: harness 363 ran both ways, 0 mismatches. Adversarially reviewed (rule 1 holds) |
+| L7b | generic structs and enums (`struct Page<T>`, `enum Tree<T>`): inferred like calls, never holding a capability, one IR type per instance (displayed without arguments); no codegen change: harness 380 ran both ways, 0 mismatches. Needs its adversarial review (rule 1) |
 
 | C8a | bench/ (`bench/run.sh`): 9 benchmarks and HTTP against Rust, Python and the interpreter, with profiles. Compiled-only code is 1.1-2.3x Rust; runtime-heavy code 3-271x (quadratic `s = s + x`, zero-filled buffers, allocation, refcount and runtime calls, fuel); ranked C8b list in roadmap.md |
 | C8b1 | in-place `Str` append (`s = s + x`, `s += x`) when the count is 1, no zero-filled byte buffers, inline `inc`/`dec`/`unique` and list `len`/`get`/`push` (a runtime-owned `ListBody` layout). Strings 1.37 s to 8.5 ms (2.4x Rust), JSON 554 to 144 ms, closures 36 to 13, list 52 to 28, tree 438 to 284 |
@@ -33,7 +34,7 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 ## Next
 
 1. C8b2 (borrowed parameters, inc/dec elision, fewer allocations, word-at-a-time `memcmp`): pin it from a fresh profile of tree, JSON and word count.
-2. L7a adversarial review; L7b (generic structs and enums), L7c (bounds).
+2. L7b adversarial review (rule 1 for generic types); L7c (bounds).
 
 ## Waiting on the maintainer
 

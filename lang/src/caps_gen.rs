@@ -26,35 +26,35 @@ pub fn v0() -> CapTable {
                     method(
                         "read",
                         vec![Ty::Str],
-                        Ty::Result(Box::new(Ty::Bytes), Box::new(Ty::Enum("IoErr".into()))),
+                        Ty::Result(Box::new(Ty::Bytes), Box::new(Ty::Enum("IoErr".into(), vec![]))),
                     ),
                     method(
                         "create",
                         vec![Ty::Str, Ty::Bytes],
-                        Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("IoErr".into()))),
+                        Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("IoErr".into(), vec![]))),
                     ),
                     method(
                         "list",
                         vec![Ty::Str],
                         Ty::Result(
                             Box::new(Ty::List(Box::new(Ty::Str))),
-                            Box::new(Ty::Enum("IoErr".into())),
+                            Box::new(Ty::Enum("IoErr".into(), vec![])),
                         ),
                     ),
                     method(
                         "write",
                         vec![Ty::Str, Ty::Bytes],
-                        Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("IoErr".into()))),
+                        Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("IoErr".into(), vec![]))),
                     ),
                     method(
                         "remove",
                         vec![Ty::Str],
-                        Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("IoErr".into()))),
+                        Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("IoErr".into(), vec![]))),
                     ),
                     method(
                         "exists",
                         vec![Ty::Str],
-                        Ty::Result(Box::new(Ty::Bool), Box::new(Ty::Enum("IoErr".into()))),
+                        Ty::Result(Box::new(Ty::Bool), Box::new(Ty::Enum("IoErr".into(), vec![]))),
                     ),
                 ],
             },
@@ -63,7 +63,7 @@ pub fn v0() -> CapTable {
                 methods: vec![method(
                     "get",
                     vec![Ty::Str],
-                    Ty::Result(Box::new(Ty::Bytes), Box::new(Ty::Enum("HttpErr".into()))),
+                    Ty::Result(Box::new(Ty::Bytes), Box::new(Ty::Enum("HttpErr".into(), vec![]))),
                 )],
             },
             CapType {
@@ -86,7 +86,7 @@ pub fn v0() -> CapTable {
                         Ty::List(Box::new(Ty::Str)),
                         Ty::Bytes,
                     ],
-                    Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("WebErr".into()))),
+                    Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("WebErr".into(), vec![]))),
                 )],
             },
             CapType {
@@ -97,25 +97,25 @@ pub fn v0() -> CapTable {
                         vec![Ty::Str],
                         Ty::Result(
                             Box::new(Ty::Option(Box::new(Ty::Bytes))),
-                            Box::new(Ty::Enum("KvErr".into())),
+                            Box::new(Ty::Enum("KvErr".into(), vec![])),
                         ),
                     ),
                     method(
                         "set",
                         vec![Ty::Str, Ty::Bytes],
-                        Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("KvErr".into()))),
+                        Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("KvErr".into(), vec![]))),
                     ),
                     method(
                         "delete",
                         vec![Ty::Str],
-                        Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("KvErr".into()))),
+                        Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("KvErr".into(), vec![]))),
                     ),
                     method(
                         "keys",
                         vec![Ty::Str],
                         Ty::Result(
                             Box::new(Ty::List(Box::new(Ty::Str))),
-                            Box::new(Ty::Enum("KvErr".into())),
+                            Box::new(Ty::Enum("KvErr".into(), vec![])),
                         ),
                     ),
                     method(
@@ -125,7 +125,7 @@ pub fn v0() -> CapTable {
                             Ty::Option(Box::new(Ty::Bytes)),
                             Ty::Option(Box::new(Ty::Bytes)),
                         ],
-                        Ty::Result(Box::new(Ty::Bool), Box::new(Ty::Enum("KvErr".into()))),
+                        Ty::Result(Box::new(Ty::Bool), Box::new(Ty::Enum("KvErr".into(), vec![]))),
                     ),
                 ],
             },
@@ -143,17 +143,17 @@ pub fn v0() -> CapTable {
                     method(
                         "text",
                         vec![Ty::Str],
-                        Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("WsErr".into()))),
+                        Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("WsErr".into(), vec![]))),
                     ),
                     method(
                         "binary",
                         vec![Ty::Bytes],
-                        Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("WsErr".into()))),
+                        Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("WsErr".into(), vec![]))),
                     ),
                     method(
                         "close",
                         vec![Ty::Int],
-                        Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("WsErr".into()))),
+                        Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("WsErr".into(), vec![]))),
                     ),
                 ],
             },
@@ -161,6 +161,7 @@ pub fn v0() -> CapTable {
         enums: vec![
             Enum {
                 name: "IoErr".into(),
+                tparams: vec![],
                 variants: vec![
                     case("NotFound", vec![]),
                     case("Denied", vec![]),
@@ -173,6 +174,7 @@ pub fn v0() -> CapTable {
             },
             Enum {
                 name: "HttpErr".into(),
+                tparams: vec![],
                 variants: vec![
                     case("Denied", vec![]),
                     case("Timeout", vec![]),
@@ -184,18 +186,21 @@ pub fn v0() -> CapTable {
             },
             Enum {
                 name: "WebErr".into(),
+                tparams: vec![],
                 variants: vec![case("AlreadySent", vec![]), case("Invalid", vec![])],
                 span: at,
                 public: true,
             },
             Enum {
                 name: "KvErr".into(),
+                tparams: vec![],
                 variants: vec![case("TooLarge", vec![]), case("Full", vec![])],
                 span: at,
                 public: true,
             },
             Enum {
                 name: "WsErr".into(),
+                tparams: vec![],
                 variants: vec![
                     case("Closed", vec![]),
                     case("TooLarge", vec![]),

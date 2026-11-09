@@ -812,16 +812,28 @@ fn generic_functions_and_turbofish() {
         "empty type arguments",
         Some("write `g` without `::<>`"),
     );
+}
+
+#[test]
+fn generic_structs_and_enums() {
+    let items = parse("struct Page<T> { items: List<T> } pub enum Tree<K, V> { Leaf, Node(K, V) }").unwrap();
+    let Item::Struct(s) = &items[0] else { panic!() };
+    let names: Vec<&str> = s.tparams.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["T"]);
+    let Item::Enum(e) = &items[1] else { panic!() };
+    let names: Vec<&str> = e.tparams.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["K", "V"]);
+    assert_eq!(ty(&e.variants[1].fields[1]), "V");
     rejected_with(
-        "struct Page<T> { items: List<T> }",
-        "<",
-        "generic structs are not supported yet",
-        Some("give each field a concrete type"),
+        "struct S<> { a: Int }",
+        ">",
+        "empty type parameters",
+        Some("write `struct S { .. }` without `<>`"),
     );
     rejected_with(
-        "enum Tree<T> { Leaf }",
-        "<",
-        "generic enums are not supported yet",
-        Some("give each payload a concrete type"),
+        "enum E<T: Ord> { A }",
+        ":",
+        "type parameter bounds are not supported",
+        Some("remove the bound: a `T` can be passed, stored and returned without one"),
     );
 }

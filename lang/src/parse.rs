@@ -225,24 +225,26 @@ impl Parser {
         let public = self.eat_kw("pub");
         if self.eat_kw("struct") {
             let name = self.ident()?;
-            self.not_generic("structs", "give each field a concrete type")?;
+            let tparams = self.tparams(&format!("struct {name} {{ .. }}"))?;
             self.expect("{")?;
             let fields = self.list("}", Self::param)?;
             return Ok(Item::Struct(Struct {
                 public,
                 name,
+                tparams,
                 fields,
                 span: self.since(start),
             }));
         }
         if self.eat_kw("enum") {
             let name = self.ident()?;
-            self.not_generic("enums", "give each payload a concrete type")?;
+            let tparams = self.tparams(&format!("enum {name} {{ .. }}"))?;
             self.expect("{")?;
             let variants = self.list("}", Self::variant)?;
             return Ok(Item::Enum(Enum {
                 public,
                 name,
+                tparams,
                 variants,
                 span: self.since(start),
             }));
@@ -251,15 +253,7 @@ impl Parser {
             return Err(self.unexpected("`fn`"));
         }
         let name = self.ident()?;
-        let tparams = if self.eat("<") {
-            if self.at(">") {
-                let hint = format!("write `fn {name}(..)` without `<>`");
-                return Err(err(self.span(), "empty type parameters", Some(&hint)));
-            }
-            self.list(">", Self::tparam)?
-        } else {
-            Vec::new()
-        };
+        let tparams = self.tparams(&format!("fn {name}(..)"))?;
         self.expect("(")?;
         let params = self.list(")", Self::param)?;
         let ret = self.ret()?;
@@ -275,13 +269,16 @@ impl Parser {
         }))
     }
 
-    /// Refuses `<T>` after a struct or enum name, which L7b adds.
-    fn not_generic(&self, what: &str, hint: &str) -> Result<(), Diag> {
-        if self.at("<") {
-            let msg = format!("generic {what} are not supported yet");
-            return Err(err(self.span(), &msg, Some(hint)));
+    /// `<T, U>` after an item's name; `item` is how it is written without them.
+    fn tparams(&mut self, item: &str) -> Result<Vec<(String, Span)>, Diag> {
+        if !self.eat("<") {
+            return Ok(Vec::new());
         }
-        Ok(())
+        if self.at(">") {
+            let hint = format!("write `{item}` without `<>`");
+            return Err(err(self.span(), "empty type parameters", Some(&hint)));
+        }
+        self.list(">", Self::tparam)
     }
 
     /// A type parameter `T`; bounds such as `T: Eq` are not supported yet.

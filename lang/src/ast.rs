@@ -26,6 +26,8 @@ pub struct Fn {
 pub struct Struct {
     pub public: bool,
     pub name: String,
+    /// Type parameters `<T, U>`, as on `Fn`.
+    pub tparams: Vec<(String, Span)>,
     /// Declared fields, which have the shape of parameters.
     pub fields: Vec<Param>,
     pub span: Span,
@@ -35,6 +37,8 @@ pub struct Struct {
 pub struct Enum {
     pub public: bool,
     pub name: String,
+    /// Type parameters `<T, U>`, as on `Fn`.
+    pub tparams: Vec<(String, Span)>,
     pub variants: Vec<Variant>,
     pub span: Span,
 }

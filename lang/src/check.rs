@@ -42,6 +42,7 @@ pub struct Program {
     /// Resolved payload types of every enum, for checking host values.
     pub(crate) variants: Variants,
     pub(crate) fields: Fields,
+    pub(crate) tparams: TypeParams,
     /// Resolved signature of each function, by key.
     pub(crate) sigs: HashMap<String, Sig>,
     /// The type of every expression and assignment target, by its span, which no other
@@ -145,8 +146,10 @@ pub enum Ty {
     Str,
     Bytes,
     Unit,
-    Struct(String),
-    Enum(String),
+    /// A struct by key, with its type arguments (none if it is not generic).
+    Struct(String, Vec<Ty>),
+    /// An enum by key, with its type arguments.
+    Enum(String, Vec<Ty>),
     Option(Box<Ty>),
     Result(Box<Ty>, Box<Ty>),
     List(Box<Ty>),
@@ -175,6 +178,8 @@ pub(crate) fn subst(ty: &Ty, binds: &[(String, Ty)]) -> Ty {
         Ty::Result(t, e) => Ty::Result(s(t), s(e)),
         Ty::Map(k, v) => Ty::Map(s(k), s(v)),
         Ty::Fn(ps, r) => Ty::Fn(ps.iter().map(|p| subst(p, binds)).collect(), s(r)),
+        Ty::Struct(k, args) => Ty::Struct(k.clone(), args.iter().map(|a| subst(a, binds)).collect()),
+        Ty::Enum(k, args) => Ty::Enum(k.clone(), args.iter().map(|a| subst(a, binds)).collect()),
         _ => ty.clone(),
     }
 }
@@ -186,6 +191,7 @@ fn has_param(ty: &Ty) -> bool {
         Ty::Option(t) | Ty::List(t) => has_param(t),
         Ty::Result(t, e) | Ty::Map(t, e) => has_param(t) || has_param(e),
         Ty::Fn(ps, r) => ps.iter().any(has_param) || has_param(r),
+        Ty::Struct(_, args) | Ty::Enum(_, args) => args.iter().any(has_param),
         _ => false,
     }
 }
@@ -196,8 +202,32 @@ fn ty_size(ty: &Ty) -> usize {
         Ty::Option(t) | Ty::List(t) => ty_size(t),
         Ty::Result(t, e) | Ty::Map(t, e) => ty_size(t) + ty_size(e),
         Ty::Fn(ps, r) => ps.iter().map(ty_size).sum::<usize>() + ty_size(r),
+        Ty::Struct(_, args) | Ty::Enum(_, args) => args.iter().map(ty_size).sum(),
         _ => 0,
     }
+}
+
+/// Type parameter names of each generic struct and enum, by key.
+pub(crate) type TypeParams = HashMap<String, Vec<String>>;
+
+/// The bindings of a generic type's parameters to the arguments in `ty`, a struct or enum
+/// type; empty for any other type.
+pub(crate) fn type_binds(tparams: &TypeParams, ty: &Ty) -> Vec<(String, Ty)> {
+    match ty {
+        Ty::Struct(k, args) | Ty::Enum(k, args) if !args.is_empty() => {
+            tparams[k].iter().cloned().zip(args.iter().cloned()).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The fields of struct type `ty`, with its type arguments in place.
+pub(crate) fn fields_of(fields: &Fields, tparams: &TypeParams, ty: &Ty) -> Vec<(String, Ty)> {
+    let Ty::Struct(k, _) = ty else {
+        unreachable!("a struct type");
+    };
+    let binds = type_binds(tparams, ty);
+    fields[k].iter().map(|(n, t)| (n.clone(), subst(t, &binds))).collect()
 }
 
 impl fmt::Display for Ty {
@@ -209,7 +239,11 @@ impl fmt::Display for Ty {
             Ty::Str => f.write_str("Str"),
             Ty::Bytes => f.write_str("Bytes"),
             Ty::Unit => f.write_str("()"),
-            Ty::Struct(name) | Ty::Enum(name) | Ty::Cap(name) | Ty::Param(name) => f.write_str(name),
+            Ty::Struct(name, args) | Ty::Enum(name, args) if !args.is_empty() => {
+                let args: Vec<_> = args.iter().map(Ty::to_string).collect();
+                write!(f, "{name}<{}>", args.join(", "))
+            }
+            Ty::Struct(name, _) | Ty::Enum(name, _) | Ty::Cap(name) | Ty::Param(name) => f.write_str(name),
             Ty::Option(t) => write!(f, "Option<{t}>"),
             Ty::Result(t, e) => write!(f, "Result<{t}, {e}>"),
             Ty::List(t) => write!(f, "List<{t}>"),
@@ -365,6 +399,7 @@ type Witnesses = Option<Vec<Vec<Cover>>>;
 /// The usefulness algorithm of Maranget, "Warnings for pattern matching" (2007), with witnesses.
 struct Usefulness<'a> {
     variants: &'a Variants,
+    tparams: &'a TypeParams,
     budget: usize,
     /// What is left of `PROGRAM_MATCH_BUDGET`, shared by every match being checked.
     program: &'a Cell<usize>,
@@ -376,8 +411,8 @@ impl Usefulness<'_> {
     fn ctors(&self, ty: &Ty) -> Option<Vec<(Ctor, Vec<Ty>)>> {
         match ty {
             Ty::Bool => Some(vec![(Ctor::Bool(true), vec![]), (Ctor::Bool(false), vec![])]),
-            Ty::Enum(_) | Ty::Option(_) | Ty::Result(..) => {
-                let vs = shape(self.variants, ty).1.into_iter().enumerate();
+            Ty::Enum(..) | Ty::Option(_) | Ty::Result(..) => {
+                let vs = shape(self.variants, self.tparams, ty).1.into_iter().enumerate();
                 Some(vs.map(|(i, (_, tys))| (Ctor::Variant(i), tys)).collect())
             }
             _ => None,
@@ -466,7 +501,7 @@ impl Usefulness<'_> {
             })
             .collect();
         let part_tys = match c {
-            Ctor::Variant(i) => shape(self.variants, &tys[0]).1.swap_remove(*i).1,
+            Ctor::Variant(i) => shape(self.variants, self.tparams, &tys[0]).1.swap_remove(*i).1,
             _ => Vec::new(),
         };
         let q = [parts, rest.to_vec()].concat();
@@ -489,7 +524,7 @@ impl Usefulness<'_> {
             Cover::Ctor(Ctor::Int(n), _) => n.to_string(),
             Cover::Ctor(Ctor::Str(s), _) => format!("{s:?}"),
             Cover::Ctor(Ctor::Variant(i), parts) => {
-                let (en, vs) = shape(self.variants, ty);
+                let (en, vs) = shape(self.variants, self.tparams, ty);
                 let (v, tys) = &vs[*i];
                 if parts.iter().all(|p| matches!(p, Cover::All)) {
                     return format!("{en}::{v}");
@@ -510,6 +545,20 @@ pub(crate) struct Sig {
     pub(crate) tparams: Vec<String>,
     pub(crate) params: Vec<Ty>,
     pub(crate) ret: Ty,
+    /// For a generic struct literal or variant, typed like a call: how each value is named
+    /// in messages (`field `b``), and the use and an example for "cannot infer".
+    parts: Option<Vec<String>>,
+    infer: Option<(String, String)>,
+}
+
+impl Sig {
+    /// How the `arg`th value (from 1) of a use is named in messages.
+    fn part(&self, arg: usize) -> String {
+        match &self.parts {
+            Some(parts) => parts[arg - 1].clone(),
+            None => format!("argument {arg}"),
+        }
+    }
 }
 
 /// What a call has fixed a type parameter to: its type, and the span and argument number
@@ -705,6 +754,7 @@ fn mentions(ty: &Ty, t: &str) -> bool {
         Ty::Option(x) | Ty::List(x) => mentions(x, t),
         Ty::Result(x, y) | Ty::Map(x, y) => mentions(x, t) || mentions(y, t),
         Ty::Fn(ps, r) => ps.iter().any(|p| mentions(p, t)) || mentions(r, t),
+        Ty::Struct(_, args) | Ty::Enum(_, args) => args.iter().any(|a| mentions(a, t)),
         _ => false,
     }
 }
@@ -738,7 +788,7 @@ fn unify(
                         0 => "from the expected type".to_string(),
                         _ => "here".to_string(),
                     };
-                    let msg = format!("`{t}` is {} {first} but {a} at argument {arg}", b.ty);
+                    let msg = format!("`{t}` is {} {first} but {a} at {}", b.ty, sig.part(arg));
                     let hint = format!("`{written}` is declared as `{}`", sig.decl);
                     Err(err(b.at, msg, Some(&hint)))
                 }
@@ -764,6 +814,12 @@ fn unify(
             }
             go(r, s)
         }
+        (Ty::Struct(n, ps), Ty::Struct(m, qs)) | (Ty::Enum(n, ps), Ty::Enum(m, qs)) if n == m => {
+            for (p, q) in ps.iter().zip(qs) {
+                go(p, q)?;
+            }
+            Ok(())
+        }
         // Without a type parameter, the caller compares the whole types.
         _ if !strict || !has_param(p) => Ok(()),
         _ => {
@@ -783,6 +839,10 @@ fn all_bound(span: Span, g: Generic, binds: &[Option<Bound>], call: bool) -> Res
 
 fn cannot_infer(span: Span, (written, sig): Generic, binds: &[Option<Bound>], call: bool) -> Diag {
     let i = binds.iter().position(Option::is_none).unwrap_or(0);
+    if let Some((what, example)) = &sig.infer {
+        let msg = format!("cannot infer `{}` for `{what}`", sig.tparams[i]);
+        return err(span, msg, Some(&format!("add a type: `{example}`")));
+    }
     let placeholders = vec!["Int"; sig.tparams.len()].join(", ");
     let args = if call { "(..)" } else { "" };
     err(
@@ -828,17 +888,18 @@ fn resolve(
             Ok(Ty::Fn(ps, Box::new(resolve(r, caps, structs, enums, scope)?)))
         }
         TypeKind::Module(m, inner) => {
-            let TypeKind::Named(n, _) = &inner.kind else {
+            let TypeKind::Named(n, args) = &inner.kind else {
                 return Err(nested_path(t.span));
             };
             let k = scope.member(m, n, t.span)?;
             if let Some(s) = structs.get(&k) {
                 scope.public(&k, s.public, "struct", t.span)?;
-                return Ok(Ty::Struct(k));
             }
             if let Some(e) = enums.get(&k) {
                 scope.public(&k, e.public, "enum", t.span)?;
-                return Ok(Ty::Enum(k));
+            }
+            if let Some(ty) = user_type(t, &k, args, caps, structs, enums, scope)? {
+                return Ok(ty);
             }
             let names = [sorted_names(structs, m), sorted_names(enums, m)].concat();
             Err(err(
@@ -887,13 +948,10 @@ fn resolve(
             ("Str", []) => Ok(Ty::Str),
             ("Bytes", []) => Ok(Ty::Bytes),
             (_, []) if caps.caps.iter().any(|c| c.name == *n) => Ok(Ty::Cap(n.clone())),
-            (_, []) => {
+            _ => {
                 let k = scope.own(caps, n);
-                if structs.contains_key(&k) {
-                    return Ok(Ty::Struct(k));
-                }
-                if enums.contains_key(&k) {
-                    return Ok(Ty::Enum(k));
+                if let Some(ty) = user_type(t, &k, args, caps, structs, enums, scope)? {
+                    return Ok(ty);
                 }
                 let mut d = unknown_type(t);
                 if !scope.module.is_empty() && (structs.contains_key(n) || enums.contains_key(n)) {
@@ -901,9 +959,48 @@ fn resolve(
                 }
                 Err(d)
             }
-            _ => Err(unknown_type(t)),
         },
     }
+}
+
+/// Struct or enum `k`, written at `t` with type arguments `args`, each of which it must be
+/// given and none of which may hold a capability (rule 1); `None` if there is no such type.
+fn user_type(
+    t: &Type,
+    k: &str,
+    args: &[Type],
+    caps: &CapTable,
+    structs: &HashMap<String, Struct>,
+    enums: &HashMap<String, Enum>,
+    scope: Scope,
+) -> Result<Option<Ty>, Diag> {
+    let (kw, tparams) = match (structs.get(k), enums.get(k)) {
+        (Some(s), _) => ("struct", &s.tparams),
+        (_, Some(e)) => ("enum", &e.tparams),
+        _ => return Ok(None),
+    };
+    let name = bare(k);
+    if args.len() != tparams.len() {
+        let names: Vec<&str> = tparams.iter().map(|(p, _)| p.as_str()).collect();
+        let msg = format!("`{name}` takes {} type arguments, found {}", tparams.len(), args.len());
+        let hint = match names.is_empty() {
+            true => format!("write `{name}`"),
+            false => format!("`{name}` is declared as `{kw} {name}<{}>`", names.join(", ")),
+        };
+        return Err(err(t.span, msg, Some(&hint)));
+    }
+    let mut tys = Vec::new();
+    for (a, (p, _)) in args.iter().zip(tparams) {
+        let ty = resolve(a, caps, structs, enums, scope)?;
+        if cap_in(&ty).is_some() {
+            return Err(cap_type_arg(a.span, p, &ty));
+        }
+        tys.push(ty);
+    }
+    Ok(Some(match kw {
+        "struct" => Ty::Struct(k.to_string(), tys),
+        _ => Ty::Enum(k.to_string(), tys),
+    }))
 }
 
 fn unknown_type(t: &Type) -> Diag {
@@ -941,6 +1038,8 @@ fn cap_in(ty: &Ty) -> Option<&str> {
         Ty::Option(t) | Ty::List(t) => cap_in(t),
         Ty::Result(t, e) | Ty::Map(t, e) => cap_in(t).or_else(|| cap_in(e)),
         Ty::Fn(ps, r) => ps.iter().find_map(cap_in).or_else(|| cap_in(r)),
+        // Unreachable: no type argument holds a capability; checked again as a second wall.
+        Ty::Struct(_, args) | Ty::Enum(_, args) => args.iter().find_map(cap_in),
         _ => None,
     }
 }
@@ -951,6 +1050,7 @@ fn fn_takes_cap(ty: &Ty) -> bool {
         Ty::Fn(..) => cap_in(ty).is_some(),
         Ty::Option(t) | Ty::List(t) => fn_takes_cap(t),
         Ty::Result(t, e) | Ty::Map(t, e) => fn_takes_cap(t) || fn_takes_cap(e),
+        Ty::Struct(_, args) | Ty::Enum(_, args) => args.iter().any(fn_takes_cap),
         _ => false,
     }
 }
@@ -1012,32 +1112,11 @@ fn signature(
         let what = format!("`{}` takes {} parameters", f.name, f.params.len());
         return Err(too_many_params(p.span, what));
     }
-    for (i, (t, span)) in f.tparams.iter().enumerate() {
-        if scope.module.is_empty() && f.name == "main" {
-            let hint = "remove `<..>`: `main` takes only capabilities";
-            return Err(err(*span, "`main` cannot be generic".to_string(), Some(hint)));
-        }
-        if !t.starts_with(|c: char| c.is_ascii_uppercase()) {
-            let fixed = t.to_ascii_uppercase();
-            let msg = format!("type parameters start with an uppercase letter: `{t}`");
-            return Err(err(*span, msg, Some(&format!("rename it `{fixed}`"))));
-        }
-        if f.tparams[..i].iter().any(|(u, _)| u == t) {
-            let msg = format!("duplicate type parameter `{t}`");
-            return Err(err(*span, msg, Some("rename one of them")));
-        }
-        let builtin = ["Int", "Float", "Bool", "Str", "Bytes", "List"].contains(&t.as_str()) || reserved(caps, t);
-        if builtin {
-            let msg = format!("`{t}` is a built-in type");
-            return Err(err(*span, msg, Some("name type parameters `T`, `U`, ..")));
-        }
-        let k = key(scope.module, t);
-        let kind = (structs.contains_key(&*k).then_some("struct")).or(enums.contains_key(&*k).then_some("enum"));
-        if let Some(kind) = kind {
-            let msg = format!("type parameter `{t}` has the name of {kind} `{t}`");
-            return Err(err(*span, msg, Some("rename the type parameter")));
-        }
+    if let (true, Some((_, span))) = (scope.module.is_empty() && f.name == "main", f.tparams.first()) {
+        let hint = "remove `<..>`: `main` takes only capabilities";
+        return Err(err(*span, "`main` cannot be generic".to_string(), Some(hint)));
     }
+    check_tparams(&f.tparams, caps, structs, enums, scope.module)?;
     let mut params = Vec::new();
     for (i, p) in f.params.iter().enumerate() {
         not_builtin(&p.name, p.span)?;
@@ -1073,7 +1152,47 @@ fn signature(
         tparams,
         params,
         ret,
+        parts: None,
+        infer: None,
     })
+}
+
+/// The type parameters of a function, struct or enum in `module`: uppercase, distinct, and
+/// not named like a type or a built-in constructor.
+fn check_tparams(
+    tparams: &[(String, Span)],
+    caps: &CapTable,
+    structs: &HashMap<String, Struct>,
+    enums: &HashMap<String, Enum>,
+    module: &str,
+) -> Result<(), Diag> {
+    for (i, (t, span)) in tparams.iter().enumerate() {
+        if !t.starts_with(|c: char| c.is_ascii_uppercase()) {
+            let fixed = t.to_ascii_uppercase();
+            let msg = format!("type parameters start with an uppercase letter: `{t}`");
+            return Err(err(*span, msg, Some(&format!("rename it `{fixed}`"))));
+        }
+        if tparams[..i].iter().any(|(u, _)| u == t) {
+            let msg = format!("duplicate type parameter `{t}`");
+            return Err(err(*span, msg, Some("rename one of them")));
+        }
+        let is_type = ["Int", "Float", "Bool", "Str", "Bytes", "List"].contains(&t.as_str()) || reserved(caps, t);
+        if is_type {
+            let msg = format!("`{t}` is a built-in type");
+            return Err(err(*span, msg, Some("name type parameters `T`, `U`, ..")));
+        }
+        if builtin(t).is_some() {
+            let msg = format!("`{t}` is a built-in constructor");
+            return Err(err(*span, msg, Some("name type parameters `T`, `U`, ..")));
+        }
+        let k = key(module, t);
+        let kind = (structs.contains_key(&*k).then_some("struct")).or(enums.contains_key(&*k).then_some("enum"));
+        if let Some(kind) = kind {
+            let msg = format!("type parameter `{t}` has the name of {kind} `{t}`");
+            return Err(err(*span, msg, Some("rename the type parameter")));
+        }
+    }
+    Ok(())
 }
 
 fn struct_fields(
@@ -1126,11 +1245,18 @@ pub(crate) fn variant<'a>(variants: &'a [(String, Vec<Ty>)], v: &str) -> Option<
     Some((i, &variants[i].1))
 }
 
-/// The enum's name and variants that `ty` matches on; empty for other types.
-pub(crate) fn shape(variants: &Variants, ty: &Ty) -> Shape {
+/// The enum's name and variants that `ty` matches on, with its type arguments in place;
+/// empty for other types.
+pub(crate) fn shape(variants: &Variants, tparams: &TypeParams, ty: &Ty) -> Shape {
     let some = |t: &Ty| vec![("None".to_string(), vec![]), ("Some".to_string(), vec![t.clone()])];
     match ty {
-        Ty::Enum(en) => (en.clone(), variants[en].clone()),
+        Ty::Enum(en, _) => {
+            let binds = type_binds(tparams, ty);
+            let vs = variants[en]
+                .iter()
+                .map(|(v, ts)| (v.clone(), ts.iter().map(|t| subst(t, &binds)).collect()));
+            (en.clone(), vs.collect())
+        }
         Ty::Option(t) => ("Option".to_string(), some(t)),
         Ty::Result(t, e) => {
             let ok = vec![
@@ -1315,28 +1441,52 @@ fn method_names<'a>(caps: &'a CapTable, recv: &Ty) -> Vec<&'a str> {
 }
 
 /// The user types stored inline in `ty`. `List` and `Map` hold items on the heap, so they end the walk.
-fn named(ty: &Ty) -> Vec<&str> {
+fn named(ty: &Ty) -> Vec<&Ty> {
     match ty {
-        Ty::Struct(n) | Ty::Enum(n) => vec![n],
+        Ty::Struct(..) | Ty::Enum(..) => vec![ty],
         Ty::Option(t) => named(t),
         Ty::Result(t, e) => [named(t), named(e)].concat(),
         _ => Vec::new(),
     }
 }
 
-/// Whether `name` reaches itself through its field or payload types.
-fn contains_itself(name: &str, fields: &Fields, variants: &Variants) -> bool {
-    let mut todo = vec![name];
+/// Whether type `name` reaches itself, with any type arguments, through its field or payload
+/// types, each with the type arguments of the instance it is in (`struct X { w: W<X> }` with
+/// `struct W<T> { t: T }`). Its own type parameters are opaque, so this holds for every
+/// instance; any other instance it reaches inline is finite or is that type's own error, so
+/// a type argument larger than `MAX_TYPE_ARG` ends the walk.
+fn contains_itself(name: &str, fields: &Fields, variants: &Variants, tparams: &TypeParams) -> bool {
+    // A type whose declaration has errors is left out.
+    let known = |k: &str| fields.contains_key(k) || variants.contains_key(k);
+    if !known(name) {
+        return false;
+    }
+    let own = |ps: Option<&Vec<String>>| ps.into_iter().flatten().map(|t| Ty::Param(t.clone())).collect();
+    let mut todo = vec![match fields.contains_key(name) {
+        true => Ty::Struct(name.to_string(), own(tparams.get(name))),
+        false => Ty::Enum(name.to_string(), own(tparams.get(name))),
+    }];
     let mut seen = HashSet::new();
-    while let Some(n) = todo.pop() {
-        let of_struct = fields.get(n).into_iter().flatten().map(|(_, ty)| ty);
-        let of_enum = variants.get(n).into_iter().flatten().flat_map(|(_, tys)| tys);
-        for m in of_struct.chain(of_enum).flat_map(named) {
-            if m == name {
-                return true;
-            }
-            if seen.insert(m) {
-                todo.push(m);
+    while let Some(ty) = todo.pop() {
+        let parts = match &ty {
+            Ty::Struct(..) => fields_of(fields, tparams, &ty).into_iter().map(|(_, t)| t).collect(),
+            _ => shape(variants, tparams, &ty)
+                .1
+                .into_iter()
+                .flat_map(|(_, ts)| ts)
+                .collect::<Vec<_>>(),
+        };
+        for part in &parts {
+            for m in named(part) {
+                let (Ty::Struct(k, _) | Ty::Enum(k, _)) = m else {
+                    unreachable!("named");
+                };
+                if k == name {
+                    return true;
+                }
+                if known(k) && ty_size(m) <= MAX_TYPE_ARG && seen.insert(m.clone()) {
+                    todo.push(m.clone());
+                }
             }
         }
     }
@@ -1349,15 +1499,18 @@ fn no_field(span: Span, field: &str, ty: &str, decl: &[(String, Ty)]) -> Diag {
     err(span, format!("no field `{field}` on {ty}"), Some(&hint))
 }
 
-/// Whether a value of `ty` can hold a function. `seen` holds the user types already walked.
+/// Whether a value of `ty` can hold a function. `seen` holds the user types already walked. A
+/// generic type holds one if its declaration does (its type parameters opaque) or one of its
+/// type arguments does, even one no field uses.
 fn has_fn<'a>(ty: &'a Ty, fields: &'a Fields, variants: &'a Variants, seen: &mut HashSet<&'a str>) -> bool {
     let mut walk = |t| has_fn(t, fields, variants, seen);
     match ty {
         Ty::Fn(..) => true,
         Ty::Option(t) | Ty::List(t) => walk(t),
         Ty::Result(t, e) | Ty::Map(t, e) => walk(t) || walk(e),
-        Ty::Struct(n) => seen.insert(n) && fields[n].iter().any(|(_, t)| has_fn(t, fields, variants, seen)),
-        Ty::Enum(n) => {
+        Ty::Struct(_, args) | Ty::Enum(_, args) if args.iter().any(&mut walk) => true,
+        Ty::Struct(n, _) => seen.insert(n) && fields[n].iter().any(|(_, t)| has_fn(t, fields, variants, seen)),
+        Ty::Enum(n, _) => {
             seen.insert(n)
                 && variants[n]
                     .iter()
@@ -1513,21 +1666,30 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
     // Types before signatures, which may name them.
     let mut fields = Fields::new();
     let mut variants = Variants::new();
+    let mut tparams = TypeParams::new();
     for name in &order {
+        let own = match structs.get(name) {
+            Some(s) => &s.tparams,
+            None => &enums[name].tparams,
+        };
+        tparams.insert(name.clone(), own.iter().map(|(t, _)| t.clone()).collect());
         let scope = Scope {
             module: module_of(name),
             mods: &mods,
-            tparams: &[],
+            tparams: own,
         };
-        let resolved = match structs.get(name) {
-            Some(s) => struct_fields(s, caps, &structs, &enums, scope).map(|f| drop(fields.insert(name.clone(), f))),
-            None => enum_variants(&enums[name], caps, &structs, &enums, scope)
-                .map(|v| drop(variants.insert(name.clone(), v))),
-        };
+        let resolved =
+            check_tparams(own, caps, &structs, &enums, scope.module).and_then(|()| match structs.get(name) {
+                Some(s) => {
+                    struct_fields(s, caps, &structs, &enums, scope).map(|f| drop(fields.insert(name.clone(), f)))
+                }
+                None => enum_variants(&enums[name], caps, &structs, &enums, scope)
+                    .map(|v| drop(variants.insert(name.clone(), v))),
+            });
         diags.extend(resolved.err());
     }
     for name in &order {
-        if contains_itself(name, &fields, &variants) {
+        if contains_itself(name, &fields, &variants, &tparams) {
             let (kind, span) = match structs.get(name) {
                 Some(s) => ("struct", s.span),
                 None => ("enum", enums[name].span),
@@ -1572,12 +1734,14 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
     let mut types = HashMap::new();
     let mut captures = HashMap::new();
     let mut uses = HashMap::new();
+    let mut seeds = HashMap::new();
     for ((module, f), sig_err) in fns.iter().zip(sig_errs) {
         let mut c = Checker {
             caps,
             sigs: &sigs,
             fields: &fields,
             variants: &variants,
+            tparams: &tparams,
             structs: &structs,
             enums: &enums,
             home: Scope {
@@ -1598,6 +1762,22 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
             uses: Vec::new(),
         };
         diags.extend(sig_err.or_else(|| c.function(f).err()));
+        // The types this function's lowering names that are or may become (by substituting
+        // a type parameter) instances of generic types: of its expressions and `let`s, and
+        // of its parameters and return type.
+        let mut own: Vec<(Span, Ty)> = (c.types.iter())
+            .filter(|(_, t)| has_app(t) || has_param(t))
+            .map(|(s, t)| (*s, t.clone()))
+            .collect();
+        own.sort_by_key(|(s, _)| (s.file, s.start, s.end));
+        if let Some(sig) = sigs.get(&*key(module, &f.name)) {
+            let decl = f.params.iter().map(|p| p.ty.span).chain([f.ret.span]);
+            own.extend(
+                decl.zip(sig.params.iter().chain([&sig.ret]))
+                    .map(|(s, t)| (s, t.clone())),
+            );
+        }
+        seeds.insert(key(module, &f.name).into_owned(), own);
         types.extend(c.types);
         captures.extend(c.captures);
         uses.insert(key(module, &f.name).into_owned(), c.uses);
@@ -1609,7 +1789,27 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
     if !diags.is_empty() {
         return Err(diags);
     }
-    instantiate(&sigs, &uses).map_err(|d| vec![d])?;
+    let mut insts = TypeInsts {
+        fields: &fields,
+        variants: &variants,
+        tparams: &tparams,
+        seen: HashMap::new(),
+    };
+    // The types every lowering names: those of the types that are not generic.
+    for name in &order {
+        if !tparams[name].is_empty() {
+            continue;
+        }
+        let span = structs.get(name).map_or_else(|| enums[name].span, |s| s.span);
+        let parts = match fields.get(name) {
+            Some(fs) => fs.iter().map(|(_, t)| t).collect(),
+            None => variants[name].iter().flat_map(|(_, ts)| ts).collect::<Vec<_>>(),
+        };
+        for t in parts {
+            insts.add(t, span, &structs, &enums).map_err(|d| vec![d])?;
+        }
+    }
+    instantiate(&sigs, &uses, &seeds, &mut insts, &structs, &enums).map_err(|d| vec![d])?;
     let instances = (uses.into_values().flatten())
         .map(|(span, g, args)| (span, (g, args)))
         .collect();
@@ -1622,6 +1822,7 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
         enums,
         variants,
         fields,
+        tparams,
         sigs,
         types,
         captures,
@@ -1650,10 +1851,120 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
 /// arguments, which may hold the enclosing function's type parameters.
 type Use = (Span, String, Vec<Ty>);
 
+/// Whether `ty` mentions a generic struct or enum.
+fn has_app(ty: &Ty) -> bool {
+    let mut found = Vec::new();
+    apps(ty, &mut found);
+    !found.is_empty()
+}
+
+/// The generic struct and enum types inside `ty`, outermost first.
+fn apps<'t>(ty: &'t Ty, out: &mut Vec<&'t Ty>) {
+    match ty {
+        Ty::Struct(_, args) | Ty::Enum(_, args) => {
+            if !args.is_empty() {
+                out.push(ty);
+            }
+            args.iter().for_each(|a| apps(a, out));
+        }
+        Ty::Option(t) | Ty::List(t) => apps(t, out),
+        Ty::Result(t, e) | Ty::Map(t, e) => {
+            apps(t, out);
+            apps(e, out);
+        }
+        Ty::Fn(ps, r) => {
+            ps.iter().for_each(|p| apps(p, out));
+            apps(r, out);
+        }
+        _ => {}
+    }
+}
+
+/// The error for a type argument over `MAX_TYPE_ARG` or a 65th instance, of generic function
+/// or type `name`, used directly in code that is not generic.
+fn too_many(span: Span, name: &str, args: &[Ty]) -> Diag {
+    if let Some(t) = args.iter().find(|t| ty_size(t) > MAX_TYPE_ARG) {
+        let msg = format!(
+            "a type argument of `{name}` is too large: {} types, at most {MAX_TYPE_ARG}",
+            ty_size(t)
+        );
+        return err(span, msg, Some("name a struct for part of it"));
+    }
+    let msg = format!("`{name}` has more than {MAX_INSTANCES} instances");
+    let hint = "use fewer distinct type arguments, or a copy that is not generic for some uses";
+    err(span, msg, Some(hint))
+}
+
+/// The instances of generic types lowering will make, found from the types it names.
+struct TypeInsts<'a> {
+    fields: &'a Fields,
+    variants: &'a Variants,
+    tparams: &'a TypeParams,
+    seen: HashMap<String, HashSet<Vec<Ty>>>,
+}
+
+impl TypeInsts<'_> {
+    /// Adds the instances in `ty`, a type named at `span`, and those their fields name. A
+    /// generic type with more than `MAX_INSTANCES` instances or a type argument larger than
+    /// `MAX_TYPE_ARG` is refused: at `span` if `ty` names it, else at the declaration whose
+    /// fields keep growing (`struct S<T> { s: List<S<List<T>>> }`).
+    fn add(
+        &mut self,
+        ty: &Ty,
+        span: Span,
+        structs: &HashMap<String, Struct>,
+        enums: &HashMap<String, Enum>,
+    ) -> Result<(), Diag> {
+        let mut todo: Vec<(Ty, Option<String>)> = vec![(ty.clone(), None)];
+        while let Some((ty, from)) = todo.pop() {
+            let mut found = Vec::new();
+            apps(&ty, &mut found);
+            for app in found {
+                let (Ty::Struct(k, args) | Ty::Enum(k, args)) = app else {
+                    unreachable!("apps");
+                };
+                let instances = self.seen.entry(k.clone()).or_default();
+                if instances.contains(args) {
+                    continue;
+                }
+                if instances.len() == MAX_INSTANCES || args.iter().any(|t| ty_size(t) > MAX_TYPE_ARG) {
+                    let Some(owner) = &from else {
+                        return Err(too_many(span, bare(k), args));
+                    };
+                    let at = structs.get(owner).map_or_else(|| enums[owner].span, |s| s.span);
+                    let msg = format!("generic type `{}` instantiates without end", bare(owner));
+                    let hint = "a field or payload holds this type with larger type arguments; keep them the same";
+                    return Err(err(at, msg, Some(hint)));
+                }
+                instances.insert(args.clone());
+                let parts: Vec<Ty> = match app {
+                    Ty::Struct(..) => fields_of(self.fields, self.tparams, app)
+                        .into_iter()
+                        .map(|(_, t)| t)
+                        .collect(),
+                    _ => (shape(self.variants, self.tparams, app).1.into_iter())
+                        .flat_map(|(_, ts)| ts)
+                        .collect(),
+                };
+                todo.extend(parts.into_iter().map(|t| (t, Some(k.clone()))));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Finds every instance lowering will make, from the functions that are not generic, as
 /// lowering does, and refuses a generic function with more than `MAX_INSTANCES` of them or a
-/// type argument larger than `MAX_TYPE_ARG`: `f<T>` calling `f<List<T>>` never ends.
-fn instantiate(sigs: &HashMap<String, Sig>, uses: &HashMap<String, Vec<Use>>) -> Result<(), Diag> {
+/// type argument larger than `MAX_TYPE_ARG`: `f<T>` calling `f<List<T>>` never ends. Adds the
+/// generic types each instance names (`seeds`, by function) to `insts`.
+fn instantiate(
+    sigs: &HashMap<String, Sig>,
+    uses: &HashMap<String, Vec<Use>>,
+    seeds: &HashMap<String, Vec<(Span, Ty)>>,
+    insts: &mut TypeInsts,
+    structs: &HashMap<String, Struct>,
+    enums: &HashMap<String, Enum>,
+) -> Result<(), Diag> {
     let mut seen: HashMap<&str, HashSet<Vec<Ty>>> = HashMap::new();
     let mut todo: Vec<(&str, Vec<(String, Ty)>)> = (uses.keys())
         .filter(|k| sigs[k.as_str()].tparams.is_empty())
@@ -1662,6 +1973,9 @@ fn instantiate(sigs: &HashMap<String, Sig>, uses: &HashMap<String, Vec<Use>>) ->
     // Popped in name order, so the error is the same on every run.
     todo.sort_by(|a, b| b.0.cmp(a.0));
     while let Some((f, binds)) = todo.pop() {
+        for (span, t) in &seeds[f] {
+            insts.add(&subst(t, &binds), *span, structs, enums)?;
+        }
         for (span, g, args) in &uses[f] {
             let args: Vec<Ty> = args.iter().map(|t| subst(t, &binds)).collect();
             let instances = seen.entry(g).or_default();
@@ -1670,6 +1984,9 @@ fn instantiate(sigs: &HashMap<String, Sig>, uses: &HashMap<String, Vec<Use>>) ->
             }
             if instances.len() == MAX_INSTANCES || args.iter().any(|t| ty_size(t) > MAX_TYPE_ARG) {
                 let name = bare(g);
+                if binds.is_empty() {
+                    return Err(too_many(*span, name, &args));
+                }
                 let hint = format!(
                     "each call gives `{name}` larger type arguments; keep them the same in calls inside `{name}`"
                 );
@@ -1689,6 +2006,7 @@ struct Checker<'a> {
     sigs: &'a HashMap<String, Sig>,
     fields: &'a Fields,
     variants: &'a Variants,
+    tparams: &'a TypeParams,
     structs: &'a HashMap<String, Struct>,
     enums: &'a HashMap<String, Enum>,
     /// The module being checked.
@@ -2067,17 +2385,17 @@ impl<'a> Checker<'a> {
                 self.element(&ty, index, e.span)
             }
             ExprKind::List(items) => self.list_lit(e, items, expected),
-            ExprKind::StructLit(name, inits) => self.struct_lit(e, &key(self.home.module, name), inits),
-            ExprKind::Path(en, v) => self.variant_value(e, &self.enum_key(en), v, &[]),
+            ExprKind::StructLit(name, inits) => self.struct_lit(e, &key(self.home.module, name), inits, expected),
+            ExprKind::Path(en, v) => self.variant_value(e, &self.enum_key(en), v, &[], expected),
             ExprKind::Module(m, inner) => match &inner.kind {
                 ExprKind::StructLit(name, inits) => {
                     let k = self.home.member(m, name, e.span)?;
                     if let Some(s) = self.structs.get(&k) {
                         self.home.public(&k, s.public, "struct", e.span)?;
                     }
-                    self.struct_lit(e, &k, inits)
+                    self.struct_lit(e, &k, inits, expected)
                 }
-                ExprKind::Path(en, v) => self.module_variant(e, m, en, v, &[]),
+                ExprKind::Path(en, v) => self.module_variant(e, m, en, v, &[], expected),
                 ExprKind::Name(name) => {
                     let (k, _) = self.named_fn(e.span, name, Some(m))?;
                     self.fn_value(e.span, &k, None, expected)
@@ -2178,7 +2496,9 @@ impl<'a> Checker<'a> {
         let Some((params, ret)) = method(self.caps, &recv_ty, name) else {
             let names = method_names(self.caps, &recv_ty);
             let fn_field = match &recv_ty {
-                Ty::Struct(s) => self.fields[s].iter().any(|(f, t)| f == name && matches!(t, Ty::Fn(..))),
+                Ty::Struct(..) => fields_of(self.fields, self.tparams, &recv_ty)
+                    .iter()
+                    .any(|(f, t)| f == name && matches!(t, Ty::Fn(..))),
                 _ => false,
             };
             let hint = if fn_field {
@@ -2427,16 +2747,25 @@ impl<'a> Checker<'a> {
     }
 
     /// `m::E::V(args)`, which must name a public enum of module `m`.
-    fn module_variant(&mut self, e: &Expr, m: &str, en: &str, v: &str, args: &[Expr]) -> Result<Ty, Diag> {
+    fn module_variant(
+        &mut self,
+        e: &Expr,
+        m: &str,
+        en: &str,
+        v: &str,
+        args: &[Expr],
+        expected: Option<&Ty>,
+    ) -> Result<Ty, Diag> {
         let k = self.home.member(m, en, e.span)?;
         if let Some(d) = self.enums.get(&k) {
             self.home.public(&k, d.public, "enum", e.span)?;
         }
-        self.variant_value(e, &k, v, args)
+        self.variant_value(e, &k, v, args, expected)
     }
 
-    /// `E::V` or `E::V(args)`, with `en` the enum's key; arity and payload types must match the declaration.
-    fn variant_value(&mut self, e: &Expr, en: &str, v: &str, args: &[Expr]) -> Result<Ty, Diag> {
+    /// `E::V` or `E::V(args)`, with `en` the enum's key; arity and payload types must match
+    /// the declaration. A generic enum's type arguments are inferred as a generic call's.
+    fn variant_value(&mut self, e: &Expr, en: &str, v: &str, args: &[Expr], expected: Option<&Ty>) -> Result<Ty, Diag> {
         if builtin(v).is_some_and(|(b, _)| b == en) {
             let msg = format!("`{en}::{v}` cannot be written as a path");
             return Err(err(e.span, msg, Some(&format!("write `{v}` without `{en}::`"))));
@@ -2448,10 +2777,57 @@ impl<'a> Checker<'a> {
             let msg = format!("`{en}::{v}` takes {} arguments, found {}", payload.len(), args.len());
             return Err(err(e.span, msg, Some(&holds(en, v, payload))));
         }
-        for (a, ty) in args.iter().zip(payload) {
-            want_expr(a, &self.expr(a, Some(ty))?, ty)?;
+        let tparams = &self.tparams[en];
+        if tparams.is_empty() {
+            for (a, ty) in args.iter().zip(payload) {
+                want_expr(a, &self.expr(a, Some(ty))?, ty)?;
+            }
+            return Ok(Ty::Enum(en.to_string(), Vec::new()));
         }
-        Ok(Ty::Enum(en.to_string()))
+        let name = self.written(en);
+        let written = format!("{name}::{v}");
+        let parts = (1..=args.len()).map(|i| format!("value {i}")).collect();
+        let shown = if args.is_empty() {
+            written.clone()
+        } else {
+            format!("{written}(..)")
+        };
+        let sig = self.type_sig("enum", en, payload.to_vec(), parts, &shown);
+        let args: Vec<&Expr> = args.iter().collect();
+        let tys = self.infer(e, e.span, (&written, &sig), None, &args, expected)?;
+        Ok(Ty::Enum(en.to_string(), tys))
+    }
+
+    /// Type `k` as written in this module: without its module if it is this one's.
+    fn written<'k>(&self, k: &'k str) -> &'k str {
+        if module_of(k) == self.home.module {
+            bare(k)
+        } else {
+            k
+        }
+    }
+
+    /// The signature a literal or variant of generic type `k` (`kw` is `struct` or `enum`)
+    /// is inferred with, as a call taking values of types `params`, named `parts` in
+    /// messages; `shown` is the literal as written, for "cannot infer".
+    fn type_sig(&self, kw: &str, k: &str, params: Vec<Ty>, parts: Vec<String>, shown: &str) -> Sig {
+        let tparams = self.tparams[k].clone();
+        let name = self.written(k);
+        let local = bare(k).to_ascii_lowercase()[..1].to_string();
+        let ints = vec!["Int"; tparams.len()].join(", ");
+        let own = tparams.iter().map(|t| Ty::Param(t.clone())).collect();
+        Sig {
+            public: true,
+            decl: format!("{kw} {name}<{}>", tparams.join(", ")),
+            ret: match kw {
+                "struct" => Ty::Struct(k.to_string(), own),
+                _ => Ty::Enum(k.to_string(), own),
+            },
+            params,
+            parts: Some(parts),
+            infer: Some((shown.to_string(), format!("let {local}: {name}<{ints}> = {shown};"))),
+            tparams,
+        }
     }
 
     /// The type of an `if` (`e`) whose then-block has type `t`, given its else branch.
@@ -2488,7 +2864,7 @@ impl<'a> Checker<'a> {
         // A type parameter is matched only as a whole: by a name or `_`.
         if !matches!(
             st,
-            Ty::Int | Ty::Bool | Ty::Str | Ty::Enum(_) | Ty::Option(_) | Ty::Result(..) | Ty::Param(_)
+            Ty::Int | Ty::Bool | Ty::Str | Ty::Enum(..) | Ty::Option(_) | Ty::Result(..) | Ty::Param(_)
         ) {
             let hint = "match works on Int, Bool, Str and enums";
             return Err(err(scrut.span, format!("cannot match on {st}"), Some(hint)));
@@ -2521,6 +2897,7 @@ impl<'a> Checker<'a> {
         };
         let mut u = Usefulness {
             variants: self.variants,
+            tparams: self.tparams,
             budget: MATCH_BUDGET,
             program: self.match_budget,
             depth: 0,
@@ -2562,7 +2939,7 @@ impl<'a> Checker<'a> {
             PatKind::Int(n) => lit(Ty::Int, Ctor::Int(*n)),
             PatKind::Str(s) => lit(Ty::Str, Ctor::Str(s.clone())),
             PatKind::Bool(b) => lit(Ty::Bool, Ctor::Bool(*b)),
-            PatKind::Name(n) if variant(&shape(self.variants, st).1, n).is_some() => {
+            PatKind::Name(n) if variant(&shape(self.variants, self.tparams, st).1, n).is_some() => {
                 self.variant_pattern(p, st, n, &[], binds)
             }
             PatKind::Name(n) => {
@@ -2599,8 +2976,8 @@ impl<'a> Checker<'a> {
         parts: &[Pat],
         binds: &mut Vec<(String, Ty)>,
     ) -> Result<Cover, Diag> {
-        if k != shape(self.variants, st).0 {
-            want(p.span, &Ty::Enum(k), st)?;
+        if k != shape(self.variants, self.tparams, st).0 {
+            want(p.span, &Ty::Enum(k, Vec::new()), st)?;
         }
         self.variant_pattern(p, st, v, parts, binds)
     }
@@ -2613,7 +2990,7 @@ impl<'a> Checker<'a> {
         parts: &[Pat],
         binds: &mut Vec<(String, Ty)>,
     ) -> Result<Cover, Diag> {
-        let (en, vs) = shape(self.variants, st);
+        let (en, vs) = shape(self.variants, self.tparams, st);
         if en.is_empty() {
             let hint = format!("match {st} with a name or `_`");
             return Err(err(p.span, format!("expected {st}, found variant `{v}`"), Some(&hint)));
@@ -2635,19 +3012,25 @@ impl<'a> Checker<'a> {
 
     /// The type of field `name` of a value of type `ty`.
     fn field(&self, ty: &Ty, name: &str, span: Span) -> Result<Ty, Diag> {
-        let Ty::Struct(s) = ty else {
+        let Ty::Struct(s, _) = ty else {
             let hint = "only structs have fields";
             return Err(err(span, format!("no field `{name}` on {ty}"), Some(hint)));
         };
-        let decl = &self.fields[s.as_str()];
+        let decl = fields_of(self.fields, self.tparams, ty);
         match decl.iter().find(|(n, _)| n == name) {
             Some((_, t)) => Ok(t.clone()),
-            None => Err(no_field(span, name, s, decl)),
+            None => Err(no_field(span, name, s, &decl)),
         }
     }
 
     /// `Name { .. }`, with `name` the struct's key.
-    fn struct_lit(&mut self, e: &Expr, name: &str, inits: &[(String, Expr)]) -> Result<Ty, Diag> {
+    fn struct_lit(
+        &mut self,
+        e: &Expr,
+        name: &str,
+        inits: &[(String, Expr)],
+        expected: Option<&Ty>,
+    ) -> Result<Ty, Diag> {
         let fields = self.fields;
         let Some(decl) = fields.get(name) else {
             let hint = match self.is_cap(name) {
@@ -2657,7 +3040,9 @@ impl<'a> Checker<'a> {
             };
             return Err(err(e.span, format!("unknown struct `{name}`"), Some(&hint)));
         };
+        let generic = !self.tparams[name].is_empty();
         let mut seen = Vec::new();
+        let mut params = Vec::new();
         for (f, x) in inits {
             let Some((_, ty)) = decl.iter().find(|(n, _)| n == f) else {
                 return Err(no_field(x.span, f, name, decl));
@@ -2670,13 +3055,25 @@ impl<'a> Checker<'a> {
                 ));
             }
             seen.push(f);
-            want_expr(x, &self.expr(x, Some(ty))?, ty)?;
+            match generic {
+                // Checked below, once every field is known to exist.
+                true => params.push(ty.clone()),
+                false => want_expr(x, &self.expr(x, Some(ty))?, ty)?,
+            }
         }
         if let Some((missing, _)) = decl.iter().find(|(n, _)| !seen.contains(&n)) {
             let msg = format!("missing field `{missing}` in `{name}`");
             return Err(err(e.span, msg, Some(&format!("add `{missing}: ..`"))));
         }
-        Ok(Ty::Struct(name.to_string()))
+        if !generic {
+            return Ok(Ty::Struct(name.to_string(), Vec::new()));
+        }
+        let written = self.written(name).to_string();
+        let parts = inits.iter().map(|(f, _)| format!("field `{f}`")).collect();
+        let sig = self.type_sig("struct", name, params, parts, &format!("{written} {{ .. }}"));
+        let args: Vec<&Expr> = inits.iter().map(|(_, x)| x).collect();
+        let tys = self.infer(e, e.span, (&written, &sig), None, &args, expected)?;
+        Ok(Ty::Struct(name.to_string(), tys))
     }
 
     /// The type of an assignment target: a `let mut` local followed by fields and indexes.
@@ -2764,11 +3161,11 @@ impl<'a> Checker<'a> {
             ExprKind::Name(name) => (name, None, None),
             ExprKind::Turbofish(name, tys) => (name, None, Some(tys.as_slice())),
             ExprKind::Path(en, v) if en == "Map" && v == "new" => return self.map_new(e, args, expected),
-            ExprKind::Path(en, v) => return self.variant_value(e, &self.enum_key(en), v, args),
+            ExprKind::Path(en, v) => return self.variant_value(e, &self.enum_key(en), v, args, expected),
             ExprKind::Module(m, inner) => match &inner.kind {
                 ExprKind::Name(name) => (name, Some(m.as_str()), None),
                 ExprKind::Turbofish(name, tys) => (name, Some(m.as_str()), Some(tys.as_slice())),
-                ExprKind::Path(en, v) => return self.module_variant(e, m, en, v, args),
+                ExprKind::Path(en, v) => return self.module_variant(e, m, en, v, args, expected),
                 _ => return Err(nested_path(callee.span)),
             },
             _ => return self.call_value(e, callee, args),
@@ -2807,7 +3204,34 @@ impl<'a> Checker<'a> {
         args: &[Expr],
         expected: Option<&Ty>,
     ) -> Result<Ty, Diag> {
-        let g = (written, sig);
+        let args: Vec<&Expr> = args.iter().collect();
+        let tys = self.infer(e, at, (written, sig), explicit, &args, expected)?;
+        let pairs: Vec<(String, Ty)> = sig.tparams.iter().cloned().zip(tys.iter().cloned()).collect();
+        self.uses.push((at, k.to_string(), tys));
+        Ok(subst(&sig.ret, &pairs))
+    }
+
+    /// Argument `a` of a use of `sig`: a capability may be one in a call (rule 1 allows it as
+    /// an argument), never in a literal or variant.
+    fn value(&mut self, a: &Expr, sig: &Sig, expected: Option<&Ty>) -> Result<Ty, Diag> {
+        match sig.parts {
+            Some(_) => self.expr(a, expected),
+            None => self.operand(a, expected),
+        }
+    }
+
+    /// The type arguments of a use of generic `g` at `e` (named at `at`) with values `args`,
+    /// as `generic_call` describes; the values are checked against the instance.
+    fn infer(
+        &mut self,
+        e: &Expr,
+        at: Span,
+        g: Generic,
+        explicit: Option<&[Type]>,
+        args: &[&Expr],
+        expected: Option<&Ty>,
+    ) -> Result<Vec<Ty>, Diag> {
+        let sig = g.1;
         let mut binds = self.explicit_args(at, g, explicit)?;
         let mut found = vec![None; args.len()];
         let mut later = Vec::new();
@@ -2815,7 +3239,7 @@ impl<'a> Checker<'a> {
             if let Some(k) = known(p, sig, &binds) {
                 // Matched too, so that `same(1, "a")` names where `T` became Int. A turbofish
                 // fixed every type parameter: the caller compares the whole types.
-                let t = self.operand(a, Some(&k))?;
+                let t = self.value(a, sig, Some(&k))?;
                 if explicit.is_none() {
                     unify(p, &t, g, &mut binds, (a.span, i + 1), true)?;
                 }
@@ -2823,7 +3247,7 @@ impl<'a> Checker<'a> {
             } else if self.needs_expected(a) {
                 later.push(i);
             } else {
-                let t = self.operand(a, None)?;
+                let t = self.value(a, sig, None)?;
                 unify(p, &t, g, &mut binds, (a.span, i + 1), true)?;
                 found[i] = Some(t);
             }
@@ -2832,9 +3256,9 @@ impl<'a> Checker<'a> {
             unify(&sig.ret, want, g, &mut binds, (e.span, 0), false)?;
         }
         for i in later {
-            let (a, p) = (&args[i], &sig.params[i]);
+            let (a, p) = (args[i], &sig.params[i]);
             let t = if let Some(p) = known(p, sig, &binds) {
-                self.operand(a, Some(&p))?
+                self.value(a, sig, Some(&p))?
             } else {
                 // Only the parameter types of a `fn` parameter may be known: enough for a
                 // closure, or for a generic function named as a value.
@@ -2849,7 +3273,9 @@ impl<'a> Checker<'a> {
                         ty
                     }
                     (ExprKind::Closure(ps, _), _) if ps.iter().all(|q| q.ty.is_some()) => self.expr(a, None)?,
-                    (ExprKind::Name(_), Some(pts)) => self.expr(a, Some(&Ty::Fn(pts, Box::new(Ty::Never))))?,
+                    (ExprKind::Name(_) | ExprKind::Module(..), Some(pts)) => {
+                        self.expr(a, Some(&Ty::Fn(pts, Box::new(Ty::Never))))?
+                    }
                     _ => return Err(cannot_infer(e.span, g, &binds, true)),
                 }
             };
@@ -2863,8 +3289,7 @@ impl<'a> Checker<'a> {
         for ((a, p), t) in args.iter().zip(&sig.params).zip(found) {
             want_expr(a, &t.expect("every argument is checked"), &subst(p, &pairs))?;
         }
-        self.uses.push((at, k.to_string(), tys));
-        Ok(subst(&sig.ret, &pairs))
+        Ok(tys)
     }
 
     /// The type arguments written after `::<` for a generic function given as (name as
@@ -2905,9 +3330,11 @@ impl<'a> Checker<'a> {
     fn needs_expected(&self, a: &Expr) -> bool {
         match &a.kind {
             ExprKind::Closure(..) => true,
-            ExprKind::List(items) => items.is_empty(),
+            // The first element gives the others their type: `[Tree::Leaf]`.
+            ExprKind::List(items) => items.first().is_none_or(|x| self.needs_expected(x)),
             ExprKind::Name(n) if n == "None" => true,
-            ExprKind::Call(f, _) => match &f.kind {
+            ExprKind::Call(f, args) => match &f.kind {
+                ExprKind::Name(n) if n == "Some" => args.first().is_some_and(|x| self.needs_expected(x)),
                 ExprKind::Name(n) => n == "Ok" || n == "Err",
                 ExprKind::Path(m, n) => m == "Map" && n == "new",
                 _ => false,
@@ -2918,6 +3345,16 @@ impl<'a> Checker<'a> {
                 let sig = self.sigs.get(&*key(self.home.module, n));
                 !local && sig.is_some_and(|s| !s.tparams.is_empty())
             }
+            // A variant without a payload of a generic enum, such as `Tree::Leaf`.
+            ExprKind::Path(en, _) => self.tparams.get(&self.enum_key(en)).is_some_and(|t| !t.is_empty()),
+            ExprKind::Module(m, inner) => match &inner.kind {
+                ExprKind::Name(n) => self
+                    .sigs
+                    .get(&format!("{m}::{n}"))
+                    .is_some_and(|s| !s.tparams.is_empty()),
+                ExprKind::Path(en, _) => self.tparams.get(&format!("{m}::{en}")).is_some_and(|t| !t.is_empty()),
+                _ => false,
+            },
             _ => false,
         }
     }

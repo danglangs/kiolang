@@ -44,12 +44,12 @@ fn main(input: Dir, out: Dir) -> Result<(), IoErr> {
 | Scalars | `Int` (i64), `Float` (f64), `Bool`, `Str`, `Bytes`, `()` |
 | Containers | `List<T>`, `Map<K, V>` (key `Int` or `Str`) |
 | Errors | `Option<T>`, `Result<T, E>`, `?` |
-| User types | `struct`, and `enum` with payloads; a type may contain itself only through `List` or `Map` |
+| User types | `struct`, and `enum` with payloads, generic or not (`struct Page<T>`); a type may contain itself only through `List` or `Map` |
 | Control | `if`, `if let`, `while`, `loop`, `for x in list`, `for i in 0..n`, `match`, `break`, `continue`, `return` |
 | Functions | free functions, recursion, generic functions `fn f<T>(..)`, function values of type `fn(T, ..) -> R`, closures |
 | Capabilities | `Dir`, `Http`, `Kv`, `WsMessage`, `WsSend`, generated from `caps.wit` |
 
-Everything else is rejected with a message that names the kio alternative, for example `&str` (use `Str`), `Vec` (use `List`), `impl`, traits, bounds such as `T: Clone`, generic structs and enums, `use`, `mod`, tuples, globals, `unsafe`.
+Everything else is rejected with a message that names the kio alternative, for example `&str` (use `Str`), `Vec` (use `List`), `impl`, traits, bounds such as `T: Clone`, `use`, `mod`, tuples, globals, `unsafe`.
 
 ## Semantics
 
@@ -92,6 +92,15 @@ Everything else is rejected with a message that names the kio alternative, for e
   let xs: List<Int> = empty();                // T from the expected type
   let n = apply(|x| x + 1, 41);               // T from 41, then U from the closure
   let f: fn(List<Int>) -> Option<Int> = first;
+  ```
+- **Generic structs and enums.** Type parameters as on functions; a use names every argument (`Page<Int>`, `web::Tree<Str>`). A literal or variant takes its type arguments from its values, then from the expected type, as a call does; `Tree::Leaf` alone needs one: "cannot infer `T` for `Tree::Leaf`". Fields, field writes and patterns have the instance's types. `==` works on an instance whose arguments allow it (`Page<Int>`), not on `Page<T>` inside a generic function. A type argument is never a capability. A type may contain itself only through `List` or `Map`, in every instance (`struct X { w: W<X> }` is refused when `W<T>` holds a `T`). Each instance is its own type, printed without its arguments, as Rust's `Debug` does: `Page { items: [1], next: None }`. A type whose fields keep growing its arguments (`struct S<T> { s: List<S<List<T>>> }`) is refused once used: "generic type `S` instantiates without end". At most 64 instances of one generic function or type, each type argument at most 256 types. `Option` and `Result` stay built in.
+
+  ```
+  struct Page<T> { items: List<T>, next: Option<Int> }
+  enum Tree<T> { Leaf, Node(List<Tree<T>>, T) }
+  let p = Page { items: [1, 2], next: None };     // Page<Int>
+  let t: Tree<Str> = Tree::Leaf;
+  fn first<T>(p: Page<T>) -> Option<T> { if p.items.len() == 0 { None } else { Some(p.items[0]) } }
   ```
 - **Modules.** `mod web;` in the root file loads `web.kio`; its `pub` items are used as `web::f`, `web::T`. Modules are flat: one file each, declared only in the root. A module may use another declared module's `pub` items the same way (cycles are fine) but not the root's.
 
@@ -144,7 +153,7 @@ A WebSocket server is `fn main(msg: WsMessage, conn: WsSend, ..)` under `--liste
 
    A closure cannot capture a capability: "closure captures capability `out`". The hint, taking it as a parameter `|out: Dir, ..|`, is then refused by the `fn` type rule, so code that needs a capability is a named function that takes it as a parameter.
 
-   A type parameter is never a capability, however it would be fixed (`id(d)`, `id::<Dir>`, an expected type): "`T` cannot be `Dir`: capabilities are parameters only". A generic function takes a capability as a parameter of its own type (`fn keep<T>(d: Dir, x: T)`), so every copy of it has the same authority and the report lists it once.
+   A type parameter is never a capability, however it would be fixed (`id(d)`, `id::<Dir>`, `Box<Dir>`, an expected type): "`T` cannot be `Dir`: capabilities are parameters only". A generic function takes a capability as a parameter of its own type (`fn keep<T>(d: Dir, x: T)`), so every copy of it has the same authority and the report lists it once.
 
    So a function's authority is exactly its capability parameters, and the report is read off the signatures. A function value or closure carries none. The report lists named functions only; a closure's body is part of the function it is written in.
 
@@ -200,6 +209,6 @@ error: kio has no references
 
 - Attenuation: deriving a narrower cap, such as a sub-directory. First candidate for v1.
 - Traits and `impl`.
-- Generic structs and enums, and the bounds `T: Eq` and `T: Ord` (planned: L7b, L7c).
+- The bounds `T: Eq` and `T: Ord` (planned: L7c).
 - Tuples.
 - `use` and nested modules.
