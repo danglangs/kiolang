@@ -38,4 +38,5 @@ wasmtime = "50"
 
 [dev-dependencies]
 kio = { path = ".", features = ["test-hooks"] }
+kiogen = { path = "../tools/kiogen" }
 tempfile = "3"

@@ -1043,6 +1043,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "kio",
+ "kiogen",
  "lang",
  "rustix",
  "serde_json",
@@ -1055,6 +1056,10 @@ dependencies = [
  "wasmtime-wasi",
  "wasmtime-wizer",
 ]
+
+[[package]]
+name = "kiogen"
+version = "0.1.0"
 
 [[package]]
 name = "lang"
