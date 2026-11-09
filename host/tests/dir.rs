@@ -105,6 +105,25 @@ fn write_errors_leave_the_filesystem_unchanged() {
     assert_eq!(names(&r.join("sub")), Vec::<String>::new());
 }
 
+/// `write` to `link/`, where `link` is a symlink to a directory inside the root, is refused and
+/// leaves the link in place. Without the trailing-slash check, cap-std's `symlink_metadata` fails
+/// with `ENOTDIR` (read as missing), the temp is created through the link, and `rename` strips the
+/// slash and replaces the symlink itself with the file.
+#[test]
+fn write_to_a_directory_symlink_with_a_trailing_slash_is_denied() {
+    let t = tempfile::tempdir().unwrap();
+    let r = t.path();
+    fs::create_dir(r.join("sub")).unwrap();
+    fs::write(r.join("sub/s"), "s").unwrap();
+    symlink("sub", r.join("dlink")).unwrap();
+    assert_eq!(write(r, "dlink/", "x"), DENIED);
+    assert_eq!(write(r, "dlink//", "x"), DENIED);
+    assert_eq!(write(r, "sub/", "x"), DENIED);
+    assert!(fs::symlink_metadata(r.join("dlink")).unwrap().is_symlink());
+    assert_eq!(names(r), ["dlink", "sub"]);
+    assert_eq!(names(&r.join("sub")), ["s"]);
+}
+
 /// A write that fails after the temp file is created removes it and keeps the old file.
 #[test]
 fn failed_write_keeps_the_old_file_and_no_temp() {

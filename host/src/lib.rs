@@ -692,6 +692,7 @@ impl kio::caps::fs::HostDir for State {
     fn remove(&mut self, d: Resource<kio::caps::fs::Dir>, path: String) -> Result<Result<(), IoErr>> {
         let arg = path.clone();
         let work = |dir: &RealDir, path: &str| match kind(dir, path)? {
+            _ if path.ends_with('/') => Err(IoErr::Denied),
             None => Err(IoErr::NotFound),
             Some(t) if t.is_file() => dir.remove_file(path).map_err(|e| io_err(&e)),
             Some(_) => Err(IoErr::Denied),
@@ -780,7 +781,11 @@ impl State {
                     return Err(IoErr::TooLarge);
                 }
                 let entry = entry.map_err(|e| io_err(&e))?;
-                let t = entry.file_type().map_err(|e| io_err(&e))?;
+                let mut t = entry.file_type().map_err(|e| io_err(&e))?;
+                // Some filesystems (XFS without ftype, NFS, FUSE) report an unknown type: ask.
+                if !t.is_dir() && !t.is_file() && !t.is_symlink() {
+                    t = entry.metadata().map_err(|e| io_err(&e))?.file_type();
+                }
                 // A name that is not UTF-8 cannot cross as a WIT string; it is left out.
                 let Ok(name) = entry.file_name().into_string() else {
                     continue;
@@ -794,8 +799,11 @@ impl State {
             names.sort();
             Ok(names)
         })?;
-        if let Ok(names) = &names {
-            self.spend_io(names.iter().map(String::len).sum())?;
+        match &names {
+            Ok(names) => self.spend_io(names.iter().map(String::len).sum())?,
+            // The host still read the entries: charge a byte each, so repeating it is bounded.
+            Err(IoErr::TooLarge) => self.spend_io(LIST_CAP)?,
+            Err(_) => {}
         }
         Ok(names)
     }
@@ -814,7 +822,9 @@ impl State {
         #[cfg(feature = "test-hooks")]
         let fail_write = self.fail_writes;
         self.on_dir(d, path, move |dir, path| {
-            if kind(dir, path)?.is_some_and(|t| !t.is_file()) {
+            // `a/` can only name a directory; `kind` would report a symlink-to-directory as missing
+            // (`ENOTDIR` on macOS) and the rename would then replace the symlink itself.
+            if path.ends_with('/') || kind(dir, path)?.is_some_and(|t| !t.is_file()) {
                 return Err(IoErr::Denied);
             }
             let temp = match path.rsplit_once('/') {
