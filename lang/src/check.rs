@@ -4,6 +4,7 @@ use crate::ir::{self, EnumRef};
 use crate::parse::parse_file;
 use crate::{Diag, Span};
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -292,10 +293,18 @@ enum Cover {
 }
 
 /// Exhaustiveness work allowed per `match`, in pattern cells visited, and its recursion depth,
-/// in pattern columns. The check is exponential in the worst case; real matches use a tiny
-/// fraction of either.
+/// in pattern columns; and the work allowed for all of a program's matches together, so many
+/// large matches cannot cost minutes either. The check is exponential in the worst case; real
+/// matches use a tiny fraction of any.
 const MATCH_BUDGET: usize = 4_000_000;
 const MATCH_DEPTH: usize = 256;
+const PROGRAM_MATCH_BUDGET: usize = 20_000_000;
+
+/// Which exhaustiveness limit a `match` ran into.
+enum Spent {
+    Match,
+    Program,
+}
 
 /// Values that some patterns leave unmatched, as rows of covers; `None` when there are none.
 type Witnesses = Option<Vec<Vec<Cover>>>;
@@ -304,6 +313,8 @@ type Witnesses = Option<Vec<Vec<Cover>>>;
 struct Usefulness<'a> {
     variants: &'a Variants,
     budget: usize,
+    /// What is left of `PROGRAM_MATCH_BUDGET`, shared by every match being checked.
+    program: &'a Cell<usize>,
     depth: usize,
 }
 
@@ -322,9 +333,9 @@ impl Usefulness<'_> {
 
     /// Values that `q`, a row of covers of types `tys`, matches and no row of `rows` does.
     /// When `q` is all `Cover::All`, those are the values the rows miss. `Err` when out of budget.
-    fn useful(&mut self, rows: &[Vec<Cover>], q: &[Cover], tys: &[Ty]) -> Result<Witnesses, ()> {
+    fn useful(&mut self, rows: &[Vec<Cover>], q: &[Cover], tys: &[Ty]) -> Result<Witnesses, Spent> {
         if self.depth == MATCH_DEPTH {
-            return Err(());
+            return Err(Spent::Match);
         }
         self.depth += 1;
         let ws = self.step(rows, q, tys);
@@ -332,12 +343,14 @@ impl Usefulness<'_> {
         ws
     }
 
-    fn step(&mut self, rows: &[Vec<Cover>], q: &[Cover], tys: &[Ty]) -> Result<Witnesses, ()> {
+    fn step(&mut self, rows: &[Vec<Cover>], q: &[Cover], tys: &[Ty]) -> Result<Witnesses, Spent> {
         if rows.is_empty() {
             return Ok(Some(vec![q.to_vec()]));
         }
         let cost = (rows.len() + 1) * (q.len() + 1);
-        self.budget = self.budget.checked_sub(cost).ok_or(())?;
+        self.budget = self.budget.checked_sub(cost).ok_or(Spent::Match)?;
+        self.program
+            .set(self.program.get().checked_sub(cost).ok_or(Spent::Program)?);
         let Some((head, rest)) = q.split_first() else {
             return Ok(None);
         };
@@ -390,7 +403,7 @@ impl Usefulness<'_> {
         parts: Vec<Cover>,
         rest: &[Cover],
         tys: &[Ty],
-    ) -> Result<Witnesses, ()> {
+    ) -> Result<Witnesses, Spent> {
         let n = parts.len();
         let rows: Vec<_> = (rows.iter())
             .filter_map(|r| match &r[0] {
@@ -1288,6 +1301,7 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
         })
         .collect();
 
+    let match_budget = Cell::new(PROGRAM_MATCH_BUDGET);
     let mut types = HashMap::new();
     let mut captures = HashMap::new();
     for ((module, f), sig_err) in fns.iter().zip(sig_errs) {
@@ -1306,6 +1320,7 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
             loops: Vec::new(),
             closures: Vec::new(),
             main_caps: &main_caps,
+            match_budget: &match_budget,
             types: HashMap::new(),
             captures: HashMap::new(),
         };
@@ -1376,6 +1391,8 @@ struct Checker<'a> {
     closures: Vec<ClosureFrame>,
     /// Name and type of each capability parameter of `main`.
     main_caps: &'a [(String, String)],
+    /// What is left of `PROGRAM_MATCH_BUDGET` for this program.
+    match_budget: &'a Cell<usize>,
     /// As `Program::types`.
     types: HashMap<Span, Ty>,
     /// As `Program::captures`.
@@ -2155,17 +2172,22 @@ impl<'a> Checker<'a> {
 
     fn match_expr(&mut self, scrut: &Expr, arms: &[Arm], expected: Option<&Ty>) -> Result<Ty, Diag> {
         let st = self.scrutinee(scrut)?;
-        let too_complex = |()| {
-            let hint = "split it into smaller matches";
-            err(
+        let too_complex = |spent| match spent {
+            Spent::Match => err(
                 scrut.span,
                 "this `match` is too complex to check".to_string(),
-                Some(hint),
-            )
+                Some("split it into smaller matches"),
+            ),
+            Spent::Program => err(
+                scrut.span,
+                "this program's matches are too complex to check".to_string(),
+                Some("simplify the largest matches; together they exceed what the checker will do"),
+            ),
         };
         let mut u = Usefulness {
             variants: self.variants,
             budget: MATCH_BUDGET,
+            program: self.match_budget,
             depth: 0,
         };
         let tys = [st.clone()];

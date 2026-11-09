@@ -25,6 +25,24 @@ pub fn default_dir() -> Option<PathBuf> {
     Some(base.join("kio"))
 }
 
+/// `path` with symlinks resolved, though it may not exist yet: its nearest existing ancestor made
+/// canonical, then the rest. `None` when the rest has a `..` or `.`, which could lead anywhere.
+pub fn resolve(path: &Path) -> Option<PathBuf> {
+    let path = std::path::absolute(path).ok()?;
+    let (base, rest) = path
+        .ancestors()
+        .find_map(|a| Some((std::fs::canonicalize(a).ok()?, path.strip_prefix(a).ok()?)))?;
+    let normal = rest.components().all(|c| matches!(c, std::path::Component::Normal(_)));
+    normal.then(|| base.join(rest))
+}
+
+/// Whether a program granted the directory at `root` could write inside the cache at `dir`, or
+/// `root` is inside the cache: then the cache is not used, since an entry the program wrote
+/// would be loaded as native code. Both paths as `resolve` gives them.
+pub fn overlaps(dir: &Path, root: &Path) -> bool {
+    dir.starts_with(root) || root.starts_with(dir)
+}
+
 /// The compiled component for `wasm`, from `dir` if it holds a good entry; otherwise compiled,
 /// and stored there when `dir` is usable. A cache that cannot be used only costs the compile.
 pub fn component(engine: &Engine, wasm: &[u8], dir: &Path) -> Result<Component> {

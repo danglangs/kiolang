@@ -201,8 +201,26 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     if !ws && !ws_origins.is_empty() {
         return fail("--ws-origin without a WebSocket server\n  hint: --ws-origin lets browser pages from that origin connect to a `main` that takes WsMessage and WsSend; drop it".into());
     }
-    // A program that can write a store's log through a `Dir` could replace or craft it.
+    // The compile cache holds native code later runs load as trusted. A program granted a `Dir`
+    // over it could plant an entry, so then this run does not use it (open question 75). Says
+    // nothing: the cache is an optimization, and its path is not the program's business.
+    let cache = kio_host::cache::default_dir();
+    let resolved = cache.as_deref().and_then(kio_host::cache::resolve);
+    let apart = |c: &std::path::PathBuf| {
+        (dir_paths.iter()).all(|(_, d)| std::fs::canonicalize(d).is_ok_and(|r| !kio_host::cache::overlaps(c, &r)))
+    };
+    let use_cache = resolved.as_ref().is_some_and(apart);
+    // A program that can write a store's log through a `Dir` could replace or craft it; a store
+    // inside the cache could likewise become an entry.
     for (name, spec) in kv_specs.iter().filter(|(_, s)| s != ":memory:") {
+        let store = kio_host::cache::resolve(spec.as_ref());
+        if let (Some(c), Some(s)) = (&resolved, store) {
+            if s.starts_with(c) {
+                return fail(format!(
+                    "`--kv {name}` is inside kio's compile cache\n  hint: keep stores outside `$XDG_CACHE_HOME/kio` (default `~/.cache/kio`)"
+                ));
+            }
+        }
         let parent = std::path::Path::new(spec.as_str()).parent();
         let parent = parent.filter(|p| !p.as_os_str().is_empty()).unwrap_or(".".as_ref());
         let Ok(parent) = std::fs::canonicalize(parent) else {
@@ -234,7 +252,7 @@ fn run(path: &str, flags: &[&str]) -> i32 {
         }
     }
     kio.grant_kvs(kvs);
-    if let Some(dir) = kio_host::cache::default_dir() {
+    if let Some(dir) = cache.filter(|_| use_cache) {
         kio.cache(dir);
     }
     match kio.run_files(&files, dirs, https) {

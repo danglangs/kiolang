@@ -527,6 +527,26 @@ fn too_complex_match() {
     );
 }
 
+/// The exhaustiveness budget is per program: many matches each under the per-match cap stop at
+/// the program's, quickly, rather than costing the host minutes (C5 review).
+#[test]
+fn many_large_matches_spend_the_program_budget() {
+    let arms: String = (0..1800).map(|i| format!("{i} => 0, ")).collect();
+    let one = format!("fn f(n: Int) -> Int {{ match n {{ {arms}_ => 1 }} }} fn main() {{}}");
+    ok(&one);
+    let fns: String = (0..40)
+        .map(|k| format!("fn f{k}(n: Int) -> Int {{ match n {{ {arms}_ => 1 }} }} "))
+        .collect();
+    let start = std::time::Instant::now();
+    let diags = check(&format!("{fns}fn main() {{}}"), &CapTable::default()).expect_err("should be rejected");
+    assert!(start.elapsed().as_secs() < 5, "took {:?}", start.elapsed());
+    assert_eq!(diags[0].msg, "this program's matches are too complex to check");
+    assert_eq!(
+        diags[0].hint.as_deref(),
+        Some("simplify the largest matches; together they exceed what the checker will do")
+    );
+}
+
 /// The hint of the single diagnostic for `src`.
 #[track_caller]
 fn hint(src: &str) -> String {

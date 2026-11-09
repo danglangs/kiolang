@@ -7,6 +7,9 @@ use std::io::BufRead;
 
 const PRIMER: &str = include_str!("../../docs/language.md");
 const VERSION: &str = "2025-06-18";
+/// Source `kio_check` accepts per call, names and sources together: checking runs in the host,
+/// outside any sandbox, so its input is bounded (with the checker's own budgets, open question 58).
+const MAX_SOURCE: usize = 1 << 20;
 
 /// Answer requests from stdin until EOF. A bad message gets an error reply, never an exit.
 pub fn serve() -> i32 {
@@ -37,7 +40,7 @@ fn handle(line: &str) -> Option<Value> {
         })),
         Some("ping") => Ok(json!({})),
         Some("tools/list") => Ok(json!({ "tools": tools() })),
-        Some("tools/call") => call(params).ok_or("expected a known tool name and valid arguments"),
+        Some("tools/call") => call(params),
         _ => return Some(error(id, -32601, "method not found")),
     };
     Some(match result {
@@ -77,18 +80,25 @@ fn tools() -> Value {
     ])
 }
 
-/// A `tools/call` result, or `None` for an unknown tool or bad arguments.
-fn call(params: &Value) -> Option<Value> {
-    let (text, is_error) = match params.get("name")?.as_str()? {
-        "kio_primer" => (PRIMER.to_string(), false),
-        "kio_check" => check(params.get("arguments")?.get("files")?.as_array()?)?,
-        _ => return None,
+/// A `tools/call` result, or the error message for an unknown tool or bad arguments.
+fn call(params: &Value) -> Result<Value, &'static str> {
+    let bad = "expected a known tool name and valid arguments";
+    let (text, is_error) = match params.get("name").and_then(Value::as_str) {
+        Some("kio_primer") => (PRIMER.to_string(), false),
+        Some("kio_check") => {
+            let list = (params.get("arguments"))
+                .and_then(|a| a.get("files")?.as_array())
+                .ok_or(bad)?;
+            check(list).ok_or(bad)??
+        }
+        _ => return Err(bad),
     };
-    Some(json!({ "content": [{ "type": "text", "text": text }], "isError": is_error }))
+    Ok(json!({ "content": [{ "type": "text", "text": text }], "isError": is_error }))
 }
 
-/// Check in the host, as `kio check` does. Returns the text and whether it is an error.
-fn check(list: &[Value]) -> Option<(String, bool)> {
+/// Check in the host, as `kio check` does. Returns the text and whether it is an error; `None`
+/// for bad arguments, `Some(Err)` for files over `MAX_SOURCE`.
+fn check(list: &[Value]) -> Option<Result<(String, bool), &'static str>> {
     let files = list
         .iter()
         .map(|f| {
@@ -99,7 +109,10 @@ fn check(list: &[Value]) -> Option<(String, bool)> {
         })
         .collect::<Option<Vec<_>>>()
         .filter(|f| !f.is_empty())?;
-    Some(match kio_host::check_files(&files) {
+    if files.iter().map(|(n, s)| n.len() + s.len()).sum::<usize>() > MAX_SOURCE {
+        return Some(Err("kio_check takes at most 1 MB of source per call"));
+    }
+    Some(Ok(match kio_host::check_files(&files) {
         Ok(report) => (report.lines.join("\n"), false),
         Err(diags) => {
             let found: Vec<Value> = diags
@@ -109,5 +122,5 @@ fn check(list: &[Value]) -> Option<(String, bool)> {
                 .collect();
             (Value::Array(found).to_string(), true)
         }
-    })
+    }))
 }

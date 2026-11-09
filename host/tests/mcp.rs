@@ -87,3 +87,16 @@ fn mcp_session() {
     assert_eq!(replies[8]["error"]["code"], -32602);
     assert_eq!(replies[9]["error"]["code"], -32602);
 }
+
+/// Checking runs in the host, outside the sandbox: `kio_check` refuses more than 1 MB of source.
+#[test]
+fn kio_check_refuses_over_a_megabyte() {
+    let pad = format!("fn main() {{}}\n//{}\n", "x".repeat(1 << 20));
+    let replies = session(&[check_call(1, &pad), check_call(2, &pad[..(1 << 20) - 5])]);
+    assert_eq!(replies[0]["error"]["code"], -32602);
+    assert_eq!(
+        replies[0]["error"]["message"],
+        "kio_check takes at most 1 MB of source per call"
+    );
+    assert_eq!(replies[1]["result"]["isError"], false, "{}", replies[1]);
+}

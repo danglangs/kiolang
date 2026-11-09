@@ -83,14 +83,14 @@ On a loopback `--listen`, a request's `Host` must be `localhost`, `127.0.0.1` or
 - `--audit log.jsonl` records every host call: capability, method, path, bytes and result. A call the report did not predict stops the run as a checker bug.
 - Every run is bounded: `--fuel`, `--timeout`, `--memory`, `--stack`, `--calls`, `--io`. Each limit's error names the flag that raises it.
 - Errors teach: `did you mean count?`, `declare it with let mut`.
-- Performance: about 60,000 requests/s with keep-alive, 21,000 without, with a fresh sandbox per request ([docs/perf.md](docs/perf.md)). `kio run` keeps compiled programs in `~/.cache/kio`, so a second run of the same program skips the compile.
+- Performance: about 60,000 requests/s with keep-alive, 21,000 without, with a fresh sandbox per request ([docs/perf.md](docs/perf.md)). `kio run` keeps compiled programs in `~/.cache/kio`, so a second run of the same program skips the compile; a run granted a `--dir` that contains, or is inside, the cache does not use it, and a `--kv` store there is refused.
 - The language: [docs/language.md](docs/language.md). A web framework in kio: [kio-web](https://github.com/danglangs/kio-web).
 - A guided demo: `examples/tour/demo.sh` walks through the report, a rejected helper, a refused escape and a fuel stop.
 - From source: `cargo test` runs every suite; `cargo run -p kio -- run file.kio` runs without installing.
 
 ## Use from an agent
 
-`kio mcp` is an MCP server on stdio with two tools: `kio_primer` (the language guide) and `kio_check` (check source; errors come back as `{file, line, message, hint}`). There is no run tool: grants are the operator's decision. Add it to an MCP client config:
+`kio mcp` is an MCP server on stdio with two tools: `kio_primer` (the language guide) and `kio_check` (check up to 1 MB of source; errors come back as `{file, line, message, hint}`). There is no run tool: grants are the operator's decision. Add it to an MCP client config:
 
 ```json
 { "mcpServers": { "kio": { "command": "kio", "args": ["mcp"] } } }
