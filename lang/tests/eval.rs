@@ -1447,3 +1447,29 @@ fn floats_display_nested() {
     assert_eq!(shown(src), "{\"a\": [inf, NaN, 2.5]}");
     assert_eq!(shown("fn main() -> Option<Float> { Some(-1.0 / 0.0) }"), "Some(-inf)");
 }
+
+#[test]
+fn assignment_of_untyped_values() {
+    let src = "struct S { f: Option<Int> }
+               fn main() -> List<Int> {
+                   let mut o: Option<Int> = Some(1);
+                   o = None;
+                   let mut r: Result<Int, Str> = Ok(1);
+                   r = Err(\"x\");
+                   let mut xs: List<Int> = [1];
+                   xs = [];
+                   let mut m: Map<Str, Int> = Map::new();
+                   m.insert(\"a\", 1);
+                   m = Map::new();
+                   let mut s = S { f: Some(1) };
+                   s.f = None;
+                   let mut ys: List<Option<Int>> = [Some(1)];
+                   ys[0] = None;
+                   let mut n = 0;
+                   if o.is_none() { n += 1; }
+                   if s.f.is_none() { n += 1; }
+                   if ys[0].is_none() { n += 1; }
+                   [n, xs.len(), m.len()]
+               }";
+    assert_eq!(shown(src), "[3, 0, 0]");
+}

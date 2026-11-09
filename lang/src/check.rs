@@ -1439,8 +1439,8 @@ impl<'a> Checker<'a> {
                 Ok(Ty::Unit)
             }
             StmtKind::Assign { target, op, value } => {
-                let found = self.expr(value, None)?;
                 let ty = self.place(target)?;
+                let found = self.expr(value, (*op == "=").then_some(&ty))?;
                 if *op == "=" {
                     want_expr(value, &found, &ty)?;
                 } else if binary_ty(&op[..1], &ty, &found) != Some(ty.clone()) {

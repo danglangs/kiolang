@@ -1757,3 +1757,17 @@ fn floats_cannot_be_matched_or_keys() {
     );
     assert_eq!(reject("fn main() -> Float { -true }").0, "expected Int, found Bool");
 }
+
+#[test]
+fn assignment_passes_the_place_type() {
+    ok("fn main() { let mut o: Option<Int> = Some(1); o = None; }");
+    ok("fn main() { let mut r: Result<Int, Str> = Ok(1); r = Err(\"x\"); r = Ok(2); }");
+    ok("fn main() { let mut xs: List<Int> = [1]; xs = []; }");
+    ok("fn main() { let mut m: Map<Str, Int> = Map::new(); m = Map::new(); }");
+    ok("struct S { f: Option<Int> } fn main() { let mut s = S { f: Some(1) }; s.f = None; }");
+    ok("fn main() { let mut xs: List<Option<Int>> = [Some(1)]; xs[0] = None; }");
+    let (msg, _) = reject("fn main() { let mut o: Option<Int> = None; o = 1; }");
+    assert_eq!(msg, "expected Option<Int>, found Int");
+    let (msg, _) = reject("fn main() { let mut x = 1; x = None; }");
+    assert_eq!(msg, "expected Int, found an Option");
+}
