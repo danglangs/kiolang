@@ -11,7 +11,8 @@ use crate::ws::{WsEvent, WsFrame};
 use crate::{
     audit_header, config, end_audit, grants, limit_message, main_calls, named, new_store, on_run_stack, push_grants,
     set_stack, single, spawn_ticker, start_audit, web_grants, write_line, ws_grants, Audit, Bound, Diag, DirPaths,
-    Handles, KvGrants, Limits, Origin, Outcome, Report, Request, Response, RunResult, SharedLog, State, Stopped,
+    Handles, KvGrants, Limits, Origin, Outcome, Report, Request, Response, RunResult, SharedLog, Sources, State,
+    Stopped,
 };
 use cap_std::fs::Dir as RealDir;
 use codegen::Site;
@@ -227,6 +228,9 @@ fn instantiate(
                 "Outgoing" => Grant::Outgoing(Resource::new_own(rep)),
                 "Kv" => Grant::Kv(Resource::new_own(rep)),
                 "WsMessage" => Grant::WsMessage(Resource::new_own(rep)),
+                "Rng" => Grant::Rng(Resource::new_own(rep)),
+                "Clock" => Grant::Clock(Resource::new_own(rep)),
+                "Log" => Grant::Log(Resource::new_own(rep)),
                 _ => Grant::WsSend(Resource::new_own(rep)),
             }
         })
@@ -306,6 +310,8 @@ pub struct Kio {
     audit: Option<(Box<dyn Write + Send>, DirPaths)>,
     /// `Kv` grants for the next run.
     kvs: KvGrants,
+    /// `Rng`, `Clock` and `Log` grants for the next run.
+    sources: Sources,
     /// Where compiled programs are kept between runs (cache.rs), if anywhere.
     cache: Option<PathBuf>,
     /// Capability imports and peak memory of the last run.
@@ -332,6 +338,7 @@ impl Kio {
             _ticker: ticker,
             audit: None,
             kvs: vec![],
+            sources: Sources::default(),
             cache: None,
             calls: 0,
             peak_memory: 0,
@@ -352,6 +359,11 @@ impl Kio {
     /// Grant `kvs` by name to the next run, with the other grants `run_*` is given.
     pub fn grant_kvs(&mut self, kvs: KvGrants) {
         self.kvs = kvs;
+    }
+
+    /// Grant `sources`' `Rng`s, `Clock`s and `Log`s by name to the next run.
+    pub fn grant_sources(&mut self, sources: Sources) {
+        self.sources = sources;
     }
 
     /// Keep compiled programs in `dir` and reuse them (cache.rs).
@@ -515,7 +527,8 @@ impl Kio {
             store.data_mut().fail_writes = self.fail_writes;
         }
         let handles = handles(store.data_mut())?;
-        let bound = push_grants(store.data_mut(), dirs, https, handles, std::mem::take(&mut self.kvs))?;
+        let (kvs, sources) = (std::mem::take(&mut self.kvs), std::mem::take(&mut self.sources));
+        let bound = push_grants(store.data_mut(), dirs, https, handles, kvs, sources, None)?;
         if let Some((out, paths)) = self.audit.take() {
             start_audit(store.data_mut(), out, &paths, &self.limits, files, &bound)?;
         }
@@ -558,11 +571,15 @@ pub struct Server {
     _ticker: Ticker,
     /// Shared by every request.
     kvs: KvGrants,
+    /// `Rng`, `Clock` and `Log` grants; every request gets fresh handles (a seeded `Rng`'s
+    /// stream and a `Log` line's prefix carry the request number).
+    sources: Sources,
     /// `main`'s `WsMessage` and `WsSend` parameter names, for a WebSocket server.
     ws: Option<(String, String)>,
     /// `main`'s `Incoming` and `Outgoing` parameter names, for an HTTP server.
     http: (String, String),
-    /// The audit log every request writes to, and how many requests have been numbered for it.
+    /// The audit log every request writes to, if any, and how many runs have been numbered
+    /// (requests and WebSocket events, from 1).
     audit: Option<SharedLog>,
     requests: AtomicU64,
 }
@@ -624,6 +641,7 @@ impl Server {
             limits,
             _ticker: ticker,
             kvs: vec![],
+            sources: Sources::default(),
             ws,
             http,
             audit: None,
@@ -644,6 +662,10 @@ impl Server {
         };
         grants.extend(handles.into_iter().map(|(n, k)| (n.clone(), k, None)));
         grants.extend(self.kvs.iter().map(|(n, s)| (n.clone(), "Kv", Some(s.label()))));
+        let src = &self.sources;
+        grants.extend(src.rngs.iter().map(|(n, r)| (n.clone(), "Rng", Some(r.label()))));
+        grants.extend(src.clocks.iter().map(|(n, c)| (n.clone(), "Clock", Some(c.label()))));
+        grants.extend(src.logs.iter().map(|(n, l)| (n.clone(), "Log", Some(l.label.clone()))));
         let out: SharedLog = Arc::new(Mutex::new(Box::new(out)));
         write_line(&out, &audit_header(&self.program.files, &self.limits, &grants))?;
         self.audit = Some(out);
@@ -658,6 +680,16 @@ impl Server {
             "Server::grant_kvs after Server::audit: the audit header lists Kv grants"
         );
         self.kvs = kvs;
+    }
+
+    /// Grant `sources`' `Rng`s, `Clock`s and `Log`s by name to every request. Panics after
+    /// `audit`, as `grant_kvs`.
+    pub fn grant_sources(&mut self, sources: Sources) {
+        assert!(
+            self.audit.is_none(),
+            "Server::grant_sources after Server::audit: the audit header lists the grants"
+        );
+        self.sources = sources;
     }
 
     /// The program's files, root first.
@@ -745,12 +777,15 @@ impl Server {
         let mut store = new_store(&self.engine, &self.limits).map_err(start)?;
         store.data_mut().allowed = self.program.allowed.clone();
         let handles = grant(store.data_mut()).map_err(start)?;
-        let bound = push_grants(store.data_mut(), dirs, vec![], handles, self.kvs.clone()).map_err(start)?;
+        // Numbered before its grants: a seeded `Rng`'s stream and a `Log` line's prefix carry the
+        // number. A run whose instance cannot be made (the pool is full) takes a number the
+        // audit log then lacks.
+        let req = self.requests.fetch_add(1, Relaxed) + 1;
+        let (kvs, sources) = (self.kvs.clone(), self.sources.clone());
+        let bound = push_grants(store.data_mut(), dirs, vec![], handles, kvs, sources, Some(req)).map_err(start)?;
         let diags = |d: Vec<Diag>| d.iter().map(|d| d.message.as_str()).collect::<Vec<_>>().join("; ");
         let started = instantiate(&mut store, &self.program, &bound).map_err(start)?;
-        // Numbered once it runs, so every number in the log has a trailer.
         if let Some(out) = &self.audit {
-            let req = self.requests.fetch_add(1, Relaxed) + 1;
             let tag = match conn {
                 Some(c) => format!(r#""req":{req},"conn":{c},"#),
                 None => format!(r#""req":{req},"#),

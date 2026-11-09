@@ -82,6 +82,7 @@ On a loopback `--listen`, a request's `Host` must be `localhost`, `127.0.0.1` or
 
 - `--http api=api.example` grants `Http` (`get` only) to one host over HTTPS; `--http api=http://127.0.0.1:9000` allows plain HTTP for local testing.
 - `--kv store=data.kv` grants a key-value store (`store: Kv`) that outlives runs and is shared by every `--listen` request; `--kv store=:memory:` keeps it for the process only. `swap` updates a key atomically, `add` counts in one, `scan` pages through a prefix's entries. `--kv store=data.kv:ro` is read-only: a program that can call `set`, `delete`, `swap` or `add` on it is refused, no lock is taken, and each `get`, `keys` and `scan` sees what another kio writing the file stored (a server reading tokens a separate job rotates).
+- `--rng r` grants randomness (`r: Rng`: `bytes(n)`, `int(lo, hi)`) from the OS; `--rng r=seed:1` a stream that is the same every run (under `--listen`, keyed by the request number too), for replay and tests. `--clock now` grants the system clock (`now.now_ms()`); `--clock now=fixed:2026-11-09T12:00:00Z` (or `fixed:<ms>`) always that time. `--log events=app.log` grants a log the program appends one line to per `write` (control characters escaped, 64 KB a line, 1 MB a run, `req N: ` first under `--listen`); `--log events=-` is stderr. None of the three is reachable without its grant, so a run with fixed values is replayable.
 - `--audit log.jsonl` records every host call: capability, method, path, bytes and result. A call the report did not predict stops the run as a checker bug. Under `--listen` it is one log for the server: the header once, then each request's calls and trailer, every line starting with `"req":N` (and `"conn":N` for a WebSocket event). The log is appended to, never truncated, and refused at startup if it is a `--kv` store's file, inside a granted `--dir` or inside the compile cache.
 - Every run is bounded: `--fuel`, `--timeout`, `--memory`, `--stack`, `--calls`, `--io`. Each limit's error names the flag that raises it.
 - Errors teach: `did you mean count?`, `declare it with let mut`.
@@ -112,7 +113,7 @@ kio-lang makes authority declarative:
 - The program names roles. The operator binds them to real directories and hosts, per run.
 - Programs run inside a Wasm sandbox whose only exits are a short list of host functions. If the checker has a bug, the sandbox still holds.
 
-A reviewer reads the signature of `main` and knows everything the program can ever touch. Because there is no ambient clock or randomness, a run is also deterministic given its inputs, so a replay reproduces a bug exactly.
+A reviewer reads the signature of `main` and knows everything the program can ever touch. Because there is no ambient clock or randomness (a program reaches time or random values only through a `Clock` or `Rng` parameter, which the operator can fix), a run is also deterministic given its inputs, so a replay reproduces a bug exactly.
 
 ## Why a new language
 

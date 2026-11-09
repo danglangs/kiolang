@@ -61,6 +61,11 @@ fn hint(name: &str, ty: &str) -> String {
         "Dir" => format!("grant it: `--dir {name}=path`"),
         "Http" => format!("grant it: `--http {name}=host`"),
         "Kv" => format!("grant it: `--kv {name}=path` or `--kv {name}=:memory:`"),
+        "Rng" => format!("grant it: `--rng {name}` (the OS's randomness) or `--rng {name}=seed:N`"),
+        "Clock" => {
+            format!("grant it: `--clock {name}` (the system clock) or `--clock {name}=fixed:<ms or RFC 3339 time>`")
+        }
+        "Log" => format!("grant it: `--log {name}=path` (appended) or `--log {name}=-` (stderr)"),
         "WsMessage" | "WsSend" => "`--listen` grants WsMessage and WsSend".into(),
         _ => "`--listen` grants Incoming and Outgoing".into(),
     }

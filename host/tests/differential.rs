@@ -5,7 +5,7 @@
 
 use kio_host::kv::Store;
 use kio_host::ws::WsEvent;
-use kio_host::{Interp, Kio, Limits, Origin, Request};
+use kio_host::{ClockSpec, Interp, Kio, Limits, LogSink, Origin, Request, RngSpec, Sources};
 use lang::CapTable;
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -96,6 +96,9 @@ struct World {
     dirs: Vec<(String, cap_std::fs::Dir)>,
     https: Vec<(String, Origin)>,
     kvs: kio_host::KvGrants,
+    /// Each `Rng` seeded 1, each `Clock` fixed, each `Log` writing to `log`.
+    sources: Sources,
+    log: Log,
     web: bool,
     ws: Option<(String, String)>,
 }
@@ -106,12 +109,23 @@ fn world(params: &[(String, String)]) -> World {
         dirs: vec![],
         https: vec![],
         kvs: vec![],
+        sources: Sources::default(),
+        log: Log::default(),
         web: false,
         ws: None,
     };
     let named = |ty: &str| params.iter().find(|(_, t)| t == ty).map(|(n, _)| n.clone());
     for (name, ty) in params {
         match ty.as_str() {
+            "Rng" => w.sources.rngs.push((name.clone(), RngSpec::Seed(1))),
+            "Clock" => w
+                .sources
+                .clocks
+                .push((name.clone(), ClockSpec::Fixed(1_794_225_600_000))),
+            "Log" => {
+                let sink = LogSink::new(Box::new(w.log.clone()), "mem");
+                w.sources.logs.push((name.clone(), sink));
+            }
             "Dir" => {
                 let t = tempfile::tempdir().unwrap();
                 std::fs::write(t.path().join("invoices.csv"), "a,1\nb,2\n").unwrap();
@@ -171,6 +185,7 @@ fn compiled(src: &str, params: &[(String, String)]) -> Seen {
     let mut c = Kio::new(limits()).unwrap();
     c.audit(log.clone(), paths(&w));
     c.grant_kvs(w.kvs);
+    c.grant_sources(w.sources);
     let (r, sent) = if w.web {
         sent(c.run_web(src, w.dirs, request()))
     } else if let Some(names) = &w.ws {
@@ -183,6 +198,7 @@ fn compiled(src: &str, params: &[(String, String)]) -> Seen {
         Ok(Err(d)) => Ok(Err((d[0].message.clone(), d[0].start as usize, d[0].end as usize))),
         Err(e) => Err(format!("{e:#}")),
     };
+    let sent = format!("{sent}{}", w.log.lines().join("\n"));
     (finish(r, |o| Ok((o.value, o.failed))), sent, log.lines())
 }
 
@@ -192,6 +208,7 @@ fn interpreted(src: &str, params: &[(String, String)]) -> Seen {
     let mut k = Interp::new(limits()).unwrap();
     k.audit(log.clone(), paths(&w));
     k.grant_kvs(w.kvs);
+    k.grant_sources(w.sources);
     let (r, sent) = if w.web {
         sent(k.run_web(src, w.dirs, request()))
     } else if let Some(names) = &w.ws {
@@ -204,6 +221,7 @@ fn interpreted(src: &str, params: &[(String, String)]) -> Seen {
         Ok(Err(d)) => Ok(Err((d[0].message.clone(), d[0].start as usize, d[0].end as usize))),
         Err(e) => Err(k.explain(&e).unwrap_or_else(|| format!("{e:#}"))),
     };
+    let sent = format!("{sent}{}", w.log.lines().join("\n"));
     (finish(r, |o| Ok((o.value, o.failed))), sent, log.lines())
 }
 
@@ -270,6 +288,32 @@ fn differential() {
     );
     assert!(agreed > 20, "only {agreed} programs agreed");
     assert!(with_caps > 20, "only {with_caps} programs with capabilities agreed");
+}
+
+/// H13-H15: programs on `Rng` (seeded), `Clock` (fixed) and `Log` give the same values, the same
+/// log lines and the same audit log both ways, runtime errors included.
+#[test]
+fn sources_agree() {
+    let programs = [
+        r#"fn main(r: Rng, c: Clock, log: Log) -> Str {
+            let w = log.write("t=" + c.now_ms().to_str() + "\t" + r.bytes(4).to_hex());
+            let mut s = "";
+            for i in 0..20 { s = s + r.int(-3, 3).to_str() + ","; }
+            match log.write(s) { Ok(_) => s, Err(e) => "too-large" }
+        }"#,
+        r#"fn main(r: Rng) -> Int { r.int(0, 1000000) + r.bytes(65536).len() }"#,
+        r#"fn main(r: Rng) -> Int { let n = r.int(0, 2) + 65536; r.bytes(n).len() }"#,
+        r#"fn main(r: Rng) -> Int { let lo = r.int(0, 1); r.int(lo, lo) }"#,
+        r#"fn big(n: Int) -> Str { let mut s = "x"; for i in 0..n { s = s + s; } s }
+           fn main(log: Log) -> Int { let mut n = 0; for i in 0..17 { if log.write(big(16)).is_ok() { n = n + 1; } } n }"#,
+    ];
+    let caps = CapTable::v0();
+    for src in programs {
+        let params = lang::check(src, &caps).unwrap().main_params();
+        let (c, i) = (compiled(src, &params), interpreted(src, &params));
+        assert_eq!(c, i, "{src}");
+        assert!(matches!(c.0, End::Done(_)), "{src}");
+    }
 }
 
 #[test]

@@ -1,6 +1,9 @@
 mod mcp;
 
-use kio_host::{listen, open_dir, Diag, Kio, Limits, Origin, Server};
+use kio_host::{listen, open_dir, ClockSpec, Diag, Kio, Limits, LogSink, Origin, RngSpec, Server, Sources};
+
+/// `kio run`'s flags.
+const USAGE: &str = "[--dir name=path]... [--http name=host]... [--kv name=path[:ro]|:memory:]... [--kv-mb mb] [--rng name[=seed:N]]... [--clock name[=fixed:T]]... [--log name=path|-]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]...";
 
 fn main() {
     // The host checks and lowers programs natively, and compiled code runs on this thread's stack
@@ -16,7 +19,7 @@ fn cli() -> i32 {
         ["mcp"] => return mcp::serve(),
         ["run", path, ref flags @ ..] => return run(path, flags),
         _ => eprintln!(
-            "kio: a capability-typed language; code names what it needs, the operator grants what that is.\n\nusage: kio check <prog.kio>\n       kio mcp\n       kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--kv name=path[:ro]|:memory:]... [--kv-mb mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]..."
+            "kio: a capability-typed language; code names what it needs, the operator grants what that is.\n\nusage: kio check <prog.kio>\n       kio mcp\n       kio run <prog.kio> {USAGE}"
         ),
     }
     2
@@ -80,6 +83,9 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     let mut dir_paths = Vec::new();
     let mut kv_specs: Vec<(String, String)> = Vec::new();
     let mut kv_mb = 64;
+    let mut sources = Sources::default();
+    // `(name, path)` of each `--log` to a file, opened once the paths are checked.
+    let mut log_paths: Vec<(String, String)> = Vec::new();
     for pair in flags.chunks(2) {
         let (name, dir) = match pair {
             ["--http", spec] => {
@@ -148,14 +154,38 @@ fn run(path: &str, flags: &[&str]) -> i32 {
                 hosts.push(name.to_ascii_lowercase());
                 continue;
             }
+            [flag @ ("--rng" | "--clock"), spec] => {
+                let (name, rest) = match spec.split_once('=') {
+                    Some((n, r)) => (n, Some(r)),
+                    None => (*spec, None),
+                };
+                if name.is_empty() {
+                    return fail(format!("{flag} {spec}: expected a name"));
+                }
+                let parsed = match *flag {
+                    "--rng" => RngSpec::parse(rest).map(|r| sources.rngs.push((name.into(), r))),
+                    _ => ClockSpec::parse(rest).map(|c| sources.clocks.push((name.into(), c))),
+                };
+                if let Err(e) = parsed {
+                    return fail(format!("{flag} {spec}: {e}"));
+                }
+                continue;
+            }
+            ["--log", spec] => {
+                match spec.split_once('=') {
+                    Some((name, "-")) if !name.is_empty() => sources.logs.push((name.into(), LogSink::stderr())),
+                    Some((name, path)) if !name.is_empty() && !path.is_empty() => {
+                        log_paths.push((name.into(), path.into()))
+                    }
+                    _ => return fail(format!("--log {spec}: expected name=path or name=- (stderr)")),
+                }
+                continue;
+            }
             ["--dir", spec] => match spec.split_once('=') {
                 Some(nd) => nd,
                 None => return fail(format!("--dir {spec}: expected name=path")),
             },
-            _ => return fail(
-                "usage: kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--kv name=path[:ro]|:memory:]... [--kv-mb mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]..."
-                    .into(),
-            ),
+            _ => return fail(format!("usage: kio run <prog.kio> {USAGE}")),
         };
         match open_dir(dir.as_ref()) {
             Ok(d) => {
@@ -245,30 +275,46 @@ fn run(path: &str, flags: &[&str]) -> i32 {
             }
         }
     }
+    // The audit log and each `--log` file: not a store, not inside a granted dir or the cache,
+    // and not one another's file.
+    let mut taken: Vec<(String, &str)> = Vec::new();
+    let mut files_to_check: Vec<(String, &str)> = Vec::new();
     if let Some(path) = &audit {
-        if let Some(why) = audit_refusal(path, &kv_specs, &dir_paths, resolved.as_deref()) {
+        files_to_check.push(("--audit".into(), path));
+    }
+    files_to_check.extend(log_paths.iter().map(|(n, p)| (format!("--log {n}"), p.as_str())));
+    for (flag, path) in files_to_check {
+        if let Some(why) = file_refusal(&flag, path, &kv_specs, &dir_paths, resolved.as_deref(), &taken) {
             return fail(why);
         }
+        taken.push((flag, path));
     }
     let kvs = match kio_host::kv::open_all(&kv_specs, kv_mb) {
         Ok(kvs) => kvs,
         Err(e) => return fail(e),
     };
+    for (name, path) in &log_paths {
+        match open_append(path) {
+            Ok(f) => sources.logs.push((name.clone(), LogSink::file(f, path))),
+            Err(e) => return fail(format!("--log {name}={path}: {e}")),
+        }
+    }
     if let Some(addr) = listen {
         let audit = audit.map(|path| (path, dir_paths));
-        return serve(files, dirs, kvs, addr, limits, ws_origins, hosts, audit);
+        return serve(files, dirs, kvs, sources, addr, limits, ws_origins, hosts, audit);
     }
     let mut kio = match Kio::new(limits) {
         Ok(k) => k,
         Err(e) => return fail(format!("{e:#}")),
     };
     if let Some(path) = audit {
-        match open_audit(&path) {
+        match open_append(&path) {
             Ok(f) => kio.audit(f, dir_paths),
             Err(e) => return fail(format!("--audit {path}: {e}")),
         }
     }
     kio.grant_kvs(kvs);
+    kio.grant_sources(sources);
     if let Some(dir) = cache.filter(|_| use_cache) {
         kio.cache(dir);
     }
@@ -304,6 +350,7 @@ fn serve(
     files: Vec<(String, String)>,
     dirs: Vec<(String, cap_std::fs::Dir)>,
     kvs: kio_host::KvGrants,
+    sources: Sources,
     addr: std::net::SocketAddr,
     limits: Limits,
     ws_origins: Vec<String>,
@@ -316,8 +363,9 @@ fn serve(
         Ok(Ok(s)) => s,
     };
     server.grant_kvs(kvs);
+    server.grant_sources(sources);
     if let Some((path, dir_paths)) = audit {
-        let opened = open_audit(&path).and_then(|f| server.audit(f, dir_paths));
+        let opened = open_append(&path).and_then(|f| server.audit(f, dir_paths));
         if let Err(e) = opened {
             return fail(format!("--audit {path}: {e}"));
         }
@@ -328,19 +376,23 @@ fn serve(
     }
 }
 
-/// Why `--audit path` is refused, if it is: the log must not be a `--kv` store (writing it would
-/// corrupt the store), lie inside a granted `--dir` (the program could read or replace its own
-/// log) or inside the compile cache. Checked before any of them is opened.
-fn audit_refusal(
+/// Why the file `path` of `flag` (`--audit`, `--log name`) is refused, if it is: it must not be a
+/// `--kv` store (writing it would corrupt the store), lie inside a granted `--dir` (the program
+/// could read or replace its own log) or inside the compile cache, or be the file of another
+/// flag in `taken`. Checked before any of them is opened.
+fn file_refusal(
+    flag: &str,
     path: &str,
     kv_specs: &[(String, String)],
     dir_paths: &[(String, String)],
     cache: Option<&std::path::Path>,
+    taken: &[(String, &str)],
 ) -> Option<String> {
     use std::os::unix::fs::MetadataExt;
+    let what = if flag == "--audit" { "the audit log" } else { "the log" };
     let Some(log) = kio_host::cache::resolve(path.as_ref()) else {
         return Some(format!(
-            "`--audit {path}` has `.` or `..` past the directories that exist\n  hint: name the log by a plain path"
+            "`{flag} {path}` has `.` or `..` past the directories that exist\n  hint: name {what} by a plain path"
         ));
     };
     let id = |p: &std::path::Path| std::fs::metadata(p).ok().map(|m| (m.dev(), m.ino()));
@@ -354,28 +406,35 @@ fn audit_refusal(
         let store = kio_host::kv::split_spec(spec).0;
         if same(store) || same(&format!("{store}.tmp")) {
             return Some(format!(
-                "`--audit {path}` is the same file as `--kv {name}`\n  hint: give the audit log its own file; writing it would corrupt the store"
+                "`{flag} {path}` is the same file as `--kv {name}`\n  hint: give {what} its own file; writing it would corrupt the store"
+            ));
+        }
+    }
+    for (other, p) in taken {
+        if same(p) {
+            return Some(format!(
+                "`{flag} {path}` is the same file as `{other}`\n  hint: give each log its own file"
             ));
         }
     }
     if cache.is_some_and(|c| log.starts_with(c)) {
         return Some(format!(
-            "`--audit {path}` is inside kio's compile cache\n  hint: keep the audit log outside `$XDG_CACHE_HOME/kio` (default `~/.cache/kio`)"
+            "`{flag} {path}` is inside kio's compile cache\n  hint: keep {what} outside `$XDG_CACHE_HOME/kio` (default `~/.cache/kio`)"
         ));
     }
     for (d, dir) in dir_paths {
         if std::fs::canonicalize(dir).is_ok_and(|root| log.starts_with(root)) {
             return Some(format!(
-                "`--audit {path}` is inside `--dir {d}`\n  hint: keep the audit log outside granted directories, where the program cannot read or replace it"
+                "`{flag} {path}` is inside `--dir {d}`\n  hint: keep {what} outside granted directories, where the program cannot read or replace it"
             ));
         }
     }
     None
 }
 
-/// Open the audit log to append, creating it: an existing file is never truncated, and a
-/// symlink is never followed (it could lead past `audit_refusal`'s checks).
-fn open_audit(path: &str) -> std::io::Result<std::fs::File> {
+/// Open a log (`--audit`, `--log`) to append, creating it: an existing file is never truncated,
+/// and a symlink is never followed (it could lead past `file_refusal`'s checks).
+fn open_append(path: &str) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     std::fs::OpenOptions::new()
         .append(true)

@@ -609,6 +609,9 @@ const STR_DESC: u32 = 3;
 const OUT_OF_BOUNDS: &str = "index {a} out of bounds for length {b}";
 /// `{c}` is the length, which the runtime passes through its `EXTRA` site.
 const SLICE_BOUNDS: &str = "slice {a}..{b} out of bounds for length {c}";
+/// `Rng`'s argument checks (`rng_check`); the texts are `lang::eval::cap_arg_error`'s.
+const RNG_BYTES: &str = "Rng.bytes({a}): the count must be 0 to 65536";
+const RNG_INT: &str = "Rng.int({a}, {b}): lo must be less than hi";
 
 impl FuncGen<'_, '_> {
     fn sink(&mut self) -> InstructionSink<'_> {
@@ -1813,7 +1816,7 @@ impl FuncGen<'_, '_> {
                 self.object(desc, *v, ENUM_SLOTS, &args);
             }
             ExprKind::Field(base, f) => self.field(base, *f, &e.ty),
-            ExprKind::CapCall(cap, method, args) => self.cap_call(*cap, *method, args, &e.ty),
+            ExprKind::CapCall(cap, method, args) => self.cap_call(*cap, *method, args, &e.ty, e.span),
             ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms, &e.ty),
             ExprKind::Try(x) => self.try_expr(x),
         }
@@ -1877,22 +1880,52 @@ impl FuncGen<'_, '_> {
 
     /// A capability method: the runtime's wrapper (runtime/src/caps.rs) takes the result's
     /// descriptor, the handle, then the arguments, which it borrows.
-    fn cap_call(&mut self, cap: ir::LocalId, method: u32, args: &[ir::Expr], ty: &Ty) {
+    fn cap_call(&mut self, cap: ir::LocalId, method: u32, args: &[ir::Expr], ty: &Ty, span: Span) {
         let Ty::Cap(c) = self.f.locals[cap.0 as usize].ty else {
             unreachable!("a capability call on a capability")
         };
         let def = &self.m.caps[c.0 as usize];
         let name = format!("rt_cap_{}_{}", snake(&def.name), def.methods[method as usize].0);
+        let rng = (def.name == "Rng").then(|| def.methods[method as usize].0.clone());
         let desc = self.statics.desc(ty);
         let h = self.local(cap).expect("a capability has a value");
         let xs: Vec<&ir::Expr> = args.iter().collect();
         self.borrowing(&xs, |g, temps| {
+            if let Some(m) = &rng {
+                g.rng_check(span, m, temps);
+            }
             g.sink().i32_const(desc as i32).local_get(h);
             for (x, t) in xs.iter().zip(temps) {
                 g.get(x, *t);
             }
             g.call_rt(&name);
         });
+    }
+
+    /// `Rng.bytes(n)` needs `n` in 0 to 65,536 and `Rng.int(lo, hi)` needs `lo < hi`: a runtime
+    /// error at the call with the interpreter's message (lang/src/eval.rs `cap_arg_error`); the
+    /// host checks again and stops a run whose code skipped this. An argument of type `!` has
+    /// no local, and the call after it is unreachable.
+    fn rng_check(&mut self, span: Span, method: &str, temps: &[Option<u32>]) {
+        match (method, temps) {
+            ("bytes", [Some(n)]) => {
+                let n = *n;
+                self.sink()
+                    .local_get(n)
+                    .i64_const(0)
+                    .i64_lt_s()
+                    .local_get(n)
+                    .i64_const(lang::eval::RNG_BYTES_MAX)
+                    .i64_gt_s()
+                    .i32_or();
+                self.trap_if(span, RNG_BYTES, n, n);
+            }
+            ("int", [Some(lo), Some(hi)]) => {
+                self.sink().local_get(*lo).local_get(*hi).i64_ge_s();
+                self.trap_if(span, RNG_INT, *lo, *hi);
+            }
+            _ => {}
+        }
     }
 
     /// A new struct (`first` 8) or enum variant (`first` 16) of descriptor `desc`: the object

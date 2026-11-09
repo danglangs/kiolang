@@ -4,16 +4,19 @@
 //! through Wasm), so grants, quotas, the report check and the audit log are the same; only the
 //! fuel, memory and stack limits do not apply.
 
+use crate::kio::caps::clock::HostClock;
 use crate::kio::caps::fs::{HostDir, IoErr};
 use crate::kio::caps::kv::{HostKv, KvEntry, KvErr};
+use crate::kio::caps::log::{HostLog, LogErr};
 use crate::kio::caps::net::{HostHttp, HttpErr};
+use crate::kio::caps::rng::HostRng;
 use crate::kio::caps::web::{HostIncoming, HostOutgoing, WebErr};
 use crate::kio::caps::ws::{HostWsMessage, HostWsSend, WsErr};
 use crate::ws::{WsEvent, WsFrame};
 use crate::{
     end_audit, grants, main_calls, named, on_run_stack, push_grants, single, start_audit, state_limit, web_grants,
-    ws_grants, Diag, DirPaths, Handles, KvGrants, Limits, Origin, Outcome, Report, Request, Response, RunResult, State,
-    Stopped,
+    ws_grants, Diag, DirPaths, Handles, KvGrants, Limits, Origin, Outcome, Report, Request, Response, RunResult,
+    Sources, State, Stopped,
 };
 use cap_std::fs::Dir as RealDir;
 use lang::ir::{EnumId, EnumRef, StructId};
@@ -29,6 +32,7 @@ pub struct Interp {
     limits: Limits,
     audit: Option<(Box<dyn Write + Send>, DirPaths)>,
     kvs: KvGrants,
+    sources: Sources,
     hidden: Option<(String, String)>,
     calls: u32,
 }
@@ -39,9 +43,15 @@ impl Interp {
             limits,
             audit: None,
             kvs: vec![],
+            sources: Sources::default(),
             hidden: None,
             calls: 0,
         })
+    }
+
+    /// Grant `sources`' `Rng`s, `Clock`s and `Log`s by name to the next run, as `Kio::grant_sources`.
+    pub fn grant_sources(&mut self, sources: Sources) {
+        self.sources = sources;
     }
 
     /// Write the audit log of the next run to `out`, as `Kio::audit`.
@@ -149,7 +159,8 @@ impl Interp {
         let checked = lang::check_files(&pairs, &caps);
         let mut s = State::limited(&self.limits);
         let handles = handles(&mut s)?;
-        let bound = push_grants(&mut s, dirs, https, handles, std::mem::take(&mut self.kvs))?;
+        let (kvs, sources) = (std::mem::take(&mut self.kvs), std::mem::take(&mut self.sources));
+        let bound = push_grants(&mut s, dirs, https, handles, kvs, sources, None)?;
         if let Some((out, paths)) = self.audit.take() {
             start_audit(&mut s, out, &paths, &self.limits, files, &bound)?;
         }
@@ -355,6 +366,21 @@ impl lang::Caps for Native<'_> {
                         .map_err(ws_err),
                 )
             }
+            // `eval::cap_arg_error` has refused a count outside `u32`, so this never truncates.
+            ("Rng", "bytes", [Value::Int(n)]) => {
+                let n = u32::try_from(*n).unwrap_or(u32::MAX);
+                bytes(HostRng::bytes(s, own(rep), n).map_err(stop)?)
+            }
+            ("Rng", "int", [Value::Int(lo), Value::Int(hi)]) => {
+                Value::Int(HostRng::int(s, own(rep), *lo, *hi).map_err(stop)?)
+            }
+            ("Clock", "now_ms", []) => Value::Int(HostClock::now_ms(s, own(rep)).map_err(stop)?),
+            ("Log", "write", [Value::Str(line)]) => result(
+                HostLog::write(s, own(rep), line.to_string())
+                    .map_err(stop)?
+                    .map(unit)
+                    .map_err(|LogErr::TooLarge| err_value("LogErr", "TooLarge", vec![])),
+            ),
             _ => {
                 return Err(format!(
                     "unsupported call `{cap}.{method}` with {} arguments",

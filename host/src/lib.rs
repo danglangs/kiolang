@@ -2,8 +2,9 @@
 //! then runs it in the `compiled` world of caps.wit. `dir` is backed by cap-std; `http` is a ureq
 //! client fixed to one granted origin; `incoming` and `outgoing` hold one request and its first
 //! response; `kv` is a store shared across runs (kv.rs); `ws-message` and `ws-send` hold one
-//! WebSocket event and its sends (ws.rs). Every import is counted and, if asked, written to an
-//! audit log.
+//! WebSocket event and its sends (ws.rs); `rng`, `clock` and `log` are the OS's randomness (or a
+//! seeded stream), the system clock (or a fixed time) and an appended file (or stderr). Every
+//! import is counted and, if asked, written to an audit log.
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir as RealDir, OpenOptions, OpenOptionsExt};
 use std::collections::{HashMap, HashSet};
@@ -13,7 +14,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering::Relaxed};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use wasmtime::component::{Resource, ResourceTable};
 use wasmtime::Result;
 use wasmtime::{Engine, Store};
@@ -407,7 +408,8 @@ pub struct State {
 
 impl State {
     /// State for a run under `limits`, its deadline counted from now. Nothing but caps.wit is
-    /// linked: compiled code has no clock, randomness or environment.
+    /// linked: compiled code has no environment, and reaches a clock or randomness only through
+    /// a `Clock` or `Rng` grant.
     fn limited(limits: &Limits) -> Self {
         // A timeout too large to represent caps at a year rather than panicking.
         let now = Instant::now();
@@ -1179,6 +1181,338 @@ impl State {
     }
 }
 
+/// Where an `Rng` grant's randomness comes from (`--rng name` or `--rng name=seed:N`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RngSpec {
+    /// The operating system's (`getrandom`).
+    Os,
+    /// A ChaCha20 stream keyed by the seed: the same values every run. Under `--listen` each
+    /// request's stream is keyed by the seed and the request number.
+    Seed(u64),
+}
+
+impl RngSpec {
+    /// Parse what follows `name=` in `--rng`, if anything: nothing is the OS, `seed:N` a seed.
+    pub fn parse(spec: Option<&str>) -> std::result::Result<Self, String> {
+        match spec {
+            None => Ok(RngSpec::Os),
+            Some(s) => match s.strip_prefix("seed:").and_then(|n| n.parse::<u64>().ok()) {
+                Some(n) => Ok(RngSpec::Seed(n)),
+                None => Err(format!(
+                    "{s:?}: expected `seed:N` (N a non-negative integer), or no `=` for the OS's randomness"
+                )),
+            },
+        }
+    }
+
+    /// For the audit header.
+    fn label(&self) -> String {
+        match self {
+            RngSpec::Os => "os".into(),
+            RngSpec::Seed(n) => format!("seed:{n}"),
+        }
+    }
+}
+
+/// What a `Clock` grant tells (`--clock name` or `--clock name=fixed:..`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClockSpec {
+    System,
+    /// Always this many milliseconds since the Unix epoch.
+    Fixed(i64),
+}
+
+impl ClockSpec {
+    /// Parse what follows `name=` in `--clock`, if anything: nothing is the system clock,
+    /// `fixed:<ms>` or `fixed:<RFC 3339 UTC time ending in Z>` one fixed time.
+    pub fn parse(spec: Option<&str>) -> std::result::Result<Self, String> {
+        let Some(s) = spec else { return Ok(ClockSpec::System) };
+        let bad = || {
+            format!(
+                "{s:?}: expected `fixed:<ms>` or `fixed:YYYY-MM-DDTHH:MM:SS[.fff]Z`, or no `=` for the system clock"
+            )
+        };
+        let t = s.strip_prefix("fixed:").ok_or_else(bad)?;
+        if let Ok(ms) = t.parse::<i64>() {
+            return Ok(ClockSpec::Fixed(ms));
+        }
+        rfc3339_ms(t).map(ClockSpec::Fixed).ok_or_else(bad)
+    }
+
+    fn label(&self) -> String {
+        match self {
+            ClockSpec::System => "system".into(),
+            ClockSpec::Fixed(ms) => format!("fixed:{ms}"),
+        }
+    }
+}
+
+/// Milliseconds since the Unix epoch of `YYYY-MM-DDTHH:MM:SS[.fff]Z` (digits as written, UTC
+/// only); `None` for anything else, including a day the month does not have.
+fn rfc3339_ms(t: &str) -> Option<i64> {
+    let t = t.strip_suffix('Z')?;
+    let (date, time) = t.split_once('T')?;
+    let num = |s: &str, digits: usize| {
+        (s.len() == digits && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse::<i64>().ok())?
+    };
+    let [y, mo, d] = <[&str; 3]>::try_from(date.split('-').collect::<Vec<_>>()).ok()?;
+    let (hms, frac) = time.split_once('.').map_or((time, "000"), |(a, b)| (a, b));
+    let [h, mi, s] = <[&str; 3]>::try_from(hms.split(':').collect::<Vec<_>>()).ok()?;
+    let (y, mo, d) = (num(y, 4)?, num(mo, 2)?, num(d, 2)?);
+    let (h, mi, s) = (num(h, 2)?, num(mi, 2)?, num(s, 2)?);
+    let ms = match frac.len() {
+        1..=3 => num(frac, frac.len())? * 10i64.pow(3 - frac.len() as u32),
+        _ => return None,
+    };
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let days_in_month = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if !(1..=12).contains(&mo) || d < 1 || d > days_in_month[mo as usize - 1] || h > 23 || mi > 59 || s > 59 {
+        return None;
+    }
+    // Days from 1970-01-01 (Howard Hinnant's `days_from_civil`).
+    let y = if mo <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if mo > 2 { mo - 3 } else { mo + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(((days * 24 + h) * 60 + mi) * 60_000 + s * 1000 + ms)
+}
+
+/// Where a `Log` grant writes (`--log name=path`, appended, or `name=-`, stderr), shared by every
+/// run of the process; each line is one write under the lock, so lines never interleave.
+#[derive(Clone)]
+pub struct LogSink {
+    out: SharedLog,
+    /// The path, or `-`, for the audit header.
+    label: String,
+}
+
+impl LogSink {
+    pub fn stderr() -> Self {
+        LogSink::new(Box::new(io::stderr()), "-")
+    }
+
+    /// `file`, opened to append by the caller (main.rs `open_append`), at `path`.
+    pub fn file(file: std::fs::File, path: &str) -> Self {
+        LogSink::new(Box::new(file), path)
+    }
+
+    pub fn new(out: Box<dyn Write + Send>, label: &str) -> Self {
+        LogSink {
+            out: Arc::new(Mutex::new(out)),
+            label: label.into(),
+        }
+    }
+}
+
+/// The `--rng`, `--clock` and `--log` grants, by `main` parameter name. Every run (every request
+/// under `--listen`) gets fresh handles to them; a `Log`'s byte budget is per run.
+#[derive(Clone, Default)]
+pub struct Sources {
+    pub rngs: Vec<(String, RngSpec)>,
+    pub clocks: Vec<(String, ClockSpec)>,
+    pub logs: Vec<(String, LogSink)>,
+}
+
+/// A granted `Rng` in the resource table.
+enum Randomness {
+    Os,
+    Seeded(Box<rand_chacha::ChaCha20Rng>),
+}
+
+impl Randomness {
+    /// `spec`'s source for request `stream` (0 for a one-shot run): a seeded stream is the
+    /// ChaCha20 stream of that number under a key holding the seed.
+    fn new(spec: RngSpec, stream: u64) -> Self {
+        use rand_chacha::rand_core::SeedableRng;
+        match spec {
+            RngSpec::Os => Randomness::Os,
+            RngSpec::Seed(seed) => {
+                let mut key = [0u8; 32];
+                key[..8].copy_from_slice(&seed.to_le_bytes());
+                let mut rng = rand_chacha::ChaCha20Rng::from_seed(key);
+                rng.set_stream(stream);
+                Randomness::Seeded(Box::new(rng))
+            }
+        }
+    }
+
+    fn fill(&mut self, out: &mut [u8]) -> Result<()> {
+        use rand_chacha::rand_core::Rng;
+        match self {
+            Randomness::Os => {
+                getrandom::fill(out).map_err(|e| wasmtime::Error::msg(format!("the OS gave no randomness: {e}")))
+            }
+            Randomness::Seeded(rng) => {
+                rng.fill_bytes(out);
+                Ok(())
+            }
+        }
+    }
+
+    fn next_u64(&mut self) -> Result<u64> {
+        let mut b = [0u8; 8];
+        self.fill(&mut b)?;
+        Ok(u64::from_le_bytes(b))
+    }
+}
+
+/// The most bytes one `Rng.bytes` gives (`lang::eval::RNG_BYTES_MAX`).
+const RNG_BYTES_MAX: u32 = 65_536;
+
+impl kio::caps::rng::Host for State {}
+impl kio::caps::clock::Host for State {}
+impl kio::caps::log::Host for State {}
+
+impl kio::caps::rng::HostRng for State {
+    fn bytes(&mut self, r: Resource<kio::caps::rng::Rng>, n: u32) -> Result<Vec<u8>> {
+        self.call(r.rep(), "bytes", "bytes", |s| s.random_bytes(&r, n), ok)
+    }
+
+    fn int(&mut self, r: Resource<kio::caps::rng::Rng>, lo: i64, hi: i64) -> Result<i64> {
+        self.call(r.rep(), "int", "int", |s| s.random_int(&r, lo, hi), ok)
+    }
+
+    fn drop(&mut self, r: Resource<kio::caps::rng::Rng>) -> Result<()> {
+        let _ = self.table.delete(Resource::<Randomness>::new_own(r.rep()));
+        Ok(())
+    }
+}
+
+impl State {
+    /// The guest checks `n` before calling (lang/src/eval.rs `cap_arg_error`); one past the cap
+    /// here came from code that skipped its check, and stops the run. The bytes are charged
+    /// to `--io`.
+    fn random_bytes(&mut self, r: &Resource<kio::caps::rng::Rng>, n: u32) -> Result<Vec<u8>> {
+        self.audit_extra = format!(r#","n":{n}"#);
+        if n > RNG_BYTES_MAX {
+            wasmtime::bail!("Rng.bytes({n}): the count must be 0 to {RNG_BYTES_MAX}");
+        }
+        self.spend_io(n as usize)?;
+        let src = self.table.get_mut(&Resource::<Randomness>::new_borrow(r.rep()))?;
+        let mut out = vec![0; n as usize];
+        src.fill(&mut out)?;
+        Ok(out)
+    }
+
+    /// Uniform in `lo..hi` by rejection: draw 64 bits masked to the width's bit length until
+    /// the draw is below the width (at least every second draw is). The same source, so the
+    /// same values, for the interpreter and compiled code.
+    fn random_int(&mut self, r: &Resource<kio::caps::rng::Rng>, lo: i64, hi: i64) -> Result<i64> {
+        self.audit_extra = format!(r#","lo":{lo},"hi":{hi}"#);
+        if lo >= hi {
+            wasmtime::bail!("Rng.int({lo}, {hi}): lo must be less than hi");
+        }
+        // 1 to u64::MAX: the whole `i64` range fits.
+        let width = hi.wrapping_sub(lo) as u64;
+        let mask = u64::MAX.checked_shr((width - 1).leading_zeros()).unwrap_or(0);
+        let src = self.table.get_mut(&Resource::<Randomness>::new_borrow(r.rep()))?;
+        loop {
+            let draw = src.next_u64()? & mask;
+            if draw < width {
+                return Ok(lo.wrapping_add(draw as i64));
+            }
+        }
+    }
+}
+
+impl kio::caps::clock::HostClock for State {
+    fn now_ms(&mut self, c: Resource<kio::caps::clock::Clock>) -> Result<i64> {
+        self.call(
+            c.rep(),
+            "now_ms",
+            "now_ms",
+            |s| {
+                let now = match s.table.get(&Resource::<ClockSpec>::new_borrow(c.rep()))? {
+                    ClockSpec::System => unix_ms(),
+                    ClockSpec::Fixed(ms) => *ms,
+                };
+                s.audit_extra = format!(r#","now":{now}"#);
+                Ok(now)
+            },
+            ok,
+        )
+    }
+
+    fn drop(&mut self, c: Resource<kio::caps::clock::Clock>) -> Result<()> {
+        let _ = self.table.delete(Resource::<ClockSpec>::new_own(c.rep()));
+        Ok(())
+    }
+}
+
+/// Milliseconds since the Unix epoch now; negative before it.
+fn unix_ms() -> i64 {
+    let ms = |d: Duration| i64::try_from(d.as_millis()).unwrap_or(i64::MAX);
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(d) => ms(d),
+        Err(e) => -ms(e.duration()),
+    }
+}
+
+/// One run's handle on a `Log` grant: the sink, the line prefix (`req 3: ` under `--listen`)
+/// and the bytes this run has written.
+struct LogHandle {
+    sink: LogSink,
+    prefix: String,
+    written: u64,
+}
+
+/// The most escaped bytes in one `Log.write` line, and in one run's lines together.
+const LOG_LINE_MAX: usize = 64 << 10;
+const LOG_RUN_MAX: u64 = 1 << 20;
+
+/// A line as the log holds it: `\` as `\\`, LF, CR and tab as `\n`, `\r` and `\t`, any other
+/// control character (C0, DEL, C1) as `\u{XX}`. So a line is one line, and holds no terminal
+/// escape.
+fn escape_line(s: &str) -> String {
+    let mut o = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => o.push_str("\\\\"),
+            '\n' => o.push_str("\\n"),
+            '\r' => o.push_str("\\r"),
+            '\t' => o.push_str("\\t"),
+            c if c.is_control() => o.push_str(&format!("\\u{{{:02x}}}", c as u32)),
+            c => o.push(c),
+        }
+    }
+    o
+}
+
+impl kio::caps::log::HostLog for State {
+    fn write(&mut self, l: Resource<kio::caps::log::Log>, line: String) -> Result<Result<(), kio::caps::log::LogErr>> {
+        self.call(l.rep(), "write", "write", |s| s.log_line(&l, line), outcome)
+    }
+
+    fn drop(&mut self, l: Resource<kio::caps::log::Log>) -> Result<()> {
+        let _ = self.table.delete(Resource::<LogHandle>::new_own(l.rep()));
+        Ok(())
+    }
+}
+
+impl State {
+    /// Escape `line`, refuse it past the line or run cap (`too-large`, nothing written), charge
+    /// its bytes to `--io`, and write it with the prefix and a newline in one locked write.
+    fn log_line(
+        &mut self,
+        l: &Resource<kio::caps::log::Log>,
+        line: String,
+    ) -> Result<Result<(), kio::caps::log::LogErr>> {
+        let escaped = escape_line(&line);
+        let h = self.table.get_mut(&Resource::<LogHandle>::new_borrow(l.rep()))?;
+        let total = h.written.saturating_add(escaped.len() as u64);
+        if escaped.len() > LOG_LINE_MAX || total > LOG_RUN_MAX {
+            return Ok(Err(kio::caps::log::LogErr::TooLarge));
+        }
+        h.written = total;
+        let (out, text) = (h.sink.out.clone(), format!("{}{escaped}", h.prefix));
+        self.spend_io(escaped.len())?;
+        write_line(&out, &text).map_err(|e| wasmtime::Error::msg(format!("log: cannot write: {e}")))?;
+        Ok(Ok(()))
+    }
+}
+
 /// Per-run limits. `stack` is bytes of Wasm stack, 2 MB by default: about 43,000 calls of a small
 /// function. Fuel is Wasm instructions: compiled code spends 10 to 60 times less than the
 /// interpreter did per program, so the defaults are a tenth of the interpreter's (C5), which keeps
@@ -1358,12 +1692,16 @@ fn named(bound: &[Bound]) -> Vec<(String, &'static str)> {
 
 /// Put one run's grants in `store`'s table (`handles` are there already) and record which grant
 /// each handle is, for the report check and the log. In the order the audit header lists them.
+/// `req` is the request number under `--listen` (`None` for a one-shot run): a seeded `Rng`'s
+/// stream and a `Log` line's prefix come from it.
 fn push_grants(
     s: &mut State,
     dirs: Vec<(String, RealDir)>,
     https: Vec<(String, Origin)>,
     handles: Handles,
     kvs: KvGrants,
+    sources: Sources,
+    req: Option<u64>,
 ) -> Result<Vec<Bound>> {
     let mut bound = Vec::new();
     let mut add = |name: String, kind, rep, target| {
@@ -1387,6 +1725,23 @@ fn push_grants(
     for (name, store) in kvs {
         let target = Some(store.label());
         add(name, "Kv", s.table.push(store)?.rep(), target);
+    }
+    for (name, spec) in sources.rngs {
+        let rng = Randomness::new(spec, req.unwrap_or(0));
+        add(name, "Rng", s.table.push(rng)?.rep(), Some(spec.label()));
+    }
+    for (name, spec) in sources.clocks {
+        add(name, "Clock", s.table.push(spec)?.rep(), Some(spec.label()));
+    }
+    for (name, sink) in sources.logs {
+        let target = Some(sink.label.clone());
+        let prefix = req.map_or(String::new(), |n| format!("req {n}: "));
+        let handle = LogHandle {
+            sink,
+            prefix,
+            written: 0,
+        };
+        add(name, "Log", s.table.push(handle)?.rep(), target);
     }
     for b in &bound {
         s.handles.insert(b.rep, (b.name.clone(), b.kind));

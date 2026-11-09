@@ -111,6 +111,25 @@ fn out_of_bounds(span: Span, i: i64, len: usize) -> Box<Stop> {
     fail(span, &format!("index {i} out of bounds for length {len}"))
 }
 
+/// The most bytes one `Rng.bytes` gives.
+pub const RNG_BYTES_MAX: i64 = 65_536;
+
+/// A capability argument refused before the host is called: `Rng.bytes(n)` with `n` outside 0
+/// to 65,536, `Rng.int(lo, hi)` with `lo >= hi`. A runtime error at the call, as an index out of
+/// bounds is; codegen emits the same checks with the same messages (codegen/src/lib.rs
+/// `rng_check`), and the host checks again and stops a run whose code skipped them.
+pub fn cap_arg_error(cap: &str, method: &str, args: &[Value]) -> Option<String> {
+    match (cap, method, args) {
+        ("Rng", "bytes", [Value::Int(n)]) if !(0..=RNG_BYTES_MAX).contains(n) => {
+            Some(format!("Rng.bytes({n}): the count must be 0 to {RNG_BYTES_MAX}"))
+        }
+        ("Rng", "int", [Value::Int(lo), Value::Int(hi)]) if lo >= hi => {
+            Some(format!("Rng.int({lo}, {hi}): lo must be less than hi"))
+        }
+        _ => None,
+    }
+}
+
 /// Evaluates `main`. Calls nest at most `MAX_CALLS` deep, which natively needs up to about 2 MB
 /// of stack in release builds and 9 MB in debug ones, more with deep nesting in each call.
 /// Callers provide that stack.
@@ -589,8 +608,12 @@ impl<'a> Interp<'a> {
         let Some(Ty::Cap(c)) = param.map(|l| &l.ty) else {
             unreachable!("Value::Cap names a main parameter");
         };
-        let (method, _, ty) = &self.m.caps[c.0 as usize].methods[method as usize];
+        let def = &self.m.caps[c.0 as usize];
+        let (method, _, ty) = &def.methods[method as usize];
         let vals = self.values(args)?;
+        if let Some(msg) = cap_arg_error(&def.name, method, &vals) {
+            return Err(fail(span, &msg));
+        }
         let v = self.caps.call(&name, method, vals).map_err(|msg| fail(span, &msg))?;
         // The host is trusted code but checked anyway: a value of the wrong type stops the run.
         if !self.fits(&v, ty) {

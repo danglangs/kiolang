@@ -32,7 +32,18 @@ fn every_capability_method_compiles() {
     let names: Vec<&str> = caps.caps.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(
         names,
-        ["Dir", "Http", "Incoming", "Outgoing", "Kv", "WsMessage", "WsSend"],
+        [
+            "Dir",
+            "Http",
+            "Incoming",
+            "Outgoing",
+            "Kv",
+            "WsMessage",
+            "WsSend",
+            "Rng",
+            "Clock",
+            "Log"
+        ],
         "runtime/src/entry.rs `run` numbers caps.wit's `grant` cases in this order"
     );
     let mut calls = 0;
@@ -62,7 +73,7 @@ fn every_capability_method_compiles() {
     let src = format!("fn main({}) {{\n{body}}}", params.join(", "));
     let wasm = compile(&module(&src)).unwrap();
     wasmparser::Validator::new().validate_all(&wasm.component).unwrap();
-    assert_eq!(calls, 28);
+    assert_eq!(calls, 32);
 }
 
 #[test]

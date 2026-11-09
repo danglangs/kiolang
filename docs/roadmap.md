@@ -82,7 +82,7 @@ Most-used Rust crates, and kio's answer to each:
 | Async | tokio | none: a sandbox per request | Fine per request. Concurrent upstream calls inside one handler need host-side async (web decision 4). |
 | Serialization | serde, serde_json | built-in `Json` (L9, C12), an untyped tree: `parse_json`, `to_json`, accessors; 1.5x `serde_json`, 1.4x faster than Python's `json` | Typed decode into structs needs a derive or traits; generics alone do not give it. |
 | Database | sqlx, diesel, redis | `Kv` (K1): get/set/delete/keys/swap, in memory or an append-only file the host owns | No SQL. A `Sql` capability (`caps.wit`, owner decision): the host holds the connection pool, the program gets a capability scoped to one database. |
-| Time, randomness, UUIDs | chrono, rand, uuid | none, by design (deterministic) | A `Clock` and `Rng` capability: granted explicitly, logged, and replayable. |
+| Time, randomness, UUIDs | chrono, rand, uuid | `Clock` (`now_ms`) and `Rng` (`bytes`, `int`) capabilities (H13, H14): granted explicitly (`--clock`, `--rng`), audited, fixable for replay (`fixed:`, `seed:`); a `Log` for the program's own lines (H15) | Date arithmetic and formatting as built-ins; UUIDs from `Rng.bytes(16)` in library code. |
 | Crypto, hashing | ring, sha2, jsonwebtoken | none | Pure functions, so built-ins in `lang` (no capability needed), or host functions for speed. |
 | Collections | `HashMap`, `BTreeMap`, tuples | `List`, `Map` (key order), `HashMap` (insertion order, L10, C13), `Int` or `Str` keys | No sets, tuples, `contains_key` or `for` over a map (open_questions #114). |
 | Errors | anyhow, thiserror | `Result`, `?`, enums | No conversion between error types (`From`). |

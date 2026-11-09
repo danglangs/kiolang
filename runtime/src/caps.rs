@@ -15,9 +15,12 @@
 
 use crate::abi::{addr, ptr, table};
 use crate::desc::{self, Desc, Table};
+use crate::entry::kio::caps::clock::Clock;
 use crate::entry::kio::caps::fs::{Dir, IoErr};
 use crate::entry::kio::caps::kv::{Kv, KvEntry, KvErr};
+use crate::entry::kio::caps::log::{Log, LogErr};
 use crate::entry::kio::caps::net::{Http, HttpErr};
+use crate::entry::kio::caps::rng::Rng;
 use crate::entry::kio::caps::web::Incoming;
 use crate::entry::kio::caps::ws::{WsErr, WsMessage, WsSend};
 use crate::obj::{self, to_slot, Header};
@@ -545,4 +548,35 @@ pub extern "C" fn rt_cap_ws_send_close(ret: u32, h: u32, code: i64) -> u32 {
     };
     let w = sender(h);
     result(ret, in_place(|| w.close(code)), unit, ws_err)
+}
+
+/// Codegen has trapped on an `n` outside 0 to 65,536 (`rng_check`); one that still arrives is
+/// passed on as `u32::MAX`, which the host refuses.
+#[no_mangle]
+pub extern "C" fn rt_cap_rng_bytes(_: u32, h: u32, n: i64) -> u32 {
+    // SAFETY: see `handle`.
+    let r = unsafe { handle(h, Rng::from_handle) };
+    let n = u32::try_from(n).unwrap_or(u32::MAX);
+    addr(bytes_obj(in_place(|| r.bytes(n))))
+}
+
+#[no_mangle]
+pub extern "C" fn rt_cap_rng_int(_: u32, h: u32, lo: i64, hi: i64) -> i64 {
+    // SAFETY: see `handle`.
+    let r = unsafe { handle(h, Rng::from_handle) };
+    r.int(lo, hi)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_cap_clock_now_ms(_: u32, h: u32) -> i64 {
+    // SAFETY: see `handle`.
+    let c = unsafe { handle(h, Clock::from_handle) };
+    c.now_ms()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_cap_log_write(ret: u32, h: u32, line: u32) -> u32 {
+    // SAFETY: the contract above.
+    let (l, line) = unsafe { (handle(h, Log::from_handle), text(line)) };
+    result(ret, in_place(|| l.write(line)), unit, |LogErr::TooLarge| "TooLarge")
 }

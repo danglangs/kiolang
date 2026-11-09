@@ -177,6 +177,25 @@ pub fn v0() -> CapTable {
                     ),
                 ],
             },
+            CapType {
+                name: "Rng".into(),
+                methods: vec![
+                    method("bytes", vec![Ty::Int], Ty::Bytes),
+                    method("int", vec![Ty::Int, Ty::Int], Ty::Int),
+                ],
+            },
+            CapType {
+                name: "Clock".into(),
+                methods: vec![method("now_ms", vec![], Ty::Int)],
+            },
+            CapType {
+                name: "Log".into(),
+                methods: vec![method(
+                    "write",
+                    vec![Ty::Str],
+                    Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("LogErr".into(), vec![]))),
+                )],
+            },
         ],
         enums: vec![
             Enum {
@@ -231,6 +250,13 @@ pub fn v0() -> CapTable {
                     case("TooLarge", vec![]),
                     case("Invalid", vec![]),
                 ],
+                span: at,
+                public: true,
+            },
+            Enum {
+                name: "LogErr".into(),
+                tparams: vec![],
+                variants: vec![case("TooLarge", vec![])],
                 span: at,
                 public: true,
             },

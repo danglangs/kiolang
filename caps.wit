@@ -81,6 +81,33 @@ interface ws {
   variant ws-err { closed, too-large, invalid }
 }
 
+interface rng {
+  // Randomness from the source the operator granted: the OS (`--rng name`), or a stream keyed by
+  // a seed (`--rng name=seed:N`), the same every run; under `--listen`, by the seed and the
+  // request number.
+  resource rng {
+    bytes: func(n: u32) -> list<u8>;       // n at most 65,536 (more is a runtime error at the call)
+    int:   func(lo: s64, hi: s64) -> s64;  // uniform in lo..hi, no modulo bias; lo < hi (else a runtime error)
+  }
+}
+
+interface clock {
+  // The system clock (`--clock name`) or one fixed time (`--clock name=fixed:<ms>` or an RFC 3339 UTC time).
+  resource clock {
+    now-ms: func() -> s64;   // milliseconds since the Unix epoch
+  }
+}
+
+interface log {
+  variant log-err { too-large }
+
+  // The program's own log (`--log name=path`, appended; `name=-` is stderr), not the audit log.
+  // One line per call, control characters escaped; at most 64 KB a line and 1 MB a run.
+  resource log {
+    write: func(line: string) -> result<_, log-err>;
+  }
+}
+
 // Compiled kio (docs/codegen.md): the runtime with the program appended, one core module.
 world compiled {
   import fs;
@@ -88,14 +115,23 @@ world compiled {
   import web;
   import kv;
   import ws;
+  import rng;
+  import clock;
+  import log;
   use fs.{dir};
   use net.{http};
   use web.{incoming, outgoing};
   use kv.{kv};
   use ws.{ws-message, ws-send};
+  use rng.{rng};
+  use clock.{clock};
+  use log.{log};
 
   // One handle per capability parameter of `main`, in parameter order.
-  variant grant { dir(dir), http(http), incoming(incoming), outgoing(outgoing), kv(kv), ws-message(ws-message), ws-send(ws-send) }
+  variant grant {
+    dir(dir), http(http), incoming(incoming), outgoing(outgoing), kv(kv), ws-message(ws-message), ws-send(ws-send),
+    rng(rng), clock(clock), log(log),
+  }
   // main's value printed, and whether main returned `Err`.
   record outcome { value: string, failed: bool }
 
