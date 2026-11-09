@@ -117,6 +117,36 @@ fn serves_files_and_404() {
     assert_eq!(send(kio.port, "GET", "/../../etc/passwd", b"").0, 404);
 }
 
+/// Compiled code runs on the server's worker threads' stacks: recursion to the largest `--stack`
+/// is a 500 for that request, never a crash of the server.
+#[test]
+fn deep_recursion_at_the_largest_stack_is_a_500() {
+    let public = tempfile::tempdir().unwrap();
+    let app = public
+        .path()
+        .join("..")
+        .join(format!("deep-{}.kio", std::process::id()));
+    std::fs::write(
+        &app,
+        r#"fn down(n: Int) -> Int { if n == 0 { 0 } else { 1 + down(n - 1) } }
+        fn main(req: Incoming, res: Outgoing, public: Dir) -> Result<(), WebErr> {
+            let n = if req.target() == "/deep" { 100000000 } else { 1 };
+            res.send(200, [], [], down(n).to_str().to_bytes())
+        }"#,
+    )
+    .unwrap();
+    let kio = start_with(
+        app.to_str().unwrap(),
+        public.path(),
+        &["--stack", "8192", "--fuel", "1000000000"],
+    );
+    let deep = send(kio.port, "GET", "/deep", b"");
+    let after = send(kio.port, "GET", "/", b"");
+    std::fs::remove_file(&app).unwrap();
+    assert_eq!(deep.0, 500);
+    assert_eq!(after, (200, b"1".to_vec()));
+}
+
 /// The host owns framing: a guest-set content-length cannot desync the connection.
 #[test]
 fn guest_framing_headers_are_dropped() {

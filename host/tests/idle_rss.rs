@@ -40,8 +40,9 @@ fn idle_listen_rss() {
     let _ = child.kill();
     let _ = child.wait();
     println!("idle --listen RSS: {} MB ({kb} KB)", kb >> 10);
-    // Release on macOS: about 54 MB, 100 MB before W13d. Debug builds are bigger; print only.
+    // Release on macOS: about 27 MB compiled (C5); 61 MB with the interpreter guest, 100 MB
+    // before W13d. Debug builds are bigger; print only.
     if !cfg!(debug_assertions) {
-        assert!(kb < 80 << 10, "idle RSS {kb} KB");
+        assert!(kb < 50 << 10, "idle RSS {kb} KB");
     }
 }

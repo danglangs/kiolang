@@ -1,6 +1,9 @@
-//! Runs the guest component under Wasmtime. `dir` is backed by cap-std; `http` is a ureq client fixed to one granted origin; `incoming` and `outgoing` hold one request and its first response; `kv` is a store shared across runs (kv.rs); `ws-message` and `ws-send` hold one WebSocket event and its sends (ws.rs). Every import is counted and, if asked, written to an audit log.
-// The generated `call_run` takes a store, the files and seven grant lists.
-#![allow(clippy::too_many_arguments)]
+//! Runs compiled kio under Wasmtime. The host checks, lowers and compiles a program (compiled.rs),
+//! then runs it in the `compiled` world of caps.wit. `dir` is backed by cap-std; `http` is a ureq
+//! client fixed to one granted origin; `incoming` and `outgoing` hold one request and its first
+//! response; `kv` is a store shared across runs (kv.rs); `ws-message` and `ws-send` hold one
+//! WebSocket event and its sends (ws.rs). Every import is counted and, if asked, written to an
+//! audit log.
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir as RealDir, OpenOptions, OpenOptionsExt};
 use std::collections::{HashMap, HashSet};
@@ -11,27 +14,95 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering::Relaxed};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
-use wasmtime::component::{Component, InstancePre, Linker, Resource, ResourceTable};
+use wasmtime::component::{Resource, ResourceTable};
 use wasmtime::Result;
-use wasmtime::{Engine, InstanceAllocationStrategy, PoolingAllocationConfig, Store};
-use wasmtime_wasi::{HostMonotonicClock, HostWallClock, WasiCtx, WasiCtxView, WasiView};
+use wasmtime::{Engine, Store};
 
-// Trappable imports let a host function stop the run by returning `Err`.
-wasmtime::component::bindgen!({ world: "guest", path: "../caps.wit", imports: { default: trappable } });
+mod bindings {
+    // Trappable imports let a host function stop the run by returning `Err`.
+    wasmtime::component::bindgen!({ world: "compiled", path: "../caps.wit", imports: { default: trappable } });
+}
+use bindings::kio;
 
+pub mod cache;
 mod compiled;
 mod config;
 mod grants;
+#[cfg(feature = "test-hooks")]
+mod interp;
 pub mod kv;
-pub use compiled::{Compiled, CompiledRun};
-pub use config::MAX_STACK;
+pub use compiled::{Kio, Server};
+pub use config::{MAX_STACK, RUN_STACK};
+#[cfg(feature = "test-hooks")]
+pub use interp::Interp;
 pub mod listen;
 pub mod ws;
 
-/// The guest, compiled to native code by `build.rs` with `config::compile_config`.
-const GUEST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/guest.cwasm"));
-/// The same guest as Wasm, for `Server` to pre-initialize with its program.
-const GUEST_WASM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/guest.wasm"));
+/// A checker, grant or runtime error: byte span into source file number `file`, message and an
+/// optional fix.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Diag {
+    pub start: u32,
+    pub end: u32,
+    pub message: String,
+    pub hint: Option<String>,
+    pub file: u32,
+}
+
+impl From<lang::Diag> for Diag {
+    fn from(d: lang::Diag) -> Self {
+        Diag {
+            start: d.span.start as u32,
+            end: d.span.end as u32,
+            message: d.msg,
+            hint: d.hint,
+            file: d.span.file,
+        }
+    }
+}
+
+/// The authority report, one line per function.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Report {
+    pub lines: Vec<String>,
+}
+
+/// What a run produced: the report, main's value printed, and whether main returned `Err`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Outcome {
+    pub report: Report,
+    pub value: String,
+    pub failed: bool,
+}
+
+/// A run's outcome, or the checker's, the grants' or a runtime error.
+pub type RunResult = std::result::Result<Outcome, Vec<Diag>>;
+
+/// A run stopped by one of its limits; the message names the limit and its flag.
+#[derive(Debug)]
+pub struct Stopped(pub String);
+
+impl std::fmt::Display for Stopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The message of a run stopped by a limit, or `None` for any other error.
+pub fn explain(e: &wasmtime::Error) -> Option<String> {
+    e.downcast_ref::<Stopped>().map(|s| s.0.clone())
+}
+
+/// Check `files` (root first) in the host: the report, or the diagnostics.
+pub fn check_files(files: &[(String, String)]) -> std::result::Result<Report, Vec<Diag>> {
+    let pairs: Vec<(&str, &str)> = files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
+    match lang::check_files(&pairs, &lang::CapTable::v0()) {
+        Ok(p) => Ok(Report {
+            lines: lang::report(&p).lines().map(String::from).collect(),
+        }),
+        Err(diags) => Err(diags.into_iter().map(Diag::from).collect()),
+    }
+}
 
 /// The most one `Dir.read` returns; a larger file is `too-large`.
 const READ_CAP: u64 = 10 << 20;
@@ -322,81 +393,43 @@ pub struct State {
     /// `(capability parameter, method)` pairs on `main`'s report line; any other call is a checker
     /// bug. Set at the start of every run, whether or not a log is written.
     allowed: HashSet<(String, String)>,
-    /// `main`'s parameters, which the grants must match; `None` when the program does not check
-    /// (the guest then reports why).
-    params: Option<grants::Params>,
     /// Grant name and kind of each handle.
     handles: HashMap<u32, (String, &'static str)>,
     audit_msg: String,
     /// Compiled code: the third value of the next runtime error's message (compiled.rs).
     trap_c: i64,
-    wasi: WasiCtx,
     table: ResourceTable,
 }
 
-/// A clock that never moves, so a run cannot observe time.
-struct Frozen;
-
-impl HostWallClock for Frozen {
-    fn resolution(&self) -> Duration {
-        Duration::from_secs(1)
-    }
-    fn now(&self) -> Duration {
-        Duration::ZERO
-    }
-}
-
-impl HostMonotonicClock for Frozen {
-    fn resolution(&self) -> u64 {
-        1
-    }
-    fn now(&self) -> u64 {
-        0
-    }
-}
-
 impl State {
-    /// WASI is linked only because Rust's std for wasm32-wasip2 imports it. It grants nothing:
-    /// no preopens, env, args, network or stdio, and frozen clocks and fixed seeds so every run of
-    /// the same program behaves the same. kio code reaches the host only through caps.wit.
-    fn new() -> Self {
-        let wasi = WasiCtx::builder()
-            .wall_clock(Frozen)
-            .monotonic_clock(Frozen)
-            .insecure_random_seed(0)
-            .build();
+    /// State for a run under `limits`, its deadline counted from now. Nothing but caps.wit is
+    /// linked: compiled code has no clock, randomness or environment.
+    fn limited(limits: &Limits) -> Self {
+        // A timeout too large to represent caps at a year rather than panicking.
+        let now = Instant::now();
+        let year = Duration::from_secs(365 * 24 * 3600);
+        let wait = Duration::from_secs(limits.timeout_secs).min(year);
         State {
             calls: 0,
             peak_memory: 0,
-            memory_limit: usize::MAX,
+            memory_limit: limits.memory,
             out_of_memory: false,
-            call_limit: u32::MAX,
+            call_limit: limits.calls,
             too_many_calls: false,
             io: 0,
-            io_limit: u64::MAX,
+            io_limit: limits.io,
             too_much_io: false,
-            deadline: Instant::now(),
+            deadline: now.checked_add(wait).unwrap_or(now),
             timed_out: false,
             #[cfg(feature = "test-hooks")]
             fail_writes: false,
             audit: None,
             unexpected: false,
             allowed: HashSet::new(),
-            params: None,
             handles: HashMap::new(),
             audit_msg: String::new(),
             trap_c: 0,
-            wasi,
             table: ResourceTable::new(),
-        }
-    }
-}
-
-impl WasiView for State {
-    fn ctx(&mut self) -> WasiCtxView<'_> {
-        WasiCtxView {
-            ctx: &mut self.wasi,
-            table: &mut self.table,
         }
     }
 }
@@ -971,15 +1004,12 @@ pub struct Response {
     pub body: Vec<u8>,
 }
 
-/// What `run` returns: the outcome, or the diagnostics.
-type RunResult = std::result::Result<Outcome, Vec<Diag>>;
-
 /// The `Incoming` and `Outgoing` grants for one request, named `names`, and the slot the
 /// `Outgoing` fills.
-fn web_grants(store: &mut Store<State>, request: Request, names: (&str, &str)) -> Result<(Sent, Handles)> {
+fn web_grants(s: &mut State, request: Request, names: (&str, &str)) -> Result<(Sent, Handles)> {
     let sent = Sent::default();
-    let req = store.data_mut().table.push(request)?;
-    let res = store.data_mut().table.push(sent.clone())?;
+    let req = s.table.push(request)?;
+    let res = s.table.push(sent.clone())?;
     let handles = Handles {
         incomings: vec![(names.0.to_string(), Resource::new_own(req.rep()))],
         outgoings: vec![(names.1.to_string(), Resource::new_own(res.rep()))],
@@ -991,15 +1021,15 @@ fn web_grants(store: &mut Store<State>, request: Request, names: (&str, &str)) -
 /// The `WsMessage` and `WsSend` grants for one event, named `names`, and the outbox the
 /// sends fill. `closed` makes every send `closed`.
 fn ws_grants(
-    store: &mut Store<State>,
+    s: &mut State,
     event: ws::WsEvent,
     closed: bool,
     names: &(String, String),
 ) -> Result<(ws::Sends, Handles)> {
     let sends = ws::Sends::default();
     sends.lock().unwrap_or_else(PoisonError::into_inner).closed = closed;
-    let msg = store.data_mut().table.push(event)?;
-    let conn = store.data_mut().table.push(sends.clone())?;
+    let msg = s.table.push(event)?;
+    let conn = s.table.push(sends.clone())?;
     let handles = Handles {
         messages: vec![(names.0.clone(), Resource::new_own(msg.rep()))],
         senders: vec![(names.1.clone(), Resource::new_own(conn.rep()))],
@@ -1127,8 +1157,10 @@ impl State {
     }
 }
 
-/// Per-run limits. `stack` is bytes of Wasm stack: 2 MB by default, since the deepest recursion
-/// the depth budget allows needs about 900 KB in a release host and more in a debug one (G4).
+/// Per-run limits. `stack` is bytes of Wasm stack, 2 MB by default: about 43,000 calls of a small
+/// function. Fuel is Wasm instructions: compiled code spends 10 to 60 times less than the
+/// interpreter did per program, so the defaults are a tenth of the interpreter's (C5), which keeps
+/// at least the headroom typical programs had.
 #[derive(Clone, Copy)]
 pub struct Limits {
     pub fuel: u64,
@@ -1145,7 +1177,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Limits {
-            fuel: 1_000_000_000,
+            fuel: 100_000_000,
             timeout_secs: 10,
             stack: 2 << 20,
             memory: 256 << 20,
@@ -1156,10 +1188,10 @@ impl Default for Limits {
 }
 
 impl Limits {
-    /// Per-request limits for serving (web decision 9): 100 million fuel, 64 MB, 5 s.
+    /// Per-request limits for serving (web decision 9): 10 million fuel, 64 MB, 5 s.
     pub fn web() -> Self {
         Limits {
-            fuel: 100_000_000,
+            fuel: 10_000_000,
             timeout_secs: 5,
             memory: 64 << 20,
             ..Limits::default()
@@ -1184,18 +1216,25 @@ fn spawn_ticker(engine: &Engine) -> Arc<AtomicBool> {
     stop
 }
 
-/// The guest's stack limit. Wasmtime requires the async stack (enabled by wizer, W13b) to be at
-/// least as large, so a `--stack` over its 2 MB default would otherwise be refused.
+/// The run's stack limit, at most `MAX_STACK`. Compiled code runs on the calling thread's stack,
+/// which must be `RUN_STACK`.
 fn set_stack(config: &mut wasmtime::Config, bytes: usize) {
     let bytes = bytes.min(config::MAX_STACK);
     config.max_wasm_stack(bytes);
-    config.async_stack_size(bytes.max(2 << 20) + (64 << 10));
+    // Nothing runs async (the feature is off), but Wasmtime still refuses a `max_wasm_stack` above
+    // `async_stack_size`, 2 MB by default; nothing is reserved for it.
+    config.async_stack_size(bytes.max(2 << 20));
 }
 
-fn load_guest(engine: &Engine) -> Result<Component> {
-    // SAFETY: GUEST is the output of `precompile_component` from our own build script, not
-    // untrusted input; Wasmtime still checks it matches this engine's version and settings.
-    unsafe { Component::deserialize(engine, GUEST) }
+/// Run `work` on a thread with `RUN_STACK` of native stack, whatever the caller's.
+fn on_run_stack<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|s| {
+        let t = std::thread::Builder::new().stack_size(config::RUN_STACK);
+        match t.spawn_scoped(s, work).expect("cannot start a thread").join() {
+            Ok(v) => v,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    })
 }
 
 /// SHA-256 of the program as 64 hex digits; lengths keep file boundaries in the hash.
@@ -1209,95 +1248,11 @@ pub fn program_hash(files: &[(String, String)]) -> String {
     sha.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The guest with `files` already checked, from running its `init` export once and snapshotting
-/// the result. Each instance then starts with the checked program in its memory.
-fn checked_guest(engine: &Engine, files: &[(String, String)]) -> Result<Component> {
-    // `init` is called as a WAVE-syntax call: a list of `{name, source}` records.
-    let wave = |s: &str| {
-        let body: String = s
-            .chars()
-            .map(|c| match c {
-                '"' | '\\' => format!("\\{c}"),
-                c if c.is_control() => format!("\\u{{{:x}}}", c as u32),
-                c => c.to_string(),
-            })
-            .collect();
-        format!("\"{body}\"")
-    };
-    let list: Vec<String> = files
-        .iter()
-        .map(|(n, s)| format!("{{name: {}, source: {}}}", wave(n), wave(s)))
-        .collect();
-    let mut wizer = wasmtime_wizer::Wizer::new();
-    wizer.init_func(format!("init([{}])", list.join(", ")));
-    // The generated bindings still look up `init`.
-    wizer.keep_init_func(true);
-    // Both compiles below run on throwaway engines, one thread, cheapest settings for the init
-    // run: a parallel optimizing compile peaks near 90 MB of allocator memory that macOS malloc
-    // never hands back, and an idle server kept it (W13d).
-    let build = || {
-        let mut config = config::compile_config();
-        config.parallel_compilation(false);
-        config
-    };
-    let mut quick = build();
-    quick.cranelift_opt_level(wasmtime::OptLevel::None);
-    quick.cranelift_regalloc_algorithm(wasmtime::RegallocAlgorithm::SinglePass);
-    let quick = Engine::new(&quick)?;
-    let (mut store, linker) = (new_store(&quick, &Limits::default())?, guest_linker(&quick)?);
-    let init = wizer.run_component(&mut store, GUEST_WASM, async |s, c| {
-        linker.instantiate_async(s, c).await
-    });
-    let (wasm, rets) = block_on(init)?;
-    if matches!(rets.first(), Some(wasmtime::component::Val::Result(Err(_)))) {
-        wasmtime::bail!("the guest refused a program the host had checked");
-    }
-    let native = Engine::new(&build())?.precompile_component(&wasm)?;
-    // SAFETY: `native` was just produced with these settings from the guest and a program checked above.
-    unsafe { Component::deserialize(engine, &native) }
-}
-
-/// Drive `future` to completion on this thread with no Tokio runtime entered: WASI's blocking
-/// stream calls (the guest's panic message on stderr) panic inside one, which would turn a guest
-/// failure during `init` into a host panic.
-fn block_on<F: std::future::Future>(future: F) -> F::Output {
-    struct Wake(std::thread::Thread);
-    impl std::task::Wake for Wake {
-        fn wake(self: Arc<Self>) {
-            self.0.unpark();
-        }
-    }
-    let waker = Arc::new(Wake(std::thread::current())).into();
-    let mut cx = std::task::Context::from_waker(&waker);
-    let mut future = std::pin::pin!(future);
-    loop {
-        if let std::task::Poll::Ready(out) = future.as_mut().poll(&mut cx) {
-            return out;
-        }
-        std::thread::park();
-    }
-}
-
-fn guest_linker(engine: &Engine) -> Result<Linker<State>> {
-    let mut linker = Linker::new(engine);
-    wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
-    Guest::add_to_linker::<State, wasmtime::component::HasSelf<State>>(&mut linker, |s| s)?;
-    Ok(linker)
-}
-
 /// A store holding `limits`' fuel, memory, call and I/O quotas and its deadline, counted from now.
 fn new_store(engine: &Engine, limits: &Limits) -> Result<Store<State>> {
-    let mut store = Store::new(engine, State::new());
-    store.data_mut().memory_limit = limits.memory;
-    store.data_mut().call_limit = limits.calls;
-    store.data_mut().io_limit = limits.io;
+    let mut store = Store::new(engine, State::limited(limits));
     store.limiter(|s| s);
     store.set_fuel(limits.fuel)?;
-    // A timeout too large to represent caps at a year rather than panicking.
-    let now = Instant::now();
-    let year = Duration::from_secs(365 * 24 * 3600);
-    let wait = Duration::from_secs(limits.timeout_secs).min(year);
-    store.data_mut().deadline = now.checked_add(wait).unwrap_or(now);
     store.set_epoch_deadline(limits.timeout_secs.saturating_mul(10));
     store.epoch_deadline_trap();
     Ok(store)
@@ -1316,8 +1271,13 @@ fn limit_trap(e: &wasmtime::Error, l: &Limits) -> Option<String> {
 }
 
 /// The message for a run in `s` that hit one of `l`'s limits, or `None` for any other error.
-fn explain(s: &State, l: &Limits, e: &wasmtime::Error) -> Option<String> {
-    // A refused memory grow makes the guest's allocator abort, so the trap itself is generic.
+fn limit_message(s: &State, l: &Limits, e: &wasmtime::Error) -> Option<String> {
+    state_limit(s, l).or_else(|| limit_trap(e, l))
+}
+
+/// The message for a limit `s` recorded: memory, a quota, the report check or the deadline.
+fn state_limit(s: &State, l: &Limits) -> Option<String> {
+    // A refused memory grow makes the runtime's allocator trap, so the trap itself is generic.
     if s.out_of_memory {
         return Some(format!(
             "out of memory (limit {} MB; raise it with --memory)",
@@ -1342,279 +1302,11 @@ fn explain(s: &State, l: &Limits, e: &wasmtime::Error) -> Option<String> {
             l.timeout_secs
         ));
     }
-    limit_trap(e, l)
-}
-
-/// A fresh instance of the embedded guest, for one run: fuel, deadline, call and I/O counters
-/// are not reset, so make a new `Kio` per run.
-pub struct Kio {
-    store: Store<State>,
-    guest: Guest,
-    /// Stops the epoch ticker on drop; `None` when a `Server` owns the ticker.
-    stop: Option<Arc<AtomicBool>>,
-    limits: Limits,
-    /// The audit log and the `(name, path)` of each `Dir` grant, until a run starts.
-    audit: Option<(Box<dyn Write + Send>, DirPaths)>,
-    /// Test only: a `(parameter, method)` pair to leave out of the authority report.
-    #[cfg(feature = "test-hooks")]
-    hidden: Option<(String, String)>,
-    /// `Kv` grants for the next run.
-    kvs: KvGrants,
+    None
 }
 
 /// Named `Kv` stores. A store outlives runs, so each run gets a handle to the same one.
 pub type KvGrants = Vec<(String, Arc<kv::Store>)>;
-
-impl Drop for Kio {
-    fn drop(&mut self) {
-        if let Some(stop) = &self.stop {
-            stop.store(true, Relaxed);
-        }
-    }
-}
-
-impl Kio {
-    /// A guest under `limits`. Running out of stack, fuel or time traps, which the host reports.
-    pub fn new(limits: Limits) -> Result<Self> {
-        let mut config = config::compile_config();
-        set_stack(&mut config, limits.stack);
-        let engine = Engine::new(&config)?;
-        let stop = spawn_ticker(&engine);
-        let component = load_guest(&engine)?;
-        let linker = guest_linker(&engine)?;
-        let mut store = new_store(&engine, &limits)?;
-        let guest = Guest::instantiate(&mut store, &component, &linker)?;
-        Ok(Kio {
-            store,
-            guest,
-            stop: Some(stop),
-            limits,
-            audit: None,
-            #[cfg(feature = "test-hooks")]
-            hidden: None,
-            kvs: vec![],
-        })
-    }
-
-    /// Write the audit log (H8) of the next run to `out`: a header, one line per host call, a
-    /// trailer. `dir_paths` gives the `(name, path)` of each `Dir` grant for the header, since a
-    /// handle does not know its path. Sizes only, never contents.
-    pub fn audit(&mut self, out: impl Write + Send + 'static, dir_paths: DirPaths) {
-        self.audit = Some((Box::new(out), dir_paths));
-    }
-
-    /// Grant `kvs` by name to the next run, with the other grants `run_*` is given.
-    pub fn grant_kvs(&mut self, kvs: KvGrants) {
-        self.kvs = kvs;
-    }
-
-    /// Test only: pretend the authority report lacks `cap.method`, so the call is "unexpected".
-    #[cfg(feature = "test-hooks")]
-    pub fn hide_from_report(&mut self, cap: &str, method: &str) {
-        self.hidden = Some((cap.into(), method.into()));
-    }
-
-    /// Make every `Dir.create` fail after the file is created, to test the cleanup.
-    #[cfg(feature = "test-hooks")]
-    pub fn fail_writes(&mut self) {
-        self.store.data_mut().fail_writes = true;
-    }
-
-    /// The message for a run that hit one of its limits, or `None` for any other error.
-    pub fn explain(&self, e: &wasmtime::Error) -> Option<String> {
-        explain(self.store.data(), &self.limits, e)
-    }
-
-    /// Parse and check `source`: the report lines, or the diagnostics.
-    pub fn check(&mut self, source: &str) -> Result<std::result::Result<Report, Vec<Diag>>> {
-        self.check_files(&[single(source)])
-    }
-
-    /// Like `check` for `(name, source)` files, root first; see `lang::check_files`.
-    pub fn check_files(&mut self, files: &[(String, String)]) -> Result<std::result::Result<Report, Vec<Diag>>> {
-        self.guest.call_check(&mut self.store, &file_list(files))
-    }
-
-    /// The most linear memory the guest has asked for, in bytes.
-    pub fn peak_memory(&self) -> usize {
-        self.store.data().peak_memory
-    }
-
-    /// Capability imports the guest has called so far.
-    pub fn import_calls(&self) -> u32 {
-        self.store.data().calls
-    }
-
-    /// Check `source` and run `main` with `dirs` granted by name.
-    pub fn run(
-        &mut self,
-        source: &str,
-        dirs: Vec<(String, RealDir)>,
-    ) -> Result<std::result::Result<Outcome, Vec<Diag>>> {
-        self.run_with(source, dirs, vec![])
-    }
-
-    /// Like `run`, with `https` granted by name too.
-    pub fn run_with(
-        &mut self,
-        source: &str,
-        dirs: Vec<(String, RealDir)>,
-        https: Vec<(String, Origin)>,
-    ) -> Result<std::result::Result<Outcome, Vec<Diag>>> {
-        self.run_files(&[single(source)], dirs, https)
-    }
-
-    /// Like `run_with` for `(name, source)` files, root first.
-    pub fn run_files(
-        &mut self,
-        files: &[(String, String)],
-        dirs: Vec<(String, RealDir)>,
-        https: Vec<(String, Origin)>,
-    ) -> Result<std::result::Result<Outcome, Vec<Diag>>> {
-        self.run_all(files, dirs, https, Handles::default())
-    }
-
-    /// Run `main(req: Incoming, res: Outgoing, ..)` for one request, with `dirs` granted by name.
-    /// Returns the outcome and the first response `main` sent, if any.
-    pub fn run_web(
-        &mut self,
-        source: &str,
-        dirs: Vec<(String, RealDir)>,
-        request: Request,
-    ) -> Result<(RunResult, Option<Response>)> {
-        let (sent, handles) = web_grants(&mut self.store, request, ("req", "res"))?;
-        let outcome = self.run_all(&[single(source)], dirs, vec![], handles)?;
-        let response = sent.lock().unwrap_or_else(PoisonError::into_inner).take();
-        Ok((outcome, response))
-    }
-
-    /// Run `main(m: WsMessage, w: WsSend, ..)` for one event, with the two named `names` and
-    /// `dirs` granted by name; `closed` makes every send `closed`. Returns the outcome and the
-    /// frames `main` sent.
-    pub fn run_ws(
-        &mut self,
-        source: &str,
-        dirs: Vec<(String, RealDir)>,
-        event: ws::WsEvent,
-        closed: bool,
-        names: &(String, String),
-    ) -> Result<(RunResult, Vec<ws::WsFrame>)> {
-        let (sends, handles) = ws_grants(&mut self.store, event, closed, names)?;
-        let outcome = self.run_all(&[single(source)], dirs, vec![], handles)?;
-        let frames = std::mem::take(&mut sends.lock().unwrap_or_else(PoisonError::into_inner).frames);
-        Ok((outcome, frames))
-    }
-
-    fn run_all(
-        &mut self,
-        files: &[(String, String)],
-        dirs: Vec<(String, RealDir)>,
-        https: Vec<(String, Origin)>,
-        handles: Handles,
-    ) -> Result<std::result::Result<Outcome, Vec<Diag>>> {
-        self.arm_report(files);
-        self.run_armed(files, dirs, https, handles)
-    }
-
-    /// `run_all` with `State::allowed` and `State::params` already set.
-    fn run_armed(
-        &mut self,
-        files: &[(String, String)],
-        dirs: Vec<(String, RealDir)>,
-        https: Vec<(String, Origin)>,
-        handles: Handles,
-    ) -> Result<std::result::Result<Outcome, Vec<Diag>>> {
-        let bound = push_grants(&mut self.store, dirs, https, handles, std::mem::take(&mut self.kvs))?;
-        if let Some((out, paths)) = self.audit.take() {
-            start_audit(self.store.data_mut(), out, &paths, &self.limits, files, &bound)?;
-        }
-        let result = self.run_bound(files, &bound);
-        let outcome = match &result {
-            Ok(Ok(o)) if !o.failed => "ok",
-            Ok(Ok(_)) => "failed",
-            _ => "error",
-        };
-        end_audit(&mut self.store, &self.limits, outcome)?;
-        result
-    }
-
-    /// Set the `(parameter, method)` pairs a call may use and `main`'s parameters. The host
-    /// checks the files itself, so they do not come from the guest.
-    fn arm_report(&mut self, files: &[(String, String)]) {
-        let pairs: Vec<(&str, &str)> = files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
-        let caps = lang::CapTable::v0();
-        let (allowed, params) = match lang::check_files(&pairs, &caps) {
-            Ok(p) => (
-                main_calls(&lang::report(&p)),
-                Some(grants::main_params(&lang::lower::lower(&p, &caps))),
-            ),
-            Err(_) => (HashSet::new(), None),
-        };
-        #[cfg_attr(not(feature = "test-hooks"), allow(unused_mut))]
-        let mut allowed = allowed;
-        #[cfg(feature = "test-hooks")]
-        if let Some(h) = &self.hidden {
-            allowed.remove(h);
-        }
-        self.store.data_mut().allowed = allowed;
-        self.store.data_mut().params = params;
-    }
-
-    /// Check the grants against `main`'s parameters, then run the guest with them.
-    fn run_bound(&mut self, files: &[(String, String)], bound: &[Bound]) -> Result<RunResult> {
-        if let Some(params) = &self.store.data().params {
-            if let Err(diags) = grants::bind(params, &named(bound)) {
-                return Ok(Err(diags.into_iter().map(wit_diag).collect()));
-            }
-        }
-        let (mut dirs, mut https, mut incomings, mut outgoings) = (vec![], vec![], vec![], vec![]);
-        let (mut kvs, mut messages, mut senders) = (vec![], vec![], vec![]);
-        for b in bound {
-            let (name, rep) = (b.name.clone(), b.rep);
-            match b.kind {
-                "Dir" => dirs.push(DirGrant {
-                    name,
-                    dir: Resource::new_own(rep),
-                }),
-                "Http" => https.push(HttpGrant {
-                    name,
-                    http: Resource::new_own(rep),
-                }),
-                "Incoming" => incomings.push(IncomingGrant {
-                    name,
-                    incoming: Resource::new_own(rep),
-                }),
-                "Outgoing" => outgoings.push(OutgoingGrant {
-                    name,
-                    outgoing: Resource::new_own(rep),
-                }),
-                "Kv" => kvs.push(KvGrant {
-                    name,
-                    kv: Resource::new_own(rep),
-                }),
-                "WsMessage" => messages.push(WsMessageGrant {
-                    name,
-                    message: Resource::new_own(rep),
-                }),
-                _ => senders.push(WsSendGrant {
-                    name,
-                    sender: Resource::new_own(rep),
-                }),
-            }
-        }
-        self.guest.call_run(
-            &mut self.store,
-            &file_list(files),
-            &dirs,
-            &https,
-            &incomings,
-            &outgoings,
-            &kvs,
-            &messages,
-            &senders,
-        )
-    }
-}
 
 impl Handles {
     /// `(name, kind, rep)` of each handle.
@@ -1645,13 +1337,12 @@ fn named(bound: &[Bound]) -> Vec<(String, &'static str)> {
 /// Put one run's grants in `store`'s table (`handles` are there already) and record which grant
 /// each handle is, for the report check and the log. In the order the audit header lists them.
 fn push_grants(
-    store: &mut Store<State>,
+    s: &mut State,
     dirs: Vec<(String, RealDir)>,
     https: Vec<(String, Origin)>,
     handles: Handles,
     kvs: KvGrants,
 ) -> Result<Vec<Bound>> {
-    let s = store.data_mut();
     let mut bound = Vec::new();
     let mut add = |name: String, kind, rep, target| {
         bound.push(Bound {
@@ -1720,9 +1411,7 @@ fn start_audit(
 }
 
 /// Write the audit trailer, even when the run stopped. `outcome` is `ok`, `failed` or `error`.
-fn end_audit(store: &mut Store<State>, l: &Limits, outcome: &str) -> Result<()> {
-    let fuel_used = l.fuel.saturating_sub(store.get_fuel().unwrap_or(0));
-    let d = store.data_mut();
+fn end_audit(d: &mut State, fuel_used: u64, outcome: &str) -> Result<()> {
     let Some(a) = d.audit.as_mut() else { return Ok(()) };
     let line = format!(
         r#"{{"event":"end","outcome":"{outcome}","calls":{},"io":{},"peak_memory":{},"fuel_used":{fuel_used}}}"#,
@@ -1735,216 +1424,6 @@ fn end_audit(store: &mut Store<State>, l: &Limits, outcome: &str) -> Result<()> 
 /// A lone root file, for callers with one source.
 fn single(source: &str) -> (String, String) {
     ("main".into(), source.into())
-}
-
-fn file_list(files: &[(String, String)]) -> Vec<File> {
-    files
-        .iter()
-        .map(|(name, source)| File {
-            name: name.clone(),
-            source: source.clone(),
-        })
-        .collect()
-}
-
-/// Serves one program: the engine, compiled guest and linker are built once, and every request
-/// gets a fresh instance (web decisions 3-5, 9). `Send + Sync`, so threads may share `handle`.
-pub struct Server {
-    engine: Engine,
-    pre: InstancePre<State>,
-    files: Vec<(String, String)>,
-    allowed: HashSet<(String, String)>,
-    params: grants::Params,
-    report: String,
-    limits: Limits,
-    stop: Arc<AtomicBool>,
-    /// Shared by every request.
-    kvs: KvGrants,
-    /// `main`'s `WsMessage` and `WsSend` parameter names, for a WebSocket server.
-    ws: Option<(String, String)>,
-    /// `main`'s `Incoming` and `Outgoing` parameter names, for an HTTP server.
-    http: (String, String),
-}
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        self.stop.store(true, Relaxed);
-    }
-}
-
-/// Instances the pool holds at once; one more fails `handle` until another request ends.
-const POOL_INSTANCES: u32 = 64;
-
-impl Server {
-    /// Check `files` (root first) once and prepare the guest, or return the diagnostics. Every
-    /// request runs under `limits`; the pool reserves address space for `limits.memory` per
-    /// instance, but touches only what the guest uses.
-    pub fn new(files: Vec<(String, String)>, limits: Limits) -> Result<std::result::Result<Self, Vec<Diag>>> {
-        let pairs: Vec<(&str, &str)> = files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
-        let program = match lang::check_files(&pairs, &lang::CapTable::v0()) {
-            Ok(p) => p,
-            Err(diags) => return Ok(Err(diags.into_iter().map(wit_diag).collect())),
-        };
-        let report = lang::report(&program);
-        let allowed = main_calls(&report);
-        let bound = grants::main_params(&lang::lower::lower(&program, &lang::CapTable::v0()));
-        let params = program.main_params();
-        let param = |ty: &str| params.iter().find(|(_, t)| t == ty).map(|(n, _)| n.clone());
-        let ws = param("WsMessage").zip(param("WsSend"));
-        let http = (
-            param("Incoming").unwrap_or("req".into()),
-            param("Outgoing").unwrap_or("res".into()),
-        );
-        let mut pool = PoolingAllocationConfig::new();
-        pool.total_component_instances(POOL_INSTANCES)
-            .total_core_instances(POOL_INSTANCES)
-            .total_memories(POOL_INSTANCES)
-            .total_tables(POOL_INSTANCES)
-            .total_stacks(POOL_INSTANCES)
-            .max_memory_size(limits.memory);
-        let mut config = config::compile_config();
-        set_stack(&mut config, limits.stack);
-        config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
-        let engine = Engine::new(&config)?;
-        let component = checked_guest(&engine, &files)?;
-        let stop = spawn_ticker(&engine);
-        let pre = guest_linker(&engine)?.instantiate_pre(&component)?;
-        Ok(Ok(Server {
-            engine,
-            pre,
-            files,
-            allowed,
-            params: bound,
-            report,
-            limits,
-            stop,
-            kvs: vec![],
-            ws,
-            http,
-        }))
-    }
-
-    /// Grant `kvs` by name to every request; all requests share each store.
-    pub fn grant_kvs(&mut self, kvs: KvGrants) {
-        self.kvs = kvs;
-    }
-
-    /// The program's files, root first.
-    pub fn files(&self) -> &[(String, String)] {
-        &self.files
-    }
-
-    /// The authority report, as `kio check` prints it.
-    pub fn report(&self) -> &str {
-        &self.report
-    }
-
-    /// Run `main` on `request` in a fresh instance, with `dirs` granted by name. A program that
-    /// sends no response, or traps, gets a 500 with an empty body and the cause on stderr. `Err`
-    /// means no instance could be made (for example the pool is full).
-    pub fn handle(&self, request: Request, dirs: Vec<(String, RealDir)>) -> std::result::Result<Response, String> {
-        let mut sent = Sent::default();
-        let result = self.run_fresh(dirs, |kio| {
-            let (s, handles) = web_grants(&mut kio.store, request, (&self.http.0, &self.http.1))?;
-            sent = s;
-            Ok(handles)
-        })?;
-        let response = sent.lock().unwrap_or_else(PoisonError::into_inner).take();
-        match (result, response) {
-            (Ok(_), Some(r)) => Ok(r),
-            (Err(why), _) => {
-                eprintln!("request failed: {why}");
-                Ok(Response::internal_error())
-            }
-            _ => {
-                eprintln!("request failed: no response sent");
-                Ok(Response::internal_error())
-            }
-        }
-    }
-
-    /// The names of `main`'s `WsMessage` and `WsSend` parameters, if it takes both: the program
-    /// is then a WebSocket server.
-    pub fn ws_params(&self) -> Option<&(String, String)> {
-        self.ws.as_ref()
-    }
-
-    /// Run `main` on one WebSocket event in a fresh instance, with `dirs` granted by name;
-    /// `closed` makes every send `closed`. The frames to write, in order, or `None` if the run
-    /// failed (a trap, a limit or `Err` from `main`; the cause goes to stderr). `Err` means no
-    /// instance could be made.
-    pub fn handle_ws(
-        &self,
-        event: ws::WsEvent,
-        closed: bool,
-        dirs: Vec<(String, RealDir)>,
-    ) -> std::result::Result<Option<Vec<ws::WsFrame>>, String> {
-        let names = self.ws.as_ref().ok_or("main takes no WsMessage")?;
-        let mut sends = ws::Sends::default();
-        let result = self.run_fresh(dirs, |kio| {
-            let (s, handles) = ws_grants(&mut kio.store, event, closed, names)?;
-            sends = s;
-            Ok(handles)
-        })?;
-        let why = match result {
-            Ok(o) if !o.failed => {
-                return Ok(Some(std::mem::take(
-                    &mut sends.lock().unwrap_or_else(PoisonError::into_inner).frames,
-                )))
-            }
-            Ok(o) => format!("main returned Err: {}", o.value),
-            Err(why) => why,
-        };
-        eprintln!("websocket event failed: {why}");
-        Ok(None)
-    }
-
-    /// Run `main` once in a fresh instance with `dirs`, the shared `Kv` stores and the handles
-    /// `grant` adds. The outcome, or why the run failed; `Err` means no instance could be made.
-    fn run_fresh(
-        &self,
-        dirs: Vec<(String, RealDir)>,
-        grant: impl FnOnce(&mut Kio) -> Result<Handles>,
-    ) -> std::result::Result<std::result::Result<Outcome, String>, String> {
-        let mut kio = self.instance().map_err(|e| format!("cannot start instance: {e:#}"))?;
-        kio.store.data_mut().allowed = self.allowed.clone();
-        kio.store.data_mut().params = Some(self.params.clone());
-        kio.kvs = self.kvs.clone();
-        let handles = grant(&mut kio).map_err(|e| e.to_string())?;
-        Ok(match kio.run_armed(&self.files, dirs, vec![], handles) {
-            Ok(Ok(o)) => Ok(o),
-            Err(e) => Err(kio.explain(&e).unwrap_or_else(|| format!("{e:#}"))),
-            Ok(Err(diags)) => Err(diags.iter().map(|d| d.message.as_str()).collect::<Vec<_>>().join("; ")),
-        })
-    }
-
-    /// A `Kio` with a fresh store and instance; it does not own the epoch ticker.
-    fn instance(&self) -> Result<Kio> {
-        let mut store = new_store(&self.engine, &self.limits)?;
-        let instance = self.pre.instantiate(&mut store)?;
-        let guest = Guest::new(&mut store, &instance)?;
-        Ok(Kio {
-            store,
-            guest,
-            stop: None,
-            limits: self.limits,
-            audit: None,
-            #[cfg(feature = "test-hooks")]
-            hidden: None,
-            kvs: vec![],
-        })
-    }
-}
-
-/// A checker diagnostic in caps.wit's shape, as the guest returns it.
-fn wit_diag(d: lang::Diag) -> Diag {
-    Diag {
-        start: d.span.start as u32,
-        end: d.span.end as u32,
-        message: d.msg,
-        hint: d.hint,
-        file: d.span.file,
-    }
 }
 
 impl Response {

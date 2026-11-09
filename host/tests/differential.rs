@@ -5,11 +5,10 @@
 
 use kio_host::kv::Store;
 use kio_host::ws::WsEvent;
-use kio_host::{Compiled, Kio, Limits, Origin, Request, MAX_STACK};
+use kio_host::{Interp, Kio, Limits, Origin, Request};
 use lang::CapTable;
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -168,7 +167,7 @@ fn paths(w: &World) -> Vec<(String, String)> {
 fn compiled(src: &str, params: &[(String, String)]) -> Seen {
     let w = world(params);
     let log = Log::default();
-    let mut c = Compiled::new(limits());
+    let mut c = Kio::new(limits()).unwrap();
     c.audit(log.clone(), paths(&w));
     c.grant_kvs(w.kvs);
     let (r, sent) = if w.web {
@@ -180,7 +179,7 @@ fn compiled(src: &str, params: &[(String, String)]) -> Seen {
     };
     let r = match r {
         Ok(Ok(o)) => Ok(Ok(o)),
-        Ok(Err(d)) => Ok(Err((d[0].msg.clone(), d[0].span.start, d[0].span.end))),
+        Ok(Err(d)) => Ok(Err((d[0].message.clone(), d[0].start as usize, d[0].end as usize))),
         Err(e) => Err(format!("{e:#}")),
     };
     (finish(r, |o| Ok((o.value, o.failed))), sent, log.lines())
@@ -189,7 +188,7 @@ fn compiled(src: &str, params: &[(String, String)]) -> Seen {
 fn interpreted(src: &str, params: &[(String, String)]) -> Seen {
     let w = world(params);
     let log = Log::default();
-    let mut k = Kio::new(limits()).unwrap();
+    let mut k = Interp::new(limits()).unwrap();
     k.audit(log.clone(), paths(&w));
     k.grant_kvs(w.kvs);
     let (r, sent) = if w.web {
@@ -224,20 +223,15 @@ fn differential() {
         }
         let Ok(program) = lang::check(src, &caps) else { continue };
         let params = program.main_params();
-        let c = match catch_unwind(AssertUnwindSafe(|| compiled(src, &params))) {
-            Ok(c) => c,
-            Err(p) => {
-                let msg = (p.downcast_ref::<String>().cloned())
-                    .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
-                    .unwrap_or_default();
-                // Only an `unimplemented!` node is a skip; any other panic is a codegen bug.
-                let Some(node) = msg.strip_prefix("not implemented: codegen: ") else {
-                    panic!("codegen panicked: {msg}\n{src}");
-                };
+        let c = compiled(src, &params);
+        // Only IR codegen does not handle yet (its `unimplemented!`) is a skip; any other codegen
+        // panic is an "internal compiler error", which fails as a mismatch.
+        if let End::Done(Err((m, _, _))) = &c.0 {
+            if let Some(node) = m.strip_prefix("host error: not compiled yet: ") {
                 *unsupported.entry(node.to_string()).or_default() += 1;
                 continue;
             }
-        };
+        }
         ran += 1;
         // The runtime traps when objects are left alive at the end of a run that did not trap.
         if let End::Done(Err((m, _, _))) = &c.0 {
@@ -246,8 +240,14 @@ fn differential() {
                 continue;
             }
         }
+        // A program stopped by a limit compiled is not compared (decision 6). The native
+        // interpreter has no fuel, so it is not run on it: it may loop forever.
+        if c.0 == End::Limit {
+            limited += 1;
+            continue;
+        }
         let i = interpreted(src, &params);
-        if c.0 == End::Limit || i.0 == End::Limit {
+        if i.0 == End::Limit {
             limited += 1;
         } else if c == i {
             agreed += 1;
@@ -273,12 +273,10 @@ fn differential() {
 
 #[test]
 fn compiled_agrees_with_the_interpreter() {
-    // Wasm runs on this thread's stack, so it needs room above `--stack`, as `kio` gives it.
-    let t = std::thread::Builder::new().stack_size(4 * MAX_STACK);
     // Codegen's `unimplemented!` panics are expected and counted, so keep them quiet.
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
-    let r = t.spawn(differential).unwrap().join();
+    let r = std::panic::catch_unwind(differential);
     std::panic::set_hook(hook);
     if let Err(e) = r {
         std::panic::resume_unwind(e);

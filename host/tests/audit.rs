@@ -1,4 +1,4 @@
-use kio_host::{Compiled, Kio, Limits};
+use kio_host::{Interp, Kio, Limits};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
@@ -48,7 +48,7 @@ fn primer_on(compiled: bool, limits: Limits, out_files: &[&str], hide: Option<(&
     let log = Log::default();
     let paths = vec![("input".into(), "/in".into()), ("out".into(), "/out".into())];
     if compiled {
-        let mut c = Compiled::new(limits);
+        let mut c = Kio::new(limits).unwrap();
         c.audit(log.clone(), paths);
         if let Some((cap, m)) = hide {
             c.hide_from_report(cap, m);
@@ -56,7 +56,7 @@ fn primer_on(compiled: bool, limits: Limits, out_files: &[&str], hide: Option<(&
         let stopped = c.run_with(&src, dirs, vec![]).is_err();
         return (log, stopped);
     }
-    let mut kio = Kio::new(limits).unwrap();
+    let mut kio = Interp::new(limits).unwrap();
     kio.audit(log.clone(), paths);
     if let Some((c, m)) = hide {
         kio.hide_from_report(c, m);
@@ -175,7 +175,7 @@ fn report_check_holds_without_a_log() {
         ("input".to_string(), kio_host::open_dir(a.path()).unwrap()),
         ("out".to_string(), kio_host::open_dir(b.path()).unwrap()),
     ];
-    let mut kio = Kio::new(Limits::default()).unwrap();
+    let mut kio = Interp::new(Limits::default()).unwrap();
     kio.hide_from_report("input", "read");
     let e = kio.run(&src, dirs).unwrap_err();
     let msg = kio.explain(&e).unwrap();
@@ -194,7 +194,7 @@ fn dir_methods_are_logged() {
     std::fs::create_dir(t.path().join("sub")).unwrap();
     let run = |hide: Option<&str>| {
         let log = Log::default();
-        let mut kio = Kio::new(Limits::default()).unwrap();
+        let mut kio = Interp::new(Limits::default()).unwrap();
         kio.audit(log.clone(), vec![("d".into(), "/d".into())]);
         if let Some(m) = hide {
             kio.hide_from_report("d", m);

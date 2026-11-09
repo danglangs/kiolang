@@ -22,10 +22,11 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 | L6b | closures, capturing by copy, lifted to functions in lowering; a closure cannot capture a capability; interpreter only |
 | L6c | `map`, `and_then`, `map_err`, `filter`, `any`, `all` on `Option`/`Result`/`List`, typed from the function; a closure argument takes its parameter type from the receiver; interpreter only (C9b) |
 | C9a | `fn` values and closures compiled: harness 300 ran both ways, 0 unsupported, 0 mismatches (left: capabilities, C4); a call through a value costs ~10 ns over a direct call (10 M: 144 ms vs 44 ms, incl. compiling) |
+| C5 | compiled only: `kio run` and `--listen` compile; the guest crate, its world, wizer and WASI are gone; the interpreter is the native test oracle (`Interp`). On-disk compile cache; fuel defaults a tenth. `Server::handle` 170 to 32 µs, `--listen` startup 0.95 to 0.17 s, idle RSS 66 to 28 MB. Programs with `fn` values fail "not compiled yet" until C9a/C9b |
 
 ## Next
 
-1. **C5** (compiled only), C7 (review: C4's grant path, `cabi_realloc` and `IN_PLACE`, the raw `send` import, the `trap` site `EXTRA` that returns, C9a's function table), C8 (measure, refcount elision).
+1. C7a follow-ups, and a review of C5's compile cache, `RUN_STACK` and the `Interp` oracle; C8 (measure, refcount elision).
 2. C9b (L6c's built-ins compiled), then L7 generics.
 
 ## Waiting on the maintainer
@@ -41,4 +42,4 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 | Rust | 24 ms | 20 ms |
 | kio compiled (plus ~10 ms compile) | 117 ms | 46 ms |
 | Python 3.11 | 890 ms | 1.76 s |
-| kio interpreter (`kio run` today) | 3.8 s | 5.9 s |
+| kio interpreter (the test oracle since C5) | 3.8 s | 5.9 s |

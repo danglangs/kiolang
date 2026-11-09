@@ -2,7 +2,7 @@
 //! `KIO_GEN_N` programs (default 250) from seed `KIO_GEN_SEED` (default fixed) on; a mismatch
 //! prints the seed and the source, so `KIO_GEN_SEED=<seed> KIO_GEN_N=1` reruns it alone.
 
-use kio_host::{Compiled, Kio, Limits, MAX_STACK};
+use kio_host::{Interp, Kio, Limits, MAX_STACK};
 use kiogen::Features;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -32,14 +32,14 @@ fn limits() -> Limits {
 }
 
 fn compiled(src: &str) -> Option<Run> {
-    finish(Compiled::run(src, limits()).map(|r| {
+    finish(Kio::new(limits()).unwrap().run(src, vec![]).map(|r| {
         r.map(|o| (o.value, o.failed))
-            .map_err(|d| (d[0].msg.clone(), d[0].span.start, d[0].span.end))
+            .map_err(|d| (d[0].message.clone(), d[0].start as usize, d[0].end as usize))
     }))
 }
 
 fn interpreted(src: &str) -> Option<Run> {
-    finish(Kio::new(limits()).unwrap().run(src, vec![]).map(|r| {
+    finish(Interp::new(limits()).unwrap().run(src, vec![]).map(|r| {
         r.map(|o| (o.value, o.failed))
             .map_err(|d| (d[0].message.clone(), d[0].start as usize, d[0].end as usize))
     }))
@@ -70,7 +70,12 @@ fn generated() {
             Ok(c) => c,
             Err(p) => fail(format!("codegen panicked: {:?}", p.downcast_ref::<String>())),
         };
-        match (c, interpreted(&src)) {
+        // Stopped by a limit compiled: the native interpreter, which has no fuel, is not run.
+        let Some(c) = c else {
+            limited += 1;
+            continue;
+        };
+        match (Some(c), interpreted(&src)) {
             (Some(c), Some(i)) if c != i => fail(format!("compiled: {c:?}\ninterpreted: {i:?}")),
             (Some(Ok(_)), Some(_)) => values += 1,
             (Some(Err(_)), Some(_)) => errors += 1,

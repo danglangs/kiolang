@@ -24,19 +24,14 @@ http-body-util = "0.1.5"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1.21", features = ["tokio"] }
 lang = { path = "../lang" }
-rustix = { version = "1", default-features = false, features = ["fs"] }
+rustix = { version = "1", default-features = false, features = ["fs", "process"] }
 serde_json = "1"
 sha2 = "0.10"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "macros", "signal", "sync", "time"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 ureq = "3"
 url = "2"
-wasmtime = "50"
-wasmtime-wasi = "50"
-wasmtime-wizer = { version = "50", default-features = false, features = ["component-model", "wasmtime"] }
-
-[build-dependencies]
-wasmtime = "50"
+wasmtime = { version = "50", default-features = false, features = ["anyhow", "backtrace", "component-model", "cranelift", "demangle", "addr2line", "parallel-compilation", "pooling-allocator", "runtime", "std"] }
 
 [dev-dependencies]
 kio = { path = ".", features = ["test-hooks"] }

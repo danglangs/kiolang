@@ -138,7 +138,9 @@ pub fn serve_with(
     limits: ListenLimits,
     bound: impl FnOnce(SocketAddr),
 ) -> Result<(), String> {
+    // Requests run compiled code on the runtime's blocking threads (`with_permit`).
     let rt = tokio::runtime::Builder::new_multi_thread()
+        .thread_stack_size(crate::RUN_STACK)
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;

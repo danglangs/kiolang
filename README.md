@@ -8,12 +8,12 @@ Most languages today are not AI-safe: any line can read files, open sockets or s
 
 kio is a fresh language built around that idea, using Rust's ecosystem for speed and tooling. The goal is a general-purpose systems language: near-native speed, no garbage collector, memory and capability safe.
 
-**Status:** v0 works end to end: checking, the authority report, a Wasm sandbox with enforced limits, files, HTTP and serving. A compiler to Wasm runs integer code, calls and control flow within about 2-5x of Rust and 8-38x faster than Python, checked against the interpreter on every test program; `kio run` switches to it once it covers strings, collections and capabilities ([docs/roadmap.md](docs/roadmap.md)). Where work stands: [docs/status.md](docs/status.md).
+**Status:** v0 works end to end: checking, the authority report, a Wasm sandbox with enforced limits, files, HTTP and serving. `kio run` compiles every program to Wasm and native code (within about 2-5x of Rust on compute, 8-38x faster than Python), checked against the interpreter on every test program; function values (`fn` types, closures) are not compiled yet ([docs/roadmap.md](docs/roadmap.md)). Where work stands: [docs/status.md](docs/status.md).
 
 ## Quickstart
 
 ```
-rustup target add wasm32-wasip2
+rustup target add wasm32-unknown-unknown
 cargo install --git https://github.com/danglangs/kiolang kio
 git clone https://github.com/danglangs/kiolang && cd kiolang      # for the examples
 ```
@@ -83,14 +83,14 @@ On a loopback `--listen`, a request's `Host` must be `localhost`, `127.0.0.1` or
 - `--audit log.jsonl` records every host call: capability, method, path, bytes and result. A call the report did not predict stops the run as a checker bug.
 - Every run is bounded: `--fuel`, `--timeout`, `--memory`, `--stack`, `--calls`, `--io`. Each limit's error names the flag that raises it.
 - Errors teach: `did you mean count?`, `declare it with let mut`.
-- Performance: about 24,000 requests/s with keep-alive, 6,200 without, with a fresh sandbox per request ([docs/perf.md](docs/perf.md)).
+- Performance: about 60,000 requests/s with keep-alive, 21,000 without, with a fresh sandbox per request ([docs/perf.md](docs/perf.md)). `kio run` keeps compiled programs in `~/.cache/kio`, so a second run of the same program skips the compile.
 - The language: [docs/language.md](docs/language.md). A web framework in kio: [kio-web](https://github.com/danglangs/kio-web).
 - A guided demo: `examples/tour/demo.sh` walks through the report, a rejected helper, a refused escape and a fuel stop.
 - From source: `cargo test` runs every suite; `cargo run -p kio -- run file.kio` runs without installing.
 
 ## Use from an agent
 
-`kio mcp` is an MCP server on stdio with two tools: `kio_primer` (the language guide) and `kio_check` (check source in the sandbox; errors come back as `{file, line, message, hint}`). There is no run tool: grants are the operator's decision. Add it to an MCP client config:
+`kio mcp` is an MCP server on stdio with two tools: `kio_primer` (the language guide) and `kio_check` (check source; errors come back as `{file, line, message, hint}`). There is no run tool: grants are the operator's decision. Add it to an MCP client config:
 
 ```json
 { "mcpServers": { "kio": { "command": "kio", "args": ["mcp"] } } }
@@ -119,7 +119,7 @@ Why not add a checker to Python or Rust, or run agent code in a container? kio i
 |---|---|
 | Static analysis on an existing language | Ambient authority is built into the standard library, and `eval`, reflection, FFI, `unsafe`, macros, build scripts and dependencies all reach around the analysis. Making the analysis sound means banning most of the language, which is a new language without the enforcement. Nothing makes the code that runs be the code that was checked. |
 | Containers, seccomp, VMs | They confine the whole process, all or nothing. They cannot say which function may send data where, and nothing tells a reviewer what the code can do before it runs. |
-| kio | Authority is in every signature, so the checker's rule is one sentence and its report is exact. The checker runs inside the sandbox on the code it executes, the host enforces every grant again, and the host logs every call. |
+| kio | Authority is in every signature, so the checker's rule is one sentence and its report is exact. The checker runs in the host on the code it compiles, the sandbox runs only that code, the host enforces every grant again, and the host logs every call. |
 
 The cost is the ecosystem: kio has few libraries and no package manager yet. Two things soften it. Agents, not people, write most of the code, and Rust syntax means models already write it well. Heavy lifting such as HTTP, TLS and filesystems lives in the host, in Rust, behind capabilities.
 
@@ -151,13 +151,12 @@ The checker is for early, readable rejection and the authority report. The host 
 ## Plan
 
 ```
-source ─► check + report ─► lower ─► IR ─┬─► interpreter (in the sandbox; `kio run` today)
-                                         └─► codegen ─► Wasm + runtime ─► Cranelift ─► native code
+source ─► check + report ─► lower ─► IR ─┬─► codegen ─► Wasm + runtime ─► Cranelift ─► native code (`kio run`)
+                                         └─► interpreter (native, tests only: the reference)
 ```
 
 - `lang`: parser, checker, lowering, interpreter. No I/O, no dependencies, tested natively.
-- `guest`: `lang` built to `wasm32` as the interpreter component; see [caps.wit](caps.wit).
-- `runtime` and `codegen`: the compiler's runtime library and code generator ([docs/codegen.md](docs/codegen.md)).
+- `runtime` and `codegen`: the compiler's runtime library and code generator ([docs/codegen.md](docs/codegen.md)); the sandbox interface is [caps.wit](caps.wit).
 - `host`: the `kio` binary. Wasmtime, grants, limits, host functions.
 
 Steps:
@@ -165,13 +164,14 @@ Steps:
 1. Done: parser, checker and authority report natively, with accept/reject tests (G1, G2).
 2. Done: interpreter natively, with stub host functions.
 3. Done: capability table generated from `caps.wit`, real `Dir` and `Http` host functions (G3, G4).
-4. Done: guest built for `wasm32`, running in Wasmtime with limits (G5).
+4. Done: programs running in Wasmtime with limits (G5).
 5. Done: adversarial reviews of the capability rules and the host (path escapes, forged handles, runaway loops, blocked calls). `Http` refuses other hosts, off-origin redirects and private addresses.
 6. Done: an audit log of every host call, and `kio mcp`, which serves the primer and `check` to agents.
-7. Done: `kio run --listen`, one fresh sandbox per request (about 0.2 ms each), with slow-client limits, and [kio-web](https://github.com/danglangs/kio-web), a web framework written in kio ([docs/web-support-todo.md](docs/web-support-todo.md)).
+7. Done: `kio run --listen`, one fresh sandbox per request (about 35 µs each, compiled), with slow-client limits, and [kio-web](https://github.com/danglangs/kio-web), a web framework written in kio ([docs/web-support-todo.md](docs/web-support-todo.md)).
 8. Done: copy-on-write values (passing a value is cheap; semantics unchanged) and the program checked once per server, not per request.
 9. Done: lowering to a typed IR (the interpreter runs it, 3x faster), and a compiler to Wasm for `Int`, `Bool`, control flow and calls, with a differential harness against the interpreter ([docs/compiler-todo.md](docs/compiler-todo.md)).
-10. Next: the compiler for strings, collections, structs and capabilities, then `kio run` compiled by default; later attenuation.
+10. Done: the compiler for strings, collections, structs and capabilities; `kio run` and `--listen` compile (C5), and the interpreter is the test oracle only.
+11. Next: function values compiled (C9), a review of the runtime and codegen (C7); later attenuation.
 
 v0 has no globals, reflection or `unsafe`. Capabilities are parameters only. See [docs/language.md](docs/language.md).
 

@@ -15,12 +15,10 @@ Each layer holds without the one above it. The host enforces every guarantee eve
 ```
  Agent writes          HOST (Rust, trusted)                              SANDBOX (Wasmtime)
 ┌──────────────┐   ┌───────────────────────────────────────┐   ┌────────────────────────────┐
-│ .kio source: │──▶│ check ─► report ─► lower ─► IR        │   │ compiled: program.wasm +   │
-│ records, fns,│   │   │ accept/reject         └─► codegen ─┼──▶│ runtime (refcounts, Str,   │
-│ cap params   │   │   ▼ errors back to agent    (C5: default)  │ List, Map), native code    │
+│ .kio source: │──▶│ check ─► report ─► lower ─► IR        │   │ program.wasm + runtime     │
+│ records, fns,│   │   │ accept/reject         └─► codegen ─┼──▶│ (refcounts, Str, List,     │
+│ cap params   │   │   ▼ errors back to agent    + Cranelift│   │ Map), as native code       │
 └──────────────┘   │                                       │   │                            │
-                   │ today `kio run`: source ──────────────┼──▶│ interpreter guest (lang)   │
-                   │                                       │   │                            │
                    │ host functions: dir.read, http.get,   │◀──┼─ the only way out: imports │
                    │ send, trap; check every handle, path, │   │   from caps.wit            │
                    │ quota; write the audit log            │   └────────────────────────────┘
@@ -30,10 +28,10 @@ Each layer holds without the one above it. The host enforces every guarantee eve
 | Component | Trusted | Role |
 |---|---|---|
 | `.kio` source | No | Business logic. Capabilities are opaque values that can be passed and called, never created. |
-| Checker | Yes | Accepts or rejects the program against the capability table and emits the authority report. Runs in the host (decided 2026-11-06); today the interpreter guest also checks what it runs. |
+| Checker | Yes | Accepts or rejects the program against the capability table and emits the authority report. Runs in the host (decided 2026-11-06), once per run or once per server. |
 | Lowering and codegen | Yes | Turn the checked program into an IR, then Wasm, linked with the runtime. A bug can give a wrong answer, not an escape: the sandbox and the host still enforce every grant. |
 | Runtime | No more than the program | Refcounted values, strings and collections, in the same module as the program. |
-| Interpreter | No more than the program | Runs the IR inside the sandbox: `kio run` today, and the reference the compiler is tested against. |
+| Interpreter | Not shipped | Runs the IR natively in tests only: the reference compiled code must match (differential tests). |
 | `caps.wit` | Yes | Declares every function that crosses the sandbox wall. Changing it is a security-review event. |
 | Wasmtime | Yes | In-process sandbox. No ambient file, network, env or clock. Fuel, memory, stack and epoch limits. |
 | Host functions | Yes | The only code that touches real resources. Each call validates the handle, its scope and quotas. |
@@ -43,7 +41,6 @@ Everything runs in one OS process, the `kio` binary. The sandbox is a memory wal
 ## Crates
 
 - `lang`: parser, checker, lowering to IR, interpreter. No I/O, no dependencies. All language tests run natively.
-- `guest`: `lang` built to `wasm32` as the interpreter component (`guest` world).
 - `runtime`: compiled kio's runtime library, `no_std`, built to one core module (`compiled` world).
 - `codegen`: IR to Wasm, appended to the runtime and wrapped as a component.
 - `host`: the `kio` binary. Wasmtime, grants, limits, host functions, the audit log, `--listen`, `kio mcp`.
@@ -53,18 +50,16 @@ Everything runs in one OS process, the `kio` binary. The sandbox is a memory wal
 | File | Written by | Read by | When |
 |---|---|---|---|
 | `caps.wit` | you, by hand, rarely | build step | at build |
-| capability table (Rust) | generated from `caps.wit` by `tools/capgen` (checked in, CI diffs it) | checker, inside the guest | at build |
-| guest and host Rust bindings | generated from `caps.wit` by wit-bindgen | rustc | at build |
-| `prog.kio` | the agent | checker, then interpreter (compiler from C5) | every run |
+| capability table (Rust) | generated from `caps.wit` by `tools/capgen` (checked in, CI diffs it) | checker, in the host | at build |
+| runtime and host Rust bindings | generated from `caps.wit` by wit-bindgen and Wasmtime's `bindgen!` | rustc | at build |
+| `prog.kio` | the agent | checker, then compiler, in the host | every run |
 | grants (`--dir name=path`) | the operator | host | every run |
 
-Adding a method to `caps.wit` regenerates the capability table, the guest import stub and the host trait. The host no longer compiles until the method is implemented. The three cannot drift.
+Adding a method to `caps.wit` regenerates the capability table, the runtime's import stub and the host trait. The host no longer compiles until the method is implemented. The three cannot drift.
 
 `caps.wit` is one file for the whole toolchain. It says what a `Dir` *can* do. A grant says which directory *this run* gets. The program says which roles it *needs*. Three layers, three owners.
 
 ## One run, step by step
-
-Today `kio run` uses the interpreter guest, as below. Compiled runs (the default from C5) differ in steps 3 to 6 and 9: the host checks, lowers and compiles first, the compiled `run` receives the grants in `main`'s parameter order, and compiled code, not the interpreter, makes the import calls through the same host functions (`kio_host::Compiled`, C4).
 
 ```
 kio run prog.kio --dir input=/srv/jobs/42/in --dir out=/srv/jobs/42/out
@@ -72,18 +67,17 @@ kio run prog.kio --dir input=/srv/jobs/42/in --dir out=/srv/jobs/42/out
 
 | Step | What happens | Where |
 |---|---|---|
-| 1 | Host opens each granted directory with cap-std and builds the handle table `{0: input, 1: out}` | host, native |
-| 2 | Host instantiates the guest with fuel, memory and epoch limits, and binds the WIT imports to its host functions | Wasmtime |
-| 3 | Host calls `run(files, [{input, 0}, {out, 1}], [], [], [])` | wall crossed, into the guest |
-| 4 | Guest parses and checks against the embedded capability table. On reject it returns the diagnostics. No I/O has happened. | guest |
-| 5 | Guest binds each grant to the `main` parameter of the same name. The host has already checked the binding before step 3 (host/src/grants.rs, shared with compiled runs): a missing, unknown, repeated or mistyped grant is an error and no code runs | host, then guest |
-| 6 | Interpreter starts `main` with `Cap(Dir, 0)` and `Cap(Dir, 1)` | guest |
-| 7 | On `input.read("invoices.csv")` the interpreter calls the import `dir.read(0, "invoices.csv")` | wall crossed, out of the guest |
-| 8 | Host looks up handle 0, checks its kind, charges the call quota, resolves the path beneath the root, enforces the size limit, reads, returns bytes | host, native |
-| 9 | Interpreter continues. Steps 7 and 8 repeat per capability call. | guest |
-| 10 | `main` returns. The guest returns the report and `main`'s value; the host prints the report to stderr (when `main` takes capabilities) and the value (nothing for `()` or `Ok(())`; `Err(e)` as `error: e` on stderr), sets the exit status and drops the handle table. | host |
+| 1 | Host reads the files, parses and checks them against the capability table. On reject it prints the diagnostics; nothing has run. | host, native |
+| 2 | Host lowers the program to IR, generates its Wasm, appends it to the runtime and compiles the module to native code with Cranelift | host, native |
+| 3 | Host opens each granted directory with cap-std and builds the handle table `{0: input, 1: out}` | host, native |
+| 4 | Host binds each grant to the `main` parameter of the same name (host/src/grants.rs): a missing, unknown, repeated or mistyped grant is an error and no code runs | host, native |
+| 5 | Host instantiates the module with fuel, memory, stack and epoch limits, binds its imports to the host functions, and calls `run([dir(0), dir(1)])`, the grants in parameter order | wall crossed, into the sandbox |
+| 6 | Compiled `main` runs. On `input.read("invoices.csv")` it calls the import `dir.read(0, "invoices.csv")` | wall crossed, out of the sandbox |
+| 7 | Host looks up handle 0, checks its kind, charges the call quota, checks the call is on `main`'s report line, resolves the path beneath the root, enforces the size limit, reads, returns bytes | host, native |
+| 8 | Compiled code continues. Steps 6 and 7 repeat per capability call. A runtime error calls the `trap` import with its site; the host turns it into the error's message and span. | sandbox |
+| 9 | `run` returns `main`'s value printed. The host prints the report to stderr (when `main` takes capabilities) and the value (nothing for `()` or `Ok(())`; `Err(e)` as `error: e` on stderr), sets the exit status and drops the handle table. | host |
 
-`kio check prog.kio` calls the `check` export: steps 3 and 4 only, no handles. It returns the report or the diagnostics, with spans and hints. The MCP tool calls the same export.
+`kio check prog.kio` is step 1 only. The MCP tool `kio_check` is the same. Under `--listen`, steps 1 and 2 run once at startup; each request or WebSocket event runs steps 4 to 9 in a fresh instance.
 
 ## The host
 
@@ -97,20 +91,20 @@ kio run prog.kio --dir input=/srv/jobs/42/in --dir out=/srv/jobs/42/out
 
 ## Limits
 
-Defaults per run, or per request or WebSocket event under `--listen` (fuel 100 million, 64 MB, 5 s); each can be overridden by a `kio run` flag. A server also bounds slow clients: each connection lives at most 60 s (until it becomes a WebSocket), headers within 10 s (which also closes an idle keep-alive connection after 10 s), the body within 10 s more, headers to about 64 KB (hyper checks after each read, so one large read can reach about 114 KB), 1,000 connections, 100 requests queued. A WebSocket closes on a message over 1 MB (1009), over 64 KB of events waiting (1008), 5 minutes without a frame (1000), or a failed run (1011); its sends are written after each run, within 10 s. Exceeding one stops the run with an error naming the limit.
+Defaults per run, or per request or WebSocket event under `--listen` (fuel 10 million, 64 MB, 5 s); each can be overridden by a `kio run` flag. A server also bounds slow clients: each connection lives at most 60 s (until it becomes a WebSocket), headers within 10 s (which also closes an idle keep-alive connection after 10 s), the body within 10 s more, headers to about 64 KB (hyper checks after each read, so one large read can reach about 114 KB), 1,000 connections, 100 requests queued. A WebSocket closes on a message over 1 MB (1009), over 64 KB of events waiting (1008), 5 minutes without a frame (1000), or a failed run (1011); its sends are written after each run, within 10 s. Exceeding one stops the run with an error naming the limit.
 
 | Limit | Default | Flag | Bounds |
 |---|---|---|---|
-| Fuel | 1 billion | `--fuel` | instructions, so infinite loops end |
+| Fuel | 100 million | `--fuel` | Wasm instructions, so infinite loops end; a typical program uses under 5 million |
 | Memory | 256 MB | `--memory` (MB) | guest linear memory |
-| Wasm stack | 2 MB | `--stack` (KB) | recursion; in a release host, calls 1_000 deep (the interpreter's limit) need up to about 1.8 MB when they recurse through loops |
+| Wasm stack | 2 MB | `--stack` (KB, at most 8 MB) | recursion: about 43,000 calls of a small function, 21,000 through a loop |
 | Wall clock | 10 s | `--timeout` | slow hosts and long runs |
 | Host calls | 10,000 | `--calls` | capability calls; at most 64 timed-out calls may still be finishing at once, process-wide |
 | I/O | 100 MB total, 10 MB per read | `--io` | bytes read and written |
 
 ## Where the checker runs
 
-Decided 2026-11-06: in the host. The host already holds every grant and enforces every limit, so a second check inside the sandbox adds no safety, and checking there cost the sandbox's memory and fuel on every request (open_questions #33). Adversarial source is then parsed outside the sandbox, so the front end must never panic or recurse without bound: the host runs it on a large stack, and the program generator (compiler C6) fuzzes it.
+Decided 2026-11-06, done in C5: in the host. The host already holds every grant and enforces every limit, so a second check inside the sandbox adds no safety, and checking there cost the sandbox's memory and fuel on every request (open_questions #33). The sandbox receives compiled code only. Adversarial source is then parsed outside the sandbox, so the front end must never panic or recurse without bound: the host runs it on a large stack, and the program generator (compiler C6) fuzzes it.
 
 The host never relies on the checker for safety. The handle table and host functions enforce every guarantee on their own. The checker exists for early, readable rejection and for the authority report.
 

@@ -1,4 +1,4 @@
-use kio_host::{Compiled, Kio, Limits};
+use kio_host::{Interp, Kio, Limits};
 
 /// A run's value, or its first error as (message, start, end).
 type Run = Result<String, (String, usize, usize)>;
@@ -12,14 +12,14 @@ fn limits() -> Limits {
 }
 
 fn compiled(src: &str) -> Run {
-    match Compiled::run(src, limits()).unwrap() {
+    match Kio::new(limits()).unwrap().run(src, vec![]).unwrap() {
         Ok(out) => Ok(out.value),
-        Err(d) => Err((d[0].msg.clone(), d[0].span.start, d[0].span.end)),
+        Err(d) => Err((d[0].message.clone(), d[0].start as usize, d[0].end as usize)),
     }
 }
 
 fn interpreted(src: &str) -> Run {
-    match Kio::new(limits()).unwrap().run(src, vec![]).unwrap() {
+    match Interp::new(limits()).unwrap().run(src, vec![]).unwrap() {
         Ok(out) => Ok(out.value),
         Err(d) => Err((d[0].message.clone(), d[0].start as usize, d[0].end as usize)),
     }
@@ -42,7 +42,9 @@ fn error(src: &str) -> String {
 
 #[test]
 fn forty_plus_two_compiled() {
-    let out = Compiled::run("fn main() -> Int { 40 + 2 }", Limits::default())
+    let out = Kio::new(Limits::default())
+        .unwrap()
+        .run("fn main() -> Int { 40 + 2 }", vec![])
         .unwrap()
         .unwrap();
     assert_eq!((out.value.as_str(), out.failed), ("42", false));
@@ -252,7 +254,7 @@ fn deep_recursion_is_a_stack_overflow() {
 
 fn deep_recursion() {
     let src = "fn down(n: Int) -> Int { if n == 0 { 0 } else { 1 + down(n - 1) } } fn main() -> Int { down(10000000) }";
-    let e = Compiled::run(src, Limits::default()).unwrap_err();
+    let e = Kio::new(Limits::default()).unwrap().run(src, vec![]).unwrap_err();
     assert_eq!(e.to_string(), "stack overflow (limit 2048 KB; raise it with --stack)");
     // Within the interpreter's limit both agree.
     assert_eq!(value(&src.replace("10000000", "900")), "900");
@@ -798,8 +800,8 @@ fn nested_patterns() {
 /// `main`'s value and failed flag both ways: a `Result` that is `Err` fails and shows its error
 /// alone (a `Str` bare); anything else shows as a value.
 fn outcome(src: &str) -> (String, bool) {
-    let c = Compiled::run(src, limits()).unwrap().unwrap();
-    let i = Kio::new(limits()).unwrap().run(src, vec![]).unwrap().unwrap();
+    let c = Kio::new(limits()).unwrap().run(src, vec![]).unwrap().unwrap();
+    let i = Interp::new(limits()).unwrap().run(src, vec![]).unwrap().unwrap();
     let (c, i) = ((c.value, c.failed), (i.value, i.failed));
     assert_eq!(c, i, "compiled vs interpreted: {src}");
     c
@@ -1247,7 +1249,7 @@ fn deep_recursion_through_values_is_a_stack_overflow() {
     t.spawn(|| {
         let src = "fn spin(f: fn(Int) -> Int, n: Int) -> Int { if n == 0 { 0 } else { let g = |x: Int| spin(f, x); 1 + g(n - 1) } }
             fn main() -> Int { spin(|x| x, 10000000) }";
-        let e = Compiled::run(src, Limits::default()).unwrap_err();
+        let e = Kio::new(Limits::default()).unwrap().run(src, vec![]).unwrap_err();
         assert_eq!(e.to_string(), "stack overflow (limit 2048 KB; raise it with --stack)");
         assert_eq!(value(&src.replace("10000000", "300")), "300");
     })

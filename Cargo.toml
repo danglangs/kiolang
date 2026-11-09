@@ -1,3 +1,7 @@
 [workspace]
-members = ["lang", "guest", "host", "runtime", "codegen", "tools/capgen", "tools/kiogen"]
+members = ["lang", "host", "runtime", "codegen", "tools/capgen", "tools/kiogen"]
 resolver = "2"
+
+# Every test run compiles kio programs with Cranelift; unoptimized, one compile takes seconds.
+[profile.dev.package."*"]
+opt-level = 2

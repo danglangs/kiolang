@@ -27,7 +27,7 @@ fn unknown_name_matches_lang_diag() {
     assert_eq!(kio.import_calls(), 0);
 }
 
-/// No clock, randomness or environment reaches the guest, so fresh instances agree exactly.
+/// Checking is deterministic: two checks of one program agree exactly.
 #[test]
 fn check_is_deterministic_across_instances() {
     let src = std::fs::read_to_string("../examples/invoices.kio").unwrap();
@@ -213,22 +213,26 @@ fn runtime_error_has_span() {
     assert!(diags[0].hint.is_none());
 }
 
-/// G4: on the default stack the deepest recursion stops with the depth error, never a trap,
-/// in debug and release builds of the host.
+/// G4, decision 6: recursion is bounded by `--stack`. On the default stack a deep recursion runs
+/// and a deeper one stops with "stack overflow", never a host crash, whatever the caller's stack
+/// (this test thread's is small).
 #[test]
-fn depth_budget_fits_the_default_stack() {
-    let src = "fn down(n: Int) -> Int { if n == 0 { 0 } else { down(n - 1) } } fn main() -> Int { down(100000) }";
-    let diags = Kio::new(Limits::default())
-        .unwrap()
-        .run(src, vec![])
-        .unwrap()
-        .unwrap_err();
-    assert_eq!(diags[0].message, "evaluation is too deep");
+fn deep_recursion_stops_at_the_default_stack() {
+    let src = |n: u32| {
+        format!("fn down(n: Int) -> Int {{ if n == 0 {{ 0 }} else {{ 1 + down(n - 1) }} }} fn main() -> Int {{ down({n}) }}")
+    };
+    let mut kio = Kio::new(Limits::default()).unwrap();
+    assert_eq!(kio.run(&src(10_000), vec![]).unwrap().unwrap().value, "10000");
+    let err = kio.run(&src(100_000_000), vec![]).unwrap_err();
+    assert_eq!(
+        kio.explain(&err).unwrap(),
+        "stack overflow (limit 2048 KB; raise it with --stack)"
+    );
 }
 
 #[test]
 fn small_stack_traps_with_stack_overflow() {
-    let src = "fn down(n: Int) -> Int { if n == 0 { 0 } else { down(n - 1) } } fn main() -> Int { down(1000) }";
+    let src = "fn down(n: Int) -> Int { if n == 0 { 0 } else { down(n - 1) } } fn main() -> Int { down(1000000) }";
     let err = Kio::new(Limits {
         stack: 64 << 10,
         ..Limits::default()
@@ -342,27 +346,19 @@ fn deep_recursion_overflows_a_small_stack() {
     );
 }
 
-/// Raising `--stack` above the 2 MB default lets deeper expressions run (once refused by Wasmtime).
+/// Raising `--stack` above the 2 MB default lets deeper recursion run (once refused by Wasmtime).
+/// About 43,000 calls of `d` fit in 2 MB and 174,000 in 8 MB.
 #[test]
 fn a_larger_stack_runs_deeper() {
-    // The host checks the program first, natively; give that recursion room too.
-    let t = std::thread::Builder::new().stack_size(64 << 20);
-    t.spawn(larger_stack).unwrap().join().unwrap();
-}
-
-fn larger_stack() {
-    let deep = format!(
-        "fn d(n: Int) -> Int {{ if n == 0 {{ 0 }} else {{ {}d(n - 1) }} }} fn main() -> Int {{ d(600) }}",
-        "- ".repeat(58)
-    );
+    let deep = "fn d(n: Int) -> Int { if n == 0 { 0 } else { 1 + d(n - 1) } } fn main() -> Int { d(100000) }";
     let mut small = Kio::new(Limits::default()).unwrap();
-    let err = small.run(&deep, vec![]).unwrap_err();
+    let err = small.run(deep, vec![]).unwrap_err();
     assert!(small.explain(&err).unwrap().starts_with("stack overflow"));
     let limits = Limits {
         stack: kio_host::MAX_STACK,
         ..Limits::default()
     };
-    Kio::new(limits).unwrap().run(&deep, vec![]).unwrap().unwrap();
+    Kio::new(limits).unwrap().run(deep, vec![]).unwrap().unwrap();
 }
 
 /// H4: the call past `--calls` stops the run.
@@ -731,7 +727,11 @@ fn fifo_read_is_denied_at_once() {
         .status()
         .unwrap()
         .success());
+    // A run includes compiling; time one reading a regular file to compare.
+    let regular = std::time::Instant::now();
+    assert_eq!(on(kio_host::open_dir(t.path()).unwrap(), "d.read(\"q\")"), NOT_FOUND);
+    let regular = regular.elapsed();
     let start = std::time::Instant::now();
     assert_eq!(on(d, "d.read(\"p\")"), DENIED);
-    assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    assert!(start.elapsed() < regular + std::time::Duration::from_secs(1));
 }

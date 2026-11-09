@@ -1,5 +1,5 @@
 // The only hand-written declaration of what crosses the sandbox wall.
-// The checker's capability table and the guest and host Rust bindings are generated from this file.
+// The checker's capability table and the runtime's and host's Rust bindings are generated from this file.
 // Changing it is a security-review event.
 
 package kio:caps;
@@ -69,47 +69,6 @@ interface ws {
     close:  func(code: u16) -> result<_, ws-err>;
   }
   variant ws-err { closed, too-large, invalid }
-}
-
-world guest {
-  import fs;
-  import net;
-  import web;
-  import kv;
-  import ws;
-  use fs.{dir};
-  use net.{http};
-  use web.{incoming, outgoing};
-  use kv.{kv};
-  use ws.{ws-message, ws-send};
-
-  // A source file: `name` is `web.kio` for `mod web;`; the root comes first.
-  record file { name: string, source: string }
-  // A checker or runtime error: byte span into source file number `file`, message and an optional fix.
-  record diag { start: u32, end: u32, message: string, hint: option<string>, file: u32 }
-  // The authority report, one line per function.
-  record report { lines: list<string> }
-  // What a run produced: the report, main's value printed, and whether main returned `Err`.
-  record outcome { report: report, value: string, failed: bool }
-  // A grant binds a handle to the `main` parameter of the same name. The guest owns it for one run;
-  // `borrow` would be tighter but hits a wit-bindgen 0.63 codegen bug inside a list of records.
-  record dir-grant { name: string, dir: dir }
-  record http-grant { name: string, http: http }
-  record incoming-grant { name: string, incoming: incoming }
-  record outgoing-grant { name: string, outgoing: outgoing }
-  record kv-grant { name: string, kv: kv }
-  record ws-message-grant { name: string, message: ws-message }
-  record ws-send-grant { name: string, sender: ws-send }
-
-  // Parse and check. Needs no handles.
-  export check: func(files: list<file>) -> result<report, list<diag>>;
-
-  // Check `files` and keep the checked program, for a snapshot taken before any request.
-  export init: func(files: list<file>) -> result<_, list<diag>>;
-
-  // Check, then run `main` with each grant bound to its parameter by name; a missing or
-  // mistyped grant is an error before any code runs.
-  export run: func(files: list<file>, dirs: list<dir-grant>, https: list<http-grant>, incomings: list<incoming-grant>, outgoings: list<outgoing-grant>, kvs: list<kv-grant>, messages: list<ws-message-grant>, senders: list<ws-send-grant>) -> result<outcome, list<diag>>;
 }
 
 // Compiled kio (docs/codegen.md): the runtime with the program appended, one core module.

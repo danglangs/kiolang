@@ -10,9 +10,9 @@ Measured 2026-11-06 on an Apple Silicon Mac, release builds, best of 3. Compiled
 |---|---|---|---|---|---|---|
 | `fib(35)`, calls | 24 ms | 890 ms | 117 ms | 3.8 s | 4.9x slower | 7.6x faster |
 | 30 M-iteration loop | 20 ms | 1.76 s | 46 ms | 5.9 s | 2.3x slower | 38x faster |
-| HTTP request, route and JSON, keep-alive | | | | 24,100 req/s, p99 1 ms | | |
+| HTTP request, route and JSON, keep-alive | | | 43,000-53,000 req/s, p99 1-2 ms (C5, under load) | 24,100 req/s, p99 1 ms | | |
 
-The compiler handles `Int`, `Bool`, control flow and calls today (C2); strings, collections, structs and capabilities follow (C3, C4). Until C5, `kio run` and `--listen` still run the interpreter, which is about 4x slower than CPython on compute. For I/O-bound work such as the web example the interpreter does not dominate: a fresh sandbox per request costs 175 µs in all (docs/perf.md).
+Since C5 `kio run` and `--listen` run compiled code for the whole language except function values (C9). A fresh sandbox per request costs about 32 µs in all on the web example, and a first `kio run` about 25 ms of compiling, cached after (docs/perf.md).
 
 The remaining gap to Rust is mostly checks Rust omits: kio traps on every integer overflow (Rust release builds wrap), and Wasm bounds-checks memory. No optimization pass has run yet.
 

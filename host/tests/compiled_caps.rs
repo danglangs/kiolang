@@ -3,8 +3,8 @@
 //! compiled program cannot use a handle it was not granted.
 
 use kio_host::kv::Store;
-use kio_host::{open_dir, CompiledRun, Origin};
-use kio_host::{Compiled, Kio, Limits};
+use kio_host::{open_dir, Origin, RunResult};
+use kio_host::{Interp, Kio, Limits};
 use lang::ir::{ExprKind, LocalId, Module};
 use std::sync::Arc;
 
@@ -21,9 +21,9 @@ fn dir(files: &[(&str, &str)]) -> (tempfile::TempDir, cap_std::fs::Dir) {
 /// The first diagnostic: message, hint and span.
 type Diag = (String, Option<String>, usize, usize);
 
-fn compiled_diag(r: CompiledRun) -> Diag {
+fn compiled_diag(r: RunResult) -> Diag {
     let d = &r.unwrap_err()[0];
-    (d.msg.clone(), d.hint.clone(), d.span.start, d.span.end)
+    (d.message.clone(), d.hint.clone(), d.start as usize, d.end as usize)
 }
 
 const TWO_DIRS: &str = "fn main(input: Dir, out: Dir) -> Int { 1 }";
@@ -40,15 +40,15 @@ fn grant_errors_match_the_interpreter() {
     ];
     for names in cases {
         let grants = || names.iter().map(|n| (n.to_string(), dir(&[]).1)).collect::<Vec<_>>();
-        let mut c = Compiled::new(Limits::default());
+        let mut c = Kio::new(Limits::default()).unwrap();
         let got = compiled_diag(c.run_with(TWO_DIRS, grants(), vec![]).unwrap());
         assert_eq!(c.import_calls(), 0);
-        let mut k = Kio::new(Limits::default()).unwrap();
+        let mut k = Interp::new(Limits::default()).unwrap();
         let d = &k.run(TWO_DIRS, grants()).unwrap().unwrap_err()[0];
         let want = (d.message.clone(), d.hint.clone(), d.start as usize, d.end as usize);
         assert_eq!(got, want, "{names:?}");
     }
-    let mut c = Compiled::new(Limits::default());
+    let mut c = Kio::new(Limits::default()).unwrap();
     let missing = compiled_diag(
         c.run_with(TWO_DIRS, vec![("input".into(), dir(&[]).1)], vec![])
             .unwrap(),
@@ -69,8 +69,13 @@ fn grant_errors_match_the_interpreter() {
 fn a_grant_of_the_wrong_kind_is_refused() {
     let src = "fn main(input: Dir) -> Int { 1 }";
     let http = || vec![("input".to_string(), Origin::parse("http://127.0.0.1:1").unwrap())];
-    let got = compiled_diag(Compiled::new(Limits::default()).run_with(src, vec![], http()).unwrap());
-    let mut k = Kio::new(Limits::default()).unwrap();
+    let got = compiled_diag(
+        Kio::new(Limits::default())
+            .unwrap()
+            .run_with(src, vec![], http())
+            .unwrap(),
+    );
+    let mut k = Interp::new(Limits::default()).unwrap();
     let d = &k.run_with(src, vec![], http()).unwrap().unwrap_err()[0];
     assert_eq!(got.0, "no grant for `input: Dir`");
     assert_eq!(
@@ -78,8 +83,8 @@ fn a_grant_of_the_wrong_kind_is_refused() {
         (d.message.clone(), d.hint.clone(), d.start as usize, d.end as usize)
     );
 
-    let kv = |c: &mut Compiled| c.grant_kvs(vec![("input".into(), Arc::new(Store::memory(1 << 20)))]);
-    let mut c = Compiled::new(Limits::default());
+    let kv = |c: &mut Kio| c.grant_kvs(vec![("input".into(), Arc::new(Store::memory(1 << 20)))]);
+    let mut c = Kio::new(Limits::default()).unwrap();
     kv(&mut c);
     assert_eq!(
         compiled_diag(c.run_with(src, vec![], vec![]).unwrap()).0,
@@ -94,7 +99,7 @@ fn the_primer_runs_compiled() {
     let src = std::fs::read_to_string("../examples/invoices.kio").unwrap();
     let (_a, input) = dir(&[("invoices.csv", "a,1\nb,2\nbad\n")]);
     let (b, out) = dir(&[]);
-    let mut c = Compiled::new(Limits::default());
+    let mut c = Kio::new(Limits::default()).unwrap();
     let grants = vec![("input".to_string(), input), ("out".to_string(), out)];
     let o = c.run_with(&src, grants, vec![]).unwrap().unwrap();
     assert_eq!((o.value.as_str(), o.failed), ("Ok(())", false));
@@ -132,13 +137,14 @@ fn dir_values_match_the_interpreter() {
         let (_t, d) = dir(&[("a.txt", "héllo")]);
         let grants = vec![("d".to_string(), d)];
         if compiled {
-            Compiled::new(Limits::default())
+            Kio::new(Limits::default())
+                .unwrap()
                 .run_with(src, grants, vec![])
                 .unwrap()
                 .unwrap()
                 .value
         } else {
-            Kio::new(Limits::default())
+            Interp::new(Limits::default())
                 .unwrap()
                 .run(src, grants)
                 .unwrap()
@@ -160,9 +166,9 @@ fn dir_values_match_the_interpreter() {
 fn http_errors_match_the_interpreter() {
     let src = r#"fn main(h: Http) -> List<Result<Bytes, HttpErr>> { [h.get("/x"), h.get("x")] }"#;
     let o = || vec![("h".to_string(), Origin::parse("http://127.0.0.1:1").unwrap())];
-    let mut c = Compiled::new(Limits::default());
+    let mut c = Kio::new(Limits::default()).unwrap();
     let got = c.run_with(src, vec![], o()).unwrap().unwrap().value;
-    let want = Kio::new(Limits::default())
+    let want = Interp::new(Limits::default())
         .unwrap()
         .run_with(src, vec![], o())
         .unwrap()
@@ -179,7 +185,7 @@ fn quotas_and_the_report_check_stop_a_compiled_run() {
     let run = |limits: Limits, hide: bool| {
         let (_a, input) = dir(&[("invoices.csv", "a,1\n")]);
         let (_b, out) = dir(&[]);
-        let mut c = Compiled::new(limits);
+        let mut c = Kio::new(limits).unwrap();
         if hide {
             c.hide_from_report("out", "create");
         }
@@ -213,7 +219,8 @@ fn the_deadline_stops_a_blocked_host_call() {
     };
     let src = r#"fn main(d: Dir) -> Result<Bytes, IoErr> { d.read("pipe") }"#;
     let start = std::time::Instant::now();
-    let e = Compiled::new(limits)
+    let e = Kio::new(limits)
+        .unwrap()
         .run_with(src, vec![("d".into(), d)], vec![])
         .unwrap_err();
     assert!(format!("{e:#}").starts_with("timed out after 1 s"), "{e:#}");
@@ -242,10 +249,10 @@ fn kv_values_match_the_interpreter() {
         R { a: a, b: b, c: c, d: d, e: e, f: f, g: g, h: h }
     }"#;
     let kvs = || vec![("store".to_string(), Arc::new(Store::memory(1 << 20)))];
-    let mut c = Compiled::new(Limits::default());
+    let mut c = Kio::new(Limits::default()).unwrap();
     c.grant_kvs(kvs());
     let got = c.run_with(src, vec![], vec![]).unwrap().unwrap().value;
-    let mut k = Kio::new(Limits::default()).unwrap();
+    let mut k = Interp::new(Limits::default()).unwrap();
     k.grant_kvs(kvs());
     let want = k.run(src, vec![]).unwrap().unwrap().value;
     assert_eq!(got, want);
@@ -282,7 +289,7 @@ fn a_handle_not_granted_is_refused() {
     for (i, edit) in edits.into_iter().enumerate() {
         let (_t, d) = dir(&[("a.txt", "secret")]);
         let h = Origin::parse("http://127.0.0.1:1").unwrap();
-        let mut c = Compiled::new(Limits::default());
+        let mut c = Kio::new(Limits::default()).unwrap();
         let r = c.run_edited(FORGE, vec![("d".into(), d)], vec![("h".into(), h)], edit);
         if i == 0 {
             assert_eq!(r.unwrap().unwrap().value, "Ok(<6 bytes>)");
@@ -317,9 +324,9 @@ fn web_values_and_response_match_the_interpreter() {
         header_values: vec!["example".into(), "1".into()],
         body: b"ping".to_vec(),
     };
-    let mut c = Compiled::new(Limits::default());
+    let mut c = Kio::new(Limits::default()).unwrap();
     let (got, got_sent) = c.run_web(src, vec![], request()).unwrap();
-    let mut k = Kio::new(Limits::default()).unwrap();
+    let mut k = Interp::new(Limits::default()).unwrap();
     let (want, want_sent) = k.run_web(src, vec![], request()).unwrap();
     let got = got.unwrap().value;
     assert_eq!(got, want.unwrap().value);
@@ -358,9 +365,9 @@ fn ws_values_and_frames_match_the_interpreter() {
         data: b"hi".to_vec(),
     };
     let names = ("m".to_string(), "w".to_string());
-    let mut c = Compiled::new(Limits::default());
+    let mut c = Kio::new(Limits::default()).unwrap();
     let (got, got_frames) = c.run_ws(src, vec![], event(), false, &names).unwrap();
-    let mut k = Kio::new(Limits::default()).unwrap();
+    let mut k = Interp::new(Limits::default()).unwrap();
     let (want, want_frames) = k.run_ws(src, vec![], event(), false, &names).unwrap();
     let got = got.unwrap().value;
     assert_eq!(got, want.unwrap().value);
@@ -380,7 +387,7 @@ fn ws_values_and_frames_match_the_interpreter() {
     );
 }
 
-/// A run past `--memory` reads as it does for `Kio`, not as an internal error.
+/// A run past `--memory` reads as it does for `Interp`, not as an internal error.
 #[test]
 fn out_of_memory_is_explained() {
     let limits = Limits {
@@ -388,7 +395,7 @@ fn out_of_memory_is_explained() {
         ..Limits::default()
     };
     let src = r#"fn main() -> Int { let mut s = "x"; for i in 0..30 { s = s + s; } s.len() }"#;
-    let e = Compiled::run(src, limits).unwrap_err();
+    let e = Kio::new(limits).unwrap().run(src, vec![]).unwrap_err();
     assert!(
         format!("{e:#}").starts_with("out of memory (limit 4 MB; raise it with --memory)"),
         "{e:#}"

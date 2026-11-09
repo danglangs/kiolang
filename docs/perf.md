@@ -1,5 +1,30 @@
 # Performance
 
+## Compiled (C5, 2026-11-09)
+
+Since C5 `kio run` and `--listen` run compiled code. Measured on an Apple Silicon Mac (16 cores), release builds, before (3f82d33, the interpreter guest) and after back to back, two rounds each, with another agent's build using most cores (load average 13-15): treat differences under 2x as approximate. Server: `kio run examples/serve/app.kio --listen`, `GET /hello/kio` (route and JSON), 20,000 requests per `ab` run, zero failed.
+
+| | before (interpreter guest) | after (compiled) |
+|---|---|---|
+| `kio run` hello, wall | 5 ms | 29-31 ms first run, 8 ms cached |
+| `kio run` primer (invoices.kio), wall | 6 ms | 30-38 ms first run, 8.5 ms cached |
+| `kio check` primer | 5-9 ms | 3-8 ms |
+| `--listen` startup to listening | 0.93-0.96 s | 0.16-0.18 s |
+| idle `--listen` RSS after one request | 66-67 MB | 28-29 MB |
+| `Server::handle` median (p99), serve example | 168-172 µs (450-620 µs) | 32 µs (39-81 µs) |
+| `ab -c 12`, no keep-alive | 15,200-17,600 req/s, p99 7-10 ms | 17,800-20,200 req/s, p99 6-10 ms |
+| `ab -c 12 -k` | 26,700-26,900 req/s, p99 2-3 ms | 43,000-53,400 req/s, p99 1-2 ms |
+| fuel, one serve request | 1.79 M | 0.13 M |
+| release binary | 34.5 MB | 24.3 MB |
+
+- A first `kio run` compiles the runtime and program with Cranelift (about 25 ms); the compiled code is cached in `~/.cache/kio` (open_questions #75), so a second run of the same program loads it. A cached run is still about 3 ms slower than the interpreter guest was: checking, codegen and loading 0.7 MB of native code.
+- `--listen` compiles once on one thread: a parallel compile starts in about 30 ms but leaves about 20 MB more resident on macOS (W13d). On a quiet machine, before this change: startup 27 ms, idle RSS 49 MB, `ab -k` 60,600 req/s, no keep-alive 21,400 req/s.
+- Without keep-alive the ceiling is still opening a TCP connection per request; with keep-alive, a request costs about 0.2 ms in all.
+- Fuel defaults are a tenth of the interpreter's (100 million per run, 10 million per request): see open_questions #76 for the measurements.
+- `cargo test --release --test serve -- --nocapture` prints the `Server::handle` median; `cargo test --release --test idle_rss -- --nocapture` prints idle RSS.
+
+## Interpreter guest (until C5)
+
 Measured 2026-11-05 with ApacheBench on an Apple Silicon Mac, 12 cores, 32 GB, `kio` built in release. Server: `kio run examples/serve/app.kio --listen`, the kio-web example (route match and JSON, or a 2.7 KB file through a `Dir` grant). 20,000 requests per run, keep-alive off, zero failed requests in every run.
 
 | Concurrency | Route + JSON (req/s) | Mean | p99 |

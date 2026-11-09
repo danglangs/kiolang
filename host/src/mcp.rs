@@ -2,7 +2,6 @@
 //! never run: running needs grants, and grants are the operator's decision (open question 31).
 
 use crate::locate;
-use kio_host::{Kio, Limits};
 use serde_json::{json, Value};
 use std::io::BufRead;
 
@@ -88,7 +87,7 @@ fn call(params: &Value) -> Option<Value> {
     Some(json!({ "content": [{ "type": "text", "text": text }], "isError": is_error }))
 }
 
-/// A fresh sandbox per check. Returns the text and whether it is an error.
+/// Check in the host, as `kio check` does. Returns the text and whether it is an error.
 fn check(list: &[Value]) -> Option<(String, bool)> {
     let files = list
         .iter()
@@ -100,18 +99,15 @@ fn check(list: &[Value]) -> Option<(String, bool)> {
         })
         .collect::<Option<Vec<_>>>()
         .filter(|f| !f.is_empty())?;
-    Some(
-        match Kio::new(Limits::default()).and_then(|mut k| k.check_files(&files)) {
-            Err(e) => (format!("{e:#}"), true),
-            Ok(Ok(report)) => (report.lines.join("\n"), false),
-            Ok(Err(diags)) => {
-                let found: Vec<Value> = diags
+    Some(match kio_host::check_files(&files) {
+        Ok(report) => (report.lines.join("\n"), false),
+        Err(diags) => {
+            let found: Vec<Value> = diags
                 .iter()
                 .zip(locate(&files, &diags))
                 .map(|(d, (f, line))| json!({ "file": files[f].0, "line": line, "message": d.message, "hint": d.hint }))
                 .collect();
-                (Value::Array(found).to_string(), true)
-            }
-        },
-    )
+            (Value::Array(found).to_string(), true)
+        }
+    })
 }

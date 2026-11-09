@@ -3,9 +3,9 @@ mod mcp;
 use kio_host::{listen, open_dir, Diag, Kio, Limits, Origin, Server};
 
 fn main() {
-    // The host checks and lowers programs natively, recursing as deep as the guest may; run on a
-    // stack well above the largest `--stack`, not the main thread's default.
-    let t = std::thread::Builder::new().stack_size(4 * kio_host::MAX_STACK);
+    // The host checks and lowers programs natively, and compiled code runs on this thread's stack
+    // up to `--stack`: run on a stack well above the largest `--stack`, not the main thread's.
+    let t = std::thread::Builder::new().stack_size(kio_host::RUN_STACK);
     std::process::exit(t.spawn(cli).unwrap().join().unwrap());
 }
 
@@ -23,7 +23,7 @@ fn cli() -> i32 {
 }
 
 /// The root file, then `NAME.kio` beside it for each `mod NAME;` line. This is operator input,
-/// read by the host like the root; the guest never sees the filesystem.
+/// read by the host like the root; the program never sees the filesystem.
 fn read_files(path: &str) -> Result<Vec<(String, String)>, i32> {
     let root = std::fs::read_to_string(path).map_err(|e| fail(format!("{path}: cannot read: {e}")))?;
     let dir = std::path::Path::new(path).parent().unwrap_or(".".as_ref());
@@ -52,13 +52,12 @@ fn check(path: &str) -> i32 {
         Ok(f) => f,
         Err(code) => return code,
     };
-    match Kio::new(Limits::default()).and_then(|mut k| k.check_files(&files)) {
-        Err(e) => fail(format!("{e:#}")),
-        Ok(Ok(report)) => {
+    match kio_host::check_files(&files) {
+        Ok(report) => {
             println!("{}", report.lines.join("\n"));
             0
         }
-        Ok(Err(diags)) => print_diags(&files, diags),
+        Err(diags) => print_diags(&files, diags),
     }
 }
 
@@ -235,9 +234,12 @@ fn run(path: &str, flags: &[&str]) -> i32 {
         }
     }
     kio.grant_kvs(kvs);
+    if let Some(dir) = kio_host::cache::default_dir() {
+        kio.cache(dir);
+    }
     match kio.run_files(&files, dirs, https) {
         Err(e) => {
-            // A limit or trap is the guest failing, not a usage error.
+            // A limit or trap is the program failing, not a usage error.
             match kio.explain(&e) {
                 Some(msg) => eprintln!("{msg}"),
                 None => eprintln!("kio: {e:#}"),
@@ -260,7 +262,7 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     }
 }
 
-/// `run --listen`: check once, print the report, then answer requests until Ctrl-C.
+/// `run --listen`: check and compile once, then answer requests until Ctrl-C.
 fn serve(
     files: Vec<(String, String)>,
     dirs: Vec<(String, cap_std::fs::Dir)>,
@@ -282,8 +284,8 @@ fn serve(
     }
 }
 
-/// The file index and 1-based line of each diag. The guest is untrusted: any file number or
-/// offset maps to some line, never a panic.
+/// The file index and 1-based line of each diag. Any file number or offset maps to some line,
+/// never a panic.
 fn locate(files: &[(String, String)], diags: &[Diag]) -> Vec<(usize, usize)> {
     // Byte offset of each line start, one table per file: per-diag scans are quadratic in the source.
     let starts: Vec<Vec<usize>> = files

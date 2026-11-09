@@ -1,6 +1,6 @@
 # kio primer
 
-kio uses a subset of Rust syntax, so every kio program parses as Rust. Types and semantics are kio's own: there are no references or ownership, and values are copied. The Rust compiler is never involved. kio's checker and interpreter read the source.
+kio uses a subset of Rust syntax, so every kio program parses as Rust. Types and semantics are kio's own: there are no references or ownership, and values are copied. The Rust compiler is never involved. kio's checker and compiler read the source.
 
 ## One screen of kio
 
@@ -59,7 +59,7 @@ Everything else is rejected with a message that names the kio alternative, for e
 - **Types are explicit where they cannot be read off the value.** `[]`, `Map::new()` and `None` need a declared or expected type: `let mut rows: List<Row> = [];`.
 - **Operators.** `+ - * / %` on `Int` or on `Float`, `+` on `Str`, `== !=` on two values of one type, structurally (structs, enums, `Option`, `Result`, `List`, `Map` included; capabilities have no equality), `< <= > >=` on `Int` or `Float`, `&& || !` on `Bool`. On `Int`, `/` and `%` truncate toward zero, as in Rust. `Int` and `Float` never mix: `1 + 2.0` is an error; convert with `.to_float()` or `.to_int()`.
 - **`Float` is Rust's `f64`.** Literals `1.5`, `2.0`, `1e9`, `1.5e-3` (`1.` and `.5` are errors). Arithmetic gives IEEE results and never stops the run: `1.0 / 0.0` is `inf`, `0.0 / 0.0` is `NaN`. `==` is IEEE: `NaN != NaN` and `0.0 == -0.0`, also inside structs, enums and lists. A `Float` is not a `Map` key and cannot be matched: compare with `<` or `==`.
-- **Runtime errors stop the run:** `Int` overflow, `Int` division by zero, an out-of-bounds index, invalid UTF-8 in `to_str`. Deep recursion stops the run: the interpreter allows calls 1_000 deep ("evaluation is too deep"), and `--stack` sets the limit for the stack they use ("stack overflow"). Nothing wraps or panics silently.
+- **Runtime errors stop the run:** `Int` overflow, `Int` division by zero, an out-of-bounds index, invalid UTF-8 in `to_str`. Deep recursion stops the run with "stack overflow": `--stack` sets the limit, 2 MB by default (about 40,000 calls of a small function), at most 8 MB. Nothing wraps or panics silently.
 - **`match` is exhaustive.** A pattern is `_`, a name (binds the value), an `Int`, `Str` or `Bool` literal, or a variant whose parts are patterns, at any depth: `Err(IoErr::Exists)`, `Some(Some(x))`, `Shape::Line(1, _)`. Arms are tried in order; a name binds at most once per pattern. Every value must match some arm (`Int` and `Str` need a `_` or name at that position) and every arm must match some value no earlier arm does, else "unreachable arm". A match too large to check is rejected: split it. An arm may be `return`, `break` or `continue` (`None => break,`); it has type `Never`.
 - **`if let PAT = e { .. } else { .. }`** runs the block with `PAT`'s names bound when `e` matches, else the else branch. Without `else` its type is `()`. It chains with `else if` and `else if let`. It need not be exhaustive.
 - **`Str` is UTF-8.** `len()` counts bytes, in constant time. Literal escapes: `\n \r \t \0 \" \\`.

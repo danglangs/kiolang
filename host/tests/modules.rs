@@ -9,7 +9,7 @@ fn files(web: &str) -> Vec<(String, String)> {
 const GOOD: &str = "pub fn inc(n: Int) -> Int {\n    n + 1\n}\n";
 
 #[test]
-fn two_files_check_and_run_through_the_guest() {
+fn two_files_check_compile_and_run() {
     let mut kio = Kio::new(Limits::default()).unwrap();
     let report = kio.check_files(&files(GOOD)).unwrap().unwrap();
     assert_eq!(report.lines.len(), 2);

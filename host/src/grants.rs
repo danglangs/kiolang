@@ -1,6 +1,6 @@
-//! Binding grants to `main`'s parameters, shared by the interpreter path (`Kio`) and compiled
-//! code (`Compiled`). The host checks every grant here before a run starts; the guest's own
-//! checks (guest/src/lib.rs, `lang::run`) give the same diagnostics and are never reached.
+//! Binding grants to `main`'s parameters, for compiled runs (`Kio`, `Server`) and the test
+//! oracle (`Interp`). The host checks every grant here before a run starts; `lang::run`'s own
+//! checks give the same diagnostics and are never reached.
 use lang::ir::{Module, Ty};
 use lang::{Diag, Span};
 use std::collections::HashSet;
@@ -23,7 +23,7 @@ pub(crate) fn main_params(m: &Module) -> Params {
 }
 
 /// For each parameter, the index in `grants` (`(name, kind)` each) of the grant bound to it.
-/// Errors, as the guest gives them: every grant that is not a parameter or is given twice, or
+/// Errors: every grant that is not a parameter or is given twice, or
 /// else the first parameter without a grant of its type.
 pub(crate) fn bind(params: &Params, grants: &[(String, &str)]) -> Result<Vec<usize>, Vec<Diag>> {
     let names: Vec<&str> = params.iter().map(|(n, _, _)| n.as_str()).collect();

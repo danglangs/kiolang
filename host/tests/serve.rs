@@ -27,14 +27,18 @@ fn thousand_requests_get_the_right_body() {
     let server = Server::new(files, Limits::web()).unwrap().unwrap();
     assert!(server.report().contains("main"));
     let public = tempfile::tempdir().unwrap();
-    let start = Instant::now();
+    let mut times = vec![];
     for _ in 0..1000 {
         let dirs = vec![("public".to_string(), open_dir(public.path()).unwrap())];
+        let start = Instant::now();
         let r = server.handle(get("/hello/kio"), dirs).unwrap();
+        times.push(start.elapsed());
         assert_eq!(r.status, 200);
         assert_eq!(r.body, br#"{"hello": "kio"}"#);
     }
-    println!("per request: {:?}", start.elapsed() / 1000);
+    times.sort();
+    // docs/perf.md records the release median: `cargo test --release --test serve -- --nocapture`.
+    println!("Server::handle median {:?}, p99 {:?}", times[500], times[990]);
 }
 
 #[test]
@@ -70,28 +74,6 @@ fn type_error_returns_the_diags() {
         panic!("expected diags");
     };
     assert!(!diags.is_empty());
-}
-
-/// Fuel is deterministic: this much covers a request that only runs the program (about 2 M on the
-/// serve example) but not a one-shot run, which checks it too (over 3 M).
-#[test]
-fn a_request_does_not_recheck() {
-    let read = |p: &str| std::fs::read_to_string(format!("../examples/serve/{p}")).unwrap();
-    let files = vec![
-        ("app.kio".to_string(), read("app.kio")),
-        ("web.kio".to_string(), read("web.kio")),
-    ];
-    let limits = Limits {
-        fuel: 2_500_000,
-        ..Limits::web()
-    };
-    let public = tempfile::tempdir().unwrap();
-    let dirs = vec![("public".to_string(), open_dir(public.path()).unwrap())];
-    let server = Server::new(files.clone(), limits).unwrap().unwrap();
-    assert_eq!(server.handle(get("/hello/kio"), dirs).unwrap().status, 200);
-    // The host refuses a run without its grants before the guest checks, so check alone.
-    let mut kio = kio_host::Kio::new(limits).unwrap();
-    assert!(kio.check_files(&files).is_err(), "checking in the guest runs out");
 }
 
 #[test]

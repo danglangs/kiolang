@@ -1,21 +1,21 @@
 //! C7: regression tests from the adversarial review of the compiled path. Each test is a finding:
 //! what a program, a crafted IR or a limit did, and what the host must do instead.
 
-use kio_host::{Compiled, CompiledRun, Kio, Limits};
+use kio_host::{Interp, Kio, Limits, RunResult};
 use lang::ir::{ExprKind, LocalId, Module};
 use std::sync::{Arc, Mutex};
 
 type Run = Result<(String, bool), (String, usize, usize)>;
 
 fn compiled(src: &str) -> Run {
-    match Compiled::run(src, Limits::default()).unwrap() {
+    match Kio::new(Limits::default()).unwrap().run(src, vec![]).unwrap() {
         Ok(o) => Ok((o.value, o.failed)),
-        Err(d) => Err((d[0].msg.clone(), d[0].span.start, d[0].span.end)),
+        Err(d) => Err((d[0].message.clone(), d[0].start as usize, d[0].end as usize)),
     }
 }
 
 fn interpreted(src: &str) -> Run {
-    match Kio::new(Limits::default()).unwrap().run(src, vec![]).unwrap() {
+    match Interp::new(Limits::default()).unwrap().run(src, vec![]).unwrap() {
         Ok(o) => Ok((o.value, o.failed)),
         Err(d) => Err((d[0].message.clone(), d[0].start as usize, d[0].end as usize)),
     }
@@ -27,7 +27,7 @@ fn both(src: &str) -> Run {
     c
 }
 
-fn host_error(r: wasmtime::Result<CompiledRun>) -> String {
+fn host_error(r: wasmtime::Result<RunResult>) -> String {
     format!("{:#}", r.unwrap_err())
 }
 
@@ -67,7 +67,7 @@ fn an_internal_error_site_is_not_a_program_error() {
         "fn main() -> Option<Int> { Some(1) }",
         "fn main() -> Option<Int> { None }",
     ] {
-        let mut c = Compiled::new(Limits::default());
+        let mut c = Kio::new(Limits::default()).unwrap();
         let r = c.run_edited(src, vec![], vec![], |m: &mut Module| {
             let main = &mut m.funcs[m.main.0 as usize];
             let ExprKind::Variant(_, v, _) = &mut main.body.tail.as_mut().unwrap().kind else {
@@ -115,11 +115,11 @@ fn a_bogus_pointer_argument_does_not_crash_the_host() {
     ];
     for edit in edits {
         let d = kio_host::open_dir(t.path()).unwrap();
-        let mut c = Compiled::new(Limits::default());
+        let mut c = Kio::new(Limits::default()).unwrap();
         match c.run_edited(src, vec![("d".into(), d)], vec![], edit) {
             // The bogus object read as a path: an empty or garbage string, refused.
             Ok(Ok(o)) => assert_eq!((o.value.as_str(), o.failed), ("IoErr::InvalidPath", true)),
-            Ok(Err(d)) => panic!("a program error: {}", d[0].msg),
+            Ok(Err(d)) => panic!("a program error: {}", d[0].message),
             // The runtime noticed (a handle is not an object): its internal-error site.
             Err(e) => {
                 let e = format!("{e:#}");
@@ -157,7 +157,7 @@ fn out_of_memory_in_a_host_result_is_explained() {
         }
     }
     let log = Log::default();
-    let mut c = Compiled::new(limits);
+    let mut c = Kio::new(limits).unwrap();
     c.audit(log.clone(), vec![("d".into(), "/d".into())]);
     let src = r#"fn main(d: Dir) -> Int { match d.read("big.bin") { Ok(b) => b.len(), Err(_) => -1 } }"#;
     let e = host_error(c.run_with(src, vec![("d".into(), d)], vec![]));
@@ -187,7 +187,7 @@ fn a_function_past_the_wasm_limits_is_an_error_not_a_panic() {
         args.join(", ")
     );
     assert_eq!(interpreted(&src), Ok(("1000".into(), false)));
-    let e = host_error(Compiled::run(&src, Limits::default()));
+    let e = host_error(Kio::new(Limits::default()).unwrap().run(&src, vec![]));
     assert!(e.starts_with("wrapping the module as a component"), "{e}");
 }
 
