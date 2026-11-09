@@ -334,6 +334,48 @@ fn log_escapes_control_characters() {
     }
 }
 
+/// U+2028 and U+2029 start a line in some readers, and a bidirectional override or isolate
+/// reorders the display of the rest of a line (Trojan source), so both are escaped; format
+/// characters that move nothing (a zero-width space, a BOM) are kept.
+#[test]
+fn log_escapes_line_separators_and_bidi_controls() {
+    let text = "a\u{2028}b\u{2029}c\u{202a}d\u{202e}e\u{2066}f\u{2069}g\u{200b}h\u{feff}i\u{85}j";
+    let src = format!(r#"{SHOW}fn main(log: Log) -> Str {{ show(log.write("{text}")) }}"#);
+    for compiled in [true, false] {
+        let buf = Buf::default();
+        let v = shown(run(&src, log(&buf), compiled, Limits::default(), None));
+        assert_eq!(v, "ok");
+        assert_eq!(
+            buf.text(),
+            "a\\u{2028}b\\u{2029}c\\u{202a}d\\u{202e}e\\u{2066}f\\u{2069}g\u{200b}h\u{feff}i\\u{85}j\n"
+        );
+    }
+}
+
+/// A line over 64 KB is refused on its own length, before escaping could multiply it (a 32 MB
+/// line of NULs escaped to 192 MB in the host before the check was moved); the outcome and the
+/// audit line are the ones a line refused after escaping (16 K NULs: 96 KB escaped) gets.
+#[test]
+fn an_oversize_line_is_refused_before_escaping() {
+    let src = format!(
+        r#"{SHOW}fn nul(n: Int) -> Str {{ let mut s = "\0"; for i in 0..n {{ s = s + s; }} s }}
+        fn main(log: Log) -> Str {{ show(log.write(nul(24))) + " " + show(log.write(nul(14))) }}"#
+    );
+    for compiled in [true, false] {
+        let (buf, audit) = (Buf::default(), Buf::default());
+        let v = shown(run(&src, log(&buf), compiled, Limits::default(), Some(audit.clone())));
+        assert_eq!(v, "too-large too-large");
+        assert_eq!(buf.text(), "");
+        assert_eq!(
+            audit
+                .text()
+                .matches(r#""method":"write","arg":"write","bytes":0,"result":"too-large""#)
+                .count(),
+            2
+        );
+    }
+}
+
 /// 64 KB a line and 1 MB a run, counted after escaping; a refused line writes nothing.
 #[test]
 fn log_limits() {

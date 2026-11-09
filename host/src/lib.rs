@@ -1463,8 +1463,10 @@ const LOG_LINE_MAX: usize = 64 << 10;
 const LOG_RUN_MAX: u64 = 1 << 20;
 
 /// A line as the log holds it: `\` as `\\`, LF, CR and tab as `\n`, `\r` and `\t`, any other
-/// control character (C0, DEL, C1) as `\u{XX}`. So a line is one line, and holds no terminal
-/// escape.
+/// control character (C0, DEL, C1), the line and paragraph separators (U+2028, U+2029) and the
+/// bidirectional controls (U+202A-E, U+2066-9) as `\u{XX}`. So a line is one line, holds no
+/// terminal escape, and reads in the order it was written (no Trojan-source reordering can hide
+/// its prefix). Never shorter than `s`.
 fn escape_line(s: &str) -> String {
     let mut o = String::with_capacity(s.len());
     for c in s.chars() {
@@ -1473,7 +1475,9 @@ fn escape_line(s: &str) -> String {
             '\n' => o.push_str("\\n"),
             '\r' => o.push_str("\\r"),
             '\t' => o.push_str("\\t"),
-            c if c.is_control() => o.push_str(&format!("\\u{{{:02x}}}", c as u32)),
+            c if c.is_control() || matches!(c, '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}') => {
+                o.push_str(&format!("\\u{{{:02x}}}", c as u32))
+            }
             c => o.push(c),
         }
     }
@@ -1499,6 +1503,11 @@ impl State {
         l: &Resource<kio::caps::log::Log>,
         line: String,
     ) -> Result<Result<(), kio::caps::log::LogErr>> {
+        // Escaping never shrinks a line, so one over the cap is refused before it is escaped:
+        // escaping a line of control characters takes six times its bytes.
+        if line.len() > LOG_LINE_MAX {
+            return Ok(Err(kio::caps::log::LogErr::TooLarge));
+        }
         let escaped = escape_line(&line);
         let h = self.table.get_mut(&Resource::<LogHandle>::new_borrow(l.rep()))?;
         let total = h.written.saturating_add(escaped.len() as u64);
