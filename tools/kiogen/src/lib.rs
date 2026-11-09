@@ -10,6 +10,11 @@
 //! list's tracked bound, outside other loops), since a `push` is generated only while that
 //! bound stays within `MAX_LEN`. Runtime errors (overflow, division by zero, an index out of
 //! bounds) are allowed.
+//!
+//! With `adts`, every program declares `struct S { a: Int, b: Bool }` and
+//! `enum K { Z, One(Int), Two(Int, Option<Int>) }`. A `match` lists some of a fixed sequence of
+//! arms, each more specific than or disjoint from the later ones, then `_`, which always has a
+//! value left to match (`K::Two(_, None)`, or `None`), so every arm is reachable.
 
 /// What programs may contain. Int and Bool expressions with every operator, `let`, `let mut`,
 /// assignment, `+=`, `-=`, `if`/`else` and `return` are always on.
@@ -23,6 +28,10 @@ pub struct Features {
     /// `List<Int>` locals: literals, copies, indexing (mostly in range), `len`, `push`,
     /// element assignment and `+=`, `==`, and `for x in xs`.
     pub lists: bool,
+    /// The struct `S`, the enum `K` and `Option<Int>`: locals, construction, copies, field
+    /// reads and writes, `==`, `unwrap_or`, `is_some`, `match` with nested patterns and a
+    /// catch-all, `if let`, and helpers returning `Option<Int>` that use `?`.
+    pub adts: bool,
 }
 
 impl Default for Features {
@@ -33,6 +42,7 @@ impl Default for Features {
             calls: true,
             recursion: true,
             lists: true,
+            adts: true,
         }
     }
 }
@@ -54,6 +64,9 @@ pub fn program(seed: u64, features: &Features) -> String {
         this: None,
     };
     let mut out = String::new();
+    if features.adts {
+        out += "struct S { a: Int, b: Bool }\nenum K { Z, One(Int), Two(Int, Option<Int>) }\n";
+    }
     if features.calls {
         for i in 0..g.rng.below(5) {
             out += &g.helper(i as usize);
@@ -113,6 +126,10 @@ enum Ty {
     Unit,
     /// `List<Int>`; only locals have it.
     List,
+    /// The struct `S`, the enum `K` and `Option<Int>`; locals, and `Opt` as a return type.
+    S,
+    K,
+    Opt,
 }
 
 struct Var {
@@ -212,12 +229,18 @@ impl Gen<'_> {
             Ty::Bool => "Bool",
             Ty::Unit => "()",
             Ty::List => "List<Int>",
+            Ty::S => "S",
+            Ty::K => "K",
+            Ty::Opt => "Option<Int>",
         }
     }
 
     fn helper(&mut self, i: usize) -> String {
-        let ret = *self.rng.pick(&[Ty::Int, Ty::Int, Ty::Bool, Ty::Unit]);
-        let recursive = self.features.recursion && ret != Ty::Unit && self.rng.chance(35);
+        let mut ret = *self.rng.pick(&[Ty::Int, Ty::Int, Ty::Bool, Ty::Unit]);
+        if self.features.adts && self.rng.chance(30) {
+            ret = Ty::Opt;
+        }
+        let recursive = self.features.recursion && matches!(ret, Ty::Int | Ty::Bool) && self.rng.chance(35);
         let mut params: Vec<Ty> = (0..self.rng.below(4)).map(|_| self.ty()).collect();
         if recursive {
             params.insert(0, Ty::Int);
@@ -260,7 +283,10 @@ impl Gen<'_> {
     }
 
     fn main(&mut self) -> String {
-        let ret = *self.rng.pick(&[Ty::Int, Ty::Int, Ty::Int, Ty::Bool, Ty::Unit]);
+        let mut ret = *self.rng.pick(&[Ty::Int, Ty::Int, Ty::Int, Ty::Bool, Ty::Unit]);
+        if self.features.adts && self.rng.chance(10) {
+            ret = *self.rng.pick(&[Ty::S, Ty::K, Ty::Opt]);
+        }
         self.start(ret);
         let arrow = match ret {
             Ty::Unit => String::new(),
@@ -353,6 +379,11 @@ impl Gen<'_> {
                 return s;
             }
         }
+        if self.features.adts && self.rng.chance(15) {
+            if let Some(s) = self.adt_stmt() {
+                return s;
+            }
+        }
         loop {
             match self.rng.below(100) {
                 0..=29 => return self.let_stmt(),
@@ -402,7 +433,10 @@ impl Gen<'_> {
         if self.features.lists && self.rng.chance(20) {
             return self.let_list();
         }
-        let ty = self.ty();
+        let ty = match self.features.adts && self.rng.chance(25) {
+            true => *self.rng.pick(&[Ty::S, Ty::K, Ty::Opt]),
+            false => self.ty(),
+        };
         let init = self.expr(ty, MAX_DEPTH);
         let shadow = self.visible(|v| !v.fixed);
         let name = if !shadow.is_empty() && self.rng.chance(15) {
@@ -411,7 +445,7 @@ impl Gen<'_> {
             self.name("v")
         };
         let mutable = self.rng.chance(50);
-        let annot = if self.rng.chance(30) {
+        let annot = if ty == Ty::Opt || self.rng.chance(30) {
             format!(": {}", Self::ty_name(ty))
         } else {
             String::new()
@@ -433,7 +467,11 @@ impl Gen<'_> {
             Ty::Int => *self.rng.pick(&["=", "+=", "-="]),
             _ => "=",
         };
-        let e = self.expr(ty, MAX_DEPTH);
+        // The checker does not type a bare `None` from the assigned local.
+        let e = match ty {
+            Ty::Opt => self.some(MAX_DEPTH),
+            _ => self.expr(ty, MAX_DEPTH),
+        };
         Some(format!("{}{name} {op} {e};\n", self.pad()))
     }
 
@@ -637,6 +675,7 @@ impl Gen<'_> {
             Ty::Bool => self.bool(depth),
             Ty::Unit => "()".into(),
             Ty::List => unreachable!("lists come from list_expr"),
+            Ty::S | Ty::K | Ty::Opt => self.adt(ty, depth),
         }
     }
 
@@ -683,6 +722,9 @@ impl Gen<'_> {
                 return e;
             }
         }
+        if depth > 0 && self.features.adts && self.rng.chance(15) {
+            return self.adt_int(depth - 1);
+        }
         if depth == 0 || self.rng.chance(25) {
             return self.leaf(Ty::Int);
         }
@@ -719,6 +761,9 @@ impl Gen<'_> {
             let op = *self.rng.pick(&["==", "!="]);
             return format!("({a} {op} {b})");
         }
+        if depth > 0 && self.features.adts && self.rng.chance(10) {
+            return self.adt_bool(depth - 1);
+        }
         if depth == 0 || self.rng.chance(25) {
             return self.leaf(Ty::Bool);
         }
@@ -754,5 +799,196 @@ impl Gen<'_> {
         let then = self.block(1, ty);
         let els = self.block(1, ty);
         format!("(if {c} {then} else {els})")
+    }
+
+    /// A value of `S`, `K` or `Option<Int>`: a visible local, a construction, or a call of a
+    /// helper returning `Option<Int>`. A bare `None` only here, where the context gives its type.
+    fn adt(&mut self, ty: Ty, depth: u32) -> String {
+        let vars = self.visible(|v| v.ty == ty);
+        if !vars.is_empty() && self.rng.chance(40) {
+            return self.rng.pick(&vars).clone();
+        }
+        let d = depth.saturating_sub(1);
+        match ty {
+            Ty::S => {
+                let (a, b) = (self.int(d), self.bool(d));
+                match self.rng.chance(50) {
+                    true => format!("S {{ a: {a}, b: {b} }}"),
+                    false => format!("S {{ b: {b}, a: {a} }}"),
+                }
+            }
+            Ty::K => match self.rng.below(3) {
+                0 => "K::Z".to_string(),
+                1 => format!("K::One({})", self.int(d)),
+                _ => format!("K::Two({}, {})", self.int(d), self.adt(Ty::Opt, d)),
+            },
+            _ if self.rng.chance(25) => "None".to_string(),
+            _ => self.some(d),
+        }
+    }
+
+    /// An `Option<Int>` that is never a bare `None`, for a receiver, an operand or a scrutinee.
+    fn some(&mut self, depth: u32) -> String {
+        let vars = self.visible(|v| v.ty == Ty::Opt);
+        if !vars.is_empty() && self.rng.chance(50) {
+            return self.rng.pick(&vars).clone();
+        }
+        if self.rng.chance(30) {
+            if let Some(c) = self.call(Ty::Opt) {
+                return c;
+            }
+        }
+        format!("Some({})", self.int(depth))
+    }
+
+    /// A `K` for a scrutinee or an operand: a local or a construction.
+    fn k(&mut self, depth: u32) -> String {
+        self.adt(Ty::K, depth)
+    }
+
+    /// An `Int` from the ADTs: a field, `unwrap_or`, `?` in a function returning `Option<Int>`,
+    /// a `match` or an `if let`.
+    fn adt_int(&mut self, d: u32) -> String {
+        let structs = self.visible(|v| v.ty == Ty::S);
+        loop {
+            match self.rng.below(6) {
+                0 if !structs.is_empty() => return format!("{}.a", self.rng.pick(&structs).clone()),
+                1 => return format!("({}).a", self.adt(Ty::S, d)),
+                2 => return format!("{}.unwrap_or({})", self.some(d), self.int(d)),
+                3 if self.ret == Ty::Opt => return format!("({}?)", self.some(d)),
+                4 => return self.match_expr(d),
+                5 => return self.if_let(d),
+                _ => {}
+            }
+        }
+    }
+
+    fn adt_bool(&mut self, d: u32) -> String {
+        let structs = self.visible(|v| v.ty == Ty::S);
+        loop {
+            match self.rng.below(5) {
+                0 if !structs.is_empty() => return format!("{}.b", self.rng.pick(&structs).clone()),
+                1 => {
+                    let m = *self.rng.pick(&["is_some", "is_none"]);
+                    return format!("{}.{m}()", self.some(d));
+                }
+                2 if structs.len() > 1 || (!structs.is_empty() && self.rng.chance(30)) => {
+                    let (a, b) = (self.rng.pick(&structs).clone(), self.rng.pick(&structs).clone());
+                    return format!("({a} == {b})");
+                }
+                3 => {
+                    let op = *self.rng.pick(&["==", "!="]);
+                    return format!("({} {op} {})", self.k(d), self.k(d));
+                }
+                4 => {
+                    let op = *self.rng.pick(&["==", "!="]);
+                    return format!("({} {op} {})", self.some(d), self.some(d));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Some of a fixed sequence of arms for a `K` or an `Option<Int>`, each more specific than or
+    /// disjoint from the later ones, as patterns with `N` and `M` for names to bind; then the
+    /// last arm: `_`, or `None` when an earlier arm covers every `Some`.
+    fn arms(&mut self) -> (String, Vec<String>) {
+        let lit = self.rng.below(4);
+        let (scrut, cands) = match self.rng.chance(60) {
+            true => (
+                self.k(1),
+                vec![
+                    format!("K::One({lit})"),
+                    format!("K::Two(N, Some({lit}))"),
+                    "K::Two(N, Some(M))".to_string(),
+                    "K::One(N)".to_string(),
+                    "K::Z".to_string(),
+                ],
+            ),
+            false => (self.some(1), vec![format!("Some({lit})"), "Some(N)".to_string()]),
+        };
+        let mut pats: Vec<String> = cands.into_iter().filter(|_| self.rng.chance(50)).collect();
+        let last = match pats.last().map(String::as_str) {
+            Some("Some(N)") if self.rng.chance(50) => "None",
+            _ => "_",
+        };
+        pats.push(last.to_string());
+        (scrut, pats)
+    }
+
+    /// `pat`, with each `N` and `M` (a name's place: after `(` or a space, before `)` or `,`)
+    /// replaced by a fresh name, declared in the current scope.
+    fn bind(&mut self, pat: &str) -> String {
+        let b = pat.as_bytes();
+        let mut out = String::new();
+        for (i, c) in pat.char_indices() {
+            let hole = matches!(c, 'N' | 'M')
+                && i > 0
+                && matches!(b[i - 1], b'(' | b' ')
+                && matches!(b.get(i + 1), Some(b')' | b','));
+            if hole {
+                let name = self.name("n");
+                out += &name;
+                self.declare(name, Ty::Int, false, true);
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// `(match e { .. })` of `Int`, with nested patterns and a catch-all.
+    fn match_expr(&mut self, d: u32) -> String {
+        let (scrut, pats) = self.arms();
+        let mut arms = Vec::new();
+        for p in pats {
+            self.scopes.push(Vec::new());
+            let p = self.bind(&p);
+            arms.push(format!("{p} => {}", self.int(d)));
+            self.scopes.pop();
+        }
+        format!("(match {scrut} {{ {} }})", arms.join(", "))
+    }
+
+    /// `(if let PAT = e { .. } else { .. })` of `Int`.
+    fn if_let(&mut self, d: u32) -> String {
+        let (scrut, pats) = self.arms();
+        self.scopes.push(Vec::new());
+        let p = self.bind(&pats[0]);
+        let then = self.int(d);
+        self.scopes.pop();
+        let els = self.int(d);
+        format!("(if let {p} = {scrut} {{ {then} }} else {{ {els} }})")
+    }
+
+    /// A field write on a mutable `S`, or a `match` statement whose arms are blocks.
+    fn adt_stmt(&mut self) -> Option<String> {
+        let pad = self.pad();
+        if self.rng.chance(50) {
+            let structs = self.visible(|v| v.ty == Ty::S && v.mutable && !v.fixed);
+            if structs.is_empty() {
+                return None;
+            }
+            let s = self.rng.pick(&structs).clone();
+            return Some(match self.rng.below(3) {
+                0 => format!("{pad}{s}.b = {};\n", self.bool(2)),
+                _ => {
+                    let op = *self.rng.pick(&["=", "+=", "-="]);
+                    format!("{pad}{s}.a {op} {};\n", self.int(2))
+                }
+            });
+        }
+        if self.nest >= MAX_NEST {
+            return None;
+        }
+        let (scrut, pats) = self.arms();
+        let mut arms = Vec::new();
+        for p in pats {
+            self.scopes.push(Vec::new());
+            let p = self.bind(&p);
+            arms.push(format!("{pad}    {p} => {},\n", self.block(2, Ty::Unit)));
+            self.scopes.pop();
+        }
+        Some(format!("{pad}match {scrut} {{\n{}{pad}}}\n", arms.concat()))
     }
 }

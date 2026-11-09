@@ -24,9 +24,9 @@ fn the_component_validates() {
 }
 
 #[test]
-#[should_panic(expected = "codegen: builtin StrParseInt")]
+#[should_panic(expected = "codegen: builtin StrEndsWith")]
 fn unsupported_ir_names_the_node() {
-    let _ = compile(&module("fn main() { \"12\".parse_int(); }"));
+    let _ = compile(&module("fn main() { \"12\".ends_with(\"2\"); }"));
 }
 
 #[test]
@@ -120,6 +120,12 @@ fn main() -> Int {
         (BASE, BASE + 24),
         "literals are interned and 8-aligned"
     );
+    let none = s.pinned(&Ty::Option(Box::new(Ty::Int)), 0);
+    assert_eq!(
+        (none, s.pinned(&Ty::Option(Box::new(Ty::Int)), 0)),
+        (BASE + 48, BASE + 48)
+    );
+    let dot = s.pinned(&Ty::Enum(EnumId(m.enums.len() as u32 - 1)), 0);
     let (data, table) = s.finish();
 
     // Memory as Wasm sees it: address `x` is byte `x` of `buf`, which is 8-aligned.
@@ -186,6 +192,26 @@ fn main() -> Int {
     // SAFETY: `Ok` has one `Map` slot.
     unsafe { *obj::slot(&t, r, 0) = to_slot(obj::new_map(map, Default::default())) };
     assert_eq!(show(res, r), "Ok({})");
+    // A pinned variant: displayed, copied and dropped, never counted or freed.
+    // SAFETY: `none` and `dot` are pinned enum objects in `buf`.
+    unsafe {
+        assert_eq!(
+            ((*at(none)).rc, (*at(none)).desc, *obj::field::<u32>(at(none), 8)),
+            (PINNED, opt, 0)
+        );
+        for _ in 0..3 {
+            obj::inc(at(none));
+            obj::dec(&t, at(none));
+            obj::dec(&t, at(dot));
+        }
+        let s = display(&t, opt, to_slot(at(none)));
+        assert_eq!(obj::bytes(s), b"None");
+        obj::dec(&t, s);
+        let s = display(&t, shape, to_slot(at(dot)));
+        assert_eq!(obj::bytes(s), b"Shape::Dot");
+        obj::dec(&t, s);
+        assert_eq!(((*at(none)).rc, (*at(dot)).rc), (PINNED, PINNED));
+    }
     assert_eq!(obj::live(), before);
     // SAFETY: a pinned static is never freed.
     assert_eq!(unsafe { (*at(a)).rc }, PINNED);

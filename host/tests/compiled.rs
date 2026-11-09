@@ -580,3 +580,217 @@ fn map_insert_remove_and_keys_ownership() {
     }"#;
     assert_eq!(value(src), "2154");
 }
+
+#[test]
+fn structs_enums_options_and_results() {
+    let src = r#"struct P { x: Int, name: Str }
+        enum Shape { Dot, Line(Int, Int), Named(Str) }
+        fn area(s: Shape) -> Int { match s { Shape::Dot => 0, Shape::Line(a, b) => a * b, Shape::Named(n) => n.len() } }
+        fn main() -> Str {
+            let p = P { name: "pt" + "", x: 3 };
+            let mut m: Map<Str, Int> = Map::new();
+            m.insert("k", 4);
+            let n = area(Shape::Line(p.x, 4)) + area(Shape::Dot) + area(Shape::Named(p.name));
+            let a = "12".parse_int().unwrap_or(0) + "x".parse_int().unwrap_or(7) + m.get("k").unwrap_or(100) + m.get("j").unwrap_or(100);
+            let r: Result<Int, Str> = Err("e" + "");
+            let o: Option<Str> = None;
+            let s: Option<Str> = Some("s" + "");
+            let flags = [o.is_some(), o.is_none(), s.is_some(), r.is_err(), r.is_ok()];
+            let mut t = "";
+            for f in flags { if f { t += "1"; } else { t += "0"; } }
+            n.to_str() + "," + a.to_str() + "," + r.unwrap_or(5).to_str() + p.name + o.unwrap_or("d") + s.unwrap_or("d") + t
+        }"#;
+    assert_eq!(value(src), "14,123,5ptds01110");
+}
+
+#[test]
+fn main_returns_a_struct_enum_or_option() {
+    let src = r#"struct P { x: Int, s: Str } fn main() -> P { P { x: 1, s: "a" + "b" } }"#;
+    assert_eq!(value(src), r#"P { x: 1, s: "ab" }"#);
+    assert_eq!(value("enum E { A, B(Int) } fn main() -> E { E::B(2) }"), "E::B(2)");
+    assert_eq!(value("enum E { A, B(Int) } fn main() -> E { E::A }"), "E::A");
+    assert_eq!(value("fn main() -> Option<Int> { None }"), "None");
+    assert_eq!(value(r#"fn main() -> Option<Str> { Some("x" + "") }"#), r#"Some("x")"#);
+}
+
+/// A struct literal and a variant take their parts: the same `Str` stored twice is counted twice.
+#[test]
+fn struct_literal_and_variant_take_their_parts() {
+    let src = r#"struct W { a: Str, b: Str }
+        enum E { Two(Str, Str) }
+        fn main() -> Str {
+            let s = "x" + "y";
+            let w = W { b: s, a: "p" + "q" };
+            let v = W { a: s, b: s };
+            let e = E::Two(s, s + "");
+            match e { E::Two(c, d) => w.a + w.b + v.a + v.b + s + c + d }
+        }"#;
+    assert_eq!(value(src), "pqxyxyxyxyxyxy");
+}
+
+/// `w.s` is a new reference; a base that is not a local is dropped after the read.
+#[test]
+fn a_field_read_is_owned() {
+    let src = r#"struct W { s: Str, n: Int }
+        struct V { w: W }
+        fn mk() -> W { W { s: "a" + "b", n: 1 } }
+        fn main() -> Str { let w = mk(); let t = w.s; let u = mk().s; let v = V { w: mk() }; let x = v.w.s; t + w.s + u + x + v.w.n.to_str() }"#;
+    assert_eq!(value(src), "abababab1");
+}
+
+/// A field write copies a shared struct (`rt_unique`), so the other copy is unchanged.
+#[test]
+fn field_write_copies_a_shared_struct() {
+    let src = r#"struct P { x: Int, s: Str }
+        fn main() -> Str {
+            let mut a = P { x: 1, s: "s" + "" };
+            let mut b = a;
+            b.x = 2;
+            b.s = "t" + "";
+            a.s += "!";
+            a.x -= 5;
+            a.x.to_str() + a.s + b.x.to_str() + b.s
+        }"#;
+    assert_eq!(value(src), "-4s!2t");
+}
+
+/// Field and index steps mixed: each container on the path is made unique and stored back.
+#[test]
+fn nested_field_and_index_place() {
+    let src = r#"struct In { v: List<Int>, n: Int }
+        struct Out { ins: List<In>, name: Str }
+        fn main() -> Str {
+            let mut o = Out { ins: [In { v: [1, 2], n: 0 }, In { v: [3], n: 5 }], name: "o" + "" };
+            let keep = o;
+            let inner = o.ins[1];
+            o.ins[1].n += 10;
+            o.ins[0].v[1] = 7;
+            o.ins[1].v.push(4);
+            o.name = "p" + "";
+            o.ins[0] = In { v: [o.ins[0].v[1]], n: o.ins[1].n };
+            let k = o.ins[1].n * 1000 + o.ins[0].v[0] * 100 + o.ins[1].v.len() * 10 + keep.ins[1].n + inner.v.len() + keep.ins[0].v[1] + o.ins[0].n;
+            k.to_str() + o.name + keep.name
+        }"#;
+    assert_eq!(value(src), "15743po");
+}
+
+/// Match bindings are new references, released at the end of their arm (here in a loop that
+/// takes the arms in turn) and on a `return` from inside it.
+#[test]
+fn match_bindings_are_released() {
+    let src = r#"enum T { Leaf(Str), Pair(Str, Str) }
+        fn first(t: T) -> Str { match t { T::Pair(a, b) => { if a == "x" { return b; } a + b }, T::Leaf(s) => s } }
+        fn main() -> Str {
+            let mut out = "";
+            for i in 0..4 {
+                let t = if i % 2 == 0 { T::Pair(i.to_str() + "", "y" + "") } else { T::Leaf("l" + "") };
+                match t { T::Pair(a, b) => { out += a; out += b; }, T::Leaf(s) => { out += s; } }
+            }
+            out + first(T::Pair("x" + "", "z" + "")) + first(T::Leaf("q" + "")) + first(T::Pair("m" + "", "n" + ""))
+        }"#;
+    assert_eq!(value(src), "0yl2ylzqmn");
+}
+
+/// The scrutinee is released when the match ends and on every exit from an arm: `break`,
+/// `continue` and `return`.
+#[test]
+fn scrutinee_is_released_on_every_exit() {
+    let src = r#"fn find(xs: List<Option<Str>>) -> Str {
+            for x in xs { match x { Some(s) => { if s == "r" { return s + "!"; } }, None => {} } }
+            "none"
+        }
+        fn main() -> Str {
+            let xs = [Some("a" + ""), None, Some("b" + ""), Some("r" + ""), Some("c" + "")];
+            let mut out = "";
+            for x in xs {
+                match x {
+                    Some(s) => { if s == "b" { continue; } if s == "c" { break; } out += s; },
+                    None => { out += "-"; },
+                }
+            }
+            let mut i = 0;
+            loop { i += 1; match Some(i.to_str() + "") { Some(s) => { if i == 3 { break; } out += s; }, None => {} } }
+            out + find(xs) + find([None])
+        }"#;
+    assert_eq!(value(src), "a-r12r!none");
+}
+
+/// `?` returns early releasing every owned local; an `Err` rebuilt for the function's return
+/// type holds its own reference to the error, and one of the same type is returned as is.
+#[test]
+fn question_mark_releases_and_keeps_the_error() {
+    let src = r#"fn half(n: Int) -> Result<Int, Str> { if n % 2 == 0 { Ok(n / 2) } else { Err(n.to_str() + " is odd") } }
+        fn quarter(n: Int) -> Result<Str, Str> { let keep = "k" + ""; let h = half(n)?; let q = half(h)?; Ok(keep + q.to_str()) }
+        fn same(n: Int) -> Result<Int, Str> { let keep = "k" + ""; let r = half(n); let h = r?; Ok(h + keep.len()) }
+        fn get(m: Map<Str, Str>, k: Str) -> Option<Int> { let keep = k + ""; let v = m.get(k)?; Some(v.len() + keep.len()) }
+        fn show(r: Result<Str, Str>) -> Str { match r { Ok(s) => s, Err(e) => e } }
+        fn main() -> Str {
+            let mut m: Map<Str, Str> = Map::new();
+            m.insert("a", "xyz" + "");
+            let a = show(quarter(8)) + "," + show(quarter(3)) + "," + show(quarter(6));
+            let b = same(4).unwrap_or(0) * 10 + same(5).unwrap_or(0);
+            let c = get(m, "a").unwrap_or(0) * 10 + get(m, "b").unwrap_or(9);
+            a + "," + b.to_str() + "," + c.to_str()
+        }"#;
+    assert_eq!(value(src), "k2,3 is odd,3 is odd,30,49");
+}
+
+/// `None` and payload-free variants are pinned statics: copied and dropped any number of times.
+#[test]
+fn pinned_variants_survive_any_number_of_drops() {
+    let src = r#"enum C { Red, Green(Int) }
+        fn id(c: C) -> C { c }
+        fn main() -> Int {
+            let mut n = 0;
+            let none: Option<Str> = None;
+            for i in 0..1000 {
+                let a = C::Red; let b = id(a); let c = [b, C::Red, C::Green(i)];
+                let o = none; let p = [o, None];
+                if c[0] == C::Red && p[1] == none { n += 1; }
+            }
+            n
+        }"#;
+    assert_eq!(value(src), "1000");
+}
+
+/// `==` on structs and enums compares structure, not identity.
+#[test]
+fn struct_and_enum_equality() {
+    let src = r#"struct P { x: Int, s: Str }
+        enum E { A, B(Str, Option<Int>) }
+        fn main() -> Str {
+            let p = P { x: 1, s: "a" + "b" };
+            let q = P { x: 1, s: "ab" };
+            let e = E::B("x" + "", Some(2));
+            let r = [p == q, p != q, e == E::B("x", Some(2)), e == E::B("x", None), e == E::A, E::A == E::A, Some(e) == Some(E::A)];
+            let mut t = "";
+            for f in r { if f { t += "1"; } else { t += "0"; } }
+            t
+        }"#;
+    assert_eq!(value(src), "1010010");
+}
+
+/// Nested patterns: variants, literals and bindings at any depth, arms in order.
+#[test]
+fn nested_patterns() {
+    let src = r#"enum E { A(Option<Int>, Str), B(Bool) }
+        fn f(e: E) -> Str {
+            match e {
+                E::A(Some(0), _) => "zero",
+                E::A(Some(n), "s") => "s" + n.to_str(),
+                E::A(Some(n), t) => t + n.to_str(),
+                E::A(None, t) => t,
+                E::B(true) => "yes",
+                E::B(_) => "no",
+            }
+        }
+        fn main() -> Str {
+            let mut out = f(E::A(Some(0), "q" + "")) + f(E::A(Some(4), "s" + "")) + f(E::A(Some(5), "t" + ""));
+            out += f(E::A(None, "n" + "")) + f(E::B(true)) + f(E::B(false));
+            if let Some(Some(x)) = Some(Some(7)) { out += x.to_str(); }
+            let k = match 3 { 1 => "one", 3 => "three", _ => "many" };
+            let l = match "b" + "" { "a" => out, _ => out + "." };
+            k + l
+        }"#;
+    assert_eq!(value(src), "threezeros4t5nyesno7.");
+}

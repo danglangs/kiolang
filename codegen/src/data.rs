@@ -2,7 +2,8 @@
 //! segment at `base` (docs/codegen.md, "How it is built"):
 //!
 //! ```text
-//! base   literals, each a pinned Str [u32::MAX][STR][len][len][bytes], padded to 8 bytes
+//! base   literals, each a pinned Str [u32::MAX][STR][len][len][bytes], padded to 8 bytes,
+//!        and payload-free variants, each a pinned enum [u32::MAX][desc][variant][0]
 //! table  RawTable: (address, count) of each array below, in this order
 //!        descs     [tag, 4 words] per descriptor: runtime/src/desc.rs `Desc`, repr(C, u32)
 //!        slots     u32 per record or variant slot
@@ -29,6 +30,8 @@ pub struct Statics<'m> {
     base: u32,
     literals: Vec<u8>,
     strs: HashMap<String, u32>,
+    /// The address of the pinned object of each (descriptor, payload-free variant) used.
+    pins: HashMap<(u32, u32), u32>,
     /// The descriptor of each type that has one beyond the scalars.
     tys: Vec<(Ty, u32)>,
     descs: Vec<[u32; 5]>,
@@ -47,6 +50,7 @@ impl<'m> Statics<'m> {
             base,
             literals: Vec::new(),
             strs: HashMap::new(),
+            pins: HashMap::new(),
             tys: Vec::new(),
             descs: (0..5).map(|tag| [tag, 0, 0, 0, 0]).collect(),
             slots: Vec::new(),
@@ -129,6 +133,21 @@ impl<'m> Statics<'m> {
         self.literals.extend(s.as_bytes());
         self.literals.resize(self.literals.len().next_multiple_of(8), 0);
         self.strs.insert(s.to_string(), a);
+        a
+    }
+
+    /// The address of the pinned object for variant `variant`, which has no payload, of enum
+    /// type `t`, added if new.
+    pub fn pinned(&mut self, t: &Ty, variant: u32) -> u32 {
+        let desc = self.desc(t);
+        if let Some(&a) = self.pins.get(&(desc, variant)) {
+            return a;
+        }
+        let a = self.base + self.literals.len() as u32;
+        for w in [u32::MAX, desc, variant, 0] {
+            self.literals.extend(w.to_le_bytes());
+        }
+        self.pins.insert((desc, variant), a);
         a
     }
 
@@ -232,6 +251,16 @@ impl<'m> Statics<'m> {
         }
     }
 
+    fn pat(&mut self, p: &Pat) {
+        match p {
+            Pat::Str(s) => {
+                self.str(s);
+            }
+            Pat::Variant(_, ps) => ps.iter().for_each(|p| self.pat(p)),
+            Pat::Wild | Pat::Bind(_) | Pat::Int(_) | Pat::Bool(_) => {}
+        }
+    }
+
     fn expr(&mut self, e: &Expr) {
         self.ty(&e.ty);
         let exprs = |xs: &[Expr], s: &mut Self| xs.iter().for_each(|x| s.expr(x));
@@ -268,9 +297,7 @@ impl<'m> Statics<'m> {
             ExprKind::Match(x, arms) => {
                 self.expr(x);
                 for arm in arms {
-                    if let Pat::Str(s) = &arm.pat {
-                        self.str(s);
-                    }
+                    self.pat(&arm.pat);
                     self.expr(&arm.body);
                 }
             }

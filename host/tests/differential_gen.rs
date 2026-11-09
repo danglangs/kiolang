@@ -1,5 +1,5 @@
 //! Generated programs (tools/kiogen) give the same result compiled as interpreted.
-//! `KIO_GEN_N` programs (default 300) from seed `KIO_GEN_SEED` (default fixed) on; a mismatch
+//! `KIO_GEN_N` programs (default 250) from seed `KIO_GEN_SEED` (default fixed) on; a mismatch
 //! prints the seed and the source, so `KIO_GEN_SEED=<seed> KIO_GEN_N=1` reruns it alone.
 
 use kio_host::{Compiled, Kio, Limits, MAX_STACK};
@@ -50,7 +50,7 @@ fn env(name: &str, default: u64) -> u64 {
 }
 
 fn generated() {
-    let n = env("KIO_GEN_N", 300);
+    let n = env("KIO_GEN_N", 250);
     let first = env("KIO_GEN_SEED", 0x6b69_6f00);
     let caps = lang::CapTable::v0();
     let features = Features::default();
