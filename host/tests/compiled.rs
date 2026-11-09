@@ -1766,3 +1766,54 @@ fn for_over_a_borrowed_parameter() {
         }"#;
     assert_eq!(value(src), "906");
 }
+
+/// Inline allocation (C8b5) reuses a freed block whose slots still hold the old object's
+/// pointers. A part that exits before the others are written frees the new object, which must
+/// find 0 in every pointer slot not yet written: here `r?` exits from a `P` whose `a` and `b`
+/// were last a freed `P`'s, and from the `Ok` around it.
+#[test]
+fn a_reused_block_starts_with_empty_pointer_slots() {
+    let src = r#"struct P { a: Str, b: Str, n: Int }
+        fn mk(i: Int, r: Result<Str, Str>) -> Result<P, Str> {
+            Ok(P { n: i, b: r?, a: "a" + i.to_str() })
+        }
+        fn main() -> Str {
+            let mut out = "";
+            for i in 0..40 {
+                let p = P { a: "x" + i.to_str(), b: "y" + i.to_str(), n: i };
+                out += p.a + p.b;
+                let r: Result<Str, Str> = if i % 3 == 0 { Ok("b" + i.to_str()) } else { Err("e" + i.to_str()) };
+                match mk(i, r) { Ok(q) => { out += q.a + q.b; }, Err(e) => { out += e; } }
+            }
+            out.len().to_str() + out.slice(0, 20)
+        }"#;
+    assert_eq!(value(src), "368x0y0a0b0x1y1e1x2y2e2");
+}
+
+/// Objects of several size classes and closures, built and dropped in turns so each reuses
+/// blocks of the others' freed objects (inline allocation pops the free lists, C8b5).
+#[test]
+fn inline_allocation_reuses_blocks_of_every_class() {
+    let src = r#"struct S1 { a: Str }
+        struct S3 { a: Str, b: Int, c: Str }
+        struct S6 { a: Int, b: Str, c: Int, d: Str, e: Int, f: Str }
+        struct S8 { a: Str, b: Str, c: Str, d: Str, e: Str, f: Str, g: Str, h: Str }
+        enum E { A(Str), B(Int, Str, Str), C }
+        fn main() -> Int {
+            let mut n = 0;
+            for i in 0..200 {
+                let s = i.to_str();
+                let x1 = S1 { a: s + "" };
+                let x3 = S3 { a: s, b: i, c: x1.a };
+                let x6 = S6 { a: 1, b: s, c: 2, d: x3.c, e: 3, f: s + "!" };
+                let x8 = S8 { a: s, b: s, c: s, d: s, e: s, f: s, g: s, h: x6.f };
+                let e = if i % 3 == 0 { E::A(x8.h) } else if i % 3 == 1 { E::B(i, s, x8.a) } else { E::C };
+                let k = i;
+                let f = |m: Int| m + k + x6.b.len();
+                n += match e { E::A(t) => t.len(), E::B(j, _, t) => j + t.len(), E::C => f(1) };
+                n += x8.h.len() + x6.d.len() + f(0);
+            }
+            n
+        }"#;
+    assert_eq!(value(src), "35460");
+}

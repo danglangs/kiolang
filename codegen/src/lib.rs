@@ -112,6 +112,10 @@ struct Runtime {
     /// The size of the runtime's table, the first entry the program's functions take.
     table: u32,
     exports: HashMap<String, u32>,
+    /// The addresses of the allocator's free-list heads and of the live-object count, read
+    /// from the bodies of `rt_heap_lists` and `rt_live_count` (`FuncGen::alloc`).
+    lists: u32,
+    live: u32,
 }
 
 impl Runtime {
@@ -123,7 +127,10 @@ impl Runtime {
             pages: 0,
             table: 0,
             exports: HashMap::new(),
+            lists: 0,
+            live: 0,
         };
+        let mut code = 0;
         for payload in Parser::new(0).parse_all(wasm) {
             match payload? {
                 Payload::TypeSection(s) => rt.types = s.count(),
@@ -147,15 +154,40 @@ impl Runtime {
                         rt.exports.insert(e.name.to_string(), e.index);
                     }
                 }
+                Payload::CodeSectionEntry(body) => {
+                    let index = rt.imported + code;
+                    code += 1;
+                    for (name, at) in [("rt_heap_lists", &mut rt.lists), ("rt_live_count", &mut rt.live)] {
+                        if rt.exports.get(name) == Some(&index) {
+                            *at = constant(&body).with_context(|| format!("{name} is not one i32.const"))?;
+                        }
+                    }
+                }
                 _ => {}
             }
         }
+        anyhow::ensure!(
+            rt.lists != 0 && rt.live != 0,
+            "the runtime has no rt_heap_lists or rt_live_count"
+        );
         Ok(rt)
     }
 
     fn export(&self, name: &str) -> u32 {
         self.exports[name]
     }
+}
+
+/// The value of a function body that is exactly `i32.const N; end`, as an address.
+fn constant(body: &wasmparser::FunctionBody) -> Option<u32> {
+    let mut ops = body.get_operators_reader().ok()?;
+    let wasmparser::Operator::I32Const { value } = ops.read().ok()? else {
+        return None;
+    };
+    let wasmparser::Operator::End = ops.read().ok()? else {
+        return None;
+    };
+    (ops.eof() && body.get_locals_reader().ok()?.get_count() == 0).then_some(value as u32)
 }
 
 /// A Wasm function type.
@@ -260,6 +292,19 @@ const VARIANT: wasm_encoder::MemArg = wasm_encoder::MemArg {
     align: 2,
     memory_index: 0,
 };
+
+/// The largest block the runtime's free lists hold (runtime/src/heap.rs `SMALL`): classes of
+/// 8, 16, .., 64 bytes, class `(size - 1) / 8`.
+const HEAP_SMALL: u64 = 64;
+
+/// A 4-byte word at byte `offset`.
+fn mem32(offset: u64) -> wasm_encoder::MemArg {
+    wasm_encoder::MemArg {
+        offset,
+        align: 2,
+        memory_index: 0,
+    }
+}
 
 /// The slot at byte `offset` of an object.
 fn slot_at(offset: u64) -> wasm_encoder::MemArg {
@@ -1793,9 +1838,13 @@ impl FuncGen<'_, '_> {
     /// each part's value goes into its slot (`first + 8 * index`), which takes it.
     fn object(&mut self, desc: u32, variant: u32, first: u64, parts: &[(u32, &ir::Expr)]) {
         let o = self.temp(ValType::I32);
-        self.sink().i32_const(desc as i32).i32_const(variant as i32);
-        self.call_rt("rt_alloc");
-        self.sink().local_set(o);
+        // A part that exits frees the object, which reads its pointer slots: those start 0.
+        let zero: Vec<u64> = parts
+            .iter()
+            .filter(|(_, x)| is_ptr(&x.ty))
+            .map(|(i, _)| first + 8 * u64::from(*i))
+            .collect();
+        self.alloc(desc, variant, first, parts.len(), &zero, o);
         self.owned.push(o);
         for (i, x) in parts {
             self.sink().local_get(o);
@@ -1807,15 +1856,58 @@ impl FuncGen<'_, '_> {
         self.sink().local_get(o);
     }
 
+    /// `rt_alloc(desc, variant)` into local `o`: a struct (`first` 8), or an enum variant or a
+    /// closure (`first` 16, `variant` the word at byte 8), of `n` slots, count 1. The slots at
+    /// the offsets in `zero` are 0; the caller writes the others before anything reads them.
+    ///
+    /// A small object is taken inline from its size class's free list (runtime/src/heap.rs,
+    /// C8b5): pop the head at `lists + 4 * class`, write the header and the word at 8, add 1
+    /// to the live count, as `rt_alloc` does; an empty list calls `rt_alloc`, which carves a
+    /// fresh block. The size is the runtime's for the descriptor (the table's slot count), so
+    /// the runtime frees the block into the same class; if the table disagrees with `n` (only
+    /// crafted IR), the runtime allocates, and reports the bad variant.
+    fn alloc(&mut self, desc: u32, variant: u32, first: u64, n: usize, zero: &[u64], o: u32) {
+        let size = first + 8 * n as u64;
+        let f = self.rt.export("rt_alloc");
+        let (lists, live) = (self.rt.lists, self.rt.live);
+        let known = self.statics.slots(desc, variant) == Some(n);
+        let mut s = self.sink();
+        if size > HEAP_SMALL || !known {
+            s.i32_const(desc as i32).i32_const(variant as i32).call(f).local_set(o);
+            return;
+        }
+        let head = mem32(u64::from(lists) + 4 * ((size - 1) / 8));
+        s.i32_const(0).i32_load(head).local_tee(o).if_(BlockType::Empty);
+        s.i32_const(0).local_get(o).i32_load(mem32(0)).i32_store(head);
+        s.local_get(o)
+            .i64_const(((u64::from(desc) << 32) | 1) as i64)
+            .i64_store(slot_at(0));
+        if first == ENUM_SLOTS {
+            s.local_get(o).i64_const(i64::from(variant)).i64_store(slot_at(8));
+        }
+        for &z in zero {
+            s.local_get(o).i64_const(0).i64_store(slot_at(z));
+        }
+        let live = mem32(u64::from(live));
+        s.i32_const(0)
+            .i32_const(0)
+            .i32_load(live)
+            .i32_const(1)
+            .i32_add()
+            .i32_store(live);
+        s.else_();
+        s.i32_const(desc as i32).i32_const(variant as i32).call(f).local_set(o);
+        s.end();
+    }
+
     /// A closure lifted to `f`: a new function object holding a copy (+1) of each captured
     /// local in its slots, which the object owns until it is freed. Nothing here can exit, so
     /// the object needs no place in `owned` while it is filled.
     fn closure(&mut self, f: ir::FuncId, captured: &[ir::LocalId]) {
         let (desc, elem) = self.statics.func(f, Some(captured.len()));
         let o = self.temp(ValType::I32);
-        self.sink().i32_const(desc as i32).i32_const(elem as i32);
-        self.call_rt("rt_alloc");
-        self.sink().local_set(o);
+        // Every pointer slot is written below, before anything could read it.
+        self.alloc(desc, elem, ENUM_SLOTS, captured.len(), &[], o);
         let m = self.m;
         for (i, (id, l)) in captured.iter().zip(&m.funcs[f.0 as usize].locals).enumerate() {
             let Some(x) = self.local(*id) else { continue };

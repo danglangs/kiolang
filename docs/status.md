@@ -4,7 +4,7 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 
 ## Now
 
-Compiled-only kio covers the whole language and every capability; the active stream is speed (C8): code that stays in compiled Wasm is 1.1-2.1x Rust, runtime-heavy code 3-10x (table below). The differential harness runs 404 programs both ways (0 mismatches) and the generator 250 more per CI run.
+Compiled-only kio covers the whole language and every capability; the active stream is speed (C8): code that stays in compiled Wasm is 1.1-2.1x Rust, runtime-heavy code 2.3-8x (table below). The differential harness runs 398 programs both ways (0 mismatches) and the generator 250 more per CI run.
 
 | Done | Result |
 |---|---|
@@ -36,20 +36,21 @@ Compiled-only kio covers the whole language and every capability; the active str
 | C8b3 | size-class free lists (8-64 bytes) over dlmalloc, handed back past 256 KB or when memory runs out. Tree 243 to 179 ms, JSON 100 to 82, word count 83 to 75, strings 7.9 to 5.2 |
 | C8b4 | borrowed parameters (a pointer parameter only read in place is passed without an inc; optimistic fixpoint, `fn`-value wrappers adapt) and `Str` map lookups without a key copy. Word count 74 to 70 ms, JSON 83 to 80, tree 179 to 185 (same count, code moved) |
 | L9, C12 | built-in JSON: a reserved `Json` enum, `Str.parse_json() -> Result<Json, Str>`, `Json.to_json()`, accessors (`get`, `at`, `as_*`), json.kio's rules and messages, depth 128; the interpreter (lang/src/json.rs) and the runtime (runtime/src/json.rs, building kio objects directly) agree on the harness, a generated-JSON fuzz test and byte mutations. 1 MB parse + encode 17 ms compiled (`serde_json` 7.8 ms, json.kio 82 ms). kio-web still declares its own `Json` and is refused until it moves to the built-in |
+| C8b5 | less work per operation (fuel stays): generated code pops the size-class free lists, fresh blocks carved 32 at a time from 64 KB chunks, freeing without descriptor copies, `Str` map keys compared by an 8-byte prefix. Tree 185 to 98 ms (fuel 3.78 to 2.21 G), word count 70 to 45, JSON 81 to 66 |
 
 ## Next
 
-C8 (roadmap.md): word count's map (`BTreeMap` node search, `split`'s allocations); fresh small blocks carved from chunks (dlmalloc's `malloc` is 17% of tree, while it is built); borrowed match bindings of a borrowed scrutinee (tree).
+C8 (roadmap.md): freeing (54% of tree); word count's double search for `insert(k, get(k) + 1)` (open_questions #101) and `split`'s allocations; borrowed match bindings of a borrowed scrutinee (tree).
 
 ## Waiting on the maintainer
 
 Nothing.
 
-## Speed (C8b4, 2026-11-09, release, run time; all in [roadmap.md](roadmap.md))
+## Speed (C8b5, 2026-11-09, release, run time; all in [roadmap.md](roadmap.md))
 
 | | fib(35) | 30 M loop | tree | JSON 1 MB | 100 k concatenations |
 |---|---|---|---|---|---|
-| Rust | 24 ms | 97 ms | 33 ms | 7.5 ms | 3.5 ms |
-| kio compiled (plus 20-25 ms compile, cached) | 53 ms | 111 ms | 185 ms | 80 ms | 5.2 ms |
-| Python 3.13 | 732 ms | 928 ms | 2.87 s | 16 ms | 7.0 ms |
-| kio interpreter (the test oracle) | 1.62 s | 1.32 s | 1.05 s | 868 ms | 1.57 s |
+| Rust | 23 ms | 97 ms | 33 ms | 8.0 ms | 4.6 ms |
+| kio compiled (plus 20-25 ms compile, cached) | 53-57 ms | 106 ms | 98 ms | 66 ms | 5.2 ms |
+| Python 3.13 | 704 ms | 933 ms | 2.87 s | 17 ms | 7.2 ms |
+| kio interpreter (the test oracle) | 1.54 s | 1.27 s | 1.03 s | 812 ms | 1.57 s |

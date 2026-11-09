@@ -47,6 +47,20 @@ pub extern "C" fn rt_alloc(desc: u32, variant: u32) -> u32 {
     addr(obj::alloc(&table(), desc, variant))
 }
 
+/// The address of the free lists' heads (heap.rs), for generated code's inline allocation
+/// (C8b5). Codegen reads it from this body, which must stay a single `i32.const`.
+#[no_mangle]
+pub extern "C" fn rt_heap_lists() -> u32 {
+    crate::heap::lists().expose_provenance() as u32
+}
+
+/// The address of the live-object count (obj.rs), which generated code's inline allocation
+/// adds to. Codegen reads it from this body, as `rt_heap_lists`'s.
+#[no_mangle]
+pub extern "C" fn rt_live_count() -> u32 {
+    obj::live_count().expose_provenance() as u32
+}
+
 /// # Safety
 /// `obj`'s contract.
 #[no_mangle]

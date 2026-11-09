@@ -1,18 +1,27 @@
-//! The allocator: size-class free lists over dlmalloc (C8b3).
+//! The allocator: size-class free lists over dlmalloc (C8b3), fresh blocks carved from chunks
+//! (C8b5).
 //!
 //! A block of at most 64 bytes and alignment at most 8 is rounded up to a class of 8, 16, ..,
 //! 64 bytes. A freed block goes on its class's list, linked through its first word, and the
 //! next allocation of that class takes it back with no call into dlmalloc. Anything larger,
-//! or more aligned, goes to dlmalloc directly. Every small block is allocated from dlmalloc
-//! with its class's size and alignment 8, so any list's block can be handed back to dlmalloc.
+//! or more aligned, goes to dlmalloc directly.
 //!
-//! The lists hold only blocks the program freed, and never more than `HELD` bytes when
-//! dlmalloc is asked for memory: past that, every listed block is handed back first (dlmalloc
-//! coalesces them), so dlmalloc never grows memory while the lists keep more than `HELD` from
-//! it. The same happens, and the allocation is retried once, when dlmalloc fails (the memory
-//! limit refused a grow). So a program runs out of memory where it did before, give or take
-//! `HELD` and where dlmalloc places blocks. Handing a block back costs the `free` that listing
-//! it saved, so a flush never costs more than dlmalloc alone would have.
+//! When its list is empty a class carves a fresh block from its current chunk: `CHUNK` bytes,
+//! `CHUNK`-aligned, from dlmalloc, holding blocks of that class only, after a `Chunk` header.
+//! So building a large value calls dlmalloc once per chunk, not once per block. A carved block
+//! finds its chunk by masking its address. A chunk goes back to dlmalloc only when every block
+//! carved from it is listed (`flush`): one live block keeps the whole chunk.
+//!
+//! The lists are handed back when dlmalloc is asked for memory and more than `HELD` bytes (or
+//! more than the lists kept at the last hand-back, if that is larger) were freed onto them
+//! since: every chunk whose blocks are all listed goes back to dlmalloc, which coalesces them.
+//! The same happens, and the allocation is retried once, when dlmalloc fails (the memory limit
+//! refused a grow). A hand-back walks the lists twice; the "kept" rule keeps the walks within
+//! twice the bytes freed.
+//!
+//! Generated code pops a list itself (C8b5): `free` is at offset 0, class `c`'s head at
+//! `c * size_of::<usize>()`, and `rt_heap_lists` (abi.rs) gives its address. A pop changes
+//! nothing else here, so it needs no call.
 //!
 //! Test-heap builds use dlmalloc alone (lib.rs): there freed objects are poisoned and never
 //! reused, and nothing should be recycled behind that check.
@@ -22,19 +31,52 @@ use core::cell::Cell;
 use core::ptr;
 
 const STEP: usize = 8;
-const CLASSES: usize = 8;
+pub const CLASSES: usize = 8;
 /// The largest block a free list holds.
 pub const SMALL: usize = STEP * CLASSES;
-/// The most the lists may hold when dlmalloc is called.
+/// The bytes freed onto the lists before a dlmalloc call hands them back.
 pub const HELD: usize = 256 * 1024;
+/// A chunk's alignment, and its size with dlmalloc's 8-byte chunk header: dlmalloc places
+/// chunks allocated one after another `CHUNK` bytes apart, so aligning them wastes nothing.
+pub const CHUNK: usize = 64 * 1024;
+const CHUNK_BYTES: usize = CHUNK - 8;
+/// The blocks carved at once.
+const BATCH: usize = 32;
+/// A chunk's first block, after its header.
+const FIRST: usize = core::mem::size_of::<Chunk>().next_multiple_of(STEP);
 
-pub struct Heap<A> {
-    inner: A,
-    /// Each class's most recently freed block; its first word holds the next one.
-    free: [Cell<*mut u8>; CLASSES],
-    /// The bytes listed.
-    held: Cell<usize>,
+/// The header at the start of a chunk.
+#[repr(C)]
+struct Chunk {
+    /// Blocks carved from it so far.
+    carved: u32,
+    /// While `flush` runs, its listed blocks; 0 otherwise.
+    listed: u32,
+    /// While `flush` runs, once it is to be handed back: the next such chunk.
+    next: *mut Chunk,
+    dead: bool,
 }
+
+#[repr(C)]
+pub struct Heap<A> {
+    /// Each class's most recently freed block; its first word holds the next one. At offset 0:
+    /// generated code reads and writes it.
+    free: [Cell<*mut u8>; CLASSES],
+    /// Each class's chunk to carve from (null: none), and the offset of its first uncarved byte.
+    cur: [Cell<*mut Chunk>; CLASSES],
+    top: [Cell<usize>; CLASSES],
+    /// Bytes freed onto the lists since the last hand-back.
+    freed: Cell<usize>,
+    /// Bytes the lists kept at the last hand-back.
+    kept: Cell<usize>,
+    inner: A,
+}
+
+// Generated code's pop (codegen `FuncGen::alloc`) relies on these: the heads at offset 0, 4
+// bytes each, and classes of 8 to 64 bytes in steps of 8.
+const _: () = assert!(core::mem::offset_of!(Heap<()>, free) == 0 && SMALL == 64 && STEP == 8);
+#[cfg(target_arch = "wasm32")]
+const _: () = assert!(core::mem::size_of::<Cell<*mut u8>>() == 4);
 
 // SAFETY: wasm32-unknown-unknown has one thread, and the runtime starts none, so the lists are
 // never touched concurrently. `Sync` is only what `#[global_allocator]` asks for.
@@ -44,9 +86,12 @@ unsafe impl<A: Sync> Sync for Heap<A> {}
 impl<A> Heap<A> {
     pub const fn new(inner: A) -> Heap<A> {
         Heap {
-            inner,
             free: [const { Cell::new(ptr::null_mut()) }; CLASSES],
-            held: Cell::new(0),
+            cur: [const { Cell::new(ptr::null_mut()) }; CLASSES],
+            top: [const { Cell::new(0) }; CLASSES],
+            freed: Cell::new(0),
+            kept: Cell::new(0),
+            inner,
         }
     }
 
@@ -65,66 +110,169 @@ fn class(l: Layout) -> Option<usize> {
     }
 }
 
-fn block(c: usize) -> Layout {
-    // SAFETY: a multiple of 8 up to 64, alignment 8.
-    unsafe { Layout::from_size_align_unchecked(STEP * (c + 1), STEP) }
+fn block(c: usize) -> usize {
+    STEP * (c + 1)
+}
+
+fn chunk_layout() -> Layout {
+    // SAFETY: a power-of-two alignment, and a size below it.
+    unsafe { Layout::from_size_align_unchecked(CHUNK_BYTES, CHUNK) }
+}
+
+/// The chunk a carved block is in.
+fn chunk(p: *mut u8) -> *mut Chunk {
+    p.map_addr(|a| a & !(CHUNK - 1)).cast()
+}
+
+/// The block after `p` on its list.
+///
+/// # Safety
+/// `p` is listed.
+unsafe fn next(p: *mut u8) -> *mut u8 {
+    // SAFETY: a listed block's first word is the next one.
+    unsafe { p.cast::<*mut u8>().read() }
 }
 
 impl<A: GlobalAlloc> Heap<A> {
-    /// `f`'s allocation from `inner`, after handing every list back if they hold more than
-    /// `HELD`, and retried once after handing them back if it fails.
+    /// `f`'s allocation from `inner`, after a hand-back if more than `HELD` (or than the lists
+    /// kept at the last one) was freed since, and retried once after a hand-back if it fails.
     unsafe fn inner_alloc(&self, f: impl Fn() -> *mut u8) -> *mut u8 {
-        // SAFETY: the lists hold only blocks of their class, allocated from `inner`.
+        // SAFETY: the lists hold only blocks carved from chunks of `inner`.
         unsafe {
-            if self.held.get() > HELD {
+            if self.freed.get() > HELD.max(self.kept.get()) {
                 self.flush();
             }
             let p = f();
-            if !p.is_null() || self.held.get() == 0 {
+            if !p.is_null() || !self.flush() {
                 return p;
             }
-            self.flush();
             f()
         }
     }
 
-    /// Hands every listed block back to `inner`.
+    /// Hands back to `inner` every chunk whose carved blocks are all listed, unlinking those
+    /// blocks; true if there was one.
     ///
     /// # Safety
-    /// Every listed block came from `inner` (as every block `dealloc` lists does).
-    pub(crate) unsafe fn flush(&self) {
-        for (c, head) in self.free.iter().enumerate() {
-            let mut p = head.replace(ptr::null_mut());
-            while !p.is_null() {
-                // SAFETY: a listed block: its first word is the next one, and it came from
-                // `inner` with `block(c)`.
-                unsafe {
-                    let next = p.cast::<*mut u8>().read();
-                    self.inner.dealloc(p, block(c));
-                    p = next;
+    /// Every listed block was carved from a chunk (as every block `dealloc` lists was).
+    pub(crate) unsafe fn flush(&self) -> bool {
+        // SAFETY: a listed block is in a chunk we hold, whose header is ours; chunks are handed
+        // back only after the last walk.
+        unsafe {
+            for head in &self.free {
+                let mut p = head.get();
+                while !p.is_null() {
+                    (*chunk(p)).listed += 1;
+                    p = next(p);
                 }
             }
+            // Relink each list without the blocks of chunks whose blocks are all listed. The
+            // first kept block of a chunk resets its count, so its others are kept too.
+            let mut dead: *mut Chunk = ptr::null_mut();
+            let mut kept = 0;
+            for (c, head) in self.free.iter().enumerate() {
+                let mut p = head.replace(ptr::null_mut());
+                let mut last: *mut u8 = ptr::null_mut();
+                while !p.is_null() {
+                    let n = next(p);
+                    let ch = chunk(p);
+                    if (*ch).listed == (*ch).carved {
+                        if !(*ch).dead {
+                            (*ch).dead = true;
+                            (*ch).next = dead;
+                            dead = ch;
+                        }
+                    } else {
+                        (*ch).listed = 0;
+                        if last.is_null() {
+                            head.set(p);
+                        } else {
+                            last.cast::<*mut u8>().write(p);
+                        }
+                        last = p;
+                        kept += block(c);
+                    }
+                    p = n;
+                }
+                if !last.is_null() {
+                    last.cast::<*mut u8>().write(ptr::null_mut());
+                }
+            }
+            self.freed.set(0);
+            self.kept.set(kept);
+            let any = !dead.is_null();
+            while !dead.is_null() {
+                let n = (*dead).next;
+                for cur in &self.cur {
+                    if cur.get() == dead {
+                        cur.set(ptr::null_mut());
+                    }
+                }
+                self.inner.dealloc(dead.cast(), chunk_layout());
+                dead = n;
+            }
+            any
         }
-        self.held.set(0);
     }
 
-    /// A block of class `c`, uninitialized.
+    /// A block of class `c`, uninitialized: listed, else carved.
+    #[inline]
     unsafe fn take(&self, c: usize) -> *mut u8 {
         let p = self.free[c].get();
         if p.is_null() {
-            // SAFETY: `block(c)` is not zero-sized.
-            return unsafe { self.inner_alloc(|| self.inner.alloc(block(c))) };
+            // SAFETY: the caller's contract.
+            return unsafe { self.carve(c) };
         }
-        // SAFETY: a listed block, whose first word is the next one.
-        self.free[c].set(unsafe { p.cast::<*mut u8>().read() });
-        self.held.set(self.held.get() - block(c).size());
+        // SAFETY: a listed block.
+        self.free[c].set(unsafe { next(p) });
         p
+    }
+
+    /// A fresh block of class `c` from its chunk, after taking a new chunk if it has no room.
+    unsafe fn carve(&self, c: usize) -> *mut u8 {
+        // SAFETY: a chunk is `CHUNK_BYTES` from `inner`, `CHUNK`-aligned; blocks are carved
+        // after its header and below `CHUNK_BYTES`, 8-aligned (FIRST and every class are
+        // multiples of 8).
+        unsafe {
+            if self.cur[c].get().is_null() || self.top[c].get() + block(c) > CHUNK_BYTES {
+                let p = self.inner_alloc(|| self.inner.alloc(chunk_layout()));
+                if p.is_null() {
+                    return p;
+                }
+                let ch = p.cast::<Chunk>();
+                ch.write(Chunk {
+                    carved: 0,
+                    listed: 0,
+                    next: ptr::null_mut(),
+                    dead: false,
+                });
+                self.cur[c].set(ch);
+                self.top[c].set(FIRST);
+            }
+            // Up to `BATCH` blocks: the first is returned, the others listed (the list is
+            // empty), so the next allocations, generated code's too, pop them.
+            let ch = self.cur[c].get();
+            let top = self.top[c].get();
+            let k = BATCH.min((CHUNK_BYTES - top) / block(c));
+            let p = ch.cast::<u8>().add(top);
+            let mut head = ptr::null_mut();
+            for i in (1..k).rev() {
+                let q = p.add(i * block(c));
+                q.cast::<*mut u8>().write(head);
+                head = q;
+            }
+            self.free[c].set(head);
+            self.top[c].set(top + k * block(c));
+            (*ch).carved += k as u32;
+            p
+        }
     }
 }
 
 // SAFETY: a small block is at least its layout's size (its class rounds up) and 8-aligned,
 // and is on no list while allocated: `take` unlinks it and `dealloc` links it only when the
-// caller gives it back, which `GlobalAlloc`'s contract makes the last use.
+// caller gives it back, which `GlobalAlloc`'s contract makes the last use. Carved blocks of a
+// chunk do not overlap (`top` only grows) and stay inside it.
 unsafe impl<A: GlobalAlloc> GlobalAlloc for Heap<A> {
     #[inline]
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
@@ -145,7 +293,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Heap<A> {
                 // class, as the contract requires), now ours; 8-aligned, at least 8 bytes.
                 unsafe { p.cast::<*mut u8>().write(self.free[c].get()) };
                 self.free[c].set(p);
-                self.held.set(self.held.get() + block(c).size());
+                self.freed.set(self.freed.get() + block(c));
             }
             // SAFETY: the caller's contract, passed on.
             None => unsafe { self.inner.dealloc(p, l) },
@@ -160,7 +308,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Heap<A> {
                 Some(c) => {
                     let p = self.take(c);
                     if !p.is_null() {
-                        zero(p, block(c).size());
+                        zero(p, block(c));
                     }
                     p
                 }
@@ -187,6 +335,19 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Heap<A> {
                 }
             }
         }
+    }
+}
+
+/// The address of the list heads generated code pops: the global allocator's `free`, or in a
+/// test-heap build heads that stay null, so generated code always calls the runtime.
+#[cfg(target_arch = "wasm32")]
+pub fn lists() -> *const u8 {
+    #[cfg(not(feature = "test-heap"))]
+    return (&raw const crate::ALLOC).cast();
+    #[cfg(feature = "test-heap")]
+    {
+        static NONE: [usize; CLASSES] = [0; CLASSES];
+        (&raw const NONE).cast()
     }
 }
 

@@ -43,7 +43,7 @@ pub struct Header {
 
 /// A `Map` key, as the interpreter's. `Str` keys are copied out of their objects, so they
 /// order by bytes and are not counted. Ordered as a derived `Ord` would (`Int` before `Str`),
-/// with `Str`s compared 8 bytes at a time.
+/// with `Str`s compared by their 8-byte prefixes, then 8 bytes at a time.
 #[derive(Debug, Clone)]
 pub enum Key {
     Int(i64),
@@ -58,18 +58,40 @@ impl Key {
     /// `b` outlives the probe, and the probe is only compared with, never put in a map: the
     /// `ManuallyDrop` keeps it from freeing bytes it does not own.
     pub unsafe fn probe(b: &[u8]) -> ManuallyDrop<Key> {
-        ManuallyDrop::new(Key::Str(StrKey(NonNull::from(b))))
+        ManuallyDrop::new(Key::Str(StrKey {
+            pre: prefix(b),
+            bytes: NonNull::from(b),
+        }))
     }
 }
 
 /// A `Str` key's bytes: a `Box<[u8]>` held as a raw pointer and freed on drop, or, inside
 /// `Key::probe`'s `ManuallyDrop`, borrowed bytes. A raw pointer, not a `Box`, so a probe makes
-/// no claim of owning them.
-pub struct StrKey(NonNull<[u8]>);
+/// no claim of owning them. `pre` is `prefix(bytes)`: most comparisons in a map's search end
+/// there, without reading the bytes (C8b5).
+pub struct StrKey {
+    pre: u64,
+    bytes: NonNull<[u8]>,
+}
+
+/// The first 8 bytes of `b` (zero-padded) as a big-endian number. Keys whose prefixes differ
+/// order as the prefixes do: at the first differing byte either both have a byte there, or the
+/// shorter has ended (a 0 against a nonzero byte), which makes it a prefix of the other and so
+/// smaller. Equal prefixes say nothing (`"a"` and `"a\0"`): compare the bytes.
+fn prefix(b: &[u8]) -> u64 {
+    let mut p = 0;
+    for (i, &c) in b.iter().take(8).enumerate() {
+        p |= u64::from(c) << (56 - 8 * i);
+    }
+    p
+}
 
 impl From<&[u8]> for StrKey {
     fn from(b: &[u8]) -> StrKey {
-        StrKey(NonNull::from(Box::leak(Box::<[u8]>::from(b))))
+        StrKey {
+            pre: prefix(b),
+            bytes: NonNull::from(Box::leak(Box::<[u8]>::from(b))),
+        }
     }
 }
 
@@ -77,14 +99,14 @@ impl core::ops::Deref for StrKey {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
         // SAFETY: owned bytes live as long as `self`; a probe's outlive it (`Key::probe`).
-        unsafe { self.0.as_ref() }
+        unsafe { self.bytes.as_ref() }
     }
 }
 
 impl Drop for StrKey {
     fn drop(&mut self) {
         // SAFETY: a `StrKey` that drops was made by `from`, from a `Box`; a probe never drops.
-        drop(unsafe { Box::from_raw(self.0.as_ptr()) });
+        drop(unsafe { Box::from_raw(self.bytes.as_ptr()) });
     }
 }
 
@@ -101,10 +123,11 @@ impl core::fmt::Debug for StrKey {
 }
 
 impl Ord for Key {
+    #[inline(always)]
     fn cmp(&self, other: &Key) -> core::cmp::Ordering {
         match (self, other) {
             (Key::Int(a), Key::Int(b)) => a.cmp(b),
-            (Key::Str(a), Key::Str(b)) => crate::text::bytes_cmp(a, b),
+            (Key::Str(a), Key::Str(b)) => a.pre.cmp(&b.pre).then_with(|| crate::text::bytes_cmp(a, b)),
             (Key::Int(_), Key::Str(_)) => core::cmp::Ordering::Less,
             (Key::Str(_), Key::Int(_)) => core::cmp::Ordering::Greater,
         }
@@ -121,7 +144,7 @@ impl PartialEq for Key {
     fn eq(&self, other: &Key) -> bool {
         match (self, other) {
             (Key::Int(a), Key::Int(b)) => a == b,
-            (Key::Str(a), Key::Str(b)) => crate::text::bytes_eq(a, b),
+            (Key::Str(a), Key::Str(b)) => a.pre == b.pre && crate::text::bytes_eq(a, b),
             _ => false,
         }
     }
@@ -144,8 +167,11 @@ pub struct ListBody {
 }
 
 #[cfg(target_arch = "wasm32")]
-const _: () =
-    assert!(HEADER + core::mem::offset_of!(ListBody, len) == 12 && HEADER + core::mem::offset_of!(ListBody, cap) == 16);
+const _: () = assert!(
+    HEADER + core::mem::offset_of!(ListBody, ptr) == 8
+        && HEADER + core::mem::offset_of!(ListBody, len) == 12
+        && HEADER + core::mem::offset_of!(ListBody, cap) == 16
+);
 
 pub(crate) const HEADER: usize = 8;
 const ENUM_SLOTS: usize = 16;
@@ -490,54 +516,74 @@ unsafe fn release(p: *mut Header) -> bool {
 /// Frees `p`, whose count `release` took to 0, and every object only it kept alive. A
 /// worklist, not recursion, so a deep value costs heap, not stack.
 ///
+/// One descriptor lookup per object (C8b2), read in place, and a record's slots found without
+/// `record_of`'s copy (C8b5): this loop is most of freeing a large value.
+///
 /// # Safety
 /// The module's contract, and `p` has no references left.
 unsafe fn free(t: &Table, mut p: *mut Header) {
-    let mut work = Vec::new(); // allocates only if a child dies too
-                               // One descriptor lookup per object (C8b2): its size and children as `size` and `ptrs` find
-                               // them.
+    // The first child that dies is freed next; the others wait in `work`, which allocates only
+    // if an object has two.
+    let mut work = Vec::new();
     loop {
+        let mut next: *mut Header = ptr::null_mut();
         // SAFETY: `p` is unreferenced, so its children and memory are ours to release.
         unsafe {
             let mut child = |c| {
                 if release(c) {
-                    work.push(c)
+                    if next.is_null() {
+                        next = c;
+                    } else {
+                        work.push(c);
+                    }
                 }
             };
-            let size = match t.desc((*p).desc) {
+            let mut slots = |off: usize, ds: &[u32]| {
+                for (i, &d) in ds.iter().enumerate() {
+                    if t.is_ptr(d) {
+                        child(from_slot(*field::<u64>(p, off + 8 * i)));
+                    }
+                }
+                off + 8 * ds.len()
+            };
+            let size = match &t.descs[(*p).desc as usize] {
+                Desc::Record { slots: s, .. } => slots(HEADER, t.slots(*s)),
+                Desc::Enum { variants, .. } => {
+                    slots(ENUM_SLOTS, t.slots(t.variant(*variants, *field(p, HEADER)).slots))
+                }
+                Desc::Fn { slots: s, .. } => slots(ENUM_SLOTS, t.slots(*s)),
                 Desc::Str | Desc::Bytes => BYTES_DATA + *field::<u32>(p, 12) as usize,
                 Desc::List { elem } => {
-                    if t.is_ptr(elem) {
+                    if t.is_ptr(*elem) {
                         elems(p).iter().for_each(|&v| child(from_slot(v)));
                     }
+                    // The `Vec`'s buffer, freed as `Vec` would, without the call through
+                    // `alloc::alloc`.
                     let b = body(p).read();
-                    drop(Vec::from_raw_parts(b.ptr, b.len, b.cap));
+                    if b.cap != 0 {
+                        heap::dealloc(b.ptr.cast(), Layout::array::<u64>(b.cap).unwrap());
+                    }
                     HEADER + size_of::<ListBody>()
                 }
                 Desc::Map { value, .. } => {
-                    if t.is_ptr(value) {
+                    if t.is_ptr(*value) {
                         (*field::<Map>(p, HEADER)).values().for_each(|&v| child(from_slot(v)));
                     }
                     ptr::drop_in_place(field::<Map>(p, HEADER));
                     HEADER + size_of::<Map>()
                 }
-                d @ (Desc::Record { .. } | Desc::Enum { .. } | Desc::Fn { .. }) => {
-                    let (off, slots) = record_of(t, d, p);
-                    for (i, &s) in slots.iter().enumerate() {
-                        if t.is_ptr(s) {
-                            child(from_slot(*field::<u64>(p, off + 8 * i)));
-                        }
-                    }
-                    off + 8 * slots.len()
-                }
                 d @ (Desc::Unit | Desc::Int | Desc::Bool | Desc::Float) => panic!("{d:?} is not an object"),
             };
             free_memory(p, size);
         }
-        match work.pop() {
-            Some(c) => p = c,
-            None => return,
-        }
+        p = if next.is_null() {
+            match work.pop() {
+                Some(c) => c,
+                None => return,
+            }
+        } else {
+            next
+        };
     }
 }
 
@@ -649,6 +695,11 @@ static LIVE: core::sync::atomic::AtomicIsize = core::sync::atomic::AtomicIsize::
 /// Objects allocated and not yet freed.
 pub fn live() -> isize {
     LIVE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// The live count's address: an `isize`, which generated code's inline allocation adds 1 to.
+pub fn live_count() -> *const isize {
+    LIVE.as_ptr()
 }
 
 fn live_add(n: isize) {

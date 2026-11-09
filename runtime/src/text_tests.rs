@@ -622,6 +622,13 @@ fn word_compare_matches_bytes() {
         for b in xs.iter().step_by(sb) {
             assert_eq!(text::bytes_eq(a, b), a == b, "{a:?} {b:?}");
             assert_eq!(text::bytes_cmp(a, b), a.cmp(b), "{a:?} {b:?}");
+            // Map keys compare their prefixes first (C8b5), with the same result.
+            let (ka, kb) = (
+                crate::obj::Key::Str(a.as_slice().into()),
+                crate::obj::Key::Str(b.as_slice().into()),
+            );
+            assert_eq!(ka.cmp(&kb), a.cmp(b), "{a:?} {b:?}");
+            assert_eq!(ka == kb, a == b, "{a:?} {b:?}");
         }
     }
 }
@@ -639,4 +646,13 @@ fn keys_order_as_bytes() {
     assert_eq!(k(b"abcdefghij"), k(b"abcdefghij"));
     assert_ne!(k(b"abcdefghij"), k(b"abcdefghik"));
     assert_ne!(Key::Int(0), k(b""));
+    // Equal zero-padded prefixes: the bytes decide.
+    assert!(k(b"") < k(b"\0"));
+    assert!(k(b"a") < k(b"a\0"));
+    assert!(k(b"a\0") < k(b"a\0\0"));
+    assert!(k(b"abcdefgh") < k(b"abcdefgh\0"));
+    assert_ne!(k(b"a"), k(b"a\0"));
+    // A probe compares as an owned key.
+    // SAFETY: the bytes outlive the probe, which is only compared.
+    assert_eq!(*unsafe { Key::probe(b"abcdefghij") }, k(b"abcdefghij"));
 }

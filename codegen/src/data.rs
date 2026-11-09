@@ -216,6 +216,18 @@ impl<'m> Statics<'m> {
         a
     }
 
+    /// The slot count of a struct, of variant `variant` of an enum, or of a closure, as the
+    /// runtime reads it from the table (its object's size follows from it); `None` for a
+    /// variant the enum does not have, or a descriptor with no slots.
+    pub fn slots(&self, desc: u32, variant: u32) -> Option<usize> {
+        let d = self.descs[desc as usize];
+        match d[0] {
+            RECORD | FN => Some(d[4] as usize),
+            ENUM if variant < d[4] => Some(self.variants[(d[3] + variant) as usize][3] as usize),
+            _ => None,
+        }
+    }
+
     /// Each function used as a value so far, in table order, and its captures' count.
     pub fn elems(&self) -> &[(FuncId, usize)] {
         &self.elems

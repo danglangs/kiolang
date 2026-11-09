@@ -109,8 +109,12 @@ impl<'t> Table<'t> {
     }
 
     /// Whether a value of descriptor `i` is a pointer to a heap object.
+    #[inline]
     pub fn is_ptr(&self, i: u32) -> bool {
-        !matches!(self.desc(i), Desc::Unit | Desc::Int | Desc::Bool | Desc::Float)
+        !matches!(
+            self.descs[i as usize],
+            Desc::Unit | Desc::Int | Desc::Bool | Desc::Float
+        )
     }
 
     pub fn slots(&self, s: Slice) -> &'t [u32] {
