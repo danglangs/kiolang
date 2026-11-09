@@ -5,12 +5,16 @@
 package kio:caps;
 
 interface fs {
-  variant io-err { not-found, denied, too-large, invalid-path }
+  variant io-err { not-found, denied, too-large, invalid-path, exists }
 
   // A directory the host opened. Paths are relative to it and cannot escape it.
   resource dir {
     read:   func(path: string) -> result<list<u8>, io-err>;
-    create: func(path: string, data: list<u8>) -> result<_, io-err>;
+    create: func(path: string, data: list<u8>) -> result<_, io-err>;     // a new file only
+    %list:  func(path: string) -> result<list<string>, io-err>;          // names, sorted; a directory's ends in `/`
+    write:  func(path: string, data: list<u8>) -> result<_, io-err>;     // create or replace, atomically
+    remove: func(path: string) -> result<_, io-err>;                     // one regular file
+    exists: func(path: string) -> result<bool, io-err>;
   }
 }
 

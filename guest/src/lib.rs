@@ -118,6 +118,16 @@ impl lang::Caps for Grants {
             (Grant::Dir(d), "create", [Value::Str(path), Value::Bytes(data)]) => {
                 Ok(result(d.create(path, data).map(|()| Value::Unit).map_err(io_err)))
             }
+            (Grant::Dir(d), "list", [Value::Str(path)]) => Ok(result(d.list(path).map(strs).map_err(io_err))),
+            (Grant::Dir(d), "write", [Value::Str(path), Value::Bytes(data)]) => {
+                Ok(result(d.write(path, data).map(|()| Value::Unit).map_err(io_err)))
+            }
+            (Grant::Dir(d), "remove", [Value::Str(path)]) => {
+                Ok(result(d.remove(path).map(|()| Value::Unit).map_err(io_err)))
+            }
+            (Grant::Dir(d), "exists", [Value::Str(path)]) => {
+                Ok(result(d.exists(path).map(Value::Bool).map_err(io_err)))
+            }
             (Grant::Http(h), "get", [Value::Str(path)]) => {
                 Ok(result(h.get(path).map(|b| Value::Bytes(b.into())).map_err(http_err)))
             }
@@ -190,6 +200,7 @@ fn io_err(e: IoErr) -> Value {
         IoErr::Denied => "Denied",
         IoErr::TooLarge => "TooLarge",
         IoErr::InvalidPath => "InvalidPath",
+        IoErr::Exists => "Exists",
     };
     err_value("IoErr", case, vec![])
 }

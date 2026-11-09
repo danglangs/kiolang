@@ -85,10 +85,10 @@ The checker's capability table is generated from [caps.wit](../caps.wit). Today:
 
 | Type | Methods |
 |---|---|
-| `Dir` | `read(Str) -> Result<Bytes, IoErr>`, `create(Str, Bytes) -> Result<(), IoErr>` |
+| `Dir` | `read(Str) -> Result<Bytes, IoErr>`, `create(Str, Bytes) -> Result<(), IoErr>` (new file only), `list(Str) -> Result<List<Str>, IoErr>` (`""` is the root; sorted names, a directory's ending in `/`), `write(Str, Bytes) -> Result<(), IoErr>` (create or replace atomically), `remove(Str) -> Result<(), IoErr>` (one regular file), `exists(Str) -> Result<Bool, IoErr>` |
 | `Http` | `get(Str) -> Result<Bytes, HttpErr>` |
 
-`IoErr` is `NotFound`, `Denied`, `TooLarge` or `InvalidPath`. `HttpErr` is `Denied`, `Timeout`, `TooLarge` or `Status(Int)`.
+`IoErr` is `NotFound`, `Denied`, `TooLarge`, `InvalidPath` or `Exists` (`create` on an existing path). `HttpErr` is `Denied`, `Timeout`, `TooLarge` or `Status(Int)`.
 
 ## Rules the checker enforces
 
@@ -137,7 +137,7 @@ error: `?` on `Result<Bytes, IoErr>` in a function returning `Option<Int>`
   change the return type or `match` on the result
 
 error: no method `delete` on `Dir`
-  Dir has: read, create
+  Dir has: read, create, list, write, remove, exists
 
 error: kio has no references
   use `Str` instead of `&str`

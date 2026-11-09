@@ -33,6 +33,29 @@ pub fn v0() -> CapTable {
                         vec![Ty::Str, Ty::Bytes],
                         Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("IoErr".into()))),
                     ),
+                    method(
+                        "list",
+                        vec![Ty::Str],
+                        Ty::Result(
+                            Box::new(Ty::List(Box::new(Ty::Str))),
+                            Box::new(Ty::Enum("IoErr".into())),
+                        ),
+                    ),
+                    method(
+                        "write",
+                        vec![Ty::Str, Ty::Bytes],
+                        Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("IoErr".into()))),
+                    ),
+                    method(
+                        "remove",
+                        vec![Ty::Str],
+                        Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("IoErr".into()))),
+                    ),
+                    method(
+                        "exists",
+                        vec![Ty::Str],
+                        Ty::Result(Box::new(Ty::Bool), Box::new(Ty::Enum("IoErr".into()))),
+                    ),
                 ],
             },
             CapType {
@@ -75,6 +98,7 @@ pub fn v0() -> CapTable {
                     case("Denied", vec![]),
                     case("TooLarge", vec![]),
                     case("InvalidPath", vec![]),
+                    case("Exists", vec![]),
                 ],
                 span: at,
                 public: true,

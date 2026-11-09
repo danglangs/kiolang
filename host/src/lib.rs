@@ -442,6 +442,36 @@ fn check_path(path: &str) -> Result<(), IoErr> {
     Ok(())
 }
 
+/// The most names one `Dir.list` reads; a larger directory is `too-large`.
+const LIST_CAP: usize = 10_000;
+
+/// What `path` names, not following a final symlink; `None` if missing. A symlink that leads out
+/// of the root is `invalid-path`, as for `read`.
+fn kind(dir: &RealDir, path: &str) -> Result<Option<cap_std::fs::FileType>, IoErr> {
+    match dir.symlink_metadata(path) {
+        Ok(m) if m.is_symlink() => match dir.metadata(path) {
+            Err(e) if matches!(io_err(&e), IoErr::InvalidPath) => Err(IoErr::InvalidPath),
+            _ => Ok(Some(m.file_type())),
+        },
+        Ok(m) => Ok(Some(m.file_type())),
+        Err(e) => match io_err(&e) {
+            IoErr::NotFound => Ok(None),
+            e => Err(e),
+        },
+    }
+}
+
+/// A name for `write`'s temporary file that a program cannot predict: a counter and the time,
+/// hashed with std's per-process random keys. Created with `create_new`, so it never replaces
+/// a file.
+fn temp_name() -> String {
+    use std::hash::BuildHasher;
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let seed = (NEXT.fetch_add(1, Relaxed), std::time::SystemTime::now());
+    let h = std::collections::hash_map::RandomState::new().hash_one(seed);
+    format!(".kio-{h:016x}.tmp")
+}
+
 /// The audit log (H8): one JSON line per host call. Sizes only, never contents.
 struct Audit {
     out: Box<dyn Write + Send>,
@@ -646,6 +676,39 @@ impl kio::caps::fs::HostDir for State {
         self.call(d.rep(), "create", &arg, |s| s.create_file(&d, path, data), outcome)
     }
 
+    fn list(&mut self, d: Resource<kio::caps::fs::Dir>, path: String) -> Result<Result<Vec<String>, IoErr>> {
+        let arg = path.clone();
+        self.call(d.rep(), "list", &arg, |s| s.list_dir(&d, path), outcome)
+    }
+
+    fn write(&mut self, d: Resource<kio::caps::fs::Dir>, path: String, data: Vec<u8>) -> Result<Result<(), IoErr>> {
+        let arg = path.clone();
+        self.call(d.rep(), "write", &arg, |s| s.write_file(&d, path, data), outcome)
+    }
+
+    fn remove(&mut self, d: Resource<kio::caps::fs::Dir>, path: String) -> Result<Result<(), IoErr>> {
+        let arg = path.clone();
+        let work = |dir: &RealDir, path: &str| match kind(dir, path)? {
+            None => Err(IoErr::NotFound),
+            Some(t) if t.is_file() => dir.remove_file(path).map_err(|e| io_err(&e)),
+            Some(_) => Err(IoErr::Denied),
+        };
+        self.call(d.rep(), "remove", &arg, |s| s.on_dir(&d, path, work), outcome)
+    }
+
+    fn exists(&mut self, d: Resource<kio::caps::fs::Dir>, path: String) -> Result<Result<bool, IoErr>> {
+        let arg = path.clone();
+        // Follows a symlink inside the root, as `read` does.
+        let work = |dir: &RealDir, path: &str| match dir.metadata(path) {
+            Ok(m) => Ok(m.is_file() || m.is_dir()),
+            Err(e) => match io_err(&e) {
+                IoErr::NotFound => Ok(false),
+                e => Err(e),
+            },
+        };
+        self.call(d.rep(), "exists", &arg, |s| s.on_dir(&d, path, work), outcome)
+    }
+
     fn drop(&mut self, d: Resource<kio::caps::fs::Dir>) -> Result<()> {
         let _ = self.table.delete(Resource::<Granted>::new_own(d.rep()));
         Ok(())
@@ -681,6 +744,99 @@ impl State {
         })
     }
 
+    /// Validate `path`, then run `work` on the granted directory under the run's deadline.
+    fn on_dir<T: Send + 'static>(
+        &mut self,
+        d: &Resource<kio::caps::fs::Dir>,
+        path: String,
+        work: impl FnOnce(&RealDir, &str) -> Result<T, IoErr> + Send + 'static,
+    ) -> Result<Result<T, IoErr>> {
+        if let Err(e) = check_path(&path) {
+            return Ok(Err(e));
+        }
+        let Some(dir) = self.dir(d) else {
+            return Ok(Err(IoErr::Denied));
+        };
+        self.within(move || work(&dir, &path))
+    }
+
+    fn list_dir(&mut self, d: &Resource<kio::caps::fs::Dir>, path: String) -> Result<Result<Vec<String>, IoErr>> {
+        let path = if path.is_empty() { ".".into() } else { path };
+        let names = self.on_dir(d, path, |dir, path| {
+            let sub = match dir.open_dir(path) {
+                Ok(s) => s,
+                Err(e) if e.kind() == io::ErrorKind::NotADirectory && dir.metadata(path).is_ok() => {
+                    return Err(IoErr::Denied)
+                }
+                Err(e) => return Err(io_err(&e)),
+            };
+            let mut names = Vec::new();
+            // Every entry counts toward the cap, kept or not, so the host's work is bounded too.
+            for (i, entry) in sub.entries().map_err(|e| io_err(&e))?.enumerate() {
+                if i == LIST_CAP {
+                    return Err(IoErr::TooLarge);
+                }
+                let entry = entry.map_err(|e| io_err(&e))?;
+                let t = entry.file_type().map_err(|e| io_err(&e))?;
+                // A name that is not UTF-8 cannot cross as a WIT string; it is left out.
+                let Ok(name) = entry.file_name().into_string() else {
+                    continue;
+                };
+                if t.is_dir() {
+                    names.push(name + "/");
+                } else if t.is_file() {
+                    names.push(name);
+                }
+            }
+            names.sort();
+            Ok(names)
+        })?;
+        if let Ok(names) = &names {
+            self.spend_io(names.iter().map(String::len).sum())?;
+        }
+        Ok(names)
+    }
+
+    /// Write a temp file beside `path`, then rename it over `path`, so a reader sees the old or
+    /// the new file. The rename replaces whatever is at `path` then: if a directory took its place
+    /// since the check, the rename fails; if a symlink did, the link itself is replaced. Either
+    /// way nothing outside the root is touched.
+    fn write_file(
+        &mut self,
+        d: &Resource<kio::caps::fs::Dir>,
+        path: String,
+        data: Vec<u8>,
+    ) -> Result<Result<(), IoErr>> {
+        self.spend_io(data.len())?;
+        #[cfg(feature = "test-hooks")]
+        let fail_write = self.fail_writes;
+        self.on_dir(d, path, move |dir, path| {
+            if kind(dir, path)?.is_some_and(|t| !t.is_file()) {
+                return Err(IoErr::Denied);
+            }
+            let temp = match path.rsplit_once('/') {
+                Some((parent, _)) => format!("{parent}/{}", temp_name()),
+                None => temp_name(),
+            };
+            let mut file =
+                open_regular(dir, &temp, OpenOptions::new().write(true).create_new(true)).map_err(|e| io_err(&e))?;
+            let written = file.write_all(&data);
+            #[cfg(feature = "test-hooks")]
+            let written = if fail_write {
+                Err(io::Error::other("injected"))
+            } else {
+                written
+            };
+            drop(file);
+            let done = written.and_then(|()| dir.rename(&temp, dir, path));
+            if let Err(e) = done {
+                let _ = dir.remove_file(&temp);
+                return Err(io_err(&e));
+            }
+            Ok(())
+        })
+    }
+
     fn create_file(
         &mut self,
         d: &Resource<kio::caps::fs::Dir>,
@@ -704,7 +860,7 @@ impl State {
             opts.write(true).create_new(true);
             let mut file = match open_regular(&dir, &path, &mut opts) {
                 Ok(f) => f,
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(IoErr::Denied),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(IoErr::Exists),
                 Err(e) => return Err(io_err(&e)),
             };
             let written = file.write_all(&data);

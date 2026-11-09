@@ -90,6 +90,7 @@ fn on(d: cap_std::fs::Dir, body: &str) -> String {
 const NOT_FOUND: &str = "IoErr::NotFound";
 const DENIED: &str = "IoErr::Denied";
 const INVALID: &str = "IoErr::InvalidPath";
+const EXISTS: &str = "IoErr::Exists";
 
 #[test]
 fn read_errors() {
@@ -126,7 +127,7 @@ fn symlinks_out_are_refused() {
         assert_eq!(on(d(), &format!("d.read(\"{p}\")")), INVALID, "{p}");
     }
     assert_eq!(on(d(), "d.create(\"dir/new\", \"x\".to_bytes())"), INVALID);
-    assert_eq!(on(d(), "d.create(\"file\", \"x\".to_bytes())"), DENIED);
+    assert_eq!(on(d(), "d.create(\"file\", \"x\".to_bytes())"), EXISTS);
     assert_eq!(std::fs::read(outer.path().join("secret")).unwrap(), b"s");
     assert_eq!(std::fs::read_dir(outer.path().join("outside")).unwrap().count(), 0);
 }
@@ -140,7 +141,7 @@ fn create_errors_leave_filesystem_unchanged() {
     std::fs::create_dir(root.join("in")).unwrap();
     let d = || kio_host::open_dir(&root).unwrap();
     let ok = "Ok(())";
-    assert_eq!(on(d(), "d.create(\"old\", \"new\".to_bytes())"), DENIED);
+    assert_eq!(on(d(), "d.create(\"old\", \"new\".to_bytes())"), EXISTS);
     assert_eq!(std::fs::read(root.join("old")).unwrap(), b"keep");
     for p in ["../x", "/tmp/kio-x", "", "in/../../x"] {
         assert_eq!(on(d(), &format!("d.create(\"{p}\", \"x\".to_bytes())")), INVALID, "{p}");
@@ -253,7 +254,7 @@ fn main_err_marks_the_run_failed() {
         .unwrap()
         .unwrap();
     assert!(out.failed);
-    assert_eq!(out.value, "IoErr::Denied");
+    assert_eq!(out.value, EXISTS);
 }
 
 #[test]

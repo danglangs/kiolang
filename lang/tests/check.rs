@@ -892,7 +892,10 @@ fn capability_methods_are_typed() {
     let (msg, hint, _) = reject_cap("fn main(d: Dir) { d.delete(\"x\"); }");
     assert_eq!(
         (msg.as_str(), hint.as_str()),
-        ("no method `delete` on Dir", "Dir has: read, create")
+        (
+            "no method `delete` on Dir",
+            "Dir has: read, create, list, write, remove, exists"
+        )
     );
     let (msg, hint, _) = reject_cap("fn main(d: Dir) { d.read(); }");
     assert_eq!(msg, "`read` takes 1 arguments, found 0");

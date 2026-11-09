@@ -81,3 +81,16 @@ fn for_loops_are_walked() {
     );
     assert_eq!(rep(&src), "load : d read\nmain : d read");
 }
+
+#[test]
+fn dir_list_write_remove_exists_check_and_report() {
+    let src = r#"
+fn main(d: Dir) -> Result<Bool, IoErr> {
+    let names: List<Str> = d.list("")?;
+    d.write("a", "x".to_bytes())?;
+    d.remove("a")?;
+    let e: Bool = d.exists("a")?;
+    Ok(e && names.len() == 0)
+}"#;
+    assert_eq!(rep(src), "main : d exists list remove write");
+}

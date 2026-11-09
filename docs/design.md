@@ -89,7 +89,7 @@ kio run prog.kio --dir input=/srv/jobs/42/in --dir out=/srv/jobs/42/out
 
 **Handle table.** A per-run vector of opened resources. The guest sees indices. An unknown index or a wrong kind is a denied call. Because the table holds only what was granted, guessing a different index gains nothing.
 
-**Dir.** Opened once with cap-std at grant time. Only regular files are read or created; anything else is `denied`. Every path from the guest is resolved relative to that open directory, which refuses absolute paths, `..` above the root and symlinks that lead out. On Linux this is `openat2` with `RESOLVE_BENEATH`.
+**Dir.** Opened once with cap-std at grant time. Only regular files are read, created, written or removed; anything else is `denied`. `list` returns regular files and directories only. `write` writes a temp file with an unpredictable name beside the target and renames it over, so readers never see a partial file. Every path from the guest is resolved relative to that open directory, which refuses absolute paths, `..` above the root and symlinks that lead out. On Linux this is `openat2` with `RESOLVE_BENEATH`.
 
 **Http.** A grant names host and methods. The host checks the allowlist on the first request and on every redirect hop, refuses IP-literal hosts unless explicitly granted, and pins DNS resolution for the run. Response bodies are capped.
 

@@ -77,11 +77,11 @@ fn primer_log_has_header_two_calls_and_trailer() {
 }
 
 #[test]
-fn denied_create_is_logged() {
+fn refused_create_is_logged() {
     let (log, _) = primer(Limits::default(), &["total.txt"], None);
     let lines = log.lines();
     assert!(
-        lines[2].contains(r#""method":"create""#) && lines[2].contains(r#""result":"denied""#),
+        lines[2].contains(r#""method":"create""#) && lines[2].contains(r#""result":"exists""#),
         "{lines:?}"
     );
     assert!(lines[3].contains(r#""outcome":"failed""#), "main returned Err");
@@ -136,4 +136,46 @@ fn report_check_holds_without_a_log() {
         msg.contains("`input.read` not in the authority report (a checker bug)"),
         "{msg}"
     );
+}
+
+/// D1: each new `Dir` method is logged with its path and bytes, and checked against the report.
+#[test]
+fn dir_methods_are_logged() {
+    let src = "fn main(d: Dir) -> Result<Bool, IoErr> { \
+        d.write(\"f\", \"abc\".to_bytes())?; let n = d.list(\"\")?; d.remove(\"f\")?; d.exists(\"f\") }";
+    let t = tempfile::tempdir().unwrap();
+    std::fs::create_dir(t.path().join("sub")).unwrap();
+    let run = |hide: Option<&str>| {
+        let log = Log::default();
+        let mut kio = Kio::new(Limits::default()).unwrap();
+        kio.audit(log.clone(), vec![("d".into(), "/d".into())]);
+        if let Some(m) = hide {
+            kio.hide_from_report("d", m);
+        }
+        let d = kio_host::open_dir(t.path()).unwrap();
+        let stopped = kio.run(src, vec![("d".to_string(), d)]).is_err();
+        (log.lines(), stopped)
+    };
+    let (lines, stopped) = run(None);
+    assert!(!stopped);
+    let call = |seq, method, arg, bytes| {
+        format!(
+            r#"{{"event":"call","seq":{seq},"cap":"d","kind":"Dir","method":"{method}","arg":"{arg}","bytes":{bytes},"result":"ok"}}"#
+        )
+    };
+    // `list` charges its names: "f" and "sub/".
+    assert_eq!(lines[1], call(1, "write", "f", 3));
+    assert_eq!(lines[2], call(2, "list", "", 5));
+    assert_eq!(lines[3], call(3, "remove", "f", 0));
+    assert_eq!(lines[4], call(4, "exists", "f", 0));
+    for m in ["list", "write", "remove", "exists"] {
+        let (lines, stopped) = run(Some(m));
+        assert!(stopped, "{m}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains(&format!(r#""method":"{m}""#)) && l.contains(r#""unexpected":true"#)),
+            "{m}: {lines:?}"
+        );
+    }
 }
