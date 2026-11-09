@@ -217,7 +217,8 @@ impl Compiled {
                 }
                 let mut module = lang::lower::lower(&program, &caps);
                 edit(&mut module);
-                let wasm = codegen::compile(&module).map_err(wasmtime::Error::from_anyhow)?;
+                // `{e:#}` keeps the cause (a Wasm limit, say), which the top context alone hides.
+                let wasm = codegen::compile(&module).map_err(|e| wasmtime::Error::msg(format!("{e:#}")))?;
                 let component = Component::new(&engine, &wasm.component)?;
                 Ok((allowed, grants::main_params(&module), wasm, component))
             }

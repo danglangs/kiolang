@@ -946,9 +946,16 @@ impl FuncGen<'_, '_> {
                 self.sink().local_get(cur).i32_const(off).i32_add();
             }
             ir::PlaceStep::Index(..) => {
-                let i = temps[*k].expect("an Int index");
-                self.sink().local_get(cur).local_get(i).i32_const(sites[*k] as i32);
-                self.call_rt("rt_list_at");
+                match temps[*k] {
+                    Some(i) => {
+                        self.sink().local_get(cur).local_get(i).i32_const(sites[*k] as i32);
+                        self.call_rt("rt_list_at");
+                    }
+                    // An index of type `!` (`xs[{ return 7; }] = v`) never yields a value.
+                    None => {
+                        self.sink().unreachable();
+                    }
+                }
                 *k += 1;
             }
         }

@@ -331,11 +331,15 @@ unsafe fn eq_one(t: &Table, work: &mut Vec<(u32, u64, u64)>, d: u32, a: u64, b: 
     if desc == Desc::Float {
         return f64::from_bits(a) == f64::from_bits(b);
     }
-    // SAFETY: `a` and `b` are live objects of `desc`, or scalars.
+    // Scalars compare as their 64 bits: `from_slot` would truncate an `Int` to 32 on wasm32.
+    if !t.is_ptr(d) {
+        return a == b;
+    }
+    // SAFETY: `a` and `b` are live objects of `desc`.
     unsafe {
         let (a, b) = (from_slot(a), from_slot(b));
         match desc {
-            Desc::Unit | Desc::Int | Desc::Bool | Desc::Float => a == b,
+            Desc::Unit | Desc::Int | Desc::Bool | Desc::Float => unreachable!("a scalar"),
             Desc::Str | Desc::Bytes => a == b || bytes(a) == bytes(b),
             // Shared references: `a` and `b` may be one object.
             Desc::List { elem } => {
