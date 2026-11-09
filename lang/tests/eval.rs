@@ -1167,3 +1167,35 @@ fn list_pop() {
     let src = "struct S { v: List<Int> } fn main() -> Option<Int> { let mut s = S { v: [1, 5] }; s.v.pop() }";
     assert_eq!(int(src), some_int(5));
 }
+
+#[test]
+fn result_ok_and_err() {
+    let src = "fn main() -> Int {
+        let c: Result<Int, Str> = Ok(5);
+        let d: Result<Int, Str> = Err(\"e\");
+        c.ok().unwrap_or(0) + d.ok().unwrap_or(10) + c.err().unwrap_or(\"\").len() + d.err().unwrap_or(\"\").len()
+    }";
+    assert_eq!(int(src), Value::Int(16));
+}
+
+#[test]
+fn option_ok_or() {
+    let src = "fn f(o: Option<Int>) -> Result<Int, Str> { let x = o.ok_or(\"none\")?; Ok(x + 1) }
+        fn main() -> Int {
+            let a = f(Some(1)).unwrap_or(-1);
+            let b = f(None);
+            let n = if b.is_err() { 10 } else { 0 };
+            a + n + b.err().unwrap_or(\"\").len() * 100
+        }";
+    assert_eq!(int(src), Value::Int(2 + 10 + 400));
+}
+
+#[test]
+fn ok_or_takes_its_error_type_from_the_argument() {
+    let src = "fn f(o: Option<Int>) -> Result<Int, Int> {
+          let r: Result<Int, Str> = o.ok_or(\"none\");
+          match r { Ok(n) => Ok(n), Err(_) => Err(0) }
+        }
+        fn main() -> Int { f(None).unwrap_or(7) }";
+    assert_eq!(int(src), Value::Int(7));
+}

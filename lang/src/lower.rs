@@ -434,6 +434,9 @@ impl<'a> Lowerer<'a> {
                     (T::Result(..), "unwrap_or") => Builtin::ResultUnwrapOr,
                     (T::Result(..), "is_ok") => Builtin::ResultIsOk,
                     (T::Result(..), "is_err") => Builtin::ResultIsErr,
+                    (T::Result(..), "ok") => Builtin::ResultOk,
+                    (T::Result(..), "err") => Builtin::ResultErr,
+                    (T::Option(_), "ok_or") => Builtin::OptionOkOr,
                     _ => unreachable!("checked method"),
                 };
                 return ir::ExprKind::Builtin(b, Box::new(self.expr(recv)), self.exprs(args));

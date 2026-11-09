@@ -247,6 +247,9 @@ pub enum Builtin {
     ResultUnwrapOr,
     ResultIsOk,
     ResultIsErr,
+    ResultOk,
+    ResultErr,
+    OptionOkOr,
 }
 
 /// Every built-in method that changes its receiver.

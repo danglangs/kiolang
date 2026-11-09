@@ -837,6 +837,27 @@ fn builtin(recv: &Value, b: Builtin, (arg, arg2): Args, span: Span) -> Res {
         (B::OptionIsNone, Value::Enum(_, i, _)) => Value::Bool(*i == 0),
         (B::ResultIsOk, Value::Enum(_, i, _)) => Value::Bool(*i == 0),
         (B::ResultIsErr, Value::Enum(_, i, _)) => Value::Bool(*i == 1),
+        (B::ResultOk, Value::Enum(_, i, payload)) => {
+            if *i == 0 {
+                some(payload[0].clone())
+            } else {
+                none()
+            }
+        }
+        (B::ResultErr, Value::Enum(_, i, payload)) => {
+            if *i == 1 {
+                some(payload[0].clone())
+            } else {
+                none()
+            }
+        }
+        (B::OptionOkOr, Value::Enum(_, i, payload)) => {
+            if *i == 1 {
+                Value::Enum(EnumRef::Result, 0, vec![payload[0].clone()])
+            } else {
+                Value::Enum(EnumRef::Result, 1, vec![arg.expect("checked argument")])
+            }
+        }
         _ => unreachable!("checked method"),
     })
 }

@@ -1487,3 +1487,22 @@ fn loop_types() {
     assert_eq!(msg, "missing return: `f` must return Int");
     ok("fn f() -> Int { loop { while true { break; } } } fn main() {}");
 }
+
+#[test]
+fn result_ok_err_and_option_ok_or() {
+    ok("fn f(r: Result<Int, Str>) -> Option<Str> { let o: Option<Int> = r.ok(); r.err() } fn main() {}");
+    ok("fn f(o: Option<Int>) -> Result<Int, Str> { Ok(o.ok_or(\"no\")? + 1) } fn main() {}");
+    // `?` on `ok_or(e)` needs the function's error type to equal the argument's type.
+    let src = "fn f(o: Option<Int>) -> Result<Int, Int> { let x = o.ok_or(\"no\")?; Ok(x) } fn main() {}";
+    let (msg, _) = reject(src);
+    assert_eq!(msg, "`?` on Result<Int, Str> in a function returning Result<Int, Int>");
+    assert_eq!(hint(src), "change the return type or `match` on the result");
+    assert_eq!(
+        hint("fn f(o: Option<Int>) -> Bool { o.zzzzzz() } fn main() {}"),
+        "Option<Int> has: is_none, is_some, ok_or, unwrap_or"
+    );
+    assert_eq!(
+        hint("fn f(o: Result<Int, Str>) -> Bool { o.zzzzzz() } fn main() {}"),
+        "Result<Int, Str> has: err, is_err, is_ok, ok, unwrap_or"
+    );
+}

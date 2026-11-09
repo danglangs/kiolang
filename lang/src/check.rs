@@ -825,6 +825,8 @@ fn method(caps: &CapTable, recv: &Ty, name: &str) -> Option<(Vec<Ty>, Ty)> {
         (Ty::Bytes, "push") => Some((vec![Ty::Int], Ty::Unit)),
         (Ty::Option(t), "unwrap_or") | (Ty::Result(t, _), "unwrap_or") => Some((vec![(**t).clone()], (**t).clone())),
         (Ty::Option(_), "is_some" | "is_none") | (Ty::Result(..), "is_ok" | "is_err") => Some((vec![], Ty::Bool)),
+        (Ty::Result(t, _), "ok") => Some((vec![], Ty::Option(t.clone()))),
+        (Ty::Result(_, e), "err") => Some((vec![], Ty::Option(e.clone()))),
         (Ty::Map(..), "len") => Some((vec![], Ty::Int)),
         (Ty::Map(k, _), "keys") => Some((vec![], Ty::List(k.clone()))),
         (Ty::Map(k, v), "get") => Some((vec![(**k).clone()], Ty::Option(v.clone()))),
@@ -843,6 +845,11 @@ fn method(caps: &CapTable, recv: &Ty, name: &str) -> Option<(Vec<Ty>, Ty)> {
     }
 }
 
+/// `Option.ok_or`, whose parameter type is the error type `E` of the result, so it is not in `method`.
+fn is_ok_or(recv: &Ty, name: &str) -> bool {
+    matches!((recv, name), (Ty::Option(_), "ok_or"))
+}
+
 /// How a method is declared, as a hint for a call that does not fit.
 fn declared(recv: &Ty, name: &str, params: &[Ty], ret: &Ty) -> String {
     let tys: Vec<_> = params.iter().map(Ty::to_string).collect();
@@ -853,6 +860,7 @@ fn declared(recv: &Ty, name: &str, params: &[Ty], ret: &Ty) -> String {
 const METHODS: &[&str] = &[
     "contains",
     "ends_with",
+    "err",
     "find",
     "get",
     "insert",
@@ -863,6 +871,8 @@ const METHODS: &[&str] = &[
     "keys",
     "len",
     "lines",
+    "ok",
+    "ok_or",
     "parse_int",
     "pop",
     "push",
@@ -890,7 +900,7 @@ fn method_names<'a>(caps: &'a CapTable, recv: &Ty) -> Vec<&'a str> {
     METHODS
         .iter()
         .copied()
-        .filter(|n| method(caps, recv, n).is_some())
+        .filter(|n| method(caps, recv, n).is_some() || is_ok_or(recv, n))
         .collect()
 }
 
@@ -1557,6 +1567,19 @@ impl Checker<'_> {
             (Ty::List(_), "push" | "sort" | "pop") | (Ty::Bytes, "push") | (Ty::Map(..), "insert" | "remove")
         ) {
             self.mutation_target(recv, name, &recv_ty)?;
+        }
+        if let (Ty::Option(t), true) = (&recv_ty, is_ok_or(&recv_ty, name)) {
+            if args.len() != 1 {
+                let msg = format!("`ok_or` takes 1 arguments, found {}", args.len());
+                return Err(err(
+                    e.span,
+                    msg,
+                    Some("`Option<T>.ok_or` is declared as `ok_or(E) -> Result<T, E>`"),
+                ));
+            }
+            // `E` is the argument's own type, as `Some(e)` takes its type from `e`.
+            let found = self.expr(&args[0], None)?;
+            return Ok(Ty::Result(t.clone(), Box::new(found)));
         }
         let Some((params, ret)) = method(self.caps, &recv_ty, name) else {
             let names = method_names(self.caps, &recv_ty);
