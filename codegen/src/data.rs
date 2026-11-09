@@ -340,7 +340,7 @@ impl<'m> Statics<'m> {
             Pat::Str(s) => {
                 self.str(s);
             }
-            Pat::Variant(_, ps) => ps.iter().for_each(|p| self.pat(p)),
+            Pat::Variant(_, ps) | Pat::Or(ps) => ps.iter().for_each(|p| self.pat(p)),
             Pat::Wild | Pat::Bind(_) | Pat::Int(_) | Pat::Bool(_) => {}
         }
     }

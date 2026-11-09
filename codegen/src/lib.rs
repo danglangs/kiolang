@@ -2388,9 +2388,10 @@ impl FuncGen<'_, '_> {
         let end = self.open(Open::Block, vt.map_or(BlockType::Empty, BlockType::Result));
         for arm in arms {
             let next = self.open(Open::Block, BlockType::Empty);
-            self.test(&arm.pat, &scrut.ty, s, &mut Vec::new(), next);
+            let mut which = Vec::new();
+            self.test(&arm.pat, &scrut.ty, s, &mut Vec::new(), next, &mut which);
             let scope = self.owned.len();
-            self.bind(&arm.pat, &scrut.ty, s, &mut Vec::new());
+            self.bind(&arm.pat, &scrut.ty, s, &mut Vec::new(), &mut which.into_iter());
             self.expr(&arm.body);
             self.end_scope(scope);
             self.br(end);
@@ -2421,8 +2422,9 @@ impl FuncGen<'_, '_> {
     }
 
     /// Branches to `fail` unless the part at `path`, of type `ty`, matches `p`, testing a
-    /// variant's number before its payload's parts, left to right.
-    fn test(&mut self, p: &ir::Pat, ty: &Ty, s: Option<u32>, path: &mut Vec<u32>, fail: u32) {
+    /// variant's number before its payload's parts, left to right. For each `|` pattern, in
+    /// order, pushes to `which` a local that holds the number of its alternative that matched.
+    fn test(&mut self, p: &ir::Pat, ty: &Ty, s: Option<u32>, path: &mut Vec<u32>, fail: u32, which: &mut Vec<u32>) {
         match p {
             ir::Pat::Wild | ir::Pat::Bind(_) => return,
             ir::Pat::Int(n) => {
@@ -2447,9 +2449,32 @@ impl FuncGen<'_, '_> {
                 self.br_if(fail);
                 for (i, (p, t)) in ps.iter().zip(payload(self.m, ty, *v)).enumerate() {
                     path.push(i as u32);
-                    self.test(p, &t, s, path, fail);
+                    self.test(p, &t, s, path, fail, which);
                     path.pop();
                 }
+                return;
+            }
+            // A chain of tests: each alternative that fails tries the next; the last fails the
+            // pattern. The first that matches records its number and skips the rest.
+            ir::Pat::Or(alts) => {
+                let w = self.temp(ValType::I32);
+                which.push(w);
+                let matched = self.open(Open::Block, BlockType::Empty);
+                for (k, alt) in alts.iter().enumerate() {
+                    let last = k + 1 == alts.len();
+                    let next = if last {
+                        fail
+                    } else {
+                        self.open(Open::Block, BlockType::Empty)
+                    };
+                    self.test(alt, ty, s, path, next, which);
+                    self.sink().i32_const(k as i32).local_set(w);
+                    self.br(matched);
+                    if !last {
+                        self.close();
+                    }
+                }
+                self.close();
                 return;
             }
         }
@@ -2457,8 +2482,15 @@ impl FuncGen<'_, '_> {
     }
 
     /// Sets each binding in `p`, which matched, to a new reference to its part, left to right,
-    /// and registers it in `owned`.
-    fn bind(&mut self, p: &ir::Pat, ty: &Ty, s: Option<u32>, path: &mut Vec<u32>) {
+    /// and registers it in `owned`. `which` yields the locals `test` pushed, in its order.
+    fn bind(
+        &mut self,
+        p: &ir::Pat,
+        ty: &Ty,
+        s: Option<u32>,
+        path: &mut Vec<u32>,
+        which: &mut impl Iterator<Item = u32>,
+    ) {
         match p {
             ir::Pat::Bind(id) => {
                 let Some(l) = self.local(*id) else { return };
@@ -2473,8 +2505,19 @@ impl FuncGen<'_, '_> {
             ir::Pat::Variant(v, ps) => {
                 for (i, (p, t)) in ps.iter().zip(payload(self.m, ty, *v)).enumerate() {
                     path.push(i as u32);
-                    self.bind(p, &t, s, path);
+                    self.bind(p, &t, s, path, which);
                     path.pop();
+                }
+            }
+            // The bindings of the alternative that matched; every alternative binds the same
+            // locals, so the arm's body is shared.
+            ir::Pat::Or(alts) => {
+                let w = which.next().expect("one local per `|` pattern");
+                for (k, alt) in alts.iter().enumerate() {
+                    self.sink().local_get(w).i32_const(k as i32).i32_eq();
+                    self.open(Open::If, BlockType::Empty);
+                    self.bind(alt, ty, s, path, which);
+                    self.close();
                 }
             }
             ir::Pat::Wild | ir::Pat::Int(_) | ir::Pat::Bool(_) | ir::Pat::Str(_) => {}

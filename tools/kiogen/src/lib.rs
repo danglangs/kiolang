@@ -1155,6 +1155,11 @@ impl Gen<'_> {
     /// last arm: `_`, or `None` when an earlier arm covers every `Some`.
     fn arms(&mut self) -> (String, Vec<String>) {
         let lit = self.rng.below(4);
+        // Two literals, as a `|` pattern (L13), still more specific than the later arms.
+        let lit = match self.rng.chance(30) {
+            true => format!("{lit} | {}", (lit + 1) % 4),
+            false => lit.to_string(),
+        };
         let (scrut, cands) = match self.rng.chance(60) {
             true => (
                 self.k(1),
@@ -1222,9 +1227,23 @@ impl Gen<'_> {
         format!("(if let {p} = {scrut} {{ {then} }} else {{ {els} }})")
     }
 
-    /// A field write on a mutable `S`, or a `match` statement whose arms are blocks.
+    /// A field write on a mutable `S`, a `let`-else, or a `match` statement whose arms are blocks.
     fn adt_stmt(&mut self) -> Option<String> {
         let pad = self.pad();
+        if self.rng.chance(20) {
+            // `let`-else (L14) with the first arm's pattern, which is refutable unless it is `_`.
+            let (scrut, pats) = self.arms();
+            if pats[0] == "_" {
+                return None;
+            }
+            let jump = match self.ret {
+                _ if self.loops > 0 && self.rng.chance(50) => self.rng.pick(&["break;", "continue;"]).to_string(),
+                Ty::Unit => "return;".to_string(),
+                t => format!("return {};", self.expr(t, 2)),
+            };
+            let p = self.bind(&pats[0]);
+            return Some(format!("{pad}let {p} = {scrut} else {{ {jump} }};\n"));
+        }
         if self.rng.chance(50) {
             let structs = self.visible(|v| v.ty == Ty::S && v.mutable && !v.fixed);
             if structs.is_empty() {
@@ -1717,6 +1736,23 @@ mod tests {
         }
         let eq = all.matches(" == h").count() + all.matches(" != h").count();
         assert!(eq > 5, "{eq}");
+    }
+
+    /// `|` patterns and `let`-else appear in a run of the default size.
+    #[test]
+    fn or_patterns_and_let_else_are_generated() {
+        let all: String = (0..250).map(|s| super::program(s, &Default::default())).collect();
+        for m in [
+            " | ",
+            "(0 | 1)",
+            "let K::",
+            "let Some(",
+            "else { return",
+            "else { break; }",
+            "else { continue; }",
+        ] {
+            assert!(all.matches(m).count() > 10, "{m}: {}", all.matches(m).count());
+        }
     }
 
     /// Strings appear in a run of the default size, with the in-place append's patterns.

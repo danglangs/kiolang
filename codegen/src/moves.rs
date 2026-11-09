@@ -270,6 +270,8 @@ fn binds(p: &Pat, f: &mut impl FnMut(LocalId)) {
     match p {
         Pat::Bind(id) => f(*id),
         Pat::Variant(_, ps) => ps.iter().for_each(|p| binds(p, f)),
+        // Every alternative binds the same locals.
+        Pat::Or(alts) => binds(&alts[0], f),
         Pat::Wild | Pat::Int(_) | Pat::Str(_) | Pat::Bool(_) => {}
     }
 }

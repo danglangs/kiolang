@@ -72,6 +72,7 @@ impl Printer<'_> {
                 let ps: Vec<_> = ps.iter().zip(&tys).map(|(p, t)| self.pat(p, t)).collect();
                 format!("{}({})", self.variant(t, *i), ps.join(", "))
             }
+            Pat::Or(alts) => alts.iter().map(|p| self.pat(p, t)).collect::<Vec<_>>().join(" | "),
         }
     }
 
@@ -639,6 +640,40 @@ fn nested_patterns_and_if_let() {
              _ => ()
            }
          }",
+    );
+}
+
+#[test]
+fn or_patterns_and_let_else() {
+    snapshot(
+        "enum E { A(Int), B(Int, Int), C }
+         fn f(e: E) -> Int { match e { E::A(x) | E::B(_, x) => x, E::C => 0 } }
+         fn g(o: Option<Int>) -> Int { let Some(1 | 2) | None = o else { return 0; }; let Some(n) = o else { return 1; }; n }",
+        "fn f(e#0: E) -> Int {
+           match e#0 {
+             E::A[0](x#1) | E::B[1](_, x#1) => x#1
+             E::C[2] => 0
+           }
+         }
+         locals x#1: Int
+         fn g(o#0: Option<Int>) -> Int {
+           match o#0 {
+             Some[1](1 | 2) | None[0] => {
+               match o#0 {
+                 Some[1](n#1) => {
+                   n#1
+                 }
+                 _ => {
+                   return 1
+                 }
+               }
+             }
+             _ => {
+               return 0
+             }
+           }
+         }
+         locals n#1: Int",
     );
 }
 

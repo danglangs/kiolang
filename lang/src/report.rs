@@ -93,6 +93,10 @@ fn walk_block(b: &Block, visit: &mut dyn FnMut(&Expr)) {
                 walk(target, visit);
                 walk(value, visit);
             }
+            StmtKind::LetElse { init, els, .. } => {
+                walk(init, visit);
+                walk_block(els, visit);
+            }
             StmtKind::Loop { body } => walk_block(body, visit),
             StmtKind::While { cond, body } => {
                 walk(cond, visit);

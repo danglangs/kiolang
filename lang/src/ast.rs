@@ -121,6 +121,13 @@ pub enum StmtKind {
         ty: Option<Type>,
         init: Expr,
     },
+    /// `let P: T = e else { .. };`; the else block must not finish normally.
+    LetElse {
+        pat: Pat,
+        ty: Option<Type>,
+        init: Expr,
+        els: Block,
+    },
     /// `op` is `=`, `+=` or `-=`; `target` is a name, field or index.
     Assign {
         target: Expr,
@@ -233,4 +240,6 @@ pub enum PatKind {
     Variant(Option<String>, String, Vec<Pat>),
     /// `web::Status::Paid(x)`: the pattern after `web::`.
     Module(String, Box<Pat>),
+    /// `P1 | P2 | ..`, tried left to right; each alternative binds the same names.
+    Or(Vec<Pat>),
 }

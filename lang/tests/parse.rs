@@ -62,6 +62,7 @@ fn pat(p: &Pat) -> String {
             let parts = parts.iter().fold(String::new(), |s, p| s + " " + &pat(p));
             format!("[{e}{v}{parts}]")
         }
+        PatKind::Or(alts) => format!("(| {})", alts.iter().map(pat).collect::<Vec<_>>().join(" ")),
     }
 }
 
@@ -86,6 +87,15 @@ fn stmt(s: &Stmt) -> String {
             let m = if *mutable { " mut" } else { "" };
             let t = t.as_ref().map_or(String::new(), |t| format!(" : {}", ty(t)));
             format!("(let{m} {name}{t} {})", show(init))
+        }
+        StmtKind::LetElse {
+            pat: p,
+            ty: t,
+            init,
+            els,
+        } => {
+            let t = t.as_ref().map_or(String::new(), |t| format!(" : {}", ty(t)));
+            format!("(let-else {}{t} {} {})", pat(p), show(init), block(els))
         }
         StmtKind::Assign { target, op, value } => format!("({op} {} {})", show(target), show(value)),
         StmtKind::Return(None) => "(return)".into(),
@@ -540,6 +550,18 @@ fn if_let() {
 }
 
 #[test]
+fn or_patterns_and_let_else() {
+    assert_eq!(
+        expr("match x { | 1 | 2 => 0, Some(E::A | E::B(_)) | None => 1 }"),
+        "(match x ((| 1 2) 0) ((| [Some (| [E::A] [E::B _])] None) 1))"
+    );
+    assert_eq!(
+        body("let Some(y): Option<Int> = x else { return; }; y"),
+        "{(let-else [Some y] : Option<Int> x {(return)}); tail y}"
+    );
+}
+
+#[test]
 fn match_arms() {
     assert_eq!(expr("match x {}"), "(match x)");
     assert_eq!(expr("match x { a => 1, }"), "(match x (a 1))");
@@ -772,12 +794,6 @@ fn rejects_closure_syntax() {
         "`|` is not an operator in kio",
         Some("use `||` for logical or; `|x| ..` starts a closure only where a value starts"),
     );
-    rejected_with(
-        "fn f() { match x { 1 | 2 => 1, _ => 2 } }",
-        "|",
-        "`|` patterns are not supported",
-        Some("write one arm per pattern"),
-    );
     // Closures count toward the parser's depth limit.
     let deep = format!("fn f() {{ {}1; }}", "|x| ".repeat(65));
     assert_eq!(fail(&deep).msg, "nesting is too deep");
@@ -918,18 +934,6 @@ fn l12_rust_forms_teach() {
             "(k, v)",
             "kio has no tuples",
             "loop over `m.keys()` and `get`",
-        ),
-        (
-            "fn f() { let Some(x) = o else { return; }; }",
-            "else",
-            "let-else is not supported",
-            "use `match`",
-        ),
-        (
-            "fn f() { let x = o else { return; }; }",
-            "else",
-            "let-else is not supported",
-            "use `match`",
         ),
         (
             "fn f<T>(x: T) where T: Ord { }",

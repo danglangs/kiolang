@@ -300,14 +300,63 @@ impl<'a> Lowerer<'a> {
 
     fn block(&mut self, b: &'a ast::Block) -> Block {
         let mark = self.scope.len();
-        let stmts = b.stmts.iter().map(|s| self.stmt(s)).collect();
-        let tail = b.tail.as_ref().map(|t| Box::new(self.expr(t)));
+        let block = self.stmts(&b.stmts, b.tail.as_deref());
         self.scope.truncate(mark);
-        Block { stmts, tail }
+        block
+    }
+
+    /// `stmts` then `tail`. A `let`-else becomes a `match` whose pattern arm runs the statements
+    /// after it, with its bindings, and whose `_` arm runs its else block.
+    fn stmts(&mut self, stmts: &'a [ast::Stmt], tail: Option<&'a ast::Expr>) -> Block {
+        let mut out = Vec::new();
+        for (i, s) in stmts.iter().enumerate() {
+            let StmtKind::LetElse { pat, init, els, .. } = &s.kind else {
+                out.push(self.stmt(s));
+                continue;
+            };
+            let scrut = self.expr(init);
+            let els = self.block(els);
+            let pat = self.pat(pat, &self.checked(init.span));
+            let rest = self.stmts(&stmts[i + 1..], tail);
+            let ty = rest.tail.as_ref().map_or(Ty::Unit, |t| t.ty.clone());
+            let body = |b: Block| Expr {
+                kind: ir::ExprKind::Block(b),
+                ty: ty.clone(),
+                span: s.span,
+            };
+            let arms = vec![
+                Arm { pat, body: body(rest) },
+                Arm {
+                    pat: Pat::Wild,
+                    body: body(els),
+                },
+            ];
+            let m = Expr {
+                kind: ir::ExprKind::Match(Box::new(scrut), arms),
+                ty: ty.clone(),
+                span: s.span,
+            };
+            return match ty {
+                Ty::Unit => {
+                    out.push(Stmt {
+                        kind: ir::StmtKind::Expr(m),
+                        span: s.span,
+                    });
+                    Block { stmts: out, tail: None }
+                }
+                _ => Block {
+                    stmts: out,
+                    tail: Some(Box::new(m)),
+                },
+            };
+        }
+        let tail = tail.map(|t| Box::new(self.expr(t)));
+        Block { stmts: out, tail }
     }
 
     fn stmt(&mut self, s: &'a ast::Stmt) -> Stmt {
         let kind = match &s.kind {
+            StmtKind::LetElse { .. } => unreachable!("lowered by `stmts`"),
             StmtKind::Let { name, init, .. } => {
                 let init = self.expr(init);
                 ir::StmtKind::Let(self.bind(name, &self.checked(s.span), s.span), init)
@@ -754,6 +803,32 @@ impl<'a> Lowerer<'a> {
                 let payload = &shape(&self.p.variants, &self.p.tparams, st).1[i as usize].1;
                 Pat::Variant(i, parts.iter().zip(payload).map(|(q, ty)| self.pat(q, ty)).collect())
             }
+            PatKind::Or(alts) => {
+                let mark = self.scope.len();
+                let mut out = vec![self.pat(&alts[0], st)];
+                let bound = self.scope[mark..].to_vec();
+                for alt in &alts[1..] {
+                    // Lowered with new slots, then renamed to the first alternative's.
+                    let (scope, locals) = (self.scope.len(), self.locals.len());
+                    let mut q = self.pat(alt, st);
+                    let to: Vec<(LocalId, LocalId)> = (self.scope.drain(scope..))
+                        .map(|(n, id)| (id, bound.iter().find(|(m, _)| *m == n).expect("checked alternative").1))
+                        .collect();
+                    self.locals.truncate(locals);
+                    rename(&mut q, &to);
+                    out.push(q);
+                }
+                Pat::Or(out)
+            }
         }
+    }
+}
+
+/// Replaces each binding's slot in `p` by its image under `to`.
+fn rename(p: &mut Pat, to: &[(LocalId, LocalId)]) {
+    match p {
+        Pat::Bind(id) => *id = to.iter().find(|(from, _)| from == id).expect("renamed").1,
+        Pat::Variant(_, ps) | Pat::Or(ps) => ps.iter_mut().for_each(|q| rename(q, to)),
+        Pat::Wild | Pat::Int(_) | Pat::Str(_) | Pat::Bool(_) => {}
     }
 }

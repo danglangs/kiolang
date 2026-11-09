@@ -371,4 +371,6 @@ pub enum Pat {
     Bool(bool),
     /// A variant of the matched value's enum, with a pattern for each payload field.
     Variant(u32, Vec<Pat>),
+    /// Alternatives tried left to right; each binds the same locals.
+    Or(Vec<Pat>),
 }

@@ -844,6 +844,10 @@ impl<'a> Interp<'a> {
     fn bind(&mut self, p: &Pat, v: Value) {
         match (p, v) {
             (Pat::Bind(id), v) => *self.local(*id) = v,
+            (Pat::Or(alts), v) => {
+                let alt = alts.iter().find(|a| matches(a, &v)).expect("matched");
+                self.bind(alt, v);
+            }
             (Pat::Variant(_, ps), Value::Enum(_, _, vs)) => {
                 for (p, v) in ps.iter().zip(vs) {
                     self.bind(p, v);
@@ -857,6 +861,8 @@ impl<'a> Interp<'a> {
         match p {
             Pat::Bind(id) => *self.local(*id) = Value::Unit,
             Pat::Variant(_, ps) => ps.iter().for_each(|p| self.unbind(p)),
+            // Every alternative binds the same slots.
+            Pat::Or(alts) => self.unbind(&alts[0]),
             _ => {}
         }
     }
@@ -881,6 +887,7 @@ fn matches(p: &Pat, v: &Value) -> bool {
         (Pat::Variant(i, ps), Value::Enum(_, j, vs)) => {
             *i as usize == *j && ps.iter().zip(vs).all(|(p, v)| matches(p, v))
         }
+        (Pat::Or(alts), v) => alts.iter().any(|a| matches(a, v)),
         _ => unreachable!("checked pattern"),
     }
 }

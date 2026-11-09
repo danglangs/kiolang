@@ -486,24 +486,43 @@ impl Parser {
     fn let_stmt(&mut self) -> Result<StmtKind, Diag> {
         self.pos += 1;
         let mutable = self.eat_kw("mut");
-        let at_name = self.pos;
-        let name = self.ident()?;
-        if self.at("(") || self.at("::") {
-            // `let Some(x) = e else { .. }`: a pattern where a name goes.
-            let first = self.unexpected("`=`");
-            self.pos = at_name;
-            let tried = self.pat().and_then(|_| self.expect("=")).and_then(|_| self.expr());
-            return Err(if tried.is_ok() && self.at_kw("else") {
-                self.let_else()
-            } else {
-                first
-            });
+        let name_start = self.span().start;
+        let simple = matches!(self.peek(), Some(Kind::Ident(_)))
+            && !matches!(
+                self.toks.get(self.pos + 1).map(|t| &t.kind),
+                Some(Kind::Sym("(" | "::" | "|"))
+            );
+        if !simple && !mutable {
+            // `let Some(x) = e else { .. };`
+            let pat = self.pat()?;
+            let ty = if self.eat(":") { Some(self.ty()?) } else { None };
+            self.expect("=")?;
+            let init = self.expr()?;
+            if !self.eat_kw("else") {
+                let hint = "add `else { return; }` after the value, or use `match`";
+                return Err(err(pat.span, "a pattern in `let` needs an `else` block", Some(hint)));
+            }
+            let els = self.block()?;
+            self.expect(";")?;
+            return Ok(StmtKind::LetElse { pat, ty, init, els });
         }
+        let name = self.ident()?;
+        let name_span = self.since(name_start);
         let ty = if self.eat(":") { Some(self.ty()?) } else { None };
         self.expect("=")?;
         let init = self.expr()?;
-        if self.at_kw("else") {
-            return Err(self.let_else());
+        if self.eat_kw("else") {
+            if mutable {
+                // `let mut x` binds whatever the value is, as in Rust.
+                return Err(err(name_span, "this pattern always matches", Some("write `let`")));
+            }
+            let els = self.block()?;
+            self.expect(";")?;
+            let pat = Pat {
+                kind: PatKind::Name(name),
+                span: name_span,
+            };
+            return Ok(StmtKind::LetElse { pat, ty, init, els });
         }
         self.expect(";")?;
         Ok(StmtKind::Let {
@@ -512,10 +531,6 @@ impl Parser {
             ty,
             init,
         })
-    }
-
-    fn let_else(&self) -> Diag {
-        err(self.span(), "let-else is not supported", Some("use `match`"))
     }
 
     /// `return` and an optional value, up to its `;`, or `,` or `}` as a match arm.
@@ -933,10 +948,6 @@ impl Parser {
         while !self.at("}") {
             let arm_start = self.span().start;
             let pat = self.pat()?;
-            if self.at("|") {
-                let hint = "write one arm per pattern";
-                return Err(err(self.span(), "`|` patterns are not supported", Some(hint)));
-            }
             if self.at_kw("if") {
                 let hint = "test the condition inside the arm with `if`";
                 return Err(err(self.span(), "match guards are not supported", Some(hint)));
@@ -998,7 +1009,26 @@ impl Parser {
         })
     }
 
+    /// A pattern: one alternative, or several `P1 | P2 | ..`, with an optional leading `|`, as in Rust.
     fn pat(&mut self) -> Result<Pat, Diag> {
+        let start = self.span().start;
+        self.eat("|");
+        let first = self.alt()?;
+        if !self.at("|") {
+            return Ok(first);
+        }
+        let mut alts = vec![first];
+        while self.eat("|") {
+            alts.push(self.alt()?);
+        }
+        Ok(Pat {
+            kind: PatKind::Or(alts),
+            span: self.since(start),
+        })
+    }
+
+    /// One alternative of a pattern.
+    fn alt(&mut self) -> Result<Pat, Diag> {
         let depth = self.depth;
         self.enter()?;
         let p = self.pat_inner()?;
@@ -1009,7 +1039,7 @@ impl Parser {
     fn pat_inner(&mut self) -> Result<Pat, Diag> {
         let start = self.span().start;
         if let Some(module) = self.module()? {
-            let inner = self.pat()?;
+            let inner = self.alt()?;
             return Ok(Pat {
                 kind: PatKind::Module(module, Box::new(inner)),
                 span: self.since(start),

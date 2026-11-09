@@ -410,6 +410,50 @@ fn nested_path(span: Span) -> Diag {
     )
 }
 
+/// The error for a `match` or `let`-else whose exhaustiveness check ran out of `spent`.
+fn too_complex(span: Span, spent: Spent) -> Diag {
+    match spent {
+        Spent::Match => err(
+            span,
+            "this `match` is too complex to check".to_string(),
+            Some("split it into smaller matches"),
+        ),
+        Spent::Program => err(
+            span,
+            "this program's matches are too complex to check".to_string(),
+            Some("simplify the largest matches; together they exceed what the checker will do"),
+        ),
+    }
+}
+
+/// Checks that alternatives at `a` and `b` of one pattern bind the same names, `a_binds` and
+/// `b_binds`, with the same types.
+fn same_binds(a_binds: &[(String, Ty)], b_binds: &[(String, Ty)], a: Span, b: Span) -> Result<(), Diag> {
+    for (n, t) in a_binds {
+        match b_binds.iter().find(|(m, _)| m == n) {
+            None => return Err(not_bound(b, n)),
+            Some((_, u)) if u != t => {
+                let msg = format!("`{n}` is {t} in one alternative and {u} in another");
+                return Err(err(b, msg, Some("bind values of the same type in every alternative")));
+            }
+            Some(_) => {}
+        }
+    }
+    match b_binds.iter().find(|(m, _)| !a_binds.iter().any(|(n, _)| n == m)) {
+        Some((m, _)) => Err(not_bound(a, m)),
+        None => Ok(()),
+    }
+}
+
+fn not_bound(span: Span, name: &str) -> Diag {
+    let msg = format!("`{name}` is bound in one alternative but not the other");
+    err(
+        span,
+        msg,
+        Some(&format!("bind `{name}` in every alternative, or in none")),
+    )
+}
+
 /// Hint for rule 2: no expression produces a capability.
 const NO_CAP_SYNTAX: &str = "capabilities come only as parameters of `main`";
 
@@ -437,6 +481,20 @@ enum Ctor {
 enum Cover {
     All,
     Ctor(Ctor, Vec<Cover>),
+    /// `P1 | P2 | ..`
+    Or(Vec<Cover>),
+}
+
+/// The rows `r` stands for, with an alternative of a leading `Cover::Or` in place of it, recursively.
+fn expand(r: &[Cover], out: &mut Vec<Vec<Cover>>) {
+    match r.first() {
+        Some(Cover::Or(alts)) => {
+            for a in alts {
+                expand(&[std::slice::from_ref(a), &r[1..]].concat(), out);
+            }
+        }
+        _ => out.push(r.to_vec()),
+    }
 }
 
 /// Exhaustiveness work allowed per `match`, in pattern cells visited, and its recursion depth,
@@ -495,6 +553,9 @@ impl Usefulness<'_> {
         if rows.is_empty() {
             return Ok(Some(vec![q.to_vec()]));
         }
+        let mut expanded = Vec::new();
+        rows.iter().for_each(|r| expand(r, &mut expanded));
+        let rows = &expanded[..];
         let cost = (rows.len() + 1) * (q.len() + 1);
         self.budget = self.budget.checked_sub(cost).ok_or(Spent::Match)?;
         self.program
@@ -502,13 +563,24 @@ impl Usefulness<'_> {
         let Some((head, rest)) = q.split_first() else {
             return Ok(None);
         };
-        if let Cover::Ctor(c, parts) = head {
-            return self.specialized(rows, c, parts.clone(), rest, tys);
+        match head {
+            Cover::Ctor(c, parts) => return self.specialized(rows, c, parts.clone(), rest, tys),
+            // The values some alternative matches and no row does.
+            Cover::Or(alts) => {
+                for a in alts {
+                    let q = [std::slice::from_ref(a), rest].concat();
+                    if let Some(ws) = self.useful(rows, &q, tys)? {
+                        return Ok(Some(ws));
+                    }
+                }
+                return Ok(None);
+            }
+            Cover::All => {}
         }
         let seen: Vec<&Ctor> = (rows.iter())
             .filter_map(|r| match &r[0] {
                 Cover::Ctor(c, _) => Some(c),
-                Cover::All => None,
+                Cover::All | Cover::Or(_) => None,
             })
             .collect();
         let all = self.ctors(&tys[0]);
@@ -556,7 +628,7 @@ impl Usefulness<'_> {
         let rows: Vec<_> = (rows.iter())
             .filter_map(|r| match &r[0] {
                 Cover::Ctor(d, ps) if d == c => Some([ps, &r[1..]].concat()),
-                Cover::Ctor(..) => None,
+                Cover::Ctor(..) | Cover::Or(_) => None,
                 Cover::All => Some([&vec![Cover::All; n], &r[1..]].concat()),
             })
             .collect();
@@ -580,6 +652,7 @@ impl Usefulness<'_> {
     fn show(&self, c: &Cover, ty: &Ty) -> String {
         match c {
             Cover::All => "_".to_string(),
+            Cover::Or(alts) => alts.iter().map(|a| self.show(a, ty)).collect::<Vec<_>>().join(" | "),
             Cover::Ctor(Ctor::Bool(b), _) => b.to_string(),
             Cover::Ctor(Ctor::Int(n), _) => n.to_string(),
             Cover::Ctor(Ctor::Str(s), _) => format!("{s:?}"),
@@ -2439,6 +2512,39 @@ impl<'a> Checker<'a> {
                 self.scopes.last_mut().unwrap().insert(name.clone(), local);
                 Ok(Ty::Unit)
             }
+            StmtKind::LetElse { pat, ty, init, els } => {
+                let declared = ty
+                    .as_ref()
+                    .map(|t| resolve(t, self.caps, self.structs, self.enums, self.home));
+                let st = self.scrutinee(init, declared.transpose()?.as_ref())?;
+                // The pattern's names are not in scope in the else block.
+                self.block(els, None)?;
+                let leaves = els.tail.is_none()
+                    && (els.stmts.last())
+                        .is_some_and(|s| matches!(s.kind, StmtKind::Return(_) | StmtKind::Break | StmtKind::Continue));
+                if !leaves {
+                    let msg = "the `else` block of `let`-else must leave the function or loop";
+                    let hint = "end it with `return ..`: its last statement must be `return`, `break` or `continue`";
+                    return Err(err(els.span, msg.to_string(), Some(hint)));
+                }
+                let mut binds = Vec::new();
+                let cover = self.pattern(pat, &st, &mut binds)?;
+                let missing = (self.usefulness())
+                    .useful(&[vec![cover]], &[Cover::All], &[st])
+                    .map_err(|spent| too_complex(init.span, spent))?;
+                if missing.is_none() {
+                    return Err(err(
+                        pat.span,
+                        "this pattern always matches".to_string(),
+                        Some("write `let`"),
+                    ));
+                }
+                let scope = self.scopes.last_mut().unwrap();
+                for (name, ty) in binds {
+                    scope.insert(name, Local { ty, mutable: false });
+                }
+                Ok(Ty::Unit)
+            }
             StmtKind::Assign { target, op, value } => {
                 let ty = self.place(target)?;
                 let found = self.expr(value, (*op == "=").then_some(&ty))?;
@@ -2624,7 +2730,7 @@ impl<'a> Checker<'a> {
                 self.else_branch(e, t, then, els.as_deref(), expected)
             }
             ExprKind::IfLet(pat, scrut, then, els) => {
-                let st = self.scrutinee(scrut)?;
+                let st = self.scrutinee(scrut, None)?;
                 self.bind_pattern(pat, &st)?;
                 let t = self.block(then, expected)?;
                 self.scopes.pop();
@@ -3160,8 +3266,12 @@ impl<'a> Checker<'a> {
     }
 
     /// The type of a `match` or `if let` scrutinee, which must be one patterns can match.
-    fn scrutinee(&mut self, scrut: &Expr) -> Result<Ty, Diag> {
-        let st = self.expr(scrut, None)?;
+    /// `expected` is a `let`-else's declared type.
+    fn scrutinee(&mut self, scrut: &Expr, expected: Option<&Ty>) -> Result<Ty, Diag> {
+        let st = self.expr(scrut, expected)?;
+        if let Some(t) = expected {
+            want_expr(scrut, &st, t)?;
+        }
         if st == Ty::Float {
             let hint = Some("compare with `<` or `==`");
             return Err(err(scrut.span, "cannot match on Float".to_string(), hint));
@@ -3187,36 +3297,35 @@ impl<'a> Checker<'a> {
     }
 
     fn match_expr(&mut self, scrut: &Expr, arms: &[Arm], expected: Option<&Ty>) -> Result<Ty, Diag> {
-        let st = self.scrutinee(scrut)?;
-        let too_complex = |spent| match spent {
-            Spent::Match => err(
-                scrut.span,
-                "this `match` is too complex to check".to_string(),
-                Some("split it into smaller matches"),
-            ),
-            Spent::Program => err(
-                scrut.span,
-                "this program's matches are too complex to check".to_string(),
-                Some("simplify the largest matches; together they exceed what the checker will do"),
-            ),
-        };
-        let mut u = Usefulness {
-            variants: self.variants,
-            tparams: self.tparams,
-            budget: MATCH_BUDGET,
-            program: self.match_budget,
-            depth: 0,
-        };
+        let st = self.scrutinee(scrut, None)?;
+        let too_complex = |spent| too_complex(scrut.span, spent);
+        let mut u = self.usefulness();
         let tys = [st.clone()];
         let mut ty = Ty::Never;
         let mut rows = Vec::new();
         for arm in arms {
-            let row = vec![self.bind_pattern(&arm.pat, &st)?];
-            if u.useful(&rows, &row, &tys).map_err(too_complex)?.is_none() {
+            let cover = self.bind_pattern(&arm.pat, &st)?;
+            // Each alternative of the arm must match a value that no earlier one does.
+            let alts = match (&arm.pat.kind, cover) {
+                (PatKind::Or(ps), Cover::Or(cs)) => ps.iter().map(|p| p.span).zip(cs).collect(),
+                (_, c) => vec![(arm.pat.span, c)],
+            };
+            let (n, mut useless) = (alts.len(), Vec::new());
+            for (span, c) in alts {
+                let row = vec![c];
+                if u.useful(&rows, &row, &tys).map_err(too_complex)?.is_none() {
+                    useless.push(span);
+                }
+                rows.push(row);
+            }
+            if useless.len() == n {
                 let hint = "earlier arms match every value it matches; remove it";
                 return Err(err(arm.pat.span, "unreachable arm".to_string(), Some(hint)));
             }
-            rows.push(row);
+            if let Some(&span) = useless.first() {
+                let hint = "earlier patterns match every value it matches; remove it";
+                return Err(err(span, "unreachable alternative".to_string(), Some(hint)));
+            }
             let body = self.expr(&arm.body, expected)?;
             self.scopes.pop();
             if ty == Ty::Never {
@@ -3233,6 +3342,16 @@ impl<'a> Checker<'a> {
         let msg = format!("non-exhaustive `match`: missing {}", missing.join(", "));
         let hint = "add arms for the missing cases, or `_ => ..`";
         Err(err(scrut.span, msg, Some(hint)))
+    }
+
+    fn usefulness(&self) -> Usefulness<'a> {
+        Usefulness {
+            variants: self.variants,
+            tparams: self.tparams,
+            budget: MATCH_BUDGET,
+            program: self.match_budget,
+            depth: 0,
+        }
     }
 
     /// What pattern `p` covers, typed against `st`, the type of the value it matches. Adds the
@@ -3268,6 +3387,23 @@ impl<'a> Checker<'a> {
             }
             PatKind::Variant(Some(named), v, parts) => self.enum_pattern(p, st, self.enum_key(named), v, parts, binds),
             PatKind::Variant(None, v, parts) => self.variant_pattern(p, st, v, parts, binds),
+            PatKind::Or(alts) => {
+                let mut first = Vec::new();
+                let mut covers = vec![self.pattern(&alts[0], st, &mut first)?];
+                for alt in &alts[1..] {
+                    let mut these = Vec::new();
+                    covers.push(self.pattern(alt, st, &mut these)?);
+                    same_binds(&first, &these, alts[0].span, alt.span)?;
+                }
+                for (n, ty) in first {
+                    if binds.iter().any(|(b, _)| *b == n) {
+                        let msg = format!("`{n}` is bound twice in this pattern");
+                        return Err(err(p.span, msg, Some("rename one of them")));
+                    }
+                    binds.push((n, ty));
+                }
+                Ok(Cover::Or(covers))
+            }
         }
     }
 
