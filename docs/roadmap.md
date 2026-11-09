@@ -98,3 +98,9 @@ Non-starters today, in order of what blocks a real backend first: an SQL capabil
 ## A target app
 
 A CRUD app over a `Dir` (W9a) proves the language. A target app proves the ecosystem: a small, real web service that an agent writes and an operator runs with exactly its grants. Candidate: a link shortener or notes service with a JSON API, a `Kv` store, auth by a header token (a `Secret` capability), and HTML pages. Each piece it lacks becomes a task, as kio-web did for `--listen`. `Kv` exists, and kio-web has notes apps over `Dir` and over `Kv`; the target app is next.
+
+## Can models write kio? (low priority)
+
+The design bets that models write kio from language.md and the checker's hints. Evidence so far is agents with the docs in context (the links app). Unmeasured: a cold or smaller model.
+
+Eval (after the in-flight capability and language work): about 30 tasks (pure compute, `Dir`, `Kv`, HTTP handlers), a model given only language.md. Measure per task: `kio check` passing on the first try, and check-and-fix rounds to pass (cap 5); the same tasks in Python as the baseline; two or three model sizes. Output: the rates, and the diagnostics models hit most, which feed the next L12-style round.
