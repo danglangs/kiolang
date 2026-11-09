@@ -78,6 +78,7 @@ impl<'m> Statics<'m> {
             Ty::Str => return STR,
             Ty::Bytes => return 4,
             Ty::Cap(_) | Ty::Never => unreachable!("{t:?} has no descriptor"),
+            Ty::Fn(..) => unimplemented!("codegen: type {}", crate::node(t)),
             _ => {}
         }
         if let Some((_, i)) = self.tys.iter().find(|(u, _)| u == t) {
@@ -269,6 +270,9 @@ impl<'m> Statics<'m> {
                 self.str(s);
             }
             ExprKind::Int(_) | ExprKind::Bool(_) | ExprKind::Unit | ExprKind::Local(_) | ExprKind::MapNew => {}
+            ExprKind::FnRef(_) | ExprKind::CallValue(..) => {
+                unimplemented!("codegen: expression {}", crate::node(&e.kind))
+            }
             ExprKind::Unary(_, x) | ExprKind::Field(x, _) | ExprKind::Try(x) => self.expr(x),
             ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) => {
                 self.expr(a);

@@ -90,7 +90,9 @@ fn differential() {
         let c = match catch_unwind(AssertUnwindSafe(|| compiled(src))) {
             Ok(c) => c,
             Err(p) => {
-                let msg = p.downcast_ref::<String>().cloned().unwrap_or_default();
+                let msg = (p.downcast_ref::<String>().cloned())
+                    .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_default();
                 // Only an `unimplemented!` node is a skip; any other panic is a codegen bug.
                 let Some(node) = msg.strip_prefix("not implemented: codegen: ") else {
                     panic!("codegen panicked: {msg}\n{src}");

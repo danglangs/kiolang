@@ -46,7 +46,7 @@ fn main(input: Dir, out: Dir) -> Result<(), IoErr> {
 | Errors | `Option<T>`, `Result<T, E>`, `?` |
 | User types | `struct`, and `enum` with payloads; a type may contain itself only through `List` or `Map` |
 | Control | `if`, `if let`, `while`, `loop`, `for x in list`, `for i in 0..n`, `match`, `break`, `continue`, `return` |
-| Functions | free functions, recursion |
+| Functions | free functions, recursion, function values of type `fn(T, ..) -> R` |
 | Capabilities | `Dir`, `Http`, `Kv`, `WsMessage`, `WsSend`, generated from `caps.wit` |
 
 Everything else is rejected with a message that names the kio alternative, for example `&str` (use `Str`), `Vec` (use `List`), closures (use `for`), `impl`, traits, generics, `use`, `mod`, floats, tuples, globals, `unsafe`.
@@ -66,6 +66,15 @@ Everything else is rejected with a message that names the kio alternative, for e
 - **Comments:** `//` only.
 - **Reserved words.** All Rust keywords not used by kio are reserved and cannot be names.
 - **Type names start uppercase.** `struct Point`, `enum Status`. A lowercase name before `::` is a module, as in `web::text`.
+- **Function values.** A function's name not followed by `(` is a value of type `fn(T, ..) -> R` (`fn(T)` returns `()`), usable wherever a type is: parameters, returns, locals, fields, payloads, `List` and `Option` elements. `f(x)` calls a local or parameter `f` of `fn` type; a local hides a function of the same name, as in Rust. `(e)(x)` calls any expression of `fn` type, as in `(r.handler)(req)`. Functions have no equality and are not `Map` keys; `main` is not a value. One prints as `<fn name>`.
+
+  ```
+  struct Route { path: Str, handler: fn(Request) -> Response }
+  fn dispatch(routes: List<Route>, req: Request) -> Response {
+    for r in routes { if r.path == req.path { return (r.handler)(req); } }
+    not_found()
+  }
+  ```
 - **Modules.** `mod web;` in the root file loads `web.kio`; its `pub` items are used as `web::f`, `web::T`. Modules are flat: one file each, declared only in the root. A module may use another declared module's `pub` items the same way (cycles are fine) but not the root's.
 
 ## Built-ins
@@ -110,7 +119,9 @@ A WebSocket server is `fn main(msg: WsMessage, conn: WsSend, ..)` under `--liste
    fn f(x: Option<Dir>)               // nested in a type
    ```
 
-   So a function's authority is exactly its capability parameters, and the report is read off the signatures.
+   A `fn` type may not mention a capability (`fn(Dir)`, `fn() -> Option<Dir>`), and a function with a capability parameter cannot be used as a value: "function values cannot take or return capabilities". Pass the capability to a named function instead.
+
+   So a function's authority is exactly its capability parameters, and the report is read off the signatures. A function value carries none.
 
 2. **Capabilities cannot be constructed.** There is no literal, constructor or cast that produces a `Dir`. Only the host provides them, as arguments to `main`.
 
@@ -140,6 +151,9 @@ error: capability `input` bound to local `d`
 
 error: cannot return `Dir` from `pick`
   capabilities are parameters only
+
+error: function values cannot take or return capabilities
+  pass the capability to a named function instead
 
 error: `?` on `Result<Bytes, IoErr>` in a function returning `Option<Int>`
   change the return type or `match` on the result

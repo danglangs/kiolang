@@ -655,7 +655,10 @@ fn hints_for_calls_and_operators() {
         hint("fn main() { let mut x = true; x += 1; }"),
         "`+` works on two Int or two Str"
     );
-    assert_eq!(hint("fn main() { 1(2); }"), "call a function by name, like `f(x)`");
+    assert_eq!(
+        hint("fn main() { 1(2); }"),
+        "only functions and values of `fn` type can be called"
+    );
 }
 
 #[test]
@@ -1505,4 +1508,151 @@ fn result_ok_err_and_option_ok_or() {
         hint("fn f(o: Result<Int, Str>) -> Bool { o.zzzzzz() } fn main() {}"),
         "Result<Int, Str> has: err, is_err, is_ok, ok, unwrap_or"
     );
+}
+
+const DOUBLE: &str = "fn double(x: Int) -> Int { x * 2 } ";
+
+#[test]
+fn function_values() {
+    ok(&format!(
+        "{DOUBLE}fn apply(f: fn(Int) -> Int, x: Int) -> Int {{ f(x) }} fn main() -> Int {{ apply(double, 3) }}"
+    ));
+    // In a field, called through parentheses; in a list, an `Option` and an enum payload.
+    ok(&format!(
+        "{DOUBLE}struct R {{ h: fn(Int) -> Int }} enum E {{ F(fn(Int) -> Int) }}
+         fn main() -> Int {{
+             let r = R {{ h: double }};
+             let fs: List<fn(Int) -> Int> = [double, double];
+             let o: Option<fn(Int) -> Int> = Some(double);
+             let e = E::F(double);
+             (r.h)(1) + (fs[0])(2) + match o {{ Some(f) => f(3), None => 0 }}
+         }}"
+    ));
+    // A function returning a function, called at once; `fn()` with no `->` returns `()`.
+    ok(&format!(
+        "{DOUBLE}fn pick() -> fn(Int) -> Int {{ double }} fn nop() {{}}
+         fn main() -> Int {{ let n: fn() = nop; n(); pick()(4) }}"
+    ));
+    // A recursive function as a value.
+    ok("fn fact(n: Int) -> Int { if n < 2 { 1 } else { n * fact(n - 1) } } fn main() -> Int { let f = fact; f(5) }");
+    // A local hides a function of the same name, as in Rust.
+    ok(&format!("{DOUBLE}fn main() -> Int {{ let double = 3; double }}"));
+    ok(&format!(
+        "{DOUBLE}fn main() -> Int {{ let g = double; let double = g; double(1) }}"
+    ));
+}
+
+#[test]
+fn function_values_carry_no_capability() {
+    let caps = common::caps();
+    let fn_cap = |src: &str| {
+        let d = &check(src, &caps).expect_err(src)[0];
+        assert_eq!(d.msg, "function values cannot take or return capabilities", "{src}");
+        assert_eq!(
+            d.hint.as_deref(),
+            Some("pass the capability to a named function instead")
+        );
+        src[d.span.start..d.span.end].to_string()
+    };
+    assert_eq!(fn_cap("fn f(g: fn(Dir)) {} fn main() {}"), "fn(Dir)");
+    assert_eq!(fn_cap("fn f() -> fn() -> Dir { f() } fn main() {}"), "fn() -> Dir");
+    assert_eq!(
+        fn_cap("fn f(g: List<fn(Option<Dir>) -> Int>) {} fn main() {}"),
+        "List<fn(Option<Dir>) -> Int>"
+    );
+    assert_eq!(fn_cap("struct S { h: fn(Int, Http) } fn main() {}"), "fn(Int, Http)");
+    assert_eq!(fn_cap("enum E { A(fn(fn(Dir))) } fn main() {}"), "fn(fn(Dir))");
+    let src = "fn load(d: Dir) {} fn main(d: Dir) { let g: fn(Dir) = load; }";
+    assert_eq!(fn_cap(src), "fn(Dir)");
+    // A function with a capability parameter, used as a value: at its name.
+    assert_eq!(fn_cap("fn load(d: Dir) {} fn main(d: Dir) { let g = load; }"), "load");
+    let src = "fn load(d: Dir, n: Int) {} fn take(x: Int) {} fn main() { take(load); }";
+    assert_eq!(fn_cap(src), "load");
+    // A capability cannot be passed through a value of `fn` type.
+    let src = format!("{DOUBLE}fn main(d: Dir) {{ let g = double; g(d); }}");
+    assert_eq!(check(&src, &caps).unwrap_err()[0].msg, "expected Int, found Dir");
+}
+
+#[test]
+fn function_value_rejections() {
+    let (msg, at) = reject("fn main() { let m = main; }");
+    assert_eq!(
+        (msg.as_str(), at.as_str()),
+        ("`main` cannot be used as a value", "main")
+    );
+    assert_eq!(
+        hint("fn main() { let m = main; }"),
+        "move the code into another function and use that"
+    );
+    let r = "struct R { h: fn(Int) -> Int } ";
+    for (src, ty) in [
+        (
+            format!("{DOUBLE}fn main() -> Bool {{ let f = double; f == double }}"),
+            "fn(Int) -> Int",
+        ),
+        (
+            format!("{DOUBLE}{r}fn main() -> Bool {{ let r = R {{ h: double }}; r != r }}"),
+            "R",
+        ),
+        (
+            format!("{DOUBLE}fn main() -> Bool {{ let o = Some([double]); o == o }}"),
+            "Option<List<fn(Int) -> Int>>",
+        ),
+        (
+            format!("{DOUBLE}fn main() -> Bool {{ [double].contains(double) }}"),
+            "fn(Int) -> Int",
+        ),
+    ] {
+        let (msg, _) = reject(&src);
+        assert_eq!(msg, format!("cannot compare `{ty}` values"), "{src}");
+        assert_eq!(hint(&src), "functions have no equality");
+    }
+    // Equality still works on recursive types without functions.
+    ok("struct T { kids: List<T> } fn main() -> Bool { let t = T { kids: [] }; t == t }");
+    let src = "fn f(m: Map<fn(Int), Int>) {} fn main() {}";
+    assert_eq!(reject(src).0, "`fn(Int)` cannot be a Map key");
+    assert_eq!(hint(src), "Map keys must be Int or Str");
+}
+
+#[test]
+fn calling_a_non_function() {
+    let (msg, at) = reject("fn main() { let x = 1; x(2); }");
+    assert_eq!((msg.as_str(), at.as_str()), ("`x` is Int, not a function", "x"));
+    assert_eq!(
+        hint("fn main() { let x = 1; x(2); }"),
+        "only functions and values of `fn` type can be called"
+    );
+    let src = "fn f() {} fn main() { let f = 1; f(); }";
+    assert_eq!(reject(src).0, "`f` is Int, not a function");
+    assert_eq!(hint(src), "the local `f` hides the function `f`; rename the local");
+    let (msg, at) = reject("fn main() { (1 + 2)(3); }");
+    assert_eq!(
+        (msg.as_str(), at.as_str()),
+        ("this expression is Int, not a function", "1 + 2")
+    );
+    let d = &check("fn main(d: Dir) { d(1); }", &common::caps()).unwrap_err()[0];
+    assert_eq!(d.msg, "`d` is Dir, not a function");
+}
+
+#[test]
+fn calls_through_values_check_against_the_fn_type() {
+    let src = format!("{DOUBLE}fn main() {{ let g = double; g(1, 2); }}");
+    let (msg, at) = reject(&src);
+    assert_eq!(
+        (msg.as_str(), at.as_str()),
+        ("`g` takes 1 arguments, found 2", "g(1, 2)")
+    );
+    assert_eq!(hint(&src), "`g` has type `fn(Int) -> Int`");
+    let src = "struct R { h: fn(Int) -> Int } fn f(r: R) { (r.h)(); } fn main() {}";
+    assert_eq!(reject(src).0, "this expression takes 1 arguments, found 0");
+    let (msg, at) = reject(&format!("{DOUBLE}fn main() {{ let g = double; g(\"a\"); }}"));
+    assert_eq!((msg.as_str(), at.as_str()), ("expected Int, found Str", "\"a\""));
+    let (msg, _) = reject(&format!("{DOUBLE}fn main() {{ let g: fn(Str) -> Int = double; }}"));
+    assert_eq!(msg, "expected fn(Str) -> Int, found fn(Int) -> Int");
+    let (msg, _) = reject(&format!("{DOUBLE}fn main() -> Str {{ let g = double; g(1) }}"));
+    assert_eq!(msg, "expected Str, found Int");
+    // `r.h(x)` is a method call; the hint shows how to call the field.
+    let src = "struct R { h: fn(Int) -> Int } fn f(r: R) -> Int { r.h(1) } fn main() {}";
+    assert_eq!(reject(src).0, "no method `h` on R");
+    assert_eq!(hint(src), "`h` is a field; call it as `(r.h)(..)`");
 }

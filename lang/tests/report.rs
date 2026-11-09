@@ -94,3 +94,18 @@ fn main(d: Dir) -> Result<Bool, IoErr> {
 }"#;
     assert_eq!(rep(src), "main : d exists list remove write");
 }
+
+#[test]
+fn function_values_carry_no_authority() {
+    // `apply` calls a value of `fn` type, which cannot take a capability, so only `d` is charged.
+    let src = format!(
+        "{LOAD}
+fn size(b: Bytes) -> Int {{ b.len() }}
+fn apply(f: fn(Bytes) -> Int, d: Dir) -> Int {{ match load(d) {{ Ok(b) => f(b), Err(_) => 0 }} }}
+fn main(input: Dir) -> Int {{ let load = size; apply(load, input) }}"
+    );
+    assert_eq!(
+        rep(&src),
+        "apply : d read\nload  : d read\nmain  : input read\nsize  : none"
+    );
+}

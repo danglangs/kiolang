@@ -47,10 +47,10 @@ Most-used Rust crates, and kio's answer to each:
 | Regex, text | regex | `split`, `contains`, `starts_with` | Built-ins. |
 | CLI parsing | clap | none | Needs an `Args` capability; the operator grants argv. |
 | Floats | f64 | none | Needed for most numeric work and for JSON numbers. |
-| Abstraction | traits, generics, closures | none | The largest language gap. Without generics, every container helper is written once per type. Closures or function values are needed for middleware and route tables. |
+| Abstraction | traits, generics, closures | function values (`fn(T) -> R`, L6a) | The largest language gap. Without generics, every container helper is written once per type. Closures (L6b) follow function values. |
 | Packages | cargo, crates.io | copy one file | A package manager, once there are a few libraries. |
 
-Non-starters today, in order of what blocks a real backend first: a database capability, generics and function values, floats, and an HTTP client beyond GET.
+Non-starters today, in order of what blocks a real backend first: a database capability, generics and closures, floats, and an HTTP client beyond GET.
 
 ## A target app
 

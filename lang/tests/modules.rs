@@ -446,3 +446,51 @@ fn single_file_check_is_unchanged() {
     let p = lang::check("fn main() {}", &CapTable::default());
     assert!(p.is_ok());
 }
+
+#[test]
+fn module_functions_as_values() {
+    // From the root, from a sibling module, and within the module by bare name.
+    let web = "pub fn inc(n: Int) -> Int { n + 1 } pub fn twice(f: fn(Int) -> Int, n: Int) -> Int { f(f(n)) }
+               pub fn own() -> Int { twice(inc, 0) }";
+    let json = "pub fn three() -> Int { web::twice(web::inc, 1) }";
+    let app =
+        "mod web; mod json; fn main() -> Int { web::twice(web::inc, 10) * 100 + json::three() * 10 + web::own() }";
+    let p = check(&[("app", app), ("web", web), ("json", json)]).unwrap_or_else(|d| panic!("{d:?}"));
+    assert_eq!(
+        common::big_stack(move || run(&p, &mut NoCaps).unwrap()),
+        Value::Int(1232)
+    );
+    let app = "mod web; fn main() -> fn(Int) -> Int { web::inc }";
+    let p = check(&[("app", app), ("web", web)]).unwrap_or_else(|d| panic!("{d:?}"));
+    let v = run(&p, &mut NoCaps).unwrap();
+    assert_eq!(p.display(&v), "<fn web::inc>");
+    fails(
+        &[("app", "mod web; fn main() { let f = web::g; }"), ("web", "fn g() {}")],
+        "`g` is private to `web`",
+        "mark it `pub fn g` in web.kio",
+    );
+    fails(
+        &[
+            ("app", "mod web; fn main() { let f = web::h; }"),
+            ("web", "pub fn g() {}"),
+        ],
+        "unknown function `web::h`",
+        "did you mean `g`?",
+    );
+    fails(
+        &[
+            ("app", "mod web; fn r() {} fn main() {}"),
+            ("web", "fn g() { let f = r; }"),
+        ],
+        "unknown name `r`",
+        "a module cannot use the root's items; define it in this module or pass values as arguments",
+    );
+    fails(
+        &[
+            ("app", "mod web; fn main() { let f = web::load; }"),
+            ("web", "pub fn load(d: Dir) {}"),
+        ],
+        "function values cannot take or return capabilities",
+        "pass the capability to a named function instead",
+    );
+}

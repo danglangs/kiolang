@@ -248,19 +248,7 @@ impl Parser {
         let name = self.ident()?;
         self.expect("(")?;
         let params = self.list(")", Self::param)?;
-        let ret = if self.eat("->") {
-            self.ty()?
-        } else {
-            let end = self.prev_end();
-            Type {
-                kind: TypeKind::Unit,
-                span: Span {
-                    start: end,
-                    end,
-                    file: self.file,
-                },
-            }
-        };
+        let ret = self.ret()?;
         let body = self.block()?;
         Ok(Item::Fn(Fn {
             public,
@@ -303,12 +291,32 @@ impl Parser {
         })
     }
 
+    /// `-> T`, or `()` at the end of the last token when there is no `->`.
+    fn ret(&mut self) -> Result<Type, Diag> {
+        if self.eat("->") {
+            return self.ty();
+        }
+        let end = self.prev_end();
+        Ok(Type {
+            kind: TypeKind::Unit,
+            span: Span {
+                start: end,
+                end,
+                file: self.file,
+            },
+        })
+    }
+
     fn ty(&mut self) -> Result<Type, Diag> {
         let depth = self.depth;
         self.enter()?;
         let start = self.span().start;
         let kind = if let Some(module) = self.module()? {
             TypeKind::Module(module, Box::new(self.ty()?))
+        } else if self.eat_kw("fn") {
+            self.expect("(")?;
+            let params = self.list(")", Self::ty)?;
+            TypeKind::Fn(params, Box::new(self.ret()?))
         } else if self.eat("(") {
             if !self.at(")") {
                 return Err(err(self.span(), "kio has no tuple types", Some("use a struct")));

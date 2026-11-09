@@ -1,4 +1,4 @@
-use lang::ir::{EnumId, EnumRef};
+use lang::ir::{EnumId, EnumRef, FuncId};
 use lang::{check, run, Caps, RunErr, Value};
 use std::collections::BTreeMap;
 
@@ -29,6 +29,9 @@ impl Caps for StubDir {
         }
         if &*path == "liar" {
             return Ok(Value::Int(7));
+        }
+        if &*path == "fn-value" {
+            return Ok(Value::Enum(EnumRef::Result, 0, vec![Value::Fn(FuncId(0))]));
         }
         if &*path == "wrong-payload" {
             return Ok(Value::Enum(EnumRef::Result, 0, vec![Value::Int(5)]));
@@ -155,6 +158,13 @@ fn malformed_host_value_stops_the_run() {
 #[test]
 fn host_value_of_wrong_payload_type_stops_the_run() {
     let src = "fn main(d: Dir) -> Int { let b = d.read(\"wrong-payload\"); 1 }";
+    let (r, _) = exec(src, stub(&[("d", &[])]));
+    assert_eq!(r.unwrap_err().msg, "host returned a malformed value for `read`");
+}
+
+#[test]
+fn host_cannot_return_a_function() {
+    let src = "fn main(d: Dir) -> Int { let b = d.read(\"fn-value\"); 1 }";
     let (r, _) = exec(src, stub(&[("d", &[])]));
     assert_eq!(r.unwrap_err().msg, "host returned a malformed value for `read`");
 }

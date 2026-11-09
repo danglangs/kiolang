@@ -62,6 +62,7 @@ fn ty(t: &Type) -> String {
         TypeKind::Named(n, args) if args.is_empty() => n.clone(),
         TypeKind::Module(m, t) => format!("{m}::{}", ty(t)),
         TypeKind::Named(n, args) => format!("{n}<{}>", args.iter().map(ty).collect::<Vec<_>>().join(",")),
+        TypeKind::Fn(ps, r) => format!("fn({})->{}", ps.iter().map(ty).collect::<Vec<_>>().join(","), ty(r)),
     }
 }
 
@@ -148,6 +149,24 @@ fn types() {
     assert_eq!(ty(&f.params[0].ty), "()");
     assert_eq!(ty(&f.params[1].ty), "Option<()>");
     assert_eq!(ty(&f.ret), "Result<(),IoErr>");
+}
+
+#[test]
+fn fn_types() {
+    let src = "fn f(a: fn(Int, Str) -> Bool, b: List<fn()>, c: fn(fn(Int)) -> fn() -> Int,) -> fn(web::P) {}";
+    let Item::Fn(f) = &parse(src).unwrap()[0] else { panic!() };
+    let tys: Vec<_> = f.params.iter().map(|p| ty(&p.ty)).collect();
+    assert_eq!(
+        tys,
+        ["fn(Int,Str)->Bool", "List<fn()->()>", "fn(fn(Int)->())->fn()->Int"]
+    );
+    assert_eq!(ty(&f.ret), "fn(web::P)->()");
+    // A function name is an expression; `(e)(x)` calls `e`.
+    assert_eq!(expr("(r.h)(x)"), "(call (. r h) x)");
+    assert_eq!(expr("apply(web::f, g)"), "(call apply web::f g)");
+    assert_eq!(fail("fn f(a: fn Int) {}").msg, "expected `(`");
+    let deep = format!("fn f(a: {}Int{}) {{}}", "fn(".repeat(65), ")".repeat(65));
+    assert_eq!(fail(&deep).msg, "nesting is too deep");
 }
 
 #[test]

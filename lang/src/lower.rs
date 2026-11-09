@@ -84,6 +84,7 @@ impl Ids {
             check::Ty::List(t) => Ty::List(inner(t)),
             check::Ty::Map(k, v) => Ty::Map(inner(k), inner(v)),
             check::Ty::Cap(c) => Ty::Cap(CapId(self.caps[c])),
+            check::Ty::Fn(ps, r) => Ty::Fn(ps.iter().map(|t| self.held(t)).collect(), inner(r)),
             check::Ty::Never => Ty::Never,
         }
     }
@@ -148,8 +149,16 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lookup(&self, name: &str) -> LocalId {
-        let found = self.scope.iter().rev().find(|(n, _)| *n == name);
-        found.expect("checked name").1
+        self.local(name).expect("checked name")
+    }
+
+    /// The local `name`, if one is in scope; else `name` is a function.
+    fn local(&self, name: &str) -> Option<LocalId> {
+        self.scope.iter().rev().find(|(n, _)| *n == name).map(|(_, id)| *id)
+    }
+
+    fn func(&self, k: &str) -> FuncId {
+        FuncId(self.ids.funcs[k])
     }
 
     /// The checker's type of the expression or `let` at `span`.
@@ -268,7 +277,10 @@ impl<'a> Lowerer<'a> {
             ExprKind::Bool(b) => ir::ExprKind::Bool(*b),
             ExprKind::Unit => ir::ExprKind::Unit,
             ExprKind::Name(name) if builtin(name).is_some() => self.variant_value(ty, name, &[]),
-            ExprKind::Name(name) => ir::ExprKind::Local(self.lookup(name)),
+            ExprKind::Name(name) => match self.local(name) {
+                Some(x) => ir::ExprKind::Local(x),
+                None => ir::ExprKind::FnRef(self.func(&key(self.module, name))),
+            },
             ExprKind::Unary(op, x) => {
                 let op = if *op == "-" { UnOp::Neg } else { UnOp::Not };
                 ir::ExprKind::Unary(op, Box::new(self.expr(x)))
@@ -309,9 +321,10 @@ impl<'a> Lowerer<'a> {
             ExprKind::List(items) => ir::ExprKind::List(self.exprs(items)),
             ExprKind::StructLit(_, inits) => self.struct_lit(ty, inits),
             ExprKind::Path(_, v) => self.variant_value(ty, v, &[]),
-            ExprKind::Module(_, inner) => match &inner.kind {
+            ExprKind::Module(m, inner) => match &inner.kind {
                 ExprKind::StructLit(_, inits) => self.struct_lit(ty, inits),
                 ExprKind::Path(_, v) => self.variant_value(ty, v, &[]),
+                ExprKind::Name(name) => ir::ExprKind::FnRef(self.func(&format!("{m}::{name}"))),
                 _ => unreachable!("checked module path"),
             },
             ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms),
@@ -354,7 +367,7 @@ impl<'a> Lowerer<'a> {
     fn call(&mut self, ty: &check::Ty, callee: &'a ast::Expr, args: &'a [ast::Expr]) -> ir::ExprKind {
         let k = match &callee.kind {
             ExprKind::Name(name) if builtin(name).is_some() => return self.variant_value(ty, name, args),
-            ExprKind::Name(name) => key(self.module, name).into_owned(),
+            ExprKind::Name(name) if self.local(name).is_none() => key(self.module, name).into_owned(),
             ExprKind::Path(en, _) if en == "Map" => return ir::ExprKind::MapNew,
             ExprKind::Path(_, v) => return self.variant_value(ty, v, args),
             ExprKind::Module(m, inner) => match &inner.kind {
@@ -362,9 +375,9 @@ impl<'a> Lowerer<'a> {
                 ExprKind::Path(_, v) => return self.variant_value(ty, v, args),
                 _ => unreachable!("checked callee"),
             },
-            _ => unreachable!("checked callee"),
+            _ => return ir::ExprKind::CallValue(Box::new(self.expr(callee)), self.exprs(args)),
         };
-        ir::ExprKind::Call(FuncId(self.ids.funcs[&k]), self.exprs(args))
+        ir::ExprKind::Call(self.func(&k), self.exprs(args))
     }
 
     /// `E::V(args)`, `Some(x)` and the like, where `ty` is the value's enum type.

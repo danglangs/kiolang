@@ -1199,3 +1199,74 @@ fn ok_or_takes_its_error_type_from_the_argument() {
         fn main() -> Int { f(None).unwrap_or(7) }";
     assert_eq!(int(src), Value::Int(7));
 }
+
+#[test]
+fn passing_a_function_to_another() {
+    let src = "fn double(x: Int) -> Int { x * 2 }
+               fn apply(f: fn(Int) -> Int, xs: List<Int>) -> List<Int> {
+                   let mut out: List<Int> = [];
+                   for x in xs { out.push(f(x)); }
+                   out
+               }
+               fn main() -> List<Int> { apply(double, [1, 2, 3]) }";
+    let want = Value::List(vec![Value::Int(2), Value::Int(4), Value::Int(6)].into());
+    assert_eq!(int(src), want);
+}
+
+#[test]
+fn route_table_of_handlers() {
+    let src = "struct Request { path: Str }
+               struct Response { status: Int, body: Str }
+               struct Route { path: Str, handler: fn(Request) -> Response }
+               fn home(r: Request) -> Response { Response { status: 200, body: \"home\" } }
+               fn about(r: Request) -> Response { Response { status: 200, body: \"about \" + r.path } }
+               fn dispatch(routes: List<Route>, req: Request) -> Response {
+                   for r in routes { if r.path == req.path { return (r.handler)(req); } }
+                   Response { status: 404, body: \"\" }
+               }
+               fn main() -> Str {
+                   let routes = [Route { path: \"/\", handler: home }, Route { path: \"/about\", handler: about }];
+                   let a = dispatch(routes, Request { path: \"/about\" });
+                   let b = dispatch(routes, Request { path: \"/x\" });
+                   a.body + \" \" + b.status.to_str()
+               }";
+    assert_eq!(int(src), Value::Str("about /about 404".into()));
+}
+
+#[test]
+fn function_returning_a_function() {
+    let src = "fn inc(x: Int) -> Int { x + 1 }
+               fn dec(x: Int) -> Int { x - 1 }
+               fn pick(up: Bool) -> fn(Int) -> Int { if up { inc } else { dec } }
+               fn main() -> Int { let f = pick(false); pick(true)(10) * 100 + f(10) }";
+    assert_eq!(int(src), Value::Int(1109));
+}
+
+#[test]
+fn recursive_function_as_a_value() {
+    let src = "fn fact(n: Int) -> Int { if n < 2 { 1 } else { n * fact(n - 1) } }
+               fn twice(f: fn(Int) -> Int, x: Int) -> Int { f(f(x)) }
+               fn main() -> Int { twice(fact, 3) }";
+    assert_eq!(int(src), Value::Int(720));
+    // Calls through values count toward the depth limit.
+    fails(
+        "fn spin(n: Int) -> Int { let f = spin; f(n) } fn main() -> Int { spin(1) }",
+        "evaluation is too deep",
+    );
+}
+
+#[test]
+fn local_hides_function_of_the_same_name() {
+    let src = "fn f(x: Int) -> Int { x + 1 }
+               fn g(x: Int) -> Int { x * 10 }
+               fn main() -> Int { let a = f(1); let f = g; a + f(1) }";
+    assert_eq!(int(src), Value::Int(12));
+}
+
+#[test]
+fn function_values_display() {
+    let src = "fn double(x: Int) -> Int { x * 2 } fn main() -> List<fn(Int) -> Int> { [double] }";
+    let p = check(src, &CapTable::default()).unwrap();
+    let v = run(&p, &mut NoCaps).unwrap();
+    assert_eq!(p.display(&v), "[<fn double>]");
+}

@@ -116,6 +116,7 @@ impl Program {
                 }
             }
             Value::Cap(name) => name.clone(),
+            Value::Fn(f) => format!("<fn {}>", self.ir.funcs[f.0 as usize].name),
         }
     }
 
@@ -139,6 +140,8 @@ pub enum Ty {
     Map(Box<Ty>, Box<Ty>),
     /// A capability, which only a parameter can hold.
     Cap(String),
+    /// A function value: parameter types and return type. Never mentions a capability.
+    Fn(Vec<Ty>, Box<Ty>),
     /// A block that always returns; it matches any type.
     Never,
 }
@@ -156,6 +159,14 @@ impl fmt::Display for Ty {
             Ty::Result(t, e) => write!(f, "Result<{t}, {e}>"),
             Ty::List(t) => write!(f, "List<{t}>"),
             Ty::Map(k, v) => write!(f, "Map<{k}, {v}>"),
+            Ty::Fn(ps, r) => {
+                let ps: Vec<_> = ps.iter().map(Ty::to_string).collect();
+                write!(f, "fn({})", ps.join(", "))?;
+                match **r {
+                    Ty::Unit => Ok(()),
+                    _ => write!(f, " -> {r}"),
+                }
+            }
             Ty::Never => f.write_str("!"),
         }
     }
@@ -545,6 +556,11 @@ fn resolve(
 ) -> Result<Ty, Diag> {
     match &t.kind {
         TypeKind::Unit => Ok(Ty::Unit),
+        TypeKind::Fn(ps, r) => {
+            let ps = ps.iter().map(|p| resolve(p, caps, structs, enums, scope));
+            let ps = ps.collect::<Result<_, _>>()?;
+            Ok(Ty::Fn(ps, Box::new(resolve(r, caps, structs, enums, scope)?)))
+        }
         TypeKind::Module(m, inner) => {
             let TypeKind::Named(n, _) = &inner.kind else {
                 return Err(nested_path(t.span));
@@ -651,13 +667,36 @@ fn cap_in(ty: &Ty) -> Option<&str> {
         Ty::Cap(c) => Some(c),
         Ty::Option(t) | Ty::List(t) => cap_in(t),
         Ty::Result(t, e) | Ty::Map(t, e) => cap_in(t).or_else(|| cap_in(e)),
+        Ty::Fn(ps, r) => ps.iter().find_map(cap_in).or_else(|| cap_in(r)),
         _ => None,
     }
+}
+
+/// Whether a `fn` type inside `ty` mentions a capability.
+fn fn_takes_cap(ty: &Ty) -> bool {
+    match ty {
+        Ty::Fn(..) => cap_in(ty).is_some(),
+        Ty::Option(t) | Ty::List(t) => fn_takes_cap(t),
+        Ty::Result(t, e) | Ty::Map(t, e) => fn_takes_cap(t) || fn_takes_cap(e),
+        _ => false,
+    }
+}
+
+/// The error for a `fn` type, or a function used as a value, that would carry a capability.
+fn fn_cap_err(span: Span) -> Diag {
+    err(
+        span,
+        "function values cannot take or return capabilities".to_string(),
+        Some("pass the capability to a named function instead"),
+    )
 }
 
 /// Rule 1 for types: a capability type is allowed only as the whole type of a parameter.
 fn cap_type_ok(ty: &Ty, span: Span, place: Place) -> Result<(), Diag> {
     let Some(cap) = cap_in(ty) else { return Ok(()) };
+    if fn_takes_cap(ty) {
+        return Err(fn_cap_err(span));
+    }
     let hint = "capabilities are parameters only".to_string();
     let nested = (
         format!("capability nested in `{ty}`"),
@@ -939,6 +978,33 @@ fn no_field(span: Span, field: &str, ty: &str, decl: &[(String, Ty)]) -> Diag {
     err(span, format!("no field `{field}` on {ty}"), Some(&hint))
 }
 
+/// Whether a value of `ty` can hold a function. `seen` holds the user types already walked.
+fn has_fn<'a>(ty: &'a Ty, fields: &'a Fields, variants: &'a Variants, seen: &mut HashSet<&'a str>) -> bool {
+    let mut walk = |t| has_fn(t, fields, variants, seen);
+    match ty {
+        Ty::Fn(..) => true,
+        Ty::Option(t) | Ty::List(t) => walk(t),
+        Ty::Result(t, e) | Ty::Map(t, e) => walk(t) || walk(e),
+        Ty::Struct(n) => seen.insert(n) && fields[n].iter().any(|(_, t)| has_fn(t, fields, variants, seen)),
+        Ty::Enum(n) => {
+            seen.insert(n)
+                && variants[n]
+                    .iter()
+                    .flat_map(|(_, ts)| ts)
+                    .any(|t| has_fn(t, fields, variants, seen))
+        }
+        _ => false,
+    }
+}
+
+fn no_fn_equality(span: Span, ty: &Ty) -> Diag {
+    err(
+        span,
+        format!("cannot compare `{ty}` values"),
+        Some("functions have no equality"),
+    )
+}
+
 /// At most this many diagnostics are reported, so a hostile source cannot make output unbounded.
 pub const MAX_DIAGS: usize = 100;
 
@@ -1204,7 +1270,7 @@ struct Checker<'a> {
     types: HashMap<Span, Ty>,
 }
 
-impl Checker<'_> {
+impl<'a> Checker<'a> {
     fn function(&mut self, f: &Fn) -> Result<(), Diag> {
         let sig = &self.sigs[&*key(self.home.module, &f.name)];
         let params = f.params.iter().zip(&sig.params);
@@ -1433,7 +1499,17 @@ impl Checker<'_> {
                     Err(err(e.span, "capability used as a value".to_string(), Some(hint)))
                 }
                 Some(local) => Ok(local.ty.clone()),
-                None => Err(self.unknown_name(e.span, name)),
+                None => {
+                    let k = key(self.home.module, name);
+                    if self.sigs.contains_key(&*k) {
+                        return self.fn_value(e.span, &k);
+                    }
+                    let mut d = self.unknown_name(e.span, name);
+                    if !self.home.module.is_empty() && self.sigs.contains_key(name.as_str()) {
+                        d.hint = Some(ROOT_ITEM.to_string());
+                    }
+                    Err(d)
+                }
             },
             ExprKind::Unary(op, x) => {
                 let want_ty = if *op == "-" { Ty::Int } else { Ty::Bool };
@@ -1456,6 +1532,9 @@ impl Checker<'_> {
                     }
                 }
                 let (l, r) = (self.expr(a, None)?, self.expr(b, None)?);
+                if matches!(*op, "==" | "!=") && l == r && self.has_fn(&l) {
+                    return Err(no_fn_equality(e.span, &l));
+                }
                 binary_ty(op, &l, &r).ok_or_else(|| {
                     let msg = format!("`{op}` cannot be applied to {l} and {r}");
                     err(e.span, msg, Some(&op_hint(op)))
@@ -1497,8 +1576,8 @@ impl Checker<'_> {
                 }
                 ExprKind::Path(en, v) => self.module_variant(e, m, en, v, &[]),
                 ExprKind::Name(name) => {
-                    let msg = format!("`{m}::{name}` is not a value");
-                    Err(err(e.span, msg, Some(&format!("call it: `{m}::{name}(..)`"))))
+                    let (k, _) = self.named_fn(e.span, name, Some(m))?;
+                    self.fn_value(e.span, &k)
                 }
                 _ => Err(nested_path(e.span)),
             },
@@ -1583,7 +1662,17 @@ impl Checker<'_> {
         }
         let Some((params, ret)) = method(self.caps, &recv_ty, name) else {
             let names = method_names(self.caps, &recv_ty);
-            let hint = if names.is_empty() {
+            let fn_field = match &recv_ty {
+                Ty::Struct(s) => self.fields[s].iter().any(|(f, t)| f == name && matches!(t, Ty::Fn(..))),
+                _ => false,
+            };
+            let hint = if fn_field {
+                let r = match &recv.kind {
+                    ExprKind::Name(r) => r.as_str(),
+                    _ => "..",
+                };
+                format!("`{name}` is a field; call it as `({r}.{name})(..)`")
+            } else if names.is_empty() {
                 format!("{recv_ty} has no methods")
             } else {
                 suggest(name, &names, &format!("{recv_ty} has"))
@@ -1593,6 +1682,11 @@ impl Checker<'_> {
         if args.len() != params.len() {
             let msg = format!("`{name}` takes {} arguments, found {}", params.len(), args.len());
             return Err(err(e.span, msg, Some(&declared(&recv_ty, name, &params, &ret))));
+        }
+        if let (Ty::List(t), "contains") = (&recv_ty, name) {
+            if self.has_fn(t) {
+                return Err(no_fn_equality(e.span, t));
+            }
         }
         if let (Ty::List(t), "sort") = (&recv_ty, name) {
             if !matches!(**t, Ty::Int | Ty::Str) {
@@ -2016,6 +2110,8 @@ impl Checker<'_> {
     fn call(&mut self, e: &Expr, callee: &Expr, args: &[Expr], expected: Option<&Ty>) -> Result<Ty, Diag> {
         let (name, module) = match &callee.kind {
             ExprKind::Name(name) if builtin(name).is_some() => return self.constructor(e, name, args, expected),
+            // A local hides a function of the same name, as in Rust.
+            ExprKind::Name(name) if self.lookup(name).is_some() => return self.call_value(e, callee, args),
             ExprKind::Name(name) => (name, None),
             ExprKind::Path(en, v) if en == "Map" && v == "new" => return self.map_new(e, args, expected),
             ExprKind::Path(en, v) => return self.variant_value(e, &self.enum_key(en), v, args),
@@ -2024,27 +2120,9 @@ impl Checker<'_> {
                 ExprKind::Path(en, v) => return self.module_variant(e, m, en, v, args),
                 _ => return Err(nested_path(callee.span)),
             },
-            _ => {
-                let hint = "call a function by name, like `f(x)`";
-                return Err(err(callee.span, "only functions can be called".to_string(), Some(hint)));
-            }
+            _ => return self.call_value(e, callee, args),
         };
-        let k = match module {
-            Some(m) => self.home.member(m, name, callee.span)?,
-            None => key(self.home.module, name).into_owned(),
-        };
-        let sigs = self.sigs;
-        let Some(sig) = sigs.get(&k) else {
-            let hint = if module.is_none() && !self.home.module.is_empty() && sigs.contains_key(name.as_str()) {
-                ROOT_ITEM.to_string()
-            } else {
-                suggest(name, &sorted_names(sigs, module_of(&k)), "functions")
-            };
-            return Err(err(callee.span, format!("unknown function `{k}`"), Some(&hint)));
-        };
-        if module.is_some() {
-            self.home.public(&k, sig.public, "fn", callee.span)?;
-        }
+        let (_, sig) = self.named_fn(callee.span, name, module.map(String::as_str))?;
         if args.len() != sig.params.len() {
             let msg = format!("`{name}` takes {} arguments, found {}", sig.params.len(), args.len());
             let hint = format!("`{name}` is declared as `{}`", sig.decl);
@@ -2054,5 +2132,75 @@ impl Checker<'_> {
             want_expr(a, &self.operand(a, Some(param))?, param)?;
         }
         Ok(sig.ret.clone())
+    }
+
+    /// The key and signature of function `name`, written `m::name` when `module` is `Some(m)`.
+    fn named_fn(&self, span: Span, name: &str, module: Option<&str>) -> Result<(String, &'a Sig), Diag> {
+        let k = match module {
+            Some(m) => self.home.member(m, name, span)?,
+            None => key(self.home.module, name).into_owned(),
+        };
+        let sigs = self.sigs;
+        let Some(sig) = sigs.get(&k) else {
+            let hint = if module.is_none() && !self.home.module.is_empty() && sigs.contains_key(name) {
+                ROOT_ITEM.to_string()
+            } else {
+                suggest(name, &sorted_names(sigs, module_of(&k)), "functions")
+            };
+            return Err(err(span, format!("unknown function `{k}`"), Some(&hint)));
+        };
+        if module.is_some() {
+            self.home.public(&k, sig.public, "fn", span)?;
+        }
+        Ok((k, sig))
+    }
+
+    /// Function `k` named as a value at `span`. Its parameters hold no capability, so calling
+    /// the value never adds authority.
+    fn fn_value(&self, span: Span, k: &str) -> Result<Ty, Diag> {
+        if k == "main" {
+            let hint = "move the code into another function and use that";
+            return Err(err(span, "`main` cannot be used as a value".to_string(), Some(hint)));
+        }
+        let sig = &self.sigs[k];
+        if sig.params.iter().any(|p| cap_in(p).is_some()) {
+            return Err(fn_cap_err(span));
+        }
+        Ok(Ty::Fn(sig.params.clone(), Box::new(sig.ret.clone())))
+    }
+
+    /// `f(x)` where `f` is a local, or `(e)(x)`: a call through a value of `fn` type.
+    fn call_value(&mut self, e: &Expr, callee: &Expr, args: &[Expr]) -> Result<Ty, Diag> {
+        let (ty, what) = match &callee.kind {
+            ExprKind::Name(name) => {
+                // Not `expr`, which would refuse a capability before this says it is not a function.
+                let ty = self.lookup(name).expect("a local").ty.clone();
+                self.types.insert(callee.span, ty.clone());
+                (ty, format!("`{name}`"))
+            }
+            _ => (self.expr(callee, None)?, "this expression".to_string()),
+        };
+        let Ty::Fn(params, ret) = &ty else {
+            let hint = match &callee.kind {
+                ExprKind::Name(n) if self.sigs.contains_key(&*key(self.home.module, n)) => {
+                    format!("the local `{n}` hides the function `{n}`; rename the local")
+                }
+                _ => "only functions and values of `fn` type can be called".to_string(),
+            };
+            return Err(err(callee.span, format!("{what} is {ty}, not a function"), Some(&hint)));
+        };
+        if args.len() != params.len() {
+            let msg = format!("{what} takes {} arguments, found {}", params.len(), args.len());
+            return Err(err(e.span, msg, Some(&format!("{what} has type `{ty}`"))));
+        }
+        for (a, param) in args.iter().zip(params) {
+            want_expr(a, &self.operand(a, Some(param))?, param)?;
+        }
+        Ok((**ret).clone())
+    }
+
+    /// Whether a value of `ty` can hold a function, which has no equality.
+    fn has_fn(&self, ty: &Ty) -> bool {
+        has_fn(ty, self.fields, self.variants, &mut HashSet::new())
     }
 }

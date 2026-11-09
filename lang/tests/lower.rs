@@ -40,6 +40,10 @@ impl Printer<'_> {
             Ty::Result(t, e) => format!("Result<{}, {}>", self.ty(t), self.ty(e)),
             Ty::List(t) => format!("List<{}>", self.ty(t)),
             Ty::Map(k, v) => format!("Map<{}, {}>", self.ty(k), self.ty(v)),
+            Ty::Fn(ps, r) => {
+                let ps: Vec<_> = ps.iter().map(|t| self.ty(t)).collect();
+                format!("fn({}) -> {}", ps.join(", "), self.ty(r))
+            }
             t => format!("{t:?}"),
         }
     }
@@ -218,6 +222,14 @@ impl Printer<'_> {
                 self.list(out, args, depth);
                 *out += ")";
             }
+            ExprKind::FnRef(f) => *out += &format!("fn {}", self.m.funcs[f.0 as usize].name),
+            ExprKind::CallValue(f, args) => {
+                *out += "(";
+                self.expr(out, f, depth);
+                *out += ")(";
+                self.list(out, args, depth);
+                *out += ")";
+            }
             ExprKind::CapCall(x, i, args) => {
                 let Ty::Cap(c) = &self.f.locals[x.0 as usize].ty else {
                     unreachable!()
@@ -327,6 +339,32 @@ fn locals_and_shadowing() {
            x#2
          }
          locals x#1: Int, x#2: Int, x#3: Int",
+    );
+}
+
+#[test]
+fn function_values() {
+    snapshot(
+        "struct R { h: fn(Int) -> Int }
+         fn double(x: Int) -> Int { x * 2 }
+         fn f(r: R) -> Int { let double = r.h; let g = f; double(1) + (r.h)(2) + g(r) }
+         fn pick() -> fn(Int) -> Int { double }
+         fn h() -> Int { pick()(3) + double(4) }",
+        "fn double(x#0: Int) -> Int {
+           (x#0 Mul 2)
+         }
+         fn f(r#0: R) -> Int {
+           let double#1 = r#0.h[0]
+           let g#2 = fn f
+           (((double#1)(1) Add (r#0.h[0])(2)) Add (g#2)(r#0))
+         }
+         locals double#1: fn(Int) -> Int, g#2: fn(R) -> Int
+         fn h() -> Int {
+           ((pick())(3) Add double(4))
+         }
+         fn pick() -> fn(Int) -> Int {
+           fn double
+         }",
     );
 }
 
@@ -735,6 +773,23 @@ impl Types<'_> {
                     self.agree(&a.ty, &l.ty, "argument");
                 }
                 Some(g.ret.clone())
+            }
+            ExprKind::FnRef(f) => {
+                let g = &self.m.funcs[f.0 as usize];
+                let ps = g.locals[..g.params as usize].iter().map(|l| l.ty.clone()).collect();
+                Some(Ty::Fn(ps, Box::new(g.ret.clone())))
+            }
+            ExprKind::CallValue(f, args) => {
+                self.expr(f);
+                let Ty::Fn(ps, r) = &f.ty else {
+                    panic!("call of {:?}", f.ty)
+                };
+                assert_eq!(args.len(), ps.len());
+                for (a, t) in args.iter().zip(ps) {
+                    self.expr(a);
+                    self.agree(&a.ty, t, "argument");
+                }
+                Some((**r).clone())
             }
             ExprKind::CapCall(x, i, args) => {
                 let Ty::Cap(c) = self.local(*x) else {

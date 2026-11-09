@@ -16,12 +16,13 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 | D1, K1 | `Dir` `list`/`write`/`remove`/`exists`; `Kv` (`--kv name=:memory:` or a file). Both adversarially reviewed, fixes merged |
 | WS1 | WebSockets under `--listen`, a fresh sandbox per event; 7,800 echo events/s on one connection. Adversarially reviewed, fixes in (Origin check and `--ws-origin`; `close` always follows `open`) |
 | kio-web | `api.kio`; notes on Dir and on Kv, 22 checks each |
+| L6a | `fn(T) -> R` types and function items as values, called as `f(x)` or `(e)(x)`; no capability inside a `fn` type; interpreter only |
 
 ## Next
 
 1. **C3e, C3f** (`main` returning anything; built-ins added after C3 began), then C4 (capabilities), C5 (compiled only), C7 (review), C8 (measure, refcount elision).
 2. The checker rejects `o = None;` for an `Option` local ("cannot tell the type of `None`"; open_questions #61).
-3. L6 function values (L6a-c), L8 `Float`, then L7 generics.
+3. L6b closures, L6c built-ins taking functions, L8 `Float`, then L7 generics; compiler support for `fn` values (C9).
 
 ## Waiting on the maintainer
 

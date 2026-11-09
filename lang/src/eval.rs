@@ -36,7 +36,12 @@ pub enum Value {
     Enum(EnumRef, usize, Vec<Value>),
     /// A capability, named by the `main` parameter it came from.
     Cap(String),
+    /// A function used as a value.
+    Fn(FuncId),
 }
+
+// Lists, structs and enums hold values inline, so keep `Value` small: 40 bytes on 64-bit targets.
+const _: () = assert!(std::mem::size_of::<Value>() <= 40);
 
 /// A `Map` key: an `Int` or a `Str`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -391,6 +396,13 @@ impl<'a> Interp<'a> {
             ExprKind::If(cond, then, els) => self.if_expr(cond, then, els.as_deref()),
             ExprKind::Block(b) => self.block(b),
             ExprKind::Call(f, args) => self.call(*f, args, e.span),
+            ExprKind::FnRef(f) => Ok(Value::Fn(*f)),
+            ExprKind::CallValue(f, args) => {
+                let Value::Fn(f) = self.expr(f)? else {
+                    unreachable!("checked function value");
+                };
+                self.call(f, args, e.span)
+            }
             ExprKind::CapCall(cap, method, args) => self.cap_call(*cap, *method, args, e.span),
             ExprKind::Builtin(b, recv, args) => self.builtin(*b, recv, args, e.span),
             ExprKind::Mutate(place, op, args) => self.mutate(place, *op, args, e.span),
@@ -737,7 +749,8 @@ fn in_place(e: &Expr) -> bool {
 fn pure(e: &Expr) -> bool {
     match &e.kind {
         ExprKind::Int(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Unit => true,
-        ExprKind::Local(_) | ExprKind::MapNew => true,
+        ExprKind::Local(_) | ExprKind::MapNew | ExprKind::FnRef(_) => true,
+        ExprKind::CallValue(f, xs) => pure(f) && xs.iter().all(pure),
         ExprKind::Block(_) | ExprKind::If(..) | ExprKind::Match(..) | ExprKind::Mutate(..) => false,
         ExprKind::Unary(_, x) | ExprKind::Field(x, _) | ExprKind::Try(x) => pure(x),
         ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) => pure(a) && pure(b),

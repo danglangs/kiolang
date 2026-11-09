@@ -88,6 +88,8 @@ pub enum Ty {
     List(Box<Ty>),
     Map(Box<Ty>, Box<Ty>),
     Cap(CapId),
+    /// A function value: parameter types and return type. Never mentions a capability.
+    Fn(Vec<Ty>, Box<Ty>),
     /// An expression that never produces a value, such as `return`. Only ever an expression's
     /// own type: lowering never puts it inside another type.
     Never,
@@ -170,6 +172,10 @@ pub enum ExprKind {
     If(Box<Expr>, Block, Option<Box<Expr>>),
     Block(Block),
     Call(FuncId, Vec<Expr>),
+    /// A function named as a value.
+    FnRef(FuncId),
+    /// A call through a value of `fn` type: the callee is evaluated first, then the arguments.
+    CallValue(Box<Expr>, Vec<Expr>),
     /// A capability method: the capability is always a local, since capabilities are
     /// parameters only. `method` indexes `CapDef::methods`.
     CapCall(LocalId, u32, Vec<Expr>),

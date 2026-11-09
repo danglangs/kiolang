@@ -65,6 +65,8 @@ pub enum TypeKind {
     Named(String, Vec<Type>),
     /// `web::Point`: the type after `web::`.
     Module(String, Box<Type>),
+    /// `fn(Int, Str) -> Bool`; the return type is `()` when the source has no `->`.
+    Fn(Vec<Type>, Box<Type>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
