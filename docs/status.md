@@ -14,15 +14,14 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 | C3a-d | runtime exports, descriptors, literals, leak check; Str, Bytes, List, Map, structs, enums, `Option`, `Result`, nested `match`, `?` compiled. Harness 46 to 173 ran both ways, 0 mismatches, 0 leaked; list and ADT code 4-6x faster than the interpreter |
 | C6a, C6b | generator (Int, Bool, control, calls, lists, structs/enums/`Option`/`match`/`?`): 250 programs both ways per CI run; front-end fuzzing, 210,000 inputs, no panic |
 | D1, K1 | `Dir` `list`/`write`/`remove`/`exists`; `Kv` (`--kv name=:memory:` or a file). Both adversarially reviewed, fixes merged |
-| WS1 | WebSockets under `--listen`, a fresh sandbox per event; 7,800 echo events/s on one connection |
+| WS1 | WebSockets under `--listen`, a fresh sandbox per event; 7,800 echo events/s on one connection. Adversarially reviewed, fixes in (Origin check and `--ws-origin`; `close` always follows `open`) |
 | kio-web | `api.kio`; notes on Dir and on Kv, 22 checks each |
 
 ## Next
 
-1. **C3e** (`main` returning anything), then C4 (capabilities), C5 (compiled by default), C7 (review), C8 (measure, refcount elision).
-2. H10 (HTTP grants bound by type), WS1 adversarial review.
-3. Compiler support for L4b's built-ins (`ends_with` .. `pop`): runtime exports, now unblocked by C3d. The checker rejects `o = None;` for an `Option` local ("cannot tell the type of `None`"; open_questions #61).
-4. L6 function values (L6a-c), L8 `Float`, then L7 generics.
+1. **C3e, C3f** (`main` returning anything; built-ins added after C3 began), then C4 (capabilities), C5 (compiled only), C7 (review), C8 (measure, refcount elision).
+2. The checker rejects `o = None;` for an `Option` local ("cannot tell the type of `None`"; open_questions #61).
+3. L6 function values (L6a-c), L8 `Float`, then L7 generics.
 
 ## Waiting on the maintainer
 

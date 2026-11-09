@@ -364,6 +364,393 @@ fn grant_rules_are_checked_at_startup() {
         err.contains("main takes WsMessage/WsSend but there is no address\n  hint: add `--listen 127.0.0.1:8080`"),
         "{err}"
     );
+    let (code, err) = kio(&[
+        "run",
+        "../examples/serve/app.kio",
+        "--dir",
+        "public=../examples/serve",
+        "--listen",
+        "127.0.0.1:0",
+        "--ws-origin",
+        "https://app.example",
+    ]);
+    assert_eq!(code, 2);
+    assert!(
+        err.contains("--ws-origin without a WebSocket server\n  hint: "),
+        "{err}"
+    );
+}
+
+/// A raw client frame, masked unless `mask` is false.
+fn frame(fin: bool, rsv: u8, opcode: u8, payload: &[u8], mask: bool) -> Vec<u8> {
+    let mut f = vec![(if fin { 0x80 } else { 0 }) | (rsv << 4) | opcode];
+    let m = if mask { 0x80 } else { 0 };
+    let n = payload.len();
+    if n < 126 {
+        f.push(m | n as u8);
+    } else if n < 65536 {
+        f.push(m | 126);
+        f.extend((n as u16).to_be_bytes());
+    } else {
+        f.push(m | 127);
+        f.extend((n as u64).to_be_bytes());
+    }
+    if mask {
+        let key = [1u8, 2, 3, 4];
+        f.extend(key);
+        f.extend(payload.iter().enumerate().map(|(i, b)| b ^ key[i % 4]));
+    } else {
+        f.extend(payload);
+    }
+    f
+}
+
+/// An upgrade request with `extra` headers, then `trailer`: the socket and the response head.
+fn raw_upgrade(port: u16, extra: &str, trailer: &[u8]) -> (TcpStream, String) {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    let mut req = format!(
+        "GET / HTTP/1.1\r\nhost: x\r\nconnection: upgrade\r\nupgrade: websocket\r\nsec-websocket-version: 13\r\nsec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\n{extra}\r\n"
+    )
+    .into_bytes();
+    req.extend(trailer);
+    s.write_all(&req).unwrap();
+    let mut head = Vec::new();
+    let mut b = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") && s.read(&mut b).unwrap() == 1 {
+        head.push(b[0]);
+    }
+    (s, String::from_utf8_lossy(&head).to_string())
+}
+
+/// One server frame: opcode and payload.
+fn read_frame(s: &mut TcpStream) -> Option<(u8, Vec<u8>)> {
+    let mut h = [0u8; 2];
+    s.read_exact(&mut h).ok()?;
+    let mut n = (h[1] & 0x7f) as usize;
+    if n == 126 {
+        let mut e = [0u8; 2];
+        s.read_exact(&mut e).ok()?;
+        n = u16::from_be_bytes(e) as usize;
+    } else if n == 127 {
+        let mut e = [0u8; 8];
+        s.read_exact(&mut e).ok()?;
+        n = u64::from_be_bytes(e) as usize;
+    }
+    let mut p = vec![0u8; n];
+    s.read_exact(&mut p).ok()?;
+    Some((h[0] & 0x0f, p))
+}
+
+/// The code of the next close frame, or `None` if the socket ends first.
+fn close_of(s: &mut TcpStream) -> Option<u16> {
+    loop {
+        let (op, p) = read_frame(s)?;
+        if op == 8 {
+            return Some(u16::from_be_bytes([p[0], p[1]]));
+        }
+    }
+}
+
+/// Serve `src` in-process with `limits` and a `c` store, as `kio run --listen` would.
+fn serve(src: &str, fuel: u64, limits: kio_host::listen::ListenLimits) -> u16 {
+    use kio_host::kv::open_all;
+    use kio_host::{Limits, Server};
+    let run = Limits { fuel, ..Limits::web() };
+    let mut server = Server::new(vec![("app.kio".into(), src.into())], run).unwrap().unwrap();
+    server.grant_kvs(open_all(&[("c".into(), ":memory:".into())], 64).unwrap());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = kio_host::listen::serve_with(server, vec![], "127.0.0.1:0".parse().unwrap(), limits, |a| {
+            tx.send(a.port()).unwrap()
+        });
+    });
+    rx.recv().unwrap()
+}
+
+/// Counts opens and closes in `c`; `?` answers the counts, `slow` runs for about two seconds,
+/// any other text is echoed.
+const SLOW_COUNT: &str = r#"fn count(c: Kv, key: Str) -> Int {
+  match c.get(key).unwrap_or(None) { Some(b) => b.to_str().parse_int().unwrap_or(0), None => 0 }
+}
+fn main(msg: WsMessage, conn: WsSend, c: Kv) -> Result<(), WsErr> {
+  let kind = msg.kind();
+  if kind == "text" && msg.data().to_str() == "?" {
+    return conn.text("o" + count(c, "open").to_str() + " c" + count(c, "close").to_str());
+  }
+  let r = c.set(kind, (count(c, kind) + 1).to_str().to_bytes());
+  if kind == "text" && msg.data().to_str() == "slow" { let mut i = 0; while i < 2000000 { i += 1; } }
+  if kind == "text" { conn.text(msg.data().to_str()) } else { Ok(()) }
+}"#;
+
+#[test]
+fn under_overload_an_event_waits_for_a_worker() {
+    use kio_host::listen::ListenLimits;
+    let limits = ListenLimits {
+        workers: 1,
+        queued: 1,
+        ..Default::default()
+    };
+    let port = serve(SLOW_COUNT, 100_000_000_000, limits);
+    let (mut a1, mut a2, mut victim, mut probe) = (connect(port), connect(port), connect(port), connect(port));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(text(&mut probe, "?"), "o4 c0");
+    // a1's event takes the one worker and a2's the one HTTP queue place; the victim waits too.
+    a1.send(Message::text("slow")).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    a2.send(Message::text("slow")).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(text(&mut victim, "victim"), "victim");
+    assert_eq!(next(&mut a1).into_text().unwrap().as_str(), "slow");
+    assert_eq!(next(&mut a2).into_text().unwrap().as_str(), "slow");
+    // Every open gets its close.
+    hang_up(victim);
+    drop(a1);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(text(&mut probe, "?"), "o4 c2");
+    hang_up(a2);
+}
+
+/// Counts each kind of event in `c`; `boom` traps and `err` returns `Err`; any other text
+/// answers the open and close counts.
+const FAIL: &str = r#"fn count(c: Kv, key: Str) -> Str {
+  match c.get(key).unwrap_or(None) { Some(b) => b.to_str(), None => "0" }
+}
+fn main(msg: WsMessage, conn: WsSend, c: Kv) -> Result<(), WsErr> {
+  let kind = msg.kind();
+  let n = count(c, kind).parse_int().unwrap_or(0) + 1;
+  let r = c.set(kind, n.to_str().to_bytes());
+  if kind != "text" { return Ok(()); }
+  let d = msg.data();
+  if d.to_str() == "boom" { let x = 10 / (d.len() - 4); }
+  if d.to_str() == "err" { return Err(WsErr::Invalid); }
+  conn.text("o" + count(c, "open") + " c" + count(c, "close") + " t" + count(c, "text"))
+}"#;
+
+#[test]
+fn a_failed_run_still_gets_its_close_event() {
+    let t = tempfile::tempdir().unwrap();
+    let app = write(t.path(), "fail.kio", FAIL);
+    let server = listen(&app, &["--kv", "c=:memory:"]);
+    // A trap, then the closing handshake.
+    let mut ws = connect(server.1);
+    ws.send(Message::text("boom")).unwrap();
+    assert_eq!(close_code(&mut ws), 1011);
+    while ws.read().is_ok() {}
+    // `Err` from main, with messages waiting behind it, then the peer vanishes.
+    let mut ws = connect(server.1);
+    ws.send(Message::text("err")).unwrap();
+    for _ in 0..10 {
+        let _ = ws.send(Message::text("dropped"));
+    }
+    assert_eq!(close_code(&mut ws), 1011);
+    drop(ws);
+    let mut ws = connect(server.1);
+    for asked in 1..=50 {
+        std::thread::sleep(Duration::from_millis(20));
+        // The failed runs' texts and these, not the dropped ones.
+        if text(&mut ws, "x") == format!("o3 c2 t{}", 2 + asked) {
+            return hang_up(ws);
+        }
+    }
+    panic!("no close event after a failed run");
+}
+
+/// Counts each kind of event; `?` answers the counts.
+const TALLY: &str = r#"fn count(c: Kv, key: Str) -> Str {
+  match c.get(key).unwrap_or(None) { Some(b) => b.to_str(), None => "0" }
+}
+fn main(msg: WsMessage, conn: WsSend, c: Kv) -> Result<(), WsErr> {
+  let kind = msg.kind();
+  let n = count(c, kind).parse_int().unwrap_or(0) + 1;
+  let r = c.set(kind, n.to_str().to_bytes());
+  if kind == "text" && msg.data().to_str() == "?" { conn.text("o" + count(c, "open") + " c" + count(c, "close") + " t" + count(c, "text")) } else { Ok(()) }
+}"#;
+
+/// Asks `port` for the tally once the departed connection's close has run: (opens, closes, texts).
+fn tally(port: u16) -> (u32, u32, u32) {
+    std::thread::sleep(Duration::from_millis(500));
+    let mut ws = connect(port);
+    let r = text(&mut ws, "?");
+    hang_up(ws);
+    let n: Vec<u32> = r.split(' ').map(|p| p[1..].parse().unwrap()).collect();
+    (n[0], n[1], n[2])
+}
+
+#[test]
+fn messages_waiting_at_the_peers_close_are_dropped() {
+    let t = tempfile::tempdir().unwrap();
+    let app = write(t.path(), "tally.kio", TALLY);
+    let server = listen(&app, &["--kv", "c=:memory:"]);
+    let (mut s, _) = raw_upgrade(server.1, "", &[]);
+    let mut buf = Vec::new();
+    for _ in 0..100 {
+        buf.extend(frame(true, 0, 1, b"", true));
+    }
+    buf.extend(frame(true, 0, 8, &[0x03, 0xe8], true));
+    // Data after the close frame is never delivered.
+    for _ in 0..100 {
+        buf.extend(frame(true, 0, 1, b"", true));
+    }
+    s.write_all(&buf).unwrap();
+    assert_eq!(close_of(&mut s), Some(1000));
+    drop(s);
+    // At most the message already running when the close arrived, plus the probe's.
+    let (opens, closes, texts) = tally(server.1);
+    assert_eq!((opens, closes), (2, 1));
+    assert!(texts <= 5, "{texts} texts ran");
+}
+
+#[test]
+fn a_peer_gone_without_a_close_frame_gets_no_close_and_its_messages_are_dropped() {
+    let t = tempfile::tempdir().unwrap();
+    let app = write(t.path(), "tally.kio", TALLY);
+    let server = listen(&app, &["--kv", "c=:memory:"]);
+    let (mut s, _) = raw_upgrade(server.1, "", &[]);
+    let mut buf = Vec::new();
+    for _ in 0..100 {
+        buf.extend(frame(true, 0, 1, b"", true));
+    }
+    s.write_all(&buf).unwrap();
+    s.shutdown(std::net::Shutdown::Write).unwrap();
+    assert_eq!(close_of(&mut s), None);
+    drop(s);
+    let (opens, closes, texts) = tally(server.1);
+    assert_eq!((opens, closes), (2, 1));
+    assert!(texts <= 5, "{texts} texts ran");
+}
+
+#[test]
+fn pipelined_frames_after_upgrade_are_read() {
+    let server = listen("../examples/ws/echo.kio", &[]);
+    let (mut s, head) = raw_upgrade(server.1, "", &frame(true, 0, 1, b"pipelined", true));
+    assert!(head.starts_with("HTTP/1.1 101"), "{head}");
+    let (op, p) = read_frame(&mut s).unwrap();
+    assert_eq!((op, p.as_slice()), (1, &b"pipelined"[..]));
+}
+
+#[test]
+fn invalid_utf8_across_fragments_closes_1007() {
+    let server = listen("../examples/ws/echo.kio", &[]);
+    let (mut s, head) = raw_upgrade(server.1, "", &[]);
+    assert!(head.starts_with("HTTP/1.1 101"), "{head}");
+    // "é" is c3 a9: its first byte ends one fragment and a bad continuation starts the next.
+    s.write_all(&frame(false, 0, 1, b"ab\xc3", true)).unwrap();
+    s.write_all(&frame(true, 0, 0, b"\xff", true)).unwrap();
+    assert_eq!(close_of(&mut s), Some(1007));
+}
+
+#[test]
+fn protocol_errors_close_1002() {
+    let server = listen("../examples/ws/echo.kio", &[]);
+    for (name, bytes) in [
+        ("rsv1", frame(true, 1, 1, b"x", true)),
+        ("unmasked", frame(true, 0, 1, b"x", false)),
+        ("continue without start", frame(true, 0, 0, b"x", true)),
+        ("reserved opcode", frame(true, 0, 3, b"x", true)),
+        ("close with 1 byte", frame(true, 0, 8, b"\x03", true)),
+        ("close code 1005", frame(true, 0, 8, &[0x03, 0xed], true)),
+        ("fragmented ping", frame(false, 0, 9, b"", true)),
+        ("ping > 125", frame(true, 0, 9, &[0u8; 126], true)),
+        (
+            "interleaved data",
+            [frame(false, 0, 1, b"a", true), frame(true, 0, 2, b"b", true)].concat(),
+        ),
+    ] {
+        let (mut s, head) = raw_upgrade(server.1, "", &[]);
+        assert!(head.starts_with("HTTP/1.1 101"), "{head}");
+        s.write_all(&bytes).unwrap();
+        assert_eq!(close_of(&mut s), Some(1002), "{name}");
+    }
+    let mut ws = connect(server.1);
+    assert_eq!(text(&mut ws, "still"), "still");
+}
+
+#[test]
+fn the_connection_slot_is_freed_in_each_state() {
+    use kio_host::listen::{serve_with, ListenLimits};
+    use kio_host::{Limits, Server};
+    let src = std::fs::read_to_string("../examples/ws/echo.kio").unwrap();
+    let server = Server::new(vec![("echo.kio".into(), src)], Limits::web())
+        .unwrap()
+        .unwrap();
+    let limits = ListenLimits {
+        connections: 1,
+        ..Default::default()
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = serve_with(server, vec![], "127.0.0.1:0".parse().unwrap(), limits, |a| {
+            tx.send(a.port()).unwrap()
+        });
+    });
+    let port = rx.recv().unwrap();
+    // The server drops a connection past the cap without reading it.
+    let full = |why: &str| {
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let r = s.read(&mut [0u8; 1]);
+        assert!(matches!(r, Ok(0) | Err(_)), "{why}: slot was free: {r:?}");
+    };
+    let free = |why: &str| {
+        let start = std::time::Instant::now();
+        loop {
+            let tcp = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            if let Ok((ws, _)) = client(format!("ws://127.0.0.1:{port}/"), tcp) {
+                return ws;
+            }
+            assert!(start.elapsed() < Duration::from_secs(15), "{why}: slot never freed");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    // An open WebSocket holds the slot; a clean close frees it.
+    let mut ws = free("start");
+    assert_eq!(text(&mut ws, "a"), "a");
+    full("open socket");
+    hang_up(ws);
+    // A 426, then a disconnect.
+    drop(free("after close"));
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.write_all(b"GET / HTTP/1.1\r\nhost: x\r\n\r\n").unwrap();
+    let _ = s.read(&mut [0u8; 100]);
+    drop(s);
+    // Gone halfway through the upgrade's headers.
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.write_all(b"GET / HTTP/1.1\r\nhost: x\r\nconnection: upg").unwrap();
+    drop(s);
+    let mut ws = free("after 426 and half an upgrade");
+    // The peer closes but keeps the TCP connection open.
+    ws.send(Message::Close(None)).unwrap();
+    let _ = ws.read();
+    let ws2 = free("peer close without FIN");
+    drop((ws, ws2));
+    // Gone without a close frame.
+    drop(free("after the peer's close"));
+    drop(free("after a vanished peer"));
+}
+
+#[test]
+fn a_browser_origin_must_be_the_servers_host_or_allowed() {
+    let server = listen("../examples/ws/echo.kio", &[]);
+    let status = |port, extra| raw_upgrade(port, extra, &[]).1;
+    // No Origin (not a browser), and a page served from the same host, are accepted.
+    assert!(status(server.1, "").starts_with("HTTP/1.1 101"));
+    assert!(status(server.1, "origin: http://x\r\n").starts_with("HTTP/1.1 101"));
+    assert!(status(server.1, "origin: https://X\r\n").starts_with("HTTP/1.1 101"));
+    // A page on any other site is not.
+    for origin in ["http://evil.example", "null", "http://x.evil.example", "http://x:81"] {
+        let (mut s, head) = raw_upgrade(server.1, &format!("origin: {origin}\r\n"), &[]);
+        assert!(head.starts_with("HTTP/1.1 403"), "{origin}: {head}");
+        let mut body = vec![0u8; 200];
+        let n = s.read(&mut body).unwrap();
+        let body = String::from_utf8_lossy(&body[..n]);
+        assert!(body.contains("allows it with `--ws-origin <origin>`"), "{body}");
+    }
+    drop(server);
+    let server = listen("../examples/ws/echo.kio", &["--ws-origin", "https://app.example"]);
+    assert!(status(server.1, "origin: https://app.example\r\n").starts_with("HTTP/1.1 101"));
+    assert!(status(server.1, "origin: http://app.example\r\n").starts_with("HTTP/1.1 403"));
 }
 
 /// Release only: `cargo test --release -p kio --test ws -- --ignored --nocapture`.

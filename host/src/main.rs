@@ -16,7 +16,7 @@ fn cli() -> i32 {
         ["mcp"] => return mcp::serve(),
         ["run", path, ref flags @ ..] => return run(path, flags),
         _ => eprintln!(
-            "kio: a capability-typed language; code names what it needs, the operator grants what that is.\n\nusage: kio check <prog.kio>\n       kio mcp\n       kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--kv name=path|:memory:]... [--kv-mb mb] [--audit log] [--listen addr]"
+            "kio: a capability-typed language; code names what it needs, the operator grants what that is.\n\nusage: kio check <prog.kio>\n       kio mcp\n       kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--kv name=path|:memory:]... [--kv-mb mb] [--audit log] [--listen addr] [--ws-origin origin]..."
         ),
     }
     2
@@ -76,6 +76,7 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     };
     let mut audit = None;
     let mut listen = None;
+    let mut ws_origins = Vec::new();
     let mut dir_paths = Vec::new();
     let mut kv_specs: Vec<(String, String)> = Vec::new();
     let mut kv_mb = 64;
@@ -134,12 +135,16 @@ fn run(path: &str, flags: &[&str]) -> i32 {
                 }
                 continue;
             }
+            ["--ws-origin", origin] => {
+                ws_origins.push(origin.to_string());
+                continue;
+            }
             ["--dir", spec] => match spec.split_once('=') {
                 Some(nd) => nd,
                 None => return fail(format!("--dir {spec}: expected name=path")),
             },
             _ => return fail(
-                "usage: kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--kv name=path|:memory:]... [--kv-mb mb] [--audit log] [--listen addr]"
+                "usage: kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--kv name=path|:memory:]... [--kv-mb mb] [--audit log] [--listen addr] [--ws-origin origin]..."
                     .into(),
             ),
         };
@@ -186,6 +191,9 @@ fn run(path: &str, flags: &[&str]) -> i32 {
         (Some(_), false, false) => return fail("--listen needs a `main` that takes Incoming and Outgoing, or WsMessage and WsSend\n  hint: add `req: Incoming, res: Outgoing` (HTTP) or `msg: WsMessage, conn: WsSend` (WebSocket) to main, or drop --listen".into()),
         _ => {}
     }
+    if !ws && !ws_origins.is_empty() {
+        return fail("--ws-origin without a WebSocket server\n  hint: --ws-origin lets browser pages from that origin connect to a `main` that takes WsMessage and WsSend; drop it".into());
+    }
     // A program that can write a store's log through a `Dir` could replace or craft it.
     for (name, spec) in kv_specs.iter().filter(|(_, s)| s != ":memory:") {
         let parent = std::path::Path::new(spec.as_str()).parent();
@@ -206,7 +214,7 @@ fn run(path: &str, flags: &[&str]) -> i32 {
         Err(e) => return fail(e),
     };
     if let Some(addr) = listen {
-        return serve(files, dirs, kvs, addr, limits);
+        return serve(files, dirs, kvs, addr, limits, ws_origins);
     }
     let mut kio = match Kio::new(limits) {
         Ok(k) => k,
@@ -251,6 +259,7 @@ fn serve(
     kvs: kio_host::KvGrants,
     addr: std::net::SocketAddr,
     limits: Limits,
+    ws_origins: Vec<String>,
 ) -> i32 {
     let mut server = match Server::new(files.clone(), limits) {
         Err(e) => return fail(format!("{e:#}")),
@@ -258,7 +267,7 @@ fn serve(
         Ok(Ok(s)) => s,
     };
     server.grant_kvs(kvs);
-    match listen::serve(server, dirs, addr) {
+    match listen::serve(server, dirs, addr, ws_origins) {
         Ok(()) => 0,
         Err(e) => fail(e),
     }

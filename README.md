@@ -73,6 +73,8 @@ hi
 hi
 ```
 
+A browser page may connect only from the server's own host; `--ws-origin https://app.example` allows another origin (clients that send no `Origin`, such as websocat, are not browsers and are accepted).
+
 ### More
 
 - `--kv store=data.kv` grants a key-value store (`store: Kv`) that outlives runs and is shared by every `--listen` request; `--kv store=:memory:` keeps it for the process only. `swap` updates a key atomically.

@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
+use tokio_tungstenite::tungstenite::error::ProtocolError;
 use tokio_tungstenite::tungstenite::protocol::frame::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::{Role, WebSocketConfig};
 use tokio_tungstenite::tungstenite::{handshake::derive_accept_key, Error as WsError, Message};
@@ -51,12 +52,19 @@ const WS_MESSAGE: usize = 1 << 20;
 const WS_QUEUE: usize = 64 << 10;
 /// What each waiting event counts besides its data, so empty messages cannot queue without bound.
 const WS_EVENT_COST: usize = 64;
+/// tungstenite's read buffer and the write buffer size at which it flushes (its defaults are
+/// 128 KB each), so an idle connection stays small.
+const WS_BUFFER: usize = 8 << 10;
+/// Most bytes waiting to be written: one run's sends (`MAX_SENT`) with framing, plus control
+/// frames. Past it a write fails and the socket is dropped.
+const WS_WRITE_BUFFER: usize = 2 * crate::ws::MAX_SENT;
 /// A WebSocket with no frame from the peer for this long is closed with 1000.
 const WS_IDLE: Duration = Duration::from_secs(300);
 /// Time to write one run's frames, or for the peer to answer a close; past it, the socket is dropped.
 const WS_WRITE: Duration = Duration::from_secs(10);
 
-/// The limits of `serve`. Tests lower them through `serve_with`.
+/// The limits of `serve`, and the browser origins a WebSocket accepts besides its own host
+/// (`--ws-origin`). Tests lower the limits through `serve_with`.
 #[doc(hidden)]
 pub struct ListenLimits {
     pub workers: usize,
@@ -67,6 +75,7 @@ pub struct ListenLimits {
     pub idle: Duration,
     pub lifetime: Duration,
     pub ws_idle: Duration,
+    pub ws_origins: Vec<String>,
 }
 
 impl Default for ListenLimits {
@@ -80,6 +89,7 @@ impl Default for ListenLimits {
             idle: IDLE,
             lifetime: LIFETIME,
             ws_idle: WS_IDLE,
+            ws_origins: Vec::new(),
         }
     }
 }
@@ -91,13 +101,24 @@ struct Ctx {
     queue: Semaphore,
     body_deadline: Duration,
     ws_idle: Duration,
+    ws_origins: Vec<String>,
     /// The next WebSocket connection id.
     next_conn: AtomicU64,
 }
 
-/// Serve until Ctrl-C. `dirs` are opened once; each request gets clones.
-pub fn serve(server: Server, dirs: Vec<(String, Dir)>, addr: SocketAddr) -> Result<(), String> {
-    serve_with(server, dirs, addr, ListenLimits::default(), |_| {})
+/// Serve until Ctrl-C. `dirs` are opened once; each request gets clones. A WebSocket upgrade
+/// from a browser page is accepted from the server's own host or one of `ws_origins`.
+pub fn serve(
+    server: Server,
+    dirs: Vec<(String, Dir)>,
+    addr: SocketAddr,
+    ws_origins: Vec<String>,
+) -> Result<(), String> {
+    let limits = ListenLimits {
+        ws_origins,
+        ..Default::default()
+    };
+    serve_with(server, dirs, addr, limits, |_| {})
 }
 
 /// `serve` with explicit limits; `bound` is told the address once it is listening.
@@ -132,6 +153,7 @@ pub fn serve_with(
             queue: Semaphore::new(limits.queued),
             body_deadline: limits.body_deadline,
             ws_idle: limits.ws_idle,
+            ws_origins: limits.ws_origins,
             next_conn: AtomicU64::new(1),
         });
         let open = Arc::new(Semaphore::new(limits.connections));
@@ -254,6 +276,16 @@ async fn on_worker<T: Send + 'static>(
         .map_err(|_| busy)?
         .map_err(|_| busy)?;
     drop(waiting);
+    with_permit(ctx, permit, work).await
+}
+
+/// Run `work` as `on_worker` does, holding `permit`: 503 if it could not start.
+async fn with_permit<T: Send + 'static>(
+    ctx: Arc<Ctx>,
+    permit: OwnedSemaphorePermit,
+    work: impl FnOnce(&Server, Vec<(String, Dir)>) -> Result<T, String> + Send + 'static,
+) -> Result<T, StatusCode> {
+    let busy = StatusCode::SERVICE_UNAVAILABLE;
     let work = tokio::task::spawn_blocking(move || {
         let dirs = ctx
             .dirs
@@ -332,12 +364,21 @@ fn upgrade(
             return r;
         }
     };
+    if !origin_allowed(req.headers(), &ctx.ws_origins) {
+        let body = "this origin may not open a WebSocket here: the server allows it with `--ws-origin <origin>`\n";
+        let mut r = hyper::Response::new(Full::new(Bytes::from(body)));
+        *r.status_mut() = StatusCode::FORBIDDEN;
+        return r;
+    }
     let upgraded = hyper::upgrade::on(&mut req);
     tokio::spawn(async move {
         if let Ok(io) = upgraded.await {
             let config = WebSocketConfig::default()
                 .max_message_size(Some(WS_MESSAGE))
-                .max_frame_size(Some(WS_MESSAGE));
+                .max_frame_size(Some(WS_MESSAGE))
+                .read_buffer_size(WS_BUFFER)
+                .write_buffer_size(WS_BUFFER)
+                .max_write_buffer_size(WS_WRITE_BUFFER);
             let ws = WebSocketStream::from_raw_socket(TokioIo::new(io), Role::Server, Some(config)).await;
             connection(ctx, ws).await;
         }
@@ -352,14 +393,37 @@ fn upgrade(
     r
 }
 
+/// Whether a WebSocket upgrade may proceed, against cross-site hijacking: a browser always sends
+/// `Origin`, so a request without one is not from a web page. With one, it must name the host the
+/// request was sent to (`http://H` or `https://H` for `Host: H`) or be listed in `allowed`.
+fn origin_allowed(headers: &hyper::HeaderMap, allowed: &[String]) -> bool {
+    let mut origins = headers.get_all("origin").iter();
+    let origin = match (origins.next(), origins.next()) {
+        (None, _) => return true,
+        (Some(o), None) => o,
+        _ => return false,
+    };
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+    let host = headers.get("host").and_then(|h| h.to_str().ok());
+    let same = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+        .zip(host)
+        .is_some_and(|(o, h)| o.eq_ignore_ascii_case(h));
+    same || allowed.iter().any(|a| a == origin)
+}
+
 /// What a run on the worker pool came back with: the frames to write, `None` if the run failed,
-/// or the status `on_worker` refused it with.
+/// or the status it could not start with.
 type Ran = Result<Option<Vec<WsFrame>>, StatusCode>;
 
 /// Serve one WebSocket until it closes. Events (open, each message, close) wait in `queue` and
 /// run one at a time, in order, each in a fresh sandbox on the worker pool; frames are read
-/// meanwhile. A run's sends are written after it ends. A failed run closes with 1011 and ends
-/// delivery; the close event comes last, once no more frames will be read.
+/// meanwhile. An event waits for a worker as long as it takes (the queue bounds what waits). A
+/// run's sends are written after it ends. A failed run closes with 1011 and drops the waiting
+/// messages; the close event always comes last, once no more frames will be read.
 async fn connection<S>(ctx: Arc<Ctx>, ws: WebSocketStream<S>)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -371,36 +435,39 @@ where
     let mut queue = VecDeque::from([event("open", vec![])]);
     let mut queued = WS_EVENT_COST;
     let mut running: Option<tokio::task::JoinHandle<Ran>> = None;
-    // A close frame was sent or received: sends are `closed` from now on.
+    // A close frame was sent or received: messages are no longer delivered and sends are `closed`.
     let mut closed = false;
-    // No more frames will be read; the close event has been queued unless `failed`.
+    // No more frames will be read; the close event has been queued.
     let mut done = false;
-    // A run failed: nothing more is delivered.
-    let mut failed = false;
     // When to close an idle connection, or, once `closed`, to stop waiting for the peer.
     let mut deadline = Instant::now() + ctx.ws_idle;
-    // The connection is over: queue the close event, unless a run failed.
-    macro_rules! end {
+    // Drop the messages waiting, keeping the close event.
+    macro_rules! drop_waiting {
         () => {{
-            if !done {
-                (done, closed) = (true, true);
-                if !failed {
-                    queue.push_back(event("close", vec![]));
-                    queued += WS_EVENT_COST;
-                }
-            }
-        }};
-    }
-    // Drop the messages waiting; the peer has `WS_WRITE` to answer the close just sent.
-    macro_rules! closing {
-        () => {{
-            closed = true;
-            deadline = Instant::now() + WS_WRITE;
             queue.retain(|e| e.kind == "close");
             queued = queue.iter().map(cost).sum();
         }};
     }
-    // The host closes with `code`.
+    // The connection is over: drop the messages waiting and queue the close event.
+    macro_rules! end {
+        () => {{
+            if !done {
+                (done, closed) = (true, true);
+                drop_waiting!();
+                queue.push_back(event("close", vec![]));
+                queued += WS_EVENT_COST;
+            }
+        }};
+    }
+    // Messages are no longer delivered; the peer has `WS_WRITE` to finish the closing handshake.
+    macro_rules! closing {
+        () => {{
+            closed = true;
+            deadline = Instant::now() + WS_WRITE;
+            drop_waiting!();
+        }};
+    }
+    // The host closes with `code`, unless a close frame already went either way.
     macro_rules! close {
         ($code:expr) => {{
             if !closed {
@@ -409,21 +476,19 @@ where
                     end!();
                 }
             }
-            if failed {
-                queue.clear();
-                queued = 0;
-            }
         }};
     }
     loop {
-        if running.is_none() && !failed {
+        if running.is_none() {
             if let Some(e) = queue.pop_front() {
                 queued -= cost(&e);
                 let closed = closed || e.kind == "close";
                 let ctx = ctx.clone();
-                running = Some(tokio::spawn(on_worker(ctx, move |s, dirs| {
-                    s.handle_ws(e, closed, dirs)
-                })));
+                running = Some(tokio::spawn(async move {
+                    let permit = ctx.workers.clone().acquire_owned().await;
+                    let permit = permit.map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+                    with_permit(ctx, permit, move |s, dirs| s.handle_ws(e, closed, dirs)).await
+                }));
             }
         }
         if running.is_none() && done {
@@ -442,14 +507,10 @@ where
                         }
                     }
                     Ok(Some(_)) => {}
-                    Ok(None) => {
-                        failed = true;
+                    // The cause is logged where the run failed.
+                    Ok(None) | Err(_) => {
+                        drop_waiting!();
                         close!(1011);
-                    }
-                    Err(_) => {
-                        eprintln!("websocket event refused: no worker free");
-                        failed = true;
-                        close!(1013);
                     }
                 }
             }
@@ -461,14 +522,12 @@ where
                     Some(Ok(Message::Text(t))) => Some(("text", t.as_bytes().to_vec())),
                     Some(Ok(Message::Binary(b))) => Some(("binary", b.to_vec())),
                     // tungstenite answers pings and close frames itself.
-                    Some(Ok(Message::Close(_))) => {
-                        closed = true;
-                        deadline = Instant::now() + WS_WRITE;
-                        None
-                    }
+                    Some(Ok(Message::Close(_))) => { closing!(); None }
                     Some(Ok(_)) => None,
                     Some(Err(WsError::Capacity(_))) => { close!(1009); None }
                     Some(Err(WsError::Utf8(_))) => { close!(1007); None }
+                    // The peer is gone: there is no one to send a close to.
+                    Some(Err(WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake))) => { end!(); None }
                     Some(Err(WsError::Protocol(_))) => { close!(1002); None }
                     None | Some(Err(_)) => { end!(); None }
                 };
@@ -489,7 +548,7 @@ where
             }
             _ = tokio::time::sleep_until(deadline), if !done => {
                 if closed {
-                    // The peer did not answer the close: drop the socket.
+                    // The peer did not finish the closing handshake: drop the socket.
                     end!();
                 } else {
                     close!(1000);
