@@ -59,10 +59,11 @@ struct Inner {
     live: u64,
     /// The log; `None` in memory.
     log: Option<Log>,
-    /// A reader's last full replay failed: the file's device, inode and length then, and the
-    /// error. The same file at the same length is not read again (a hostile append would
-    /// otherwise cost every call a replay); a new file or length retries.
-    stuck: Option<((u64, u64), u64, String)>,
+    /// A reader's last full replay found the file corrupt (or not a store): that file's identity
+    /// as it was opened, and the error. The same file unchanged is not read again (a hostile
+    /// append would otherwise cost every call a replay); another file, length or mtime retries.
+    /// Errors before the file was opened and read are never remembered.
+    stuck: Option<(Seen, String)>,
 }
 
 /// The open log and its path. A writer holds the file's lock and `len` is the file's length; a
@@ -158,7 +159,7 @@ impl Store {
                 "{shown} is a symbolic link\n  hint: grant the file it points to"
             ));
         }
-        let (log, map) = read_log(path)?;
+        let (log, map) = read_log(path).map_err(|(e, _)| e)?;
         Ok(Store::new(shown.to_string(), limit, map, Some(log), true))
     }
 
@@ -290,7 +291,8 @@ impl Store {
     /// cost. `too-large` for a limit outside 1 to `SCAN_MAX`, a prefix over `KEY_MAX`, or
     /// entries past `SCAN_BYTES_MAX` in all.
     fn scan(&self, prefix: &str, after: Option<&str>, limit: u32) -> io::Result<(Result<Vec<KvEntry>, KvErr>, usize)> {
-        if prefix.len() > KEY_MAX || !(1..=SCAN_MAX).contains(&limit) {
+        // No key is longer than KEY_MAX, so a longer `after` is a mistake: refuse it as a long prefix.
+        if prefix.len() > KEY_MAX || after.is_some_and(|a| a.len() > KEY_MAX) || !(1..=SCAN_MAX).contains(&limit) {
             return Ok((Err(KvErr::TooLarge), 0));
         }
         let inner = self.current()?;
@@ -373,9 +375,8 @@ impl Inner {
         if !at_path.is_file() {
             return Err(io::Error::other(format!("{shown}: not a regular file")));
         }
-        let now = ((at_path.dev(), at_path.ino()), at_path.len());
-        if let Some((id, len, e)) = &self.stuck {
-            if (*id, *len) == now {
+        if let Some((was, e)) = &self.stuck {
+            if *was == seen(&at_path) {
                 return Err(io::Error::other(e.clone()));
             }
         }
@@ -395,9 +396,9 @@ impl Inner {
         }
         let (new, map) = match read_log(&log.path) {
             Ok(r) => r,
-            Err(e) => {
+            Err((e, read)) => {
                 let e = e.lines().next().unwrap_or_default().to_string();
-                self.stuck = Some((now.0, now.1, e.clone()));
+                self.stuck = read.map(|was| (was, e.clone()));
                 return Err(io::Error::other(e));
             }
         };
@@ -501,26 +502,40 @@ fn lock(path: &Path) -> io::Result<Option<File>> {
 /// Open the log at `path` read-only (never through a symlink, never waiting on a FIFO) and replay
 /// it: the open log with `len` where its last whole record ends, and the live map. A record cut
 /// short or a tail of zeros is left for a later `follow`; the file is never changed.
-fn read_log(path: &Path) -> std::result::Result<(Log, BTreeMap<String, Vec<u8>>), String> {
+/// A file's device and inode, length and modification time: what a remembered failure is keyed on.
+type Seen = ((u64, u64), u64, (i64, i64));
+
+/// A failed `read_log`: the message, and the file read when its contents were the problem.
+type ReadErr = (String, Option<Seen>);
+
+fn seen(m: &std::fs::Metadata) -> Seen {
+    ((m.dev(), m.ino()), m.len(), (m.mtime(), m.mtime_nsec()))
+}
+
+/// Opens and replays a store. An error about the file's contents carries the identity of the
+/// file read (so a reader can remember it); one from reaching the file does not.
+fn read_log(path: &Path) -> std::result::Result<(Log, BTreeMap<String, Vec<u8>>), ReadErr> {
     let shown = path.display();
-    let io = |e: io::Error| format!("{shown}: {e}");
+    let io = |e: io::Error| (format!("{shown}: {e}"), None);
     let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;
     let file = match OpenOptions::new().read(true).custom_flags(flags.bits() as i32).open(path) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Err(format!(
-                "{shown} does not exist\n  hint: a read-only store is written by another kio: run it once first, or drop `:ro`"
+            return Err((
+                format!("{shown} does not exist\n  hint: a read-only store is written by another kio: run it once first, or drop `:ro`"),
+                None,
             ))
         }
         r => r.map_err(io)?,
     };
     let m = file.metadata().map_err(io)?;
     if !m.is_file() {
-        return Err(format!("{shown}: not a regular file"));
+        return Err((format!("{shown}: not a regular file"), None));
     }
     let mut head = [0u8; 8];
     if file.read_at(&mut head, 0).map_err(io)? < head.len() || &head != MAGIC {
-        return Err(format!(
-            "{shown} is not a kio store (no `kio-kv1` header)\n  hint: grant a store a kio program writes, or drop `:ro`"
+        return Err((
+            format!("{shown} is not a kio store (no `kio-kv1` header)\n  hint: grant a store a kio program writes, or drop `:ro`"),
+            Some(seen(&m)),
         ));
     }
     let mut map = BTreeMap::new();
@@ -533,8 +548,11 @@ fn read_log(path: &Path) -> std::result::Result<(Log, BTreeMap<String, Vec<u8>>)
     )
     .map_err(io)?;
     if bad && !zeros(&file, end, m.len()).map_err(io)? {
-        return Err(format!(
-            "{shown} is corrupt at byte {end}\n  hint: restore it from a backup, or move it away to start empty"
+        return Err((
+            format!(
+                "{shown} is corrupt at byte {end}\n  hint: restore it from a backup, or move it away to start empty"
+            ),
+            Some(seen(&m)),
         ));
     }
     let log = Log {
@@ -800,7 +818,10 @@ impl HostKv for State {
             "scan",
             &arg,
             |s| {
-                let shown = after.as_deref().map_or("null".to_string(), crate::json);
+                // As `arg`, at most 256 characters: `after` is unbounded and, under `--listen`, the client's.
+                let shown = after.as_deref().map_or("null".to_string(), |a| {
+                    crate::json(&a.chars().take(256).collect::<String>())
+                });
                 let r = s.kv(&h, move |st| Ok(Ok(st.scan(&prefix, after.as_deref(), limit)?)))?;
                 // The store's result is the inner `Ok`; `kv`'s own `Full` (a disk error) cost nothing.
                 let (r, bytes) = r.unwrap_or_else(|e| (Err(e), 0));
@@ -936,19 +957,21 @@ mod tests {
         append(&db, &bad);
         let e = get(&r, "a").unwrap_err().to_string();
         assert_eq!(e, format!("{} is corrupt at byte 23", db.display()));
-        // Mended in place, same length: not read again, so still the remembered error.
+        // Unchanged: not read again, the remembered error each time.
+        for _ in 0..100 {
+            assert_eq!(get(&r, "a").unwrap_err().to_string(), e);
+        }
+        // Mended in place at the same length: the mtime changed, so it is read again, whole now.
+        std::thread::sleep(std::time::Duration::from_millis(5));
         OpenOptions::new()
             .write(true)
             .open(&db)
             .unwrap()
             .write_all_at(&good, 23)
             .unwrap();
-        for _ in 0..100 {
-            assert_eq!(get(&r, "a").unwrap_err().to_string(), e);
-        }
-        // A longer file is read again, and is whole now.
-        append(&db, &record(SET, "b", b"3"));
         assert_eq!(get(&r, "a").unwrap().as_deref(), Some("2"));
+        // A longer file is read too.
+        append(&db, &record(SET, "b", b"3"));
         assert_eq!(get(&r, "b").unwrap().as_deref(), Some("3"));
         // Garbage again; a writer's compaction (a new inode) recovers.
         append(&db, &bad);

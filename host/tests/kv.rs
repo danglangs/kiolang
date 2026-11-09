@@ -1224,3 +1224,104 @@ fn audit_lines_for_scan_and_add() {
         lines[6]
     );
 }
+
+/// K2 review: `after` is unbounded and, under `--listen`, the client's, so its audit field is cut
+/// at 256 characters as `arg` is; a 1 MB `after` must not make a 1 MB audit line.
+#[test]
+fn a_long_after_is_cut_in_the_audit_line() {
+    let main = r#"fn main(store: Kv) -> Str {
+      let r = store.set("a", "1".to_bytes());
+      // The longest key is 1,024 bytes: an `after` that long is cut in the audit line, a longer one refused.
+      let n = match store.scan("", Some(big(10)), 5) { Ok(es) => es.len(), Err(e) => -1 };
+      let m = match store.scan("", Some(big(10) + "x"), 5) { Ok(es) => es.len(), Err(e) => -1 };
+      n.to_str() + " " + m.to_str()
+    }"#;
+    let log = Log::default();
+    let mut kio = Kio::new(Limits::default()).unwrap();
+    kio.audit(log.clone(), vec![]);
+    kio.grant_kvs(vec![("store".into(), Arc::new(Store::memory(1 << 20)))]);
+    assert_eq!(
+        kio.run(&format!("{SHOW}{main}"), vec![]).unwrap().unwrap().value,
+        "0 -1"
+    );
+    let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    let line = text.lines().nth(2).unwrap();
+    assert!(line.contains(r#""method":"scan""#), "{line}");
+    assert!(line.len() < 600, "{} bytes: {}", line.len(), &line[..300]);
+    assert!(
+        line.contains(&format!(r#""after":"{}","limit":5,"count":0"#, "x".repeat(256))),
+        "{line}"
+    );
+}
+
+/// K2: a reader sees a writer's `add` as any `set`, and `add` continues a count a compaction rewrote.
+#[test]
+fn a_reader_follows_add() {
+    let t = tempfile::tempdir().unwrap();
+    let db = t.path().join("s.kv");
+    let writer = open_all(&[("store".into(), db.display().to_string())], 64).unwrap();
+    let reader = open_all(&[("store".into(), format!("{}:ro", db.display()))], 64).unwrap();
+    // A run takes its grants, so each run is a fresh `Kio` on the same stores.
+    let on = |stores: &Vec<(String, Arc<Store>)>, src: &str| {
+        let mut kio = Kio::new(Limits::default()).unwrap();
+        kio.grant_kvs(stores.clone());
+        kio.run(src, vec![]).unwrap().unwrap().value
+    };
+    let read = format!(
+        "{SHOW}{SHOW2}fn main(store: Kv) -> Str {{ val(store.get(\"n\")) + \" \" + scanned(store.scan(\"n\", None, 10)) }}"
+    );
+    assert_eq!(on(&reader, &read), "none ");
+    // Many large writes compact the log under the reader; the count survives the rewrite.
+    let bump = format!(
+        "{SHOW}{SHOW2}fn main(store: Kv) -> Str {{
+          let a = added(store.add(\"n\", 7));
+          for i in 0..400 {{ let r = store.set(\"pad\", big(14).to_bytes()); }}
+          a + \" \" + added(store.add(\"n\", -2))
+        }}"
+    );
+    assert_eq!(on(&writer, &bump), "7 5");
+    assert_eq!(on(&reader, &read), "5 n=5");
+    assert_eq!(on(&writer, &bump), "12 10");
+    assert_eq!(on(&reader, &read), "10 n=10");
+}
+
+/// K2 review: `KvEntry` is an ordinary struct on both paths. A page of 1,000 empty values lands
+/// whole; a key and a value taken out of it outlive the page; entries compare, sort, go into
+/// `Option`, `Map`, `HashMap`, a user generic and a hand-built literal; a user type may not take
+/// the name. The compiled run's leak check covers the records `scan` builds.
+#[test]
+fn kv_entry_is_an_ordinary_struct() {
+    let main = r#"struct Box<T> { it: T }
+    fn main(store: Kv) -> Str {
+      for i in 0..1000 { let r = store.set("e/" + i.to_str(), "".to_bytes()); }
+      let r = store.set("f", "v".to_bytes());
+      let page = match store.scan("e/", None, 1000) { Ok(es) => es, Err(e) => return err_name(e) };
+      let k = page[500].key;
+      let v = page[7].value;
+      let first = page[0];
+      let copy = KvEntry { key: first.key, value: "zz".to_bytes() };
+      let mut m: Map<Str, KvEntry> = Map::new();
+      m.insert("x", copy);
+      let mut h: HashMap<Str, KvEntry> = HashMap::new();
+      h.insert("k", page[1]);
+      let o: Option<KvEntry> = Some(page[2]);
+      let b: Box<List<KvEntry>> = Box { it: page };
+      let mut xs = match store.scan("", Some("e/995"), 10) { Ok(es) => es, Err(e) => return err_name(e) };
+      xs.sort_by(|p, q| p.value.len() > q.value.len());
+      let shown = match m.get("x") { Some(e) => e.value.to_str(), None => "none" };
+      let hit = match h.get("k") { Some(e) => e.key, None => "none" };
+      b.it.len().to_str() + " " + k + " " + v.len().to_str() + " " + (first == b.it[0]).to_str() + " "
+        + (first == copy).to_str() + " " + shown + " " + hit + " " + o.map(|e| e.key).unwrap_or("?") + " " + xs[0].key
+    }"#;
+    assert_eq!(both(main, 1 << 20), "1000 e/549 0 true false zz e/1 e/10 f");
+    let t = tempfile::tempdir().unwrap();
+    for src in [
+        "struct KvEntry { key: Str, value: Bytes }\nfn main(store: Kv) -> Str { \"\" }",
+        "enum KvEntry { A }\nfn main(store: Kv) -> Str { \"\" }",
+    ] {
+        let prog = write(t.path(), "e.kio", src);
+        let (code, _, err) = kio(&["check", &prog]);
+        assert_eq!(code, 1);
+        assert!(err.contains("`KvEntry` is a built-in type"), "{err}");
+    }
+}
