@@ -160,7 +160,10 @@ fn walk(e: &Expr, visit: &mut dyn FnMut(&Expr)) {
             args.iter().for_each(|a| walk(a, visit));
         }
         ExprKind::List(items) => items.iter().for_each(|a| walk(a, visit)),
-        ExprKind::StructLit(_, fields) => fields.iter().for_each(|(_, v)| walk(v, visit)),
+        ExprKind::StructLit(_, fields, base) => {
+            fields.iter().for_each(|(_, v)| walk(v, visit));
+            base.iter().for_each(|b| walk(b, visit));
+        }
         ExprKind::Match(s, arms) => {
             walk(s, visit);
             arms.iter().for_each(|a| walk(&a.body, visit));

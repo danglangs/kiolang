@@ -55,7 +55,7 @@ fn reserved_hint(word: &str) -> &'static str {
     match word {
         "impl" | "trait" | "dyn" => "kio has no traits or `impl`; use free functions",
         "use" | "crate" | "super" | "self" | "Self" => "write the full path, like `web::text`",
-        "const" | "static" => "kio has no globals; pass values as arguments",
+        "static" => "kio has no globals; use `const` for a fixed value, or pass values as arguments",
         "where" => "write the bound on the parameter: `<T: Ord>`",
         "move" => "closures always capture by copy; remove `move`",
         _ => "this Rust keyword is reserved in kio",
@@ -223,6 +223,11 @@ impl Parser {
         match self.peek() {
             Some(Kind::Reserved(w)) => err(span, &format!("`{w}` is not supported in kio"), Some(reserved_hint(w))),
             Some(Kind::Sym("..")) => err(span, "unexpected `..`", Some("ranges are only for `for` loops")),
+            Some(Kind::Keyword(k)) if k == "const" => err(
+                span,
+                "a constant is declared at the top level of a file",
+                Some("move it out of the function, or use `let`"),
+            ),
             _ => err(span, &format!("expected {expected}"), expected_hint(expected)),
         }
     }
@@ -250,6 +255,24 @@ impl Parser {
             return Ok(Item::Mod(name, self.since(start)));
         }
         let public = self.eat_kw("pub");
+        if self.eat_kw("const") {
+            let name = self.ident()?;
+            if !self.eat(":") {
+                let hint = format!("write the type: `const {name}: Int = ..`");
+                return Err(err(self.span(), "a constant needs a type", Some(&hint)));
+            }
+            let ty = self.ty()?;
+            self.expect("=")?;
+            let value = self.expr()?;
+            self.expect(";")?;
+            return Ok(Item::Const(Const {
+                public,
+                name,
+                ty,
+                value,
+                span: self.since(start),
+            }));
+        }
         if self.eat_kw("struct") {
             let name = self.ident()?;
             let tparams = self.tparams(&format!("struct {name} {{ .. }}"))?;
@@ -800,9 +823,35 @@ impl Parser {
         let start = self.span().start;
         let name = self.ident()?;
         self.pos += 1;
-        let fields = self.list("}", Self::field_init)?;
+        let outer = std::mem::replace(&mut self.no_struct, false);
+        let (mut fields, mut base) = (Vec::new(), None);
+        while !self.at("}") {
+            if self.at("..") {
+                let from = self.span().start;
+                self.pos += 1;
+                base = Some(Box::new(self.expr()?));
+                if self.eat(",") {
+                    let hint = match self.at("}") {
+                        true => "the base struct must be last: remove this comma",
+                        false => "the base struct must be last: move `..base` after the fields",
+                    };
+                    return Err(err(
+                        self.since(from),
+                        "cannot use a comma after the base struct",
+                        Some(hint),
+                    ));
+                }
+                break;
+            }
+            fields.push(self.field_init()?);
+            if !self.eat(",") {
+                break;
+            }
+        }
+        self.expect("}")?;
+        self.no_struct = outer;
         Ok(Expr {
-            kind: ExprKind::StructLit(name, fields),
+            kind: ExprKind::StructLit(name, fields, base),
             span: self.since(start),
         })
     }
@@ -843,15 +892,6 @@ impl Parser {
 
     fn field_init(&mut self) -> Result<(String, Expr), Diag> {
         let span = self.span();
-        if self.eat("..") {
-            self.expr()?;
-            let hint = "set the fields on a `let mut` copy";
-            return Err(err(
-                self.since(span.start),
-                "struct update syntax is not supported",
-                Some(hint),
-            ));
-        }
         let name = self.ident()?;
         if !self.at(":") {
             return Err(err(

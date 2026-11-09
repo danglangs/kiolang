@@ -41,14 +41,15 @@ Compiled-only kio covers the whole language and every capability; the active str
 | L10, C13 | `HashMap<K, V>` (owner-approved): `Map`'s keys and methods, insertion-ordered iteration, order-insensitive `==`, a fixed hash with buckets sorted past 8 entries (100,000 colliding keys in under a second either way; with chains only, out of fuel). One table source (lang/src/hmap.rs) for the interpreter and the runtime; codegen reuses `Map`'s calls. Word count 45 ms on `Map`, 32 on `HashMap` (Rust 5.7); kiogen generates maps; harness 440 ran both ways, 0 mismatches |
 | L11, C14 | built-ins from the links app: `sort_by` (stable, `less(a, b)`), `sort_by_key`, `reverse`, `List.slice`, `join`, `Int`/`Float` `min`/`max`, `to_lowercase`/`to_uppercase`, `unwrap_or_else`, `Bytes.extend`, `sha256`, `to_hex`, `ct_eq`. The merge sort (lang/src/sort.rs) and SHA-256 (lang/src/digest.rs) are one source for both paths; compiled `sort_by` drives the shared sort and calls the comparator itself. Harness 467 ran both ways, 0 mismatches |
 | C8b6 | word count and JSON (fuel stays): one `Map` search for `insert(k, get(k)..)` (the object remembers the entry `get` found), `split` at a one-byte separator sized once, words freed in place, size classes up to 512 bytes. Word count 45.7 to 29.3 ms (fuel 0.68 to 0.43 G), on `HashMap` 31.8 to 25.0, built-in JSON 15.3 to 12.8; tree 97 to 101 (same fuel, #117). Follow-up: `HashMap` searches once too (#118), 25.0 to 23.2 ms (fuel 0.361 to 0.337 G) |
+| L15, L16 (C15 part) | struct update `P { x: 1, ..p }` (written fields, then the base once, as Rust; generic bases inferred) and constants `const MAX: Int = 64;` (`Int`, `Float`, `Bool`, `Str` literals, `pub` across modules). Both disappear in lowering, so codegen is unchanged; kiogen generates both. Harness 478 ran both ways, 0 mismatches |
 
 ## Next
 
-C8 (roadmap.md): freeing (54% of tree); tree's 4-5% from the larger size classes (#117); borrowed match bindings of a borrowed scrutinee (tree). The links target app (kio-web examples/links) gave L11, L12, H12, W14 (done); its remaining gaps wait on the maintainer: Kv `scan` and `add`, `Rng`/`Clock`/`Log` capabilities, struct update, constants (`|` patterns and let-else done: L13, L14).
+C8 (roadmap.md): freeing (54% of tree); tree's 4-5% from the larger size classes (#117); borrowed match bindings of a borrowed scrutinee (tree). The links target app (kio-web examples/links) gave L11, L12, H12, W14 (done); the maintainer then approved K2, H13-H15 and L13-L16: L13-L16 done; K2 (Kv `scan`, `add`) and H13-H15 (`Rng`, `Clock`, `Log`) in progress.
 
 ## Waiting on the maintainer
 
-Nothing blocks work. One open owner question: constants (open_questions #34).
+Nothing blocks work.
 
 ## Speed (C8b5 with C8b6 marked, 2026-11-09, release, run time; all in [roadmap.md](roadmap.md))
 

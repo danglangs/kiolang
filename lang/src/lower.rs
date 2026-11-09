@@ -237,6 +237,22 @@ impl Ids {
     }
 }
 
+/// The literal that constant `c` stands for; `check_consts` accepted it.
+fn constant(c: &ast::Const) -> ir::ExprKind {
+    match &c.value.kind {
+        ExprKind::Int(n) => ir::ExprKind::Int(*n),
+        ExprKind::Float(x) => ir::ExprKind::Float(f64::from_bits(*x)),
+        ExprKind::Str(s) => ir::ExprKind::Str(s.as_str().into()),
+        ExprKind::Bool(b) => ir::ExprKind::Bool(*b),
+        ExprKind::Unary(_, x) => match x.kind {
+            ExprKind::Int(n) => ir::ExprKind::Int(-n),
+            ExprKind::Float(x) => ir::ExprKind::Float(-f64::from_bits(x)),
+            _ => unreachable!("checked constant"),
+        },
+        _ => unreachable!("checked constant"),
+    }
+}
+
 /// Lowers one function.
 struct Lowerer<'a> {
     p: &'a Program,
@@ -465,7 +481,10 @@ impl<'a> Lowerer<'a> {
             ExprKind::Name(name) if builtin(name).is_some() => self.variant_value(ty, name, &[]),
             ExprKind::Name(name) => match self.local(name) {
                 Some(x) => ir::ExprKind::Local(x),
-                None => ir::ExprKind::FnRef(self.func(e.span, &key(self.module, name))),
+                None => match self.p.consts.get(&*key(self.module, name)) {
+                    Some(c) => constant(c),
+                    None => ir::ExprKind::FnRef(self.func(e.span, &key(self.module, name))),
+                },
             },
             ExprKind::Turbofish(name, _) => ir::ExprKind::FnRef(self.func(e.span, &key(self.module, name))),
             ExprKind::Unary(op, x) => {
@@ -520,11 +539,14 @@ impl<'a> Lowerer<'a> {
             }
             ExprKind::Index(base, index) => ir::ExprKind::Index(Box::new(self.expr(base)), Box::new(self.expr(index))),
             ExprKind::List(items) => ir::ExprKind::List(self.exprs(items)),
-            ExprKind::StructLit(_, inits) => self.struct_lit(ty, inits),
+            ExprKind::StructLit(_, inits, base) => self.struct_lit(ty, inits, base.as_deref()),
             ExprKind::Path(_, v) => self.variant_value(ty, v, &[]),
             ExprKind::Module(m, inner) => match &inner.kind {
-                ExprKind::StructLit(_, inits) => self.struct_lit(ty, inits),
+                ExprKind::StructLit(_, inits, base) => self.struct_lit(ty, inits, base.as_deref()),
                 ExprKind::Path(_, v) => self.variant_value(ty, v, &[]),
+                ExprKind::Name(name) if self.p.consts.contains_key(&format!("{m}::{name}")) => {
+                    constant(&self.p.consts[&format!("{m}::{name}")])
+                }
                 ExprKind::Name(name) | ExprKind::Turbofish(name, _) => {
                     ir::ExprKind::FnRef(self.func(e.span, &format!("{m}::{name}")))
                 }
@@ -645,19 +667,77 @@ impl<'a> Lowerer<'a> {
         ir::ExprKind::Variant(en, i, self.exprs(args))
     }
 
-    /// Fields keep source order, which is evaluation order.
-    fn struct_lit(&mut self, ty: &check::Ty, inits: &'a [(String, ast::Expr)]) -> ir::ExprKind {
+    /// Fields keep source order, which is evaluation order. With `..base`, as Rust: the written
+    /// fields in order, then `base` once into a new local, then the other fields read from it.
+    /// A written field that is not a literal goes to a local first, so that it runs before
+    /// `base`; the base's last use is a move into its local, and each field read a copy.
+    fn struct_lit(
+        &mut self,
+        ty: &check::Ty,
+        inits: &'a [(String, ast::Expr)],
+        base: Option<&'a ast::Expr>,
+    ) -> ir::ExprKind {
         let check::Ty::Struct(k, _) = ty else {
             unreachable!("checked struct literal");
         };
         let fields = &self.p.fields[k];
-        let inits = (inits.iter())
-            .map(|(name, x)| {
-                let field = fields.iter().position(|(n, _)| n == name).expect("checked field");
-                (field as u32, self.expr(x))
-            })
-            .collect();
-        ir::ExprKind::StructLit(StructId(self.ids.structs.id(ty)), inits)
+        let index = |name: &str| fields.iter().position(|(n, _)| n == name).expect("checked field") as u32;
+        let id = StructId(self.ids.structs.id(ty));
+        let Some(base) = base else {
+            let inits = inits.iter().map(|(name, x)| (index(name), self.expr(x))).collect();
+            return ir::ExprKind::StructLit(id, inits);
+        };
+        let declared = check::fields_of(&self.p.fields, &self.p.tparams, ty);
+        let (mut stmts, mut out) = (Vec::new(), Vec::new());
+        let mark = self.scope.len();
+        let local = |l: &mut Self, ty: Ty, value: Expr, stmts: &mut Vec<Stmt>| {
+            let (span, x) = (value.span, l.bind_ty("{struct update}", ty.clone(), value.span));
+            stmts.push(Stmt {
+                kind: ir::StmtKind::Let(x, value),
+                span,
+            });
+            Expr {
+                kind: ir::ExprKind::Local(x),
+                ty,
+                span,
+            }
+        };
+        for (name, x) in inits {
+            let (i, x) = (index(name), self.expr(x));
+            let literal = matches!(
+                x.kind,
+                ir::ExprKind::Int(_) | ir::ExprKind::Float(_) | ir::ExprKind::Bool(_) | ir::ExprKind::Str(_)
+            );
+            let x = match literal {
+                true => x,
+                false => local(self, self.ids.held(&declared[i as usize].1), x, &mut stmts),
+            };
+            out.push((i, x));
+        }
+        let b = self.expr(base);
+        let b = local(self, self.ids.ty(ty), b, &mut stmts);
+        for (i, (_, t)) in declared.iter().enumerate() {
+            if !out.iter().any(|(j, _)| *j == i as u32) {
+                let read = ir::ExprKind::Field(Box::new(b.clone()), i as u32);
+                out.push((
+                    i as u32,
+                    Expr {
+                        kind: read,
+                        ty: self.ids.held(t),
+                        span: base.span,
+                    },
+                ));
+            }
+        }
+        self.scope.truncate(mark);
+        ir::ExprKind::Block(Block {
+            stmts,
+            tail: Some(Box::new(Expr {
+                kind: ir::ExprKind::StructLit(id, out),
+                ty: self.ids.ty(ty),
+                span: base.span,
+            })),
+        })
     }
 
     fn method(&mut self, recv: &'a ast::Expr, name: &str, args: &'a [ast::Expr]) -> ir::ExprKind {

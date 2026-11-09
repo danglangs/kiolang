@@ -24,7 +24,7 @@
 //! `PARAM_MAX` bytes and a helper's result at most `RET_MAX`.
 
 /// What programs may contain. Int and Bool expressions with every operator, `let`, `let mut`,
-/// assignment, `+=`, `-=`, `if`/`else` and `return` are always on.
+/// assignment, `+=`, `-=`, `if`/`else`, `return` and the constants `MAX` and `NEG` are always on.
 pub struct Features {
     /// `while`, `loop` and `for` over a range, with `break` and `continue`.
     pub loops: bool,
@@ -35,7 +35,7 @@ pub struct Features {
     /// `List<Int>` locals: literals, copies, indexing (mostly in range), `len`, `push`,
     /// element assignment and `+=`, `==`, `for x in xs`, `contains`, `sort`, `reverse` and `pop`.
     pub lists: bool,
-    /// The struct `S`, the enum `K` and `Option<Int>`: locals, construction, copies, field
+    /// The struct `S`, the enum `K` and `Option<Int>`: locals, construction (with `..base` too), copies, field
     /// reads and writes, `==`, `unwrap_or`, `is_some`, `match` with nested patterns and a
     /// catch-all, `if let`, and helpers returning `Option<Int>` that use `?`.
     pub adts: bool,
@@ -92,7 +92,7 @@ pub fn program(seed: u64, features: &Features) -> String {
         this: None,
         ret_bound: MAX_STR,
     };
-    let mut out = String::new();
+    let mut out = String::from("const MAX: Int = 9223372036854775807;\nconst NEG: Int = -7;\n");
     if features.adts {
         out += "struct S { a: Int, b: Bool }\nenum K { Z, One(Int), Two(Int, Option<Int>) }\n";
     }
@@ -870,9 +870,16 @@ impl Gen<'_> {
         match self.rng.below(10) {
             0..=6 => self.rng.below(10).to_string(),
             7 => self.rng.below(100).to_string(),
+            8 if self.rng.chance(20) => "NEG".to_string(),
             8 => format!("(-{})", self.rng.below(10)),
             _ => {
-                let big = ["9223372036854775807", "4611686018427387904", "3037000500", "4294967296"];
+                let big = [
+                    "9223372036854775807",
+                    "4611686018427387904",
+                    "3037000500",
+                    "4294967296",
+                    "MAX",
+                ];
                 self.rng.pick(&big).to_string()
             }
         }
@@ -1073,9 +1080,13 @@ impl Gen<'_> {
         match ty {
             Ty::S => {
                 let (a, b) = (self.int(d), self.bool(d));
-                match self.rng.chance(50) {
-                    true => format!("S {{ a: {a}, b: {b} }}"),
-                    false => format!("S {{ b: {b}, a: {a} }}"),
+                // Struct update, while depth bounds the nesting of bases.
+                match self.rng.below(8) {
+                    0 if depth > 0 => format!("S {{ a: {a}, ..{} }}", self.adt(Ty::S, d)),
+                    1 if depth > 0 => format!("S {{ b: {b}, ..{} }}", self.adt(Ty::S, d)),
+                    2 if depth > 0 => format!("S {{ b: {b}, a: {a}, ..{} }}", self.adt(Ty::S, d)),
+                    0..=4 => format!("S {{ a: {a}, b: {b} }}"),
+                    _ => format!("S {{ b: {b}, a: {a} }}"),
                 }
             }
             Ty::K => match self.rng.below(3) {
@@ -1685,6 +1696,15 @@ mod tests {
             " % ",
             "-> Float",
         ] {
+            assert!(all.matches(m).count() > 10, "{m}: {}", all.matches(m).count());
+        }
+    }
+
+    /// Struct update and the constants appear in a run of the default size.
+    #[test]
+    fn struct_update_and_constants_are_generated() {
+        let all: String = (0..250).map(|s| super::program(s, &Default::default())).collect();
+        for m in [", ..", "S { b: ", "NEG", "MAX)", "MAX "] {
             assert!(all.matches(m).count() > 10, "{m}: {}", all.matches(m).count());
         }
     }

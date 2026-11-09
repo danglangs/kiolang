@@ -45,7 +45,8 @@ fn main(input: Dir, out: Dir) -> Result<(), IoErr> {
 | Containers | `List<T>`, `Map<K, V>` (key `Int` or `Str`, in key order), `HashMap<K, V>` (the same keys, in insertion order) |
 | Errors | `Option<T>`, `Result<T, E>`, `?` |
 | JSON | `Json`, built in: `enum Json { Null, Bool(Bool), Num(Int), Float(Float), Str(Str), Arr(List<Json>), Obj(Map<Str, Json>) }` |
-| User types | `struct`, and `enum` with payloads, generic or not (`struct Page<T>`); a type may contain itself only through `List`, `Map` or `HashMap` |
+| User types | `struct`, and `enum` with payloads, generic or not (`struct Page<T>`); a type may contain itself only through `List`, `Map` or `HashMap`; struct update `P { x: 1, ..p }` |
+| Constants | `const MAX: Int = 64;` at the top level: an `Int`, `Float`, `Bool` or `Str` literal |
 | Control | `if`, `if let`, `let`-else, `while`, `loop`, `for x in list`, `for i in 0..n`, `match`, `break`, `continue`, `return` |
 | Functions | free functions, recursion, generic functions `fn f<T>(..)`, function values of type `fn(T, ..) -> R`, closures |
 | Capabilities | `Dir`, `Http`, `Kv`, `Incoming`, `Outgoing`, `WsMessage`, `WsSend`, generated from `caps.wit` |
@@ -115,7 +116,9 @@ Everything else is rejected with a message that names the kio alternative, for e
   fn max<T: Ord>(xs: List<T>) -> Option<T> { .. }   // max([1.5]): `Float` is not `Ord`
   struct Set<T: Ord> { items: List<T> }              // fn f<U>(s: Set<U>): add the bound `U: Ord`
   ```
-- **Modules.** `mod web;` in the root file loads `web.kio`; its `pub` items are used as `web::f`, `web::T`. Modules are flat: one file each, declared only in the root. A module may use another declared module's `pub` items the same way (cycles are fine) but not the root's.
+- **Struct update.** `P { x: 1, ..p }` is a new `P` with the fields written and every other field from `p`, as in Rust: the written fields run in order, then `p` once. The base is a `P` (of a generic struct, the same instance: its type arguments are inferred with the fields'), and comes last; it may be any expression, and every field may be written. `p` itself is unchanged (values are copied).
+- **Constants.** `const MAX: Int = 64;` (or `pub const`) at the top level of a file: an `Int`, `Float`, `Bool` or `Str`, whose value is a literal of that type (`-1` and `-0.5` too), not an expression or another constant. A use is replaced by the literal when the program is checked, so there is no global state. `MAX` in its file, `web::MAX` from another (if `pub`). A function, type or other constant of the file cannot have its name; a local may shadow it. A constant cannot be assigned or be a pattern (`x => if x == MAX { .. }` instead).
+- **Modules.** `mod web;` in the root file loads `web.kio`; its `pub` items are used as `web::f`, `web::T`, `web::MAX`. Modules are flat: one file each, declared only in the root. A module may use another declared module's `pub` items the same way (cycles are fine) but not the root's.
 
 ## Built-ins
 
@@ -239,4 +242,4 @@ error: kio has no references
 - Traits and `impl`.
 - Tuples.
 - `use` and nested modules.
-- Constants and globals ([open_questions](open_questions.md) #34).
+- Globals (`static`); constants are literals only ([open_questions](open_questions.md) #34).

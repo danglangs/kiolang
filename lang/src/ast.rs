@@ -7,6 +7,18 @@ pub enum Item {
     Enum(Enum),
     /// `mod name;`
     Mod(String, Span),
+    Const(Const),
+}
+
+/// `const NAME: T = lit;`: `T` is `Int`, `Float`, `Bool` or `Str`; the checker requires `value`
+/// to be a literal of it (a number may have a leading `-`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Const {
+    pub public: bool,
+    pub name: String,
+    pub ty: Type,
+    pub value: Expr,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,8 +203,8 @@ pub enum ExprKind {
     Method(Box<Expr>, String, Vec<Expr>),
     Field(Box<Expr>, String),
     Index(Box<Expr>, Box<Expr>),
-    /// `Name { f: e, .. }`, with fields in source order.
-    StructLit(String, Vec<(String, Expr)>),
+    /// `Name { f: e, .. }`, with fields in source order, and the base of `..base`, if any.
+    StructLit(String, Vec<(String, Expr)>, Option<Box<Expr>>),
     /// `Enum::Variant`; a payload is a `Call` on it.
     Path(String, String),
     /// `web::f`, `web::Point { .. }` or `web::Status::Paid`: the expression after `web::`.

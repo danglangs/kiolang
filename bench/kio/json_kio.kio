@@ -9,7 +9,7 @@ struct Parsed { value: JsonKio, pos: Int }
 struct Scanned { text: Str, pos: Int }
 
 // Containers may nest at most this deep, well under kio's evaluation depth limit.
-fn max_depth() -> Int { 64 }
+const MAX_DEPTH: Int = 64;
 
 // Parse one JSON document; the Err message names the byte offset.
 pub fn parse(s: Str) -> Result<JsonKio, Str> {
@@ -189,7 +189,7 @@ fn utf8(cp: Int) -> Bytes {
 
 // The array whose '[' is b[i]; `depth` includes this array.
 fn array(b: Bytes, i: Int, depth: Int) -> Result<Parsed, Str> {
-    if depth > max_depth() { return Err(err_at("nesting deeper than 64", i)); }
+    if depth > MAX_DEPTH { return Err(err_at("nesting deeper than 64", i)); }
     let mut items: List<JsonKio> = [];
     let mut j = skip_ws(b, i + 1);
     if byte(b, j) == 93 { return Ok(Parsed { value: JsonKio::Arr(items), pos: j + 1 }); }
@@ -207,7 +207,7 @@ fn array(b: Bytes, i: Int, depth: Int) -> Result<Parsed, Str> {
 
 // The object whose '{' is b[i]; `depth` includes this object.
 fn object(b: Bytes, i: Int, depth: Int) -> Result<Parsed, Str> {
-    if depth > max_depth() { return Err(err_at("nesting deeper than 64", i)); }
+    if depth > MAX_DEPTH { return Err(err_at("nesting deeper than 64", i)); }
     let mut fields: Map<Str, JsonKio> = Map::new();
     let mut j = skip_ws(b, i + 1);
     if byte(b, j) == 125 { return Ok(Parsed { value: JsonKio::Obj(fields), pos: j + 1 }); }

@@ -40,11 +40,12 @@ fn show(e: &Expr) -> String {
             });
             format!("(match {}{arms})", show(s))
         }
-        ExprKind::StructLit(n, fields) => {
+        ExprKind::StructLit(n, fields, base) => {
             let fields = fields
                 .iter()
                 .fold(String::new(), |s, (f, v)| s + &format!(" {f}: {}", show(v)));
-            format!("(new {n}{fields})")
+            let base = base.as_ref().map_or(String::new(), |b| format!(" ..{}", show(b)));
+            format!("(new {n}{fields}{base})")
         }
     }
 }
@@ -671,7 +672,7 @@ fn module_items() {
         Item::Fn(f) => f.public,
         Item::Struct(s) => s.public,
         Item::Enum(e) => e.public,
-        Item::Mod(..) => panic!(),
+        Item::Mod(..) | Item::Const(_) => panic!(),
     };
     let flags: Vec<bool> = items[1..].iter().map(public).collect();
     assert_eq!(flags, [true, true, true, false, false]);
@@ -850,7 +851,7 @@ fn type_parameter_bounds() {
             Item::Fn(f) => &f.tparams,
             Item::Struct(s) => &s.tparams,
             Item::Enum(e) => &e.tparams,
-            Item::Mod(..) => panic!(),
+            Item::Mod(..) | Item::Const(_) => panic!(),
         };
         tparams.iter().map(|t| (t.name.clone(), t.bound)).collect::<Vec<_>>()
     };
@@ -881,12 +882,6 @@ fn type_parameter_bounds() {
 #[test]
 fn l12_rust_forms_teach() {
     let cases: &[(&str, &str, &str, &str)] = &[
-        (
-            "fn f(l: L) { let m = L { a: 3, ..l }; }",
-            "..l",
-            "struct update syntax is not supported",
-            "set the fields on a `let mut` copy",
-        ),
         (
             "fn f() { let s = format!(\"a\"); }",
             "format!",
@@ -945,6 +940,23 @@ fn l12_rust_forms_teach() {
     for (src, text, msg, hint) in cases {
         rejected_with(src, text, msg, Some(hint));
     }
+}
+
+#[test]
+fn l15_struct_update_parses() {
+    let e = |src: &str| match &parse(&format!("fn f() {{ {src}; }}")).unwrap()[0] {
+        Item::Fn(f) => match &f.body.stmts[0].kind {
+            StmtKind::Expr(e) => show(e),
+            k => panic!("{k:?}"),
+        },
+        i => panic!("{i:?}"),
+    };
+    assert_eq!(e("L { a: 3, ..l }"), "(new L a: 3 ..l)");
+    assert_eq!(e("L { ..f(x) }"), "(new L ..(call f x))");
+    assert_eq!(
+        e("web::L { a: 1, b: 2, ..L { ..l } }"),
+        "web::(new L a: 1 b: 2 ..(new L ..l))"
+    );
 }
 
 #[test]

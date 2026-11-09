@@ -37,6 +37,8 @@ pub struct Program {
     pub(crate) funcs: HashMap<String, Fn>,
     pub(crate) structs: HashMap<String, Struct>,
     pub(crate) enums: HashMap<String, Enum>,
+    /// Constants by key, each checked to be a literal of its type; lowering inlines them.
+    pub(crate) consts: HashMap<String, Const>,
     /// Return type of each capability method, keyed by (capability, method), such as (`Dir`, `read`).
     pub(crate) cap_methods: HashMap<(String, String), Ty>,
     /// Resolved payload types of every enum, for checking host values.
@@ -1879,6 +1881,67 @@ fn declared_modules(names: &[&str], parsed: &[Vec<Item>]) -> Result<HashSet<Stri
     }
 }
 
+/// The type of constant `c`, which `check_consts` accepted.
+fn const_ty(c: &Const) -> Ty {
+    match &c.ty.kind {
+        TypeKind::Named(n, _) if n == "Int" => Ty::Int,
+        TypeKind::Named(n, _) if n == "Float" => Ty::Float,
+        TypeKind::Named(n, _) if n == "Bool" => Ty::Bool,
+        _ => Ty::Str,
+    }
+}
+
+/// The constants by key: each a literal of its type, named by no other function, type or
+/// constant of its module. Errors go to `diags`.
+fn check_consts(
+    consts: Vec<(&str, Const)>,
+    sigs: &HashMap<String, Sig>,
+    structs: &HashMap<String, Struct>,
+    enums: &HashMap<String, Enum>,
+    diags: &mut Vec<Diag>,
+) -> HashMap<String, Const> {
+    let mut out = HashMap::new();
+    for (module, c) in consts {
+        let k = key(module, &c.name).into_owned();
+        let used = match () {
+            _ if out.contains_key(&k) => Some("another constant"),
+            _ if sigs.contains_key(&k) => Some("a function"),
+            _ if structs.contains_key(&k) || enums.contains_key(&k) => Some("a type"),
+            _ if builtin(&c.name).is_some() => Some("a built-in variant"),
+            _ => None,
+        };
+        if let Some(what) = used {
+            let msg = format!("the name `{}` is already used by {what}", c.name);
+            diags.push(err(c.span, msg, Some("rename one of them")));
+            continue;
+        }
+        let scalar = |n: &str| matches!(n, "Int" | "Float" | "Bool" | "Str");
+        if !matches!(&c.ty.kind, TypeKind::Named(n, a) if a.is_empty() && scalar(n)) {
+            let msg = "a constant is an `Int`, `Float`, `Bool` or `Str`".to_string();
+            let hint = "use a function for other values: `fn name() -> T { .. }`";
+            diags.push(err(c.ty.span, msg, Some(hint)));
+            continue;
+        }
+        // A bad value is reported, and the constant still has its declared type for its uses.
+        let found = match &c.value.kind {
+            ExprKind::Int(_) => Ok(Ty::Int),
+            ExprKind::Float(_) => Ok(Ty::Float),
+            ExprKind::Bool(_) => Ok(Ty::Bool),
+            ExprKind::Str(_) => Ok(Ty::Str),
+            ExprKind::Unary("-", x) if matches!(x.kind, ExprKind::Int(_)) => Ok(Ty::Int),
+            ExprKind::Unary("-", x) if matches!(x.kind, ExprKind::Float(_)) => Ok(Ty::Float),
+            _ => {
+                let msg = "a constant's value must be a literal".to_string();
+                let hint = "write the value, like `64`, or compute it in a function: `fn name() -> T { .. }`";
+                Err(err(c.value.span, msg, Some(hint)))
+            }
+        };
+        diags.extend(found.and_then(|t| want(c.value.span, &t, &const_ty(&c))).err());
+        out.insert(k, c);
+    }
+    out
+}
+
 fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Diag>> {
     let names: Vec<&str> = files.iter().map(|(n, _)| n.strip_suffix(".kio").unwrap_or(n)).collect();
     let mut parsed = Vec::new();
@@ -1895,6 +1958,7 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
     let mods = declared_modules(&names, &parsed)?;
 
     let mut fns = Vec::new();
+    let mut consts = Vec::new();
     let mut structs = HashMap::new();
     let mut enums = HashMap::new();
     let mut order = Vec::new();
@@ -1908,7 +1972,7 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
             let declared = match &item {
                 Item::Struct(s) => Some((s.name.as_str(), s.span)),
                 Item::Enum(e) => Some((e.name.as_str(), e.span)),
-                Item::Fn(_) | Item::Mod(..) => None,
+                Item::Fn(_) | Item::Mod(..) | Item::Const(_) => None,
             };
             if let Some((name, span)) = declared.filter(|(n, _)| reserved(caps, n)) {
                 let msg = format!("`{name}` is a built-in type");
@@ -1925,6 +1989,7 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
             }
             match item {
                 Item::Mod(..) => {}
+                Item::Const(c) => consts.push((module, c)),
                 Item::Fn(f) => fns.push((module, f)),
                 Item::Enum(e) => {
                     let k = key(module, &e.name).into_owned();
@@ -2027,6 +2092,8 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
         }
     }
 
+    let consts = check_consts(consts, &sigs, &structs, &enums, &mut diags);
+
     // `main`'s capability parameters, so a helper that uses one it was not given gets a hint.
     let main_caps: Vec<(String, String)> = (fns.iter())
         .filter(|(m, f)| m.is_empty() && f.name == "main")
@@ -2051,6 +2118,7 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
             tparams: &tparams,
             structs: &structs,
             enums: &enums,
+            consts: &consts,
             home: Scope {
                 module,
                 mods: &mods,
@@ -2128,6 +2196,7 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
             .collect(),
         structs,
         enums,
+        consts,
         variants,
         fields,
         tparams,
@@ -2331,6 +2400,7 @@ struct Checker<'a> {
     tparams: &'a TypeParams,
     structs: &'a HashMap<String, Struct>,
     enums: &'a HashMap<String, Enum>,
+    consts: &'a HashMap<String, Const>,
     /// The module being checked.
     home: Scope<'a>,
     scopes: Vec<HashMap<String, Local>>,
@@ -2683,11 +2753,15 @@ impl<'a> Checker<'a> {
                 Some(local) => Ok(local.ty.clone()),
                 None => {
                     let k = key(self.home.module, name);
+                    if let Some(c) = self.consts.get(&*k) {
+                        return Ok(const_ty(c));
+                    }
                     if self.sigs.contains_key(&*k) {
                         return self.fn_value(e.span, &k, None, expected);
                     }
                     let mut d = self.unknown_name(e.span, name);
-                    if !self.home.module.is_empty() && self.sigs.contains_key(name.as_str()) {
+                    let in_root = self.sigs.contains_key(name.as_str()) || self.consts.contains_key(name.as_str());
+                    if !self.home.module.is_empty() && in_root {
                         d.hint = Some(ROOT_ITEM.to_string());
                     }
                     Err(d)
@@ -2748,15 +2822,23 @@ impl<'a> Checker<'a> {
                 self.element(&ty, index, e.span)
             }
             ExprKind::List(items) => self.list_lit(e, items, expected),
-            ExprKind::StructLit(name, inits) => self.struct_lit(e, &key(self.home.module, name), inits, expected),
+            ExprKind::StructLit(name, inits, base) => {
+                self.struct_lit(e, &key(self.home.module, name), inits, base.as_deref(), expected)
+            }
             ExprKind::Path(en, v) => self.variant_value(e, &self.enum_key(en), v, &[], expected),
             ExprKind::Module(m, inner) => match &inner.kind {
-                ExprKind::StructLit(name, inits) => {
+                ExprKind::StructLit(name, inits, base) => {
                     let k = self.home.member(m, name, e.span)?;
                     if let Some(s) = self.structs.get(&k) {
                         self.home.public(&k, s.public, "struct", e.span)?;
                     }
-                    self.struct_lit(e, &k, inits, expected)
+                    self.struct_lit(e, &k, inits, base.as_deref(), expected)
+                }
+                ExprKind::Name(name) if self.consts.contains_key(&format!("{m}::{name}")) => {
+                    let k = format!("{m}::{name}");
+                    let c = &self.consts[&k];
+                    self.home.public(&k, c.public, "const", e.span)?;
+                    Ok(const_ty(c))
                 }
                 ExprKind::Path(en, v) => self.module_variant(e, m, en, v, &[], expected),
                 ExprKind::Name(name) => {
@@ -3357,6 +3439,11 @@ impl<'a> Checker<'a> {
     /// What pattern `p` covers, typed against `st`, the type of the value it matches. Adds the
     /// names it binds to `binds`, left to right.
     fn pattern(&self, p: &Pat, st: &Ty, binds: &mut Vec<(String, Ty)>) -> Result<Cover, Diag> {
+        if let Some(name) = self.const_pattern(p) {
+            // kio has no match guards, so not Rust's `x if x == N`.
+            let hint = format!("bind a name and compare in the arm: `x => if x == {name} {{ .. }} else {{ .. }}`");
+            return Err(err(p.span, "constants cannot be patterns".to_string(), Some(&hint)));
+        }
         let lit = |ty: Ty, c: Ctor| want(p.span, &ty, st).map(|_| Cover::Ctor(c, Vec::new()));
         match &p.kind {
             PatKind::Wild => Ok(Cover::All),
@@ -3405,6 +3492,19 @@ impl<'a> Checker<'a> {
                 Ok(Cover::Or(covers))
             }
         }
+    }
+
+    /// The constant that pattern `p` names, as written: `N` or `web::N`.
+    fn const_pattern(&self, p: &Pat) -> Option<String> {
+        let (k, shown) = match &p.kind {
+            PatKind::Name(n) => (key(self.home.module, n).into_owned(), n.clone()),
+            PatKind::Module(m, inner) => match &inner.kind {
+                PatKind::Name(n) => (format!("{m}::{n}"), format!("{m}::{n}")),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        self.consts.contains_key(&k).then_some(shown)
     }
 
     /// `E::V(..)`, where enum key `k` must be the matched value's enum.
@@ -3464,12 +3564,13 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// `Name { .. }`, with `name` the struct's key.
+    /// `Name { .. }`, with `name` the struct's key, and its `..base` if written.
     fn struct_lit(
         &mut self,
         e: &Expr,
         name: &str,
         inits: &[(String, Expr)],
+        base: Option<&Expr>,
         expected: Option<&Ty>,
     ) -> Result<Ty, Diag> {
         let fields = self.fields;
@@ -3502,18 +3603,35 @@ impl<'a> Checker<'a> {
                 false => want_expr(x, &self.expr(x, Some(ty))?, ty)?,
             }
         }
-        if let Some((missing, _)) = decl.iter().find(|(n, _)| !seen.contains(&n)) {
+        if let (None, Some((missing, _))) = (base, decl.iter().find(|(n, _)| !seen.contains(&n))) {
             let msg = format!("missing field `{missing}` in `{name}`");
             return Err(err(e.span, msg, Some(&format!("add `{missing}: ..`"))));
         }
-        if !generic {
-            return Ok(Ty::Struct(name.to_string(), Vec::new()));
-        }
         let written = self.written(name).to_string();
-        let parts = inits.iter().map(|(f, _)| format!("field `{f}`")).collect();
+        // The base has the literal's own type, as in Rust (no type-changing struct update).
+        let base_hint = |mut d: Diag| {
+            if base.is_some_and(|b| b.span == d.span) {
+                d.hint = Some(format!("`..` takes the fields not written from another `{written}`"));
+            }
+            d
+        };
+        if !generic {
+            let ty = Ty::Struct(name.to_string(), Vec::new());
+            if let Some(b) = base {
+                want_expr(b, &self.expr(b, Some(&ty))?, &ty).map_err(base_hint)?;
+            }
+            return Ok(ty);
+        }
+        let mut parts: Vec<String> = inits.iter().map(|(f, _)| format!("field `{f}`")).collect();
+        let mut args: Vec<&Expr> = inits.iter().map(|(_, x)| x).collect();
+        if let Some(b) = base {
+            let own = self.tparams[name].iter().map(|t| Ty::Param(t.clone())).collect();
+            params.push(Ty::Struct(name.to_string(), own));
+            parts.push("`..`".to_string());
+            args.push(b);
+        }
         let sig = self.type_sig("struct", name, params, parts, &format!("{written} {{ .. }}"));
-        let args: Vec<&Expr> = inits.iter().map(|(_, x)| x).collect();
-        let tys = self.infer(e, e.span, (&written, &sig), None, &args, expected)?;
+        let tys = (self.infer(e, e.span, (&written, &sig), None, &args, expected)).map_err(base_hint)?;
         Ok(Ty::Struct(name.to_string(), tys))
     }
 
@@ -3524,6 +3642,11 @@ impl<'a> Checker<'a> {
             ExprKind::Name(name) => {
                 let captured = self.is_capture(name);
                 let Some(local) = self.lookup(name, target.span)? else {
+                    if self.consts.contains_key(&*key(self.home.module, name)) {
+                        let msg = format!("cannot assign to constant `{name}`");
+                        let hint = format!("assign to a `let mut` copy: `let mut x = {name};`");
+                        return Err(err(target.span, msg, Some(&hint)));
+                    }
                     return Err(self.unknown_name(target.span, name));
                 };
                 if captured {
@@ -3840,7 +3963,9 @@ impl<'a> Checker<'a> {
         };
         // The type parameters, each value with its declared type, and the use's type for a call.
         let (tparams, parts, ret): (&[String], Vec<(&Ty, &Expr)>, Option<&Ty>) = match in_module(a) {
-            (m, ExprKind::StructLit(name, inits)) => {
+            // A base fixes every type parameter, unless it needs the expected type itself.
+            (_, ExprKind::StructLit(_, _, Some(b))) if !self.needs_expected(b) => return false,
+            (m, ExprKind::StructLit(name, inits, _)) => {
                 let k = key_in(m, name);
                 let (Some(tparams), Some(decl)) = (self.tparams.get(&k), self.fields.get(&k)) else {
                     return false;

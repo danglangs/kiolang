@@ -295,7 +295,7 @@ Each changes `caps.wit` or the language. Recommendation first, then the alternat
 
 ## Later, driven by kio-web
 
-Done since: function values and closures (L6), generics (L7), nested patterns (L4a), the W12 friction items except constants, `Kv` (K1), WebSockets (WS1). Still open:
+Done since: function values and closures (L6), generics (L7), nested patterns (L4a), the W12 friction items, constants (L16), `Kv` (K1), WebSockets (WS1). Still open:
 
 - **Route tables and middleware** as wrappers (`with_auth(handler)`) are possible now; kio-web does not use them yet. Timeouts, body limits and logging are host concerns.
 - **Typed JSON decoding** (into a struct) needs a derive or traits; W12 decodes into a `Json` tree.
