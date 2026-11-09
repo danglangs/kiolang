@@ -16,9 +16,8 @@ kio is a capability-typed language for code AI agents write: the code names what
 | Speed, gaps, direction | docs/roadmap.md, docs/perf.md |
 
 ```
-lang/    parser, checker, lowering to IR, interpreter. No dependencies.
-guest/   lang built to a wasm32-wasip2 component
-host/    the `kio` binary: Wasmtime, grants, limits, audit log, --listen, mcp
+lang/    parser, checker, lowering to IR, interpreter (the test oracle). No dependencies.
+host/    the `kio` binary: check, compile, run in Wasmtime; grants, limits, audit log, --listen, mcp
 runtime/ compiled kio's runtime library (no_std), built to runtime.wasm
 codegen/ IR to Wasm, appended to runtime.wasm, wrapped as a `compiled` component
 tools/capgen  generates lang/src/caps_gen.rs from caps.wit
@@ -27,7 +26,7 @@ tools/capgen  generates lang/src/caps_gen.rs from caps.wit
 ## Principles
 
 - **Every resource is a grant.** A directory, host, socket or store is a capability: a `main` parameter, granted on the command line, enforced and logged by the host. For a new feature, first ask "is this a grant?"; prefer a capability and a `kio run` flag over a new command, mode or construct.
-- **The host is the security boundary.** It enforces every rule itself and never trusts the guest or the checker.
+- **The host is the security boundary.** It enforces every rule itself and never trusts compiled code or the checker.
 - **Errors teach.** Every diagnostic says what is wrong, at the exact span, with a hint naming the fix, as rustc does. Tests assert hints.
 - **The interpreter is the reference** for the compiler and its test oracle (native only, never shipped from C5): compiled code must match it. A language feature lands in the interpreter first, and its compiler task is pinned before the language task counts as done.
 
@@ -57,9 +56,9 @@ tools/capgen  generates lang/src/caps_gen.rs from caps.wit
 ## Build and test
 
 ```
-rustup target add wasm32-wasip2
+rustup target add wasm32-unknown-unknown
 cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
-cargo clippy -p guest --target wasm32-wasip2 -- -D warnings
+cargo clippy -p runtime --target wasm32-unknown-unknown --features test-heap -- -D warnings
 cargo build --release -p kio            # target/release/kio
 ```
 
