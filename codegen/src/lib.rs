@@ -179,7 +179,6 @@ fn val_type(t: &Ty) -> Option<ValType> {
         // A handle in the component's table, never counted.
         Ty::Cap(_) => Some(ValType::I32),
         Ty::Unit | Ty::Never => None,
-        t => unimplemented!("codegen: type {}", node(t)),
     }
 }
 
@@ -1212,7 +1211,6 @@ impl FuncGen<'_, '_> {
             ExprKind::CapCall(cap, method, args) => self.cap_call(*cap, *method, args, &e.ty),
             ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms, &e.ty),
             ExprKind::Try(x) => self.try_expr(x),
-            k => unimplemented!("codegen: expression {}", node(k)),
         }
         if e.ty == Ty::Never {
             self.sink().unreachable();
