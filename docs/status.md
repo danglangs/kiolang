@@ -4,7 +4,7 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 
 ## Now
 
-Compiled-only kio covers the whole language and every capability; the active stream is speed (C8): code that stays in compiled Wasm is 1.1-2.3x Rust, runtime-heavy code 1.5-8x (closures 2.3x, tree 3.0x, word count 4.3x, built-in JSON 1.5x, JSON in kio 8.3x; table below). The differential harness runs 488 programs both ways (0 mismatches) and the generator 250 more per CI run.
+Compiled-only kio covers the whole language and every capability. Active work: what real apps need (H16 HTTP beyond GET with `send_all`, H17 SQLite, H18 `send` flushing at once), from the concurrency proposal; speed work (C8) paused after C8b7. Compiled code is 1.1-2.3x Rust on compute and 2.3-8x where it allocates (roadmap.md "Speed today"). The differential harness runs 488 programs both ways (0 mismatches) and the generator 250 more per CI run.
 
 | Done | Result |
 |---|---|

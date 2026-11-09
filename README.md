@@ -8,7 +8,16 @@ Most languages today are not AI-safe: any line can read files, open sockets or s
 
 kio is a fresh language built around that idea, using Rust's ecosystem for speed and tooling. The goal is a general-purpose systems language: near-native speed, no garbage collector, memory and capability safe.
 
-**Status:** v0 works end to end: checking, the authority report, a Wasm sandbox with enforced limits, files (`Dir`), a key-value store (`Kv`), HTTP, randomness, a clock and a log (`Rng`, `Clock`, `Log`), and serving over HTTP and WebSockets. The language has structs, enums, generics, closures, `Float`, slices, nested and `|` patterns, `let`-else, constants, struct update, `HashMap` and built-in JSON. `kio run` compiles every program to Wasm and then native code (the interpreter is a test oracle, never shipped); every test program must give the same result both ways. Compiled code is within 1.1-2.3x of Rust on integer, float, call and string-building code and 1.5-8x where the runtime allocates (closures 2.3x, trees 3.0x, word count 4.3x on `Map` and 4.6x on `HashMap`, built-in JSON 1.5x, JSON written in kio 8.3x); it beats Python 3 except on word count (1.7x slower on `Map`, 1.4x on `HashMap`) and JSON written in kio (the built-in `parse_json`/`to_json` is 1.4x faster than Python's C `json`). More speed is next ([docs/roadmap.md](docs/roadmap.md), [bench/](bench/README.md)). Where work stands: [docs/status.md](docs/status.md).
+**Status:** v0, working end to end.
+
+| | |
+|---|---|
+| Language | structs, enums, generics, closures, `match` with nested and `\|` patterns, `let`-else, constants, `Float`, `HashMap`, built-in JSON, SHA-256 |
+| Resources, each a grant | files (`Dir`), a key-value store (`Kv`), HTTP GET (`Http`), `Rng`, `Clock`, `Log`; serving HTTP and WebSockets |
+| Safety | the authority report before a run; a Wasm sandbox with fuel, memory, time, call and I/O limits; an audit log |
+| Speed | compiled to native code through Wasm: 1.1-2.3x Rust on compute, 2.3-8x where it allocates; faster than Python on most benchmarks ([table](docs/roadmap.md#speed-today)) |
+
+Next: HTTP beyond GET, SQLite, parallel HTTP calls ([status](docs/status.md)).
 
 ## Quickstart
 

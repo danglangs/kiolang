@@ -12,10 +12,10 @@ C8b5, 2026-11-09: Apple M3 Max (16 cores, 64 GB), release builds, rustc 1.99.1 `
 | 30 M-iteration integer loop | 97 ms | 933 ms | 106 ms | 106 ms | 110 ms | 2.10 G, same | 22 ms | 1.27 s | 1.1x slower | 8.8x faster |
 | Mandelbrot 400x400, 100 iterations | 11 ms | 309 ms | 13 ms | 13 ms | 14 ms | 0.28 G, same | 21 ms | 958 ms | 1.2x slower | 24x faster |
 | 1 M push, sort, index and `for` sums | 16 ms | 365 ms | 27 ms | 27 ms | 52 ms | 0.96 G, same | 23 ms | 193 ms | 1.7x slower | 13x faster |
-| tree of 2^20 leaves built and folded (C8b6: 97 to 101 ms, fuel same, #117; C8b7: 101 to 90 ms, fuel 2.26 to 1.80 G) | 33 ms | 2.87 s | 98 ms | 185 ms | 438 ms | 3.78 to 2.21 G | 22 ms | 1.03 s | 3.0x slower | 29x faster |
+| tree of 2^20 leaves built and folded (C8b6: 97 to 101 ms, fuel same, #117; C8b7: 101 to 90 ms, fuel 2.26 to 1.80 G) | 33 ms | 2.87 s | 90 ms | 185 ms | 438 ms | 3.78 to 2.21 G | 22 ms | 1.03 s | 2.7x slower | 32x faster |
 | `map`/`filter` with closures, 1 M | 5.8 ms | 77 ms | 13 ms | 13 ms | 36 ms | 0.21 G, same | 22 ms | 96 ms | 2.3x slower | 5.8x faster |
-| word count, 1 MB of text (C8b6: 45.7 to 29.3 ms, fuel 0.68 to 0.43 G; C8b7: 29.8 to 28.2, 0.43 to 0.40 G) | 6.7 ms | 17 ms | 29 ms | 70 ms | 98 ms | 1.12 to 0.68 G | 27 ms | 69 ms | 4.3x slower | 1.7x slower |
-| word count on `HashMap` (C8b6: 31.8 to 25.0 ms, fuel 0.49 to 0.36 G; follow-up, one search for `insert(k, get(k)..)`: 25.0 to 23.2 ms, 0.361 to 0.337 G; C8b7: 23.6 to 22.4, 0.337 to 0.306 G) | 5.0 ms | 17 ms (`map.py`) | 23 ms | | | | 24 ms | 47 ms | 4.6x slower | 1.4x slower |
+| word count, 1 MB of text (C8b6: 45.7 to 29.3 ms, fuel 0.68 to 0.43 G; C8b7: 29.8 to 28.2, 0.43 to 0.40 G) | 6.7 ms | 17 ms | 28 ms | 70 ms | 98 ms | 1.12 to 0.68 G | 27 ms | 69 ms | 4.2x slower | 1.6x slower |
+| word count on `HashMap` (C8b6: 31.8 to 25.0 ms, fuel 0.49 to 0.36 G; follow-up, one search for `insert(k, get(k)..)`: 25.0 to 23.2 ms, 0.361 to 0.337 G; C8b7: 23.6 to 22.4, 0.337 to 0.306 G) | 5.0 ms | 17 ms (`map.py`) | 22 ms | | | | 24 ms | 47 ms | 4.5x slower | 1.3x slower |
 | JSON parse + encode, 1 MB (json.kio; C8b7: 66 to 64 ms, fuel 0.87 to 0.80 G) | 8.0 ms | 17 ms | 66 ms | 81 ms | 554 ms | 1.12 to 0.93 G | 24 ms | 812 ms | 8.3x slower | 3.8x slower |
 | JSON parse + encode, 1 MB (built-in `parse_json`, `to_json`; C8b6: 15.3 to 12.8 ms, fuel 0.23 to 0.18 G) | 8.8 ms | 18 ms | 13 ms | | | | 26 ms | 14 ms | 1.5x slower | 1.4x faster |
 | 100 k `s = s + i.to_str() + ","` (C8b6: 5.1 to 4.8 ms; C8b7: 5.0 to 4.5) | 4.6 ms | 7.2 ms | 5.2 ms | 5.3 ms | 1.37 s | 0.08 G, same | 23 ms | 1.57 s | 1.1x slower | 1.4x faster |
