@@ -861,3 +861,90 @@ fn type_parameter_bounds() {
     let either = Some("write `T: Eq` or `T: Ord`, or remove the bound");
     rejected_with("fn f<T: Hash>() {}", "Hash", only, either);
 }
+
+#[test]
+fn l12_rust_forms_teach() {
+    let cases: &[(&str, &str, &str, &str)] = &[
+        (
+            "fn f(l: L) { let m = L { a: 3, ..l }; }",
+            "..l",
+            "struct update syntax is not supported",
+            "set the fields on a `let mut` copy",
+        ),
+        (
+            "fn f() { let s = format!(\"a\"); }",
+            "format!",
+            "macros are not supported",
+            "build text with `+` and `to_str()`",
+        ),
+        (
+            "fn f() { let s = matches!(x, A); }",
+            "matches!",
+            "macros are not supported",
+            "use `match` or `if let`",
+        ),
+        (
+            "fn f() { let s = vec![1]; }",
+            "vec!",
+            "macros are not supported",
+            "write a list literal: `[..]`",
+        ),
+        (
+            "fn f() { println!(\"a\"); }",
+            "println!",
+            "macros are not supported",
+            "return the value from `main`",
+        ),
+        (
+            "fn f() { foo!(1); }",
+            "foo!",
+            "macros are not supported",
+            "kio has no macros; write a function call",
+        ),
+        (
+            "fn f() { match o { Some(x) => n += x, None => {} } }",
+            "n += x",
+            "an assignment cannot be a match arm",
+            "wrap it in `{ }`",
+        ),
+        (
+            "fn f() { if let Some(x) = o && x > 1 { } }",
+            "o && x > 1",
+            "let-chains are not supported",
+            "nest an `if`",
+        ),
+        (
+            "fn f() { for (k, v) in m { } }",
+            "(k, v)",
+            "kio has no tuples",
+            "loop over `m.keys()` and `get`",
+        ),
+        (
+            "fn f() { let Some(x) = o else { return; }; }",
+            "else",
+            "let-else is not supported",
+            "use `match`",
+        ),
+        (
+            "fn f() { let x = o else { return; }; }",
+            "else",
+            "let-else is not supported",
+            "use `match`",
+        ),
+        (
+            "fn f<T>(x: T) where T: Ord { }",
+            "where",
+            "`where` is not supported in kio",
+            "write the bound on the parameter: `<T: Ord>`",
+        ),
+    ];
+    for (src, text, msg, hint) in cases {
+        rejected_with(src, text, msg, Some(hint));
+    }
+}
+
+#[test]
+fn l12_still_accepts_bool_pattern_on_and() {
+    parse("fn f() { if let true = a && b { } }").unwrap();
+    parse("fn f() { let x = a != b; }").unwrap();
+}

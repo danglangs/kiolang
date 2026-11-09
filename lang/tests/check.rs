@@ -828,7 +828,10 @@ fn try_operator() {
     let src = "fn a() -> Result<Int, Str> { Ok(1) } fn b() -> Result<Int, Int> { Ok(a()?) } fn main() {}";
     let (msg, _) = reject(src);
     assert_eq!(msg, "`?` on Result<Int, Str> in a function returning Result<Int, Int>");
-    assert_eq!(hint(src), "change the return type or `match` on the result");
+    assert_eq!(
+        hint(src),
+        "change the return type, convert the error with `.map_err(f)?`, or `match` on the result"
+    );
     let (msg, at) = reject("fn f() -> Option<Int> { 1? } fn main() {}");
     assert_eq!(
         (msg.as_str(), at.as_str()),
@@ -1578,7 +1581,10 @@ fn result_ok_err_and_option_ok_or() {
     let src = "fn f(o: Option<Int>) -> Result<Int, Int> { let x = o.ok_or(\"no\")?; Ok(x) } fn main() {}";
     let (msg, _) = reject(src);
     assert_eq!(msg, "`?` on Result<Int, Str> in a function returning Result<Int, Int>");
-    assert_eq!(hint(src), "change the return type or `match` on the result");
+    assert_eq!(
+        hint(src),
+        "change the return type, convert the error with `.map_err(f)?`, or `match` on the result"
+    );
     assert_eq!(
         hint("fn f(o: Option<Int>) -> Bool { o.zzzzzz() } fn main() {}"),
         "Option<Int> has: and_then, is_none, is_some, map, ok_or, unwrap_or"
@@ -1803,7 +1809,7 @@ fn int_and_float_never_mix() {
     assert_eq!(hint("fn main() -> Bool { 1.0 && true }"), "`&&` works on two Bool");
     assert_eq!(
         hint("fn main() -> Float { 1.0 + \"a\" }"),
-        "`+` works on two Int, two Float or two Str"
+        "convert with `1.0.to_str()`"
     );
 }
 
@@ -2074,7 +2080,9 @@ fn closures_cannot_reach_capabilities() {
         assert_eq!(d.msg, format!("closure captures capability `{cap}`"), "{src}");
         assert_eq!(
             d.hint.as_deref(),
-            Some(&*format!("take it as a parameter: `|{cap}: {ty}, ..|`"))
+            Some(&*format!(
+                "use a named function that takes it as a parameter, `{cap}: {ty}`"
+            ))
         );
         assert_eq!(&src[d.span.start..d.span.end], cap, "{src}");
     };
@@ -2135,4 +2143,40 @@ fn closures_cannot_reach_capabilities() {
     let src = "fn save(out: Dir, s: Str) -> Result<(), IoErr> { out.create(\"a\", s.to_bytes()) }
                fn main(out: Dir) -> Result<(), IoErr> { let f = |n: Int| n.to_str(); save(out, f(1)) }";
     assert!(check(src, &caps).is_ok());
+}
+
+#[test]
+fn l12_text_plus_number_and_try_hints() {
+    let cases = [
+        (
+            "fn main() -> Str { \"n=\" + 3 }",
+            "\"n=\" + 3",
+            "convert with `3.to_str()`",
+        ),
+        (
+            "fn main() -> Int { 3 + \"x\" }",
+            "3 + \"x\"",
+            "convert with `3.to_str()`",
+        ),
+        (
+            "fn main() -> Str { let n = 2.5; \"n=\" + n }",
+            "\"n=\" + n",
+            "convert with `n.to_str()`",
+        ),
+        (
+            "fn main() { let mut s = \"a\"; s += 3; }",
+            "s += 3;",
+            "convert with `3.to_str()`",
+        ),
+        (
+            "fn f() -> Result<Int, Str> { Ok(1) } fn main() -> Result<Int, Int> { let x = f()?; Ok(x) }",
+            "f()?",
+            "change the return type, convert the error with `.map_err(f)?`, or `match` on the result",
+        ),
+    ];
+    for (src, at, h) in cases {
+        let d = &check(src, &CapTable::default()).expect_err(src)[0];
+        assert_eq!(&src[d.span.start..d.span.end], at, "{src}");
+        assert_eq!(d.hint.as_deref(), Some(h), "{src}");
+    }
 }

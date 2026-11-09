@@ -56,6 +56,7 @@ fn reserved_hint(word: &str) -> &'static str {
         "impl" | "trait" | "dyn" => "kio has no traits or `impl`; use free functions",
         "use" | "crate" | "super" | "self" | "Self" => "write the full path, like `web::text`",
         "const" | "static" => "kio has no globals; pass values as arguments",
+        "where" => "write the bound on the parameter: `<T: Ord>`",
         "move" => "closures always capture by copy; remove `move`",
         _ => "this Rust keyword is reserved in kio",
     }
@@ -485,10 +486,25 @@ impl Parser {
     fn let_stmt(&mut self) -> Result<StmtKind, Diag> {
         self.pos += 1;
         let mutable = self.eat_kw("mut");
+        let at_name = self.pos;
         let name = self.ident()?;
+        if self.at("(") || self.at("::") {
+            // `let Some(x) = e else { .. }`: a pattern where a name goes.
+            let first = self.unexpected("`=`");
+            self.pos = at_name;
+            let tried = self.pat().and_then(|_| self.expect("=")).and_then(|_| self.expr());
+            return Err(if tried.is_ok() && self.at_kw("else") {
+                self.let_else()
+            } else {
+                first
+            });
+        }
         let ty = if self.eat(":") { Some(self.ty()?) } else { None };
         self.expect("=")?;
         let init = self.expr()?;
+        if self.at_kw("else") {
+            return Err(self.let_else());
+        }
         self.expect(";")?;
         Ok(StmtKind::Let {
             name,
@@ -496,6 +512,10 @@ impl Parser {
             ty,
             init,
         })
+    }
+
+    fn let_else(&self) -> Diag {
+        err(self.span(), "let-else is not supported", Some("use `match`"))
     }
 
     /// `return` and an optional value, up to its `;`, or `,` or `}` as a match arm.
@@ -520,6 +540,15 @@ impl Parser {
 
     fn for_stmt(&mut self) -> Result<StmtKind, Diag> {
         self.pos += 1;
+        if self.at("(") {
+            let start = self.span().start;
+            while !self.at(")") && self.peek().is_some() {
+                self.pos += 1;
+            }
+            self.pos += 1;
+            let hint = "loop over `m.keys()` and `get`";
+            return Err(err(self.since(start), "kio has no tuples", Some(hint)));
+        }
         let name = self.ident()?;
         if !self.eat_kw("in") {
             return Err(self.unexpected("`in`"));
@@ -668,6 +697,23 @@ impl Parser {
             });
         }
         let kind = match self.peek() {
+            Some(Kind::Ident(name))
+                if self.toks.get(self.pos + 1).is_some_and(|t| t.kind == Kind::Sym("!"))
+                    && self
+                        .toks
+                        .get(self.pos + 2)
+                        .is_some_and(|t| matches!(t.kind, Kind::Sym("(" | "[" | "{"))) =>
+            {
+                let hint = match name.as_str() {
+                    "format" => "build text with `+` and `to_str()`",
+                    "matches" => "use `match` or `if let`",
+                    "vec" => "write a list literal: `[..]`",
+                    "println" | "print" | "eprintln" | "dbg" => "return the value from `main`",
+                    _ => "kio has no macros; write a function call",
+                };
+                self.pos += 2;
+                return Err(err(self.since(span.start), "macros are not supported", Some(hint)));
+            }
             Some(Kind::Int(n)) => ExprKind::Int(*n),
             Some(Kind::Float(x)) => ExprKind::Float(*x),
             Some(Kind::Str(s)) => ExprKind::Str(s.clone()),
@@ -782,6 +828,15 @@ impl Parser {
 
     fn field_init(&mut self) -> Result<(String, Expr), Diag> {
         let span = self.span();
+        if self.eat("..") {
+            self.expr()?;
+            let hint = "set the fields on a `let mut` copy";
+            return Err(err(
+                self.since(span.start),
+                "struct update syntax is not supported",
+                Some(hint),
+            ));
+        }
         let name = self.ident()?;
         if !self.at(":") {
             return Err(err(
@@ -837,6 +892,12 @@ impl Parser {
             None
         };
         let cond = self.cond()?;
+        if let (Some(pat), ExprKind::Binary("&&", ..)) = (&pat, &cond.kind) {
+            // Only a Bool pattern can match `a && b`; anything else is a let-chain.
+            if !matches!(pat.kind, PatKind::Bool(_) | PatKind::Name(_) | PatKind::Wild) {
+                return Err(err(cond.span, "let-chains are not supported", Some("nest an `if`")));
+            }
+        }
         let then = self.block()?;
         let els = if !self.eat_kw("else") {
             None
@@ -887,7 +948,18 @@ impl Parser {
             } else if self.at_kw("return") || self.at_kw("break") || self.at_kw("continue") {
                 self.arm_jump()?
             } else {
-                self.expr()?
+                let e = self.expr()?;
+                if let Some(&Kind::Sym("=" | "+=" | "-=")) = self.peek() {
+                    self.pos += 1;
+                    self.expr()?;
+                    let hint = "wrap it in `{ }`";
+                    return Err(err(
+                        self.since(e.span.start),
+                        "an assignment cannot be a match arm",
+                        Some(hint),
+                    ));
+                }
+                e
             };
             arms.push(Arm {
                 pat,

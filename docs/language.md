@@ -220,7 +220,7 @@ error: cannot infer `T`
   write `empty::<Int>(..)`
 
 error: closure captures capability `out`
-  take it as a parameter: `|out: Dir, ..|`
+  use a named function that takes it as a parameter: `fn save(out: Dir, ..)`
 
 error: `?` on `Result<Bytes, IoErr>` in a function returning `Option<Int>`
   change the return type or `match` on the result

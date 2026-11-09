@@ -747,7 +747,30 @@ fn op_hint(op: &str) -> String {
 
 /// The error for `l op r` that `binary_ty` refused, at `span`; `written` is `op` or `op=`.
 /// `own` are the type parameters in scope.
-fn binary_err(op: &str, written: &str, (l, r): (&Ty, &Ty), own: &[TParam], span: Span) -> Diag {
+fn binary_err(
+    op: &str,
+    written: &str,
+    (l, r): (&Ty, &Ty),
+    own: &[TParam],
+    span: Span,
+    operands: (&Expr, &Expr),
+) -> Diag {
+    let text_and_number = matches!((l, r), (Ty::Str, Ty::Int | Ty::Float) | (Ty::Int | Ty::Float, Ty::Str));
+    if op == "+" && text_and_number {
+        let number = if *l == Ty::Str { operands.1 } else { operands.0 };
+        let shown = match &number.kind {
+            ExprKind::Int(n) if *n >= 0 => n.to_string(),
+            ExprKind::Float(x) if f64::from_bits(*x) >= 0.0 => format!("{:?}", f64::from_bits(*x)),
+            ExprKind::Name(n) => n.clone(),
+            _ => "x".to_string(),
+        };
+        let hint = format!("convert with `{shown}.to_str()`");
+        return err(
+            span,
+            format!("`{written}` cannot be applied to {l} and {r}"),
+            Some(&hint),
+        );
+    }
     if matches!((l, r), (Ty::Int, Ty::Float) | (Ty::Float, Ty::Int)) && op != "&&" && op != "||" {
         let verb = match op {
             "+" => "add",
@@ -2314,7 +2337,7 @@ impl<'a> Checker<'a> {
             }
         }
         if let (true, Ty::Cap(ty)) = (captured, &self.scopes[i][name].ty) {
-            let hint = format!("take it as a parameter: `|{name}: {ty}, ..|`");
+            let hint = format!("use a named function that takes it as a parameter, `{name}: {ty}`");
             return Err(err(span, format!("closure captures capability `{name}`"), Some(&hint)));
         }
         Ok(self.scopes[i].get_mut(name))
@@ -2390,7 +2413,14 @@ impl<'a> Checker<'a> {
                 if *op == "=" {
                     want_expr(value, &found, &ty)?;
                 } else if binary_ty(&op[..1], &ty, &found, self.home.tparams) != Some(ty.clone()) {
-                    return Err(binary_err(&op[..1], op, (&ty, &found), self.home.tparams, s.span));
+                    return Err(binary_err(
+                        &op[..1],
+                        op,
+                        (&ty, &found),
+                        self.home.tparams,
+                        s.span,
+                        (target, value),
+                    ));
                 }
                 Ok(Ty::Unit)
             }
@@ -2554,7 +2584,7 @@ impl<'a> Checker<'a> {
                     return Err(no_fn_equality(e.span, &l));
                 }
                 binary_ty(op, &l, &r, self.home.tparams)
-                    .ok_or_else(|| binary_err(op, op, (&l, &r), self.home.tparams, e.span))
+                    .ok_or_else(|| binary_err(op, op, (&l, &r), self.home.tparams, e.span, (a, b)))
             }
             ExprKind::If(cond, then, els) => {
                 want_expr(cond, &self.expr(cond, None)?, &Ty::Bool)?;
@@ -2930,6 +2960,11 @@ impl<'a> Checker<'a> {
         match (&found, &self.ret) {
             (Ty::Option(t), Ty::Option(_)) => Ok((**t).clone()),
             (Ty::Result(t, e_ty), Ty::Result(_, ret_err)) if e_ty == ret_err => Ok((**t).clone()),
+            (Ty::Result(..), ret @ Ty::Result(..)) => {
+                let msg = format!("`?` on {found} in a function returning {ret}");
+                let hint = "change the return type, convert the error with `.map_err(f)?`, or `match` on the result";
+                Err(err(e.span, msg, Some(hint)))
+            }
             (Ty::Option(_) | Ty::Result(..), ret) => {
                 let msg = format!("`?` on {found} in a function returning {ret}");
                 Err(err(
