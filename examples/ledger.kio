@@ -1,0 +1,48 @@
+// Running totals per customer, kept in a Kv across runs; prints the top customers.
+// kio run examples/ledger.kio --dir input=examples/in --kv totals=/tmp/ledger.kv
+const PREFIX: Str = "total/";
+const TOP: Int = 3;
+const PAGE: Int = 100;
+
+struct Entry { name: Str, amount: Int }
+
+enum Failed { Io(IoErr), Kv(KvErr) }
+
+fn parse(line: Str) -> Option<Entry> {
+  let parts = line.split(",");
+  if parts.len() != 2 { return None; }
+  let amount = match parts[1].trim() {
+    "" | "-" => 0,
+    s => s.parse_int()?,
+  };
+  Some(Entry { name: parts[0].trim(), amount: amount })
+}
+
+// Every total, a page at a time.
+fn load(totals: Kv) -> Result<List<Entry>, KvErr> {
+  let mut out: List<Entry> = [];
+  let mut after: Option<Str> = None;
+  loop {
+    let page = totals.scan(PREFIX, after, PAGE)?;
+    for kv in page {
+      let Some(name) = kv.key.strip_prefix(PREFIX) else { continue; };
+      let Some(amount) = kv.value.to_str().parse_int() else { continue; };
+      out.push(Entry { name: name, amount: amount });
+    }
+    if page.len() < PAGE { break; }
+    after = Some(page[page.len() - 1].key);
+  }
+  Ok(out)
+}
+
+fn main(input: Dir, totals: Kv) -> Result<List<Str>, Failed> {
+  let text = input.read("invoices.csv").map_err(|e| Failed::Io(e))?.to_str();
+  for line in text.lines() {
+    let Some(entry) = parse(line) else { continue; };
+    totals.add(PREFIX + entry.name, entry.amount).map_err(|e| Failed::Kv(e))?;
+  }
+  let mut all = load(totals).map_err(|e| Failed::Kv(e))?;
+  all.sort_by(|a, b| a.amount > b.amount);
+  let top = all.slice(0, all.len().min(TOP));
+  Ok(top.map(|e| e.name + " " + e.amount.to_str()))
+}

@@ -81,13 +81,13 @@ Most-used Rust crates, and kio's answer to each:
 | HTTP client | reqwest | `Http.get` | GET only: POST, headers and JSON bodies need `caps.wit` methods. |
 | Async | tokio | none: a sandbox per request | Fine per request. Concurrent upstream calls inside one handler need host-side async (web decision 4). |
 | Serialization | serde, serde_json | built-in `Json` (L9, C12), an untyped tree: `parse_json`, `to_json`, accessors; 1.5x `serde_json`, 1.4x faster than Python's `json` | Typed decode into structs needs a derive or traits; generics alone do not give it. |
-| Database | sqlx, diesel, redis | `Kv` (K1): get/set/delete/keys/swap, in memory or an append-only file the host owns | No SQL. A `Sql` capability (`caps.wit`, owner decision): the host holds the connection pool, the program gets a capability scoped to one database. |
+| Database | sqlx, diesel, redis | `Kv` (K1, K2): get/set/delete/keys/swap/scan/add, in memory or an append-only file the host owns; `:ro` readers follow a writer (H12) | No SQL. A `Sql` capability (`caps.wit`, owner decision): the host holds the connection pool, the program gets a capability scoped to one database. |
 | Time, randomness, UUIDs | chrono, rand, uuid | `Clock` (`now_ms`) and `Rng` (`bytes`, `int`) capabilities (H13, H14): granted explicitly (`--clock`, `--rng`), audited, fixable for replay (`fixed:`, `seed:`); a `Log` for the program's own lines (H15) | Date arithmetic and formatting as built-ins; UUIDs from `Rng.bytes(16)` in library code. |
-| Crypto, hashing | ring, sha2, jsonwebtoken | none | Pure functions, so built-ins in `lang` (no capability needed), or host functions for speed. |
+| Crypto, hashing | ring, sha2, jsonwebtoken | `sha256`, `to_hex`, constant-time `ct_eq` (L11) | No HMAC, signatures or encryption: pure functions, so built-ins in `lang` (no capability needed), or host functions for speed. |
 | Collections | `HashMap`, `BTreeMap`, tuples | `List`, `Map` (key order), `HashMap` (insertion order, L10, C13), `Int` or `Str` keys | No sets, tuples, `contains_key` or `for` over a map (open_questions #114). |
 | Errors | anyhow, thiserror | `Result`, `?`, enums | No conversion between error types (`From`). |
-| Logging, metrics | tracing | the audit log covers host calls | A `Log` capability for application logs. |
-| Regex, text | regex | `split`, `lines`, `trim`, `find`, `replace`, `strip_prefix`, `contains`, `starts_with`, `slice` | No regex. |
+| Logging, metrics | tracing | `Log` (H15) for the program's own lines; the audit log covers host calls | No levels, structured fields or metrics. |
+| Regex, text | regex | `split`, `lines`, `trim`, `find`, `replace`, `strip_prefix`, `contains`, `starts_with`, `slice`, `join`, `to_lowercase`/`to_uppercase` | No regex. |
 | CLI parsing | clap | none | Needs an `Args` capability; the operator grants argv. |
 | Floats | f64 | `Float` (f64, compiled at Rust's speed) | |
 | Abstraction | traits, generics, closures | function values (`fn(T) -> R`, L6a), closures (L6b) and built-ins taking them (`map`, `filter`, `any`, `all`, `and_then`, `map_err`; L6c), compiled (C9); generic functions (L7a) and generic structs and enums (L7b, L7d), monomorphized, with bounds `T: Eq`/`T: Ord` (L7c) | No traits: a bound is `Eq` or `Ord` only, `Ord` for `Int` and `Str`. |
@@ -97,7 +97,7 @@ Non-starters today, in order of what blocks a real backend first: an SQL capabil
 
 ## A target app
 
-A CRUD app over a `Dir` (W9a) proves the language. A target app proves the ecosystem: a small, real web service that an agent writes and an operator runs with exactly its grants. Candidate: a link shortener or notes service with a JSON API, a `Kv` store, auth by a header token (a `Secret` capability), and HTML pages. Each piece it lacks becomes a task, as kio-web did for `--listen`. `Kv` exists, and kio-web has notes apps over `Dir` and over `Kv`; the target app is next.
+A CRUD app over a `Dir` (W9a) proves the language. A target app proves the ecosystem: a small, real web service that an agent writes and an operator runs with exactly its grants. It is kio-web's links app (examples/links): a link shortener with a JSON API, a `Kv` store, a bearer token stored hashed, redirects that count hits, random slugs, expiring links, a log and HTML pages. Each piece it lacked became a task, as kio-web did for `--listen`: L11-L17, H12-H15, K2 and W14.
 
 ## Can models write kio? (low priority)
 

@@ -8,7 +8,7 @@ Most languages today are not AI-safe: any line can read files, open sockets or s
 
 kio is a fresh language built around that idea, using Rust's ecosystem for speed and tooling. The goal is a general-purpose systems language: near-native speed, no garbage collector, memory and capability safe.
 
-**Status:** v0 works end to end: checking, the authority report, a Wasm sandbox with enforced limits, files (`Dir`), a key-value store (`Kv`), HTTP, and serving over HTTP and WebSockets. The language has structs, enums, generics, closures, `Float`, slices, nested patterns, `HashMap` and built-in JSON. `kio run` compiles every program to Wasm and then native code (the interpreter is a test oracle, never shipped); every test program must give the same result both ways. Compiled code is within 1.1-2.3x of Rust on integer, float, call and string-building code and 1.5-8x where the runtime allocates (closures 2.3x, trees 3.0x, word count 4.3x on `Map` and 5.0x on `HashMap`, built-in JSON 1.5x, JSON written in kio 8.3x); it beats Python 3 except on word count (1.7x slower on `Map`, 1.5x on `HashMap`) and JSON written in kio (the built-in `parse_json`/`to_json` is 1.4x faster than Python's C `json`). More speed is next ([docs/roadmap.md](docs/roadmap.md), [bench/](bench/README.md)). Where work stands: [docs/status.md](docs/status.md).
+**Status:** v0 works end to end: checking, the authority report, a Wasm sandbox with enforced limits, files (`Dir`), a key-value store (`Kv`), HTTP, randomness, a clock and a log (`Rng`, `Clock`, `Log`), and serving over HTTP and WebSockets. The language has structs, enums, generics, closures, `Float`, slices, nested and `|` patterns, `let`-else, constants, struct update, `HashMap` and built-in JSON. `kio run` compiles every program to Wasm and then native code (the interpreter is a test oracle, never shipped); every test program must give the same result both ways. Compiled code is within 1.1-2.3x of Rust on integer, float, call and string-building code and 1.5-8x where the runtime allocates (closures 2.3x, trees 3.0x, word count 4.3x on `Map` and 4.6x on `HashMap`, built-in JSON 1.5x, JSON written in kio 8.3x); it beats Python 3 except on word count (1.7x slower on `Map`, 1.4x on `HashMap`) and JSON written in kio (the built-in `parse_json`/`to_json` is 1.4x faster than Python's C `json`). More speed is next ([docs/roadmap.md](docs/roadmap.md), [bench/](bench/README.md)). Where work stands: [docs/status.md](docs/status.md).
 
 ## Quickstart
 
@@ -60,6 +60,9 @@ error: IoErr::InvalidPath
 
 ```
 $ kio run examples/serve/app.kio --dir public=examples/tour/in --listen 127.0.0.1:8080
+main             : req body header_names header_values method target, res send, public read
+...
+listening on http://127.0.0.1:8080
 $ curl http://127.0.0.1:8080/hello/kio
 {"hello": "kio"}
 ```
@@ -69,6 +72,8 @@ A WebSocket server takes `msg: WsMessage, conn: WsSend` instead, and gets one fr
 ```
 $ kio run examples/ws/echo.kio --listen 127.0.0.1:8080
 main : msg data kind, conn binary text
+program sha256:…
+listening on ws://127.0.0.1:8080
 $ websocat ws://127.0.0.1:8080/
 hi
 hi
@@ -81,13 +86,24 @@ On a loopback `--listen`, a request's `Host` must be `localhost`, `127.0.0.1` or
 ### More
 
 - `--http api=api.example` grants `Http` (`get` only) to one host over HTTPS; `--http api=http://127.0.0.1:9000` allows plain HTTP for local testing.
-- `--kv store=data.kv` grants a key-value store (`store: Kv`) that outlives runs and is shared by every `--listen` request; `--kv store=:memory:` keeps it for the process only. `swap` updates a key atomically, `add` counts in one, `scan` pages through a prefix's entries. `--kv store=data.kv:ro` is read-only: a program that can call `set`, `delete`, `swap` or `add` on it is refused, no lock is taken, and each `get`, `keys` and `scan` sees what another kio writing the file stored (a server reading tokens a separate job rotates).
+- `--kv store=data.kv` grants a key-value store (`store: Kv`) that outlives runs and is shared by every `--listen` request; `--kv store=:memory:` keeps it for the process only. `swap` updates a key atomically, `add` counts in one, `scan` pages through a prefix's entries. `--kv store=data.kv:ro` is read-only: a program that can call `set`, `delete`, `swap` or `add` on it is refused, no lock is taken, and each `get`, `keys` and `scan` sees what another kio writing the file stored (a server reading tokens a separate job rotates). [examples/ledger.kio](examples/ledger.kio) keeps running totals per customer:
+
+  ```
+  $ kio run examples/ledger.kio --dir input=examples/in --kv totals=/tmp/ledger.kv
+  load  : totals scan
+  main  : input read, totals add scan
+  parse : none
+  Ok(["initech 300", "acme 120", "globex 45"])
+  $ kio run examples/ledger.kio --dir input=examples/in --kv totals=/tmp/ledger.kv:ro
+  kio: `totals` is granted read-only but `main` can call `totals add`
+    hint: drop `:ro` or remove the writes
+  ```
 - `--rng r` grants randomness (`r: Rng`: `bytes(n)`, `int(lo, hi)`) from the OS; `--rng r=seed:1` a stream that is the same every run (under `--listen`, keyed by the request number too), for replay and tests. `--clock now` grants the system clock (`now.now_ms()`); `--clock now=fixed:2026-11-09T12:00:00Z` (or `fixed:<ms>`) always that time. `--log events=app.log` grants a log the program appends one line to per `write` (control characters escaped, 64 KB a line, 1 MB a run, `req N: ` first under `--listen`); `--log events=-` is stderr. None of the three is reachable without its grant, so a run with fixed values is replayable.
 - `--audit log.jsonl` records every host call: capability, method, path, bytes and result. A call the report did not predict stops the run as a checker bug. Under `--listen` it is one log for the server: the header once, then each request's calls and trailer, every line starting with `"req":N` (and `"conn":N` for a WebSocket event). The log is appended to, never truncated, and refused at startup if it is a `--kv` store's file, inside a granted `--dir` or inside the compile cache.
 - Every run is bounded: `--fuel`, `--timeout`, `--memory`, `--stack`, `--calls`, `--io`. Each limit's error names the flag that raises it.
 - Errors teach: `did you mean count?`, `declare it with let mut`.
 - Performance: about 74,000 requests/s with keep-alive and 18,000-20,000 without, with a fresh sandbox per request ([docs/roadmap.md](docs/roadmap.md), [docs/perf.md](docs/perf.md)). `kio run` keeps compiled programs in `~/.cache/kio`, so a second run of the same program skips the compile; a run granted a `--dir` that contains, or is inside, the cache does not use it, and a `--kv` store there is refused.
-- Built in: `Json` (`s.parse_json()` gives `Result<Json, Str>`, `j.to_json()`, accessors `get`, `at`, `as_str`, ..), `HashMap<K, V>` (insertion-ordered, beside the key-ordered `Map`), generic functions and types with `T: Eq` and `T: Ord` bounds, and `<` on `Str` by bytes.
+- Built in: `Json` (`s.parse_json()` gives `Result<Json, Str>`, `j.to_json()`, accessors `get`, `at`, `as_str`, ..), `HashMap<K, V>` (insertion-ordered, beside the key-ordered `Map`), generic functions and types with `T: Eq` and `T: Ord` bounds, `<` on `Str` by bytes, `sort_by`, `join`, `sha256`, `to_hex` and `ct_eq` (constant-time compare).
 - The language: [docs/language.md](docs/language.md). A web framework in kio: [kio-web](https://github.com/danglangs/kio-web).
 - A guided demo: `examples/tour/demo.sh` walks through the report, a rejected helper, a refused escape and a fuel stop.
 - From source: `cargo test` runs every suite; `cargo run -p kio -- run file.kio` runs without installing.
@@ -177,7 +193,8 @@ Steps:
 10. Done: the compiler for strings, collections, structs and capabilities; `kio run` and `--listen` compile (C5), and the interpreter is the test oracle only.
 11. Done: `Dir` list/write/remove/exists, `Kv`, WebSockets, grants bound by type and DNS-rebinding defence (D1, K1, WS1, H10, H11); `Float`, slices, function values, closures, generic functions, structs and enums with `Eq`/`Ord` bounds, `<` on `Str`, all compiled (L6-L8, C9-C11); an adversarial review of the runtime and codegen (C7); built-in `Json` and `HashMap`, one source for the interpreter and the runtime (L9, L10, C12, C13).
 12. Done: a differential harness and program generator (any compiled/interpreted disagreement fails CI), and speed work on strings, refcounts, allocation and borrowed parameters (C6, C8a-C8b6).
-13. Next: more speed (C8); later attenuation.
+13. Done: what the links target app (kio-web) needed: built-ins (`sort_by`, `slice`, `join`, `sha256`, `ct_eq`, ..), errors that teach for Rust forms kio lacks, read-only `Kv` grants, `--audit` under `--listen`, `Kv` `scan` and `add`, kio-web's bearer, wildcard, HEAD, paging and protected routes; `|` patterns, `let`-else, struct update, constants, `Bool.to_str`; `Rng`, `Clock` and `Log` grants (L11-L17, H12-H15, K2, W14).
+14. Next: more speed (C8); later attenuation.
 
 There are no globals, reflection, `unsafe`, traits or tuples. Capabilities are parameters only. See [docs/language.md](docs/language.md).
 

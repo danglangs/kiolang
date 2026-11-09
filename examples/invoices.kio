@@ -16,10 +16,8 @@ fn load(d: Dir, name: Str) -> Result<List<Row>, IoErr> {
   let text = d.read(name)?.to_str();
   let mut rows: List<Row> = [];
   for line in text.lines() {
-    match parse_row(line) {
-      Some(r) => rows.push(r),
-      None => {}
-    }
+    let Some(r) = parse_row(line) else { continue; };
+    rows.push(r);
   }
   Ok(rows)
 }
