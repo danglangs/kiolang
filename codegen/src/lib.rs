@@ -1085,6 +1085,15 @@ impl FuncGen<'_, '_> {
                     Builtin::ListLen => ("rt_list_len", Nothing, None),
                     Builtin::MapLen => ("rt_map_len", Nothing, None),
                     Builtin::MapKeys => ("rt_map_keys", Desc, None),
+                    Builtin::OptionMap
+                    | Builtin::OptionAndThen
+                    | Builtin::ResultMap
+                    | Builtin::ResultMapErr
+                    | Builtin::ResultAndThen
+                    | Builtin::ListMap
+                    | Builtin::ListFilter
+                    | Builtin::ListAny
+                    | Builtin::ListAll => unimplemented!("codegen: builtin {b:?}"),
                 };
                 let pre = self.pre(pre, &e.ty);
                 let mut sites: Vec<u32> = error.map(|t| self.site(e.span, t)).into_iter().collect();

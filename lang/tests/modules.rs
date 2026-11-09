@@ -303,6 +303,24 @@ fn modules_may_call_each_other() {
 }
 
 #[test]
+fn module_function_as_a_builtin_argument() {
+    // kio-web's W9a case: `json::get(j, "title").and_then(json::as_str)`.
+    let json = "pub enum Json { Str(Str), Num(Int) }
+                pub fn get(j: List<Json>, i: Int) -> Option<Json> { if i < j.len() { Some(j[i]) } else { None } }
+                pub fn as_str(j: Json) -> Option<Str> { match j { Json::Str(s) => Some(s), _ => None } }";
+    let app = "mod json;
+               fn main() -> List<Option<Str>> {
+                 let j = [json::Json::Num(1), json::Json::Str(\"kio\")];
+                 [0, 1, 2].map(|i| json::get(j, i).and_then(json::as_str))
+               }";
+    let p = check(&[("app", app), ("json", json)]).unwrap_or_else(|d| panic!("{d:?}"));
+    let v = common::big_stack(move || run(&p, &mut NoCaps).unwrap());
+    let none = Value::Enum(EnumRef::Option, 0, vec![]);
+    let kio = Value::Enum(EnumRef::Option, 1, vec![Value::Str("kio".into())]);
+    assert_eq!(v, Value::List(vec![none.clone(), kio, none].into()));
+}
+
+#[test]
 fn report_names_functions_of_both_modules() {
     let web = "pub fn f(d: Dir) -> Int { json::g(d) }";
     let json = "pub fn g(d: Dir) -> Int { d.read(\"x\"); 1 }";

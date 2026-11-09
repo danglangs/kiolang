@@ -1619,3 +1619,127 @@ fn closures_display_and_count_toward_depth() {
         "evaluation is too deep",
     );
 }
+
+#[test]
+fn builtins_that_take_functions() {
+    let pre = "fn double(x: Int) -> Int { x * 2 }
+               fn half(x: Int) -> Result<Int, Str> { if x % 2 == 0 { Ok(x / 2) } else { Err(\"odd\") } }";
+    let t = |body: &str| shown(&format!("{pre} fn main() {body}"));
+    // `Option`: `map` and `and_then` call the function on `Some` only.
+    assert_eq!(t("-> Option<Int> { Some(2).map(double) }"), "Some(4)");
+    assert_eq!(
+        t("-> Option<Str> { let o: Option<Int> = None; o.map(|x| x.to_str()) }"),
+        "None"
+    );
+    assert_eq!(
+        t("-> Option<Int> { Some(\"7\").and_then(|s| s.parse_int()) }"),
+        "Some(7)"
+    );
+    assert_eq!(t("-> Option<Int> { Some(\"x\").and_then(|s| s.parse_int()) }"), "None");
+    // `Result`: `map` and `and_then` on `Ok`, `map_err` on `Err`.
+    let ok = "let r: Result<Int, Str> = Ok(3);";
+    let err = "let r: Result<Int, Str> = Err(\"e\");";
+    assert_eq!(t(&format!("-> Result<Int, Str> {{ {ok} r.map(double) }}")), "Ok(6)");
+    assert_eq!(
+        t(&format!("-> Result<Int, Str> {{ {err} r.map(double) }}")),
+        "Err(\"e\")"
+    );
+    assert_eq!(
+        t(&format!("-> Result<Int, Int> {{ {err} r.map_err(|e| e.len()) }}")),
+        "Err(1)"
+    );
+    assert_eq!(
+        t(&format!("-> Result<Int, Int> {{ {ok} r.map_err(|e| e.len()) }}")),
+        "Ok(3)"
+    );
+    assert_eq!(
+        t(&format!("-> Result<Int, Str> {{ {ok} r.and_then(half) }}")),
+        "Err(\"odd\")"
+    );
+    assert_eq!(
+        t(&format!("-> Result<Int, Str> {{ {ok} r.map(double).and_then(half) }}")),
+        "Ok(3)"
+    );
+    assert_eq!(
+        t(&format!("-> Result<Int, Str> {{ {err} r.and_then(half) }}")),
+        "Err(\"e\")"
+    );
+    // A closure given to `Result.and_then` may end in `Ok(x)`: the error type is the receiver's.
+    assert_eq!(
+        t(&format!(
+            "-> Result<Str, Str> {{ {ok} r.and_then(|x| Ok(x.to_str())) }}"
+        )),
+        "Ok(\"3\")"
+    );
+    // `List`: `map`, `filter`, `any`, `all`, in list order.
+    assert_eq!(t("-> List<Str> { [1, 2].map(|x| x.to_str()) }"), "[\"1\", \"2\"]");
+    assert_eq!(
+        t("-> List<Int> { [3, -1, 0, 5].filter(|x| x > 0).map(|x| x * 2) }"),
+        "[6, 10]"
+    );
+    let empty = "let xs: List<Int> = [];";
+    assert_eq!(
+        t(&format!(
+            "-> List<Bool> {{ {empty} [xs.any(|x| x > 0), xs.all(|x| x > 0)] }}"
+        )),
+        "[false, true]"
+    );
+    assert_eq!(
+        t("-> List<Bool> { let xs = [1, -2]; [xs.any(|x| x < 0), xs.all(|x| x < 0)] }"),
+        "[true, false]"
+    );
+    // Any `fn` value: a field, a local holding a closure returned from a function.
+    let src = "struct S { f: fn(Int) -> Int }
+               fn adder(n: Int) -> fn(Int) -> Int { |x| x + n }
+               fn main() -> List<Int> { let s = S { f: adder(10) }; let g = adder(1); [1, 2].map(s.f).map(g) }";
+    assert_eq!(shown(src), "[12, 13]");
+}
+
+#[test]
+fn and_then_with_a_function_name_and_try() {
+    // The W9a shape, `json::get(j, "title").and_then(json::as_str)`, with root functions
+    // (lang/tests/modules.rs has the module one).
+    let src = "fn get(j: Str, k: Str) -> Option<Str> { if j.contains(k) { Some(j) } else { None } }
+               fn as_len(s: Str) -> Option<Int> { if s == \"\" { None } else { Some(s.len()) } }
+               fn main() -> List<Option<Int>> { [get(\"title\", \"t\").and_then(as_len), get(\"x\", \"t\").and_then(as_len)] }";
+    assert_eq!(shown(src), "[Some(5), None]");
+    // `?` inside an `and_then` closure returns its `None` or `Err` from the closure.
+    let src = "fn main() -> List<Option<Int>> {
+                   let f = |s: Str| Some(s).and_then(|t| { let n = t.parse_int()?; Some(n + 1) });
+                   [f(\"1\"), f(\"x\")]
+               }";
+    assert_eq!(shown(src), "[Some(2), None]");
+    let src = "fn parse(s: Str) -> Result<Int, Str> { s.parse_int().ok_or(\"bad \" + s) }
+               fn main() -> List<Result<Int, Str>> {
+                   let r: Result<Str, Str> = Ok(\"4\");
+                   let e: Result<Str, Str> = Ok(\"z\");
+                   [r.and_then(|s| { let n = parse(s)?; Ok(n * 10) }), e.and_then(|s| { let n = parse(s)?; Ok(n * 10) })]
+               }";
+    assert_eq!(shown(src), "[Ok(40), Err(\"bad z\")]");
+}
+
+#[test]
+fn functions_given_to_builtins_run_in_order_and_stop_early() {
+    // `any` stops at the first true and `all` at the first false, as Rust's, so the division
+    // by zero after it is never reached.
+    assert_eq!(
+        int("fn main() -> Bool { [1, 0].any(|x| 10 / x > 0) }"),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        int("fn main() -> Bool { [-1, 0].all(|x| 10 / x > 0) }"),
+        Value::Bool(false)
+    );
+    // An error inside the function carries its own span.
+    let src = "fn main() -> Bool { [0, 1].all(|x| 10 / x > 0) }";
+    let e = exec(src).unwrap_err();
+    assert_eq!(e.msg, "division by zero");
+    assert_eq!(&src[e.span.start..e.span.end], "10 / x");
+    // The receiver is evaluated before the function value, which is evaluated once.
+    let src = "fn main() -> Int {
+                   let mut n = 1;
+                   let xs = [{ n = n * 10; n }, 0];
+                   xs.map({ n = n + 1; |x: Int| x + n })[0]
+               }";
+    assert_eq!(int(src), Value::Int(21));
+}

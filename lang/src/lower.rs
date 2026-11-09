@@ -559,6 +559,15 @@ impl<'a> Lowerer<'a> {
                     (T::Float, "is_infinite") => Builtin::FloatIsInfinite,
                     (T::Str, "slice") => Builtin::StrSlice,
                     (T::Bytes, "slice") => Builtin::BytesSlice,
+                    (T::Option(_), "map") => Builtin::OptionMap,
+                    (T::Option(_), "and_then") => Builtin::OptionAndThen,
+                    (T::Result(..), "map") => Builtin::ResultMap,
+                    (T::Result(..), "map_err") => Builtin::ResultMapErr,
+                    (T::Result(..), "and_then") => Builtin::ResultAndThen,
+                    (T::List(_), "map") => Builtin::ListMap,
+                    (T::List(_), "filter") => Builtin::ListFilter,
+                    (T::List(_), "any") => Builtin::ListAny,
+                    (T::List(_), "all") => Builtin::ListAll,
                     _ => unreachable!("checked method"),
                 };
                 return ir::ExprKind::Builtin(b, Box::new(self.expr(recv)), self.exprs(args));

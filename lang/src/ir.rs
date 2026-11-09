@@ -287,6 +287,17 @@ pub enum Builtin {
     FloatIsInfinite,
     StrSlice,
     BytesSlice,
+    /// The methods that take a function value, their one argument; each calls it on the
+    /// receiver's values in order (`any` and `all` stop at the first that decides).
+    OptionMap,
+    OptionAndThen,
+    ResultMap,
+    ResultMapErr,
+    ResultAndThen,
+    ListMap,
+    ListFilter,
+    ListAny,
+    ListAll,
 }
 
 /// Every built-in method that changes its receiver.

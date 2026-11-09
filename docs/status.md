@@ -20,11 +20,12 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 | C4 | capabilities in compiled code: every caps.wit method, host-checked grants shared with the interpreter path, same host functions, quotas, report check and audit log. Harness 252 to 278 ran both ways (26 capability programs, compared with their audit logs); a forged handle is refused by the handle table |
 | L6a | `fn(T) -> R` types and function items as values, called as `f(x)` or `(e)(x)`; no capability inside a `fn` type; interpreter only |
 | L6b | closures, capturing by copy, lifted to functions in lowering; a closure cannot capture a capability; interpreter only |
+| L6c | `map`, `and_then`, `map_err`, `filter`, `any`, `all` on `Option`/`Result`/`List`, typed from the function; a closure argument takes its parameter type from the receiver; interpreter only (C9b) |
 
 ## Next
 
 1. **C5** (compiled only), C7 (review: C4's grant path, `cabi_realloc` and `IN_PLACE`, the raw `send` import, the `trap` site `EXTRA` that returns), C8 (measure, refcount elision); C9a (function values compiled).
-2. L6c built-ins taking functions, then L7 generics.
+2. L7 generics; C9b (L6c's built-ins compiled).
 
 ## Waiting on the maintainer
 

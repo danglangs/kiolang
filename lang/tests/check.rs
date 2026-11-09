@@ -1206,7 +1206,7 @@ fn builtins_l4b() {
     );
     assert_eq!(
         hint("fn main() { let mut xs = [1]; xs.zzzzzz(); }"),
-        "List<Int> has: contains, len, pop, push, sort"
+        "List<Int> has: all, any, contains, filter, len, map, pop, push, sort"
     );
 }
 
@@ -1509,11 +1509,11 @@ fn result_ok_err_and_option_ok_or() {
     assert_eq!(hint(src), "change the return type or `match` on the result");
     assert_eq!(
         hint("fn f(o: Option<Int>) -> Bool { o.zzzzzz() } fn main() {}"),
-        "Option<Int> has: is_none, is_some, ok_or, unwrap_or"
+        "Option<Int> has: and_then, is_none, is_some, map, ok_or, unwrap_or"
     );
     assert_eq!(
         hint("fn f(o: Result<Int, Str>) -> Bool { o.zzzzzz() } fn main() {}"),
-        "Result<Int, Str> has: err, is_err, is_ok, ok, unwrap_or"
+        "Result<Int, Str> has: and_then, err, is_err, is_ok, map, map_err, ok, unwrap_or"
     );
 }
 
@@ -1881,6 +1881,116 @@ fn closure_rejections() {
     assert_eq!((msg.as_str(), at.as_str()), ("expected Str, found Int", "x"));
     // A closure's own locals and parameters are not captures.
     ok("fn main() -> Int { let f = |x: Int| { let mut y = x; y += 1; y }; f(1) }");
+}
+
+#[test]
+fn builtins_that_take_functions_check() {
+    // Types follow the function's: the closure's parameter from the receiver, its result from its body.
+    ok("fn main() -> List<Str> { [1, 2].map(|x| x.to_str()) }");
+    ok("fn main() -> List<Int> { [1, -2].filter(|x| x > 0).map(|x| x * 2) }");
+    ok("fn main() -> Bool { [\"a\"].any(|s| s.len() > 0) && [1].all(|x: Int| x > 0) }");
+    ok("fn main() -> Option<Str> { Some(1).map(|x| x.to_str()) }");
+    ok("fn main() -> Option<Int> { Some(\"1\").and_then(|s| s.parse_int()) }");
+    ok("fn main() -> Result<Int, Int> { let r: Result<Int, Str> = Err(\"e\"); r.map_err(|e| e.len()) }");
+    ok("fn main() -> Result<Bool, Str> { let r: Result<Int, Str> = Ok(1); r.map(|x| x > 0) }");
+    ok("fn main() -> Result<Int, Str> { let r: Result<Str, Str> = Ok(\"1\"); r.and_then(|s| { let n = s.parse_int().ok_or(\"no\")?; Ok(n) }) }");
+    // A function name, a field, a local; a closure nested in one passed directly.
+    ok("fn len(s: Str) -> Int { s.len() } fn main() -> List<Int> { [\"a\"].map(len) }");
+    ok("struct S { f: fn(Int) -> Bool } fn main() -> Bool { let s = S { f: |x| x > 0 }; [1].all(s.f) }");
+    ok("fn main() -> List<List<Int>> { let n = 2; [[1]].map(|xs| xs.map(|x| x * n)) }");
+    // `Ok` outside an `and_then` closure still needs a type.
+    let (msg, _) = reject("fn main() { let r: Result<Int, Str> = Ok(1); let x = r.map(|x| Ok(x)); }");
+    assert_eq!(msg, "cannot tell the type of `Ok`");
+}
+
+#[test]
+fn builtins_that_take_functions_reject() {
+    let r = "let r: Result<Int, Str> = Ok(1);";
+    let cases = [
+        (
+            "fn add(a: Int, b: Int) -> Int { a + b } fn main() { [1].map(add); }".to_string(),
+            "`map` takes a function of 1 parameter, found fn(Int, Int) -> Int",
+            "add",
+            "`List<Int>.map` is declared as `map(fn(Int) -> U) -> List<U>`",
+        ),
+        (
+            "fn main() { [1].map(|a, b| a); }".to_string(),
+            "`map` takes a function of 1 parameter, found a closure of 2 parameters",
+            "|a, b| a",
+            "`List<Int>.map` is declared as `map(fn(Int) -> U) -> List<U>`",
+        ),
+        (
+            "fn main() { [1].filter(|x| x * 2); }".to_string(),
+            "`filter` needs a function returning Bool, found fn(Int) -> Int",
+            "|x| x * 2",
+            "`List<Int>.filter` is declared as `filter(fn(Int) -> Bool) -> List<Int>`",
+        ),
+        (
+            "fn main() { [1].any(|x| x); }".to_string(),
+            "`any` needs a function returning Bool, found fn(Int) -> Int",
+            "|x| x",
+            "`List<Int>.any` is declared as `any(fn(Int) -> Bool) -> Bool`",
+        ),
+        (
+            "fn main() { [1].all(|x: Str| true); }".to_string(),
+            "`all` needs a function taking Int, found fn(Str) -> Bool",
+            "|x: Str| true",
+            "`List<Int>.all` is declared as `all(fn(Int) -> Bool) -> Bool`",
+        ),
+        (
+            "fn main() { [1].map(1); }".to_string(),
+            "`map` takes a function, found Int",
+            "1",
+            "`List<Int>.map` is declared as `map(fn(Int) -> U) -> List<U>`",
+        ),
+        (
+            "fn main() { [1].map(); }".to_string(),
+            "`map` takes 1 arguments, found 0",
+            "[1].map()",
+            "`List<Int>.map` is declared as `map(fn(Int) -> U) -> List<U>`",
+        ),
+        (
+            "fn main() { Some(1).and_then(|x| x + 1); }".to_string(),
+            "`and_then` needs a function returning Option<..>, found fn(Int) -> Int",
+            "|x| x + 1",
+            "`Option<Int>.and_then` is declared as `and_then(fn(Int) -> Option<U>) -> Option<U>`",
+        ),
+        (
+            format!("fn f(x: Int) -> Result<Int, Int> {{ Ok(x) }} fn main() {{ {r} r.and_then(f); }}"),
+            "`and_then` needs a function returning Result<.., Str>, found fn(Int) -> Result<Int, Int>",
+            "f",
+            "`Result<Int, Str>.and_then` is declared as `and_then(fn(Int) -> Result<U, Str>) -> Result<U, Str>`",
+        ),
+        (
+            format!("fn main() {{ {r} r.map_err(|e: Int| e); }}"),
+            "`map_err` needs a function taking Str, found fn(Int) -> Int",
+            "|e: Int| e",
+            "`Result<Int, Str>.map_err` is declared as `map_err(fn(Str) -> F) -> Result<Int, F>`",
+        ),
+        (
+            "fn main() { Some(\"1\").and_then(|s| { let r: Result<Int, Str> = Err(s); let n = r?; Some(n) }); }"
+                .to_string(),
+            "`?` on Result<Int, Str> in a closure returning Option<..>",
+            "r?",
+            "`match` on the value, or convert it: `.ok_or(e)` makes an Option a Result",
+        ),
+        (
+            "fn main() { Some(\"1\").and_then(|s| if s == \"\" { None } else { s.parse_int() }); }".to_string(),
+            "cannot tell the type of `None`",
+            "None",
+            "give the closure a type: `let f: fn(Str) -> Option<Int> = |s| ..;`, then `.and_then(f)`",
+        ),
+        (
+            "fn main() { [1].sum(); }".to_string(),
+            "no method `sum` on List<Int>",
+            "[1].sum()",
+            "List<Int> has: all, any, contains, filter, len, map, pop, push, sort",
+        ),
+    ];
+    for (src, msg, at, h) in cases {
+        assert_eq!(reject(&src), (msg.to_string(), at.to_string()), "{src}");
+        assert_eq!(hint(&src), h, "{src}");
+    }
 }
 
 /// Security: a closure cannot reach a capability by any path, and its type cannot name one.

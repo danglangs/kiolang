@@ -940,6 +940,33 @@ fn is_ok_or(recv: &Ty, name: &str) -> bool {
     matches!((recv, name), (Ty::Option(_), "ok_or"))
 }
 
+/// The built-in methods that take a function, typed from it by `Checker::fn_method`, since
+/// `method` cannot express their result.
+fn takes_fn(recv: &Ty, name: &str) -> bool {
+    matches!(
+        (recv, name),
+        (Ty::Option(_), "map" | "and_then")
+            | (Ty::Result(..), "map" | "map_err" | "and_then")
+            | (Ty::List(_), "map" | "filter" | "any" | "all")
+    )
+}
+
+/// How a method that takes a function is declared, as a hint; `U` and `F` are the function's result.
+fn fn_declared(recv: &Ty, name: &str) -> String {
+    let decl = match (recv, name) {
+        (Ty::Option(t), "map") => format!("map(fn({t}) -> U) -> Option<U>"),
+        (Ty::Option(t), _) => format!("and_then(fn({t}) -> Option<U>) -> Option<U>"),
+        (Ty::Result(t, e), "map") => format!("map(fn({t}) -> U) -> Result<U, {e}>"),
+        (Ty::Result(t, e), "map_err") => format!("map_err(fn({e}) -> F) -> Result<{t}, F>"),
+        (Ty::Result(t, e), _) => format!("and_then(fn({t}) -> Result<U, {e}>) -> Result<U, {e}>"),
+        (Ty::List(t), "map") => format!("map(fn({t}) -> U) -> List<U>"),
+        (Ty::List(t), "filter") => format!("filter(fn({t}) -> Bool) -> {recv}"),
+        (Ty::List(t), _) => format!("{name}(fn({t}) -> Bool) -> Bool"),
+        _ => unreachable!("takes_fn"),
+    };
+    format!("`{recv}.{name}` is declared as `{decl}`")
+}
+
 /// How a method is declared, as a hint for a call that does not fit.
 fn declared(recv: &Ty, name: &str, params: &[Ty], ret: &Ty) -> String {
     let tys: Vec<_> = params.iter().map(Ty::to_string).collect();
@@ -949,10 +976,14 @@ fn declared(recv: &Ty, name: &str, params: &[Ty], ret: &Ty) -> String {
 /// Every built-in method name, so hints can list the ones `method` accepts on a type.
 const METHODS: &[&str] = &[
     "abs",
+    "all",
+    "and_then",
+    "any",
     "ceil",
     "contains",
     "ends_with",
     "err",
+    "filter",
     "find",
     "floor",
     "get",
@@ -967,6 +998,8 @@ const METHODS: &[&str] = &[
     "keys",
     "len",
     "lines",
+    "map",
+    "map_err",
     "ok",
     "ok_or",
     "parse_float",
@@ -1002,7 +1035,7 @@ fn method_names<'a>(caps: &'a CapTable, recv: &Ty) -> Vec<&'a str> {
     METHODS
         .iter()
         .copied()
-        .filter(|n| method(caps, recv, n).is_some() || is_ok_or(recv, n))
+        .filter(|n| method(caps, recv, n).is_some() || is_ok_or(recv, n) || takes_fn(recv, n))
         .collect()
 }
 
@@ -1269,6 +1302,7 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
             scopes: Vec::new(),
             ret: Ty::Unit,
             ret_open: false,
+            try_shape: None,
             loops: Vec::new(),
             closures: Vec::new(),
             main_caps: &main_caps,
@@ -1332,6 +1366,9 @@ struct Checker<'a> {
     /// type (`ret_open`), `Never` until a `return` sets it.
     ret: Ty,
     ret_open: bool,
+    /// While `ret_open`, what the closure must return as an `and_then` argument: `Option<!>`
+    /// or `Result<!, E>`, so `?` inside it can be checked before the return type is known.
+    try_shape: Option<Ty>,
     /// Loops enclosing the statement being checked, inside the innermost function or closure.
     /// One entry per enclosing loop: whether a `break` has been seen in it.
     loops: Vec<bool>,
@@ -1602,12 +1639,16 @@ impl<'a> Checker<'a> {
 
     fn expr(&mut self, e: &Expr, expected: Option<&Ty>) -> Result<Ty, Diag> {
         let ty = self.expr_kind(e, expected)?;
+        self.record(e, &ty);
+        Ok(ty)
+    }
+
+    fn record(&mut self, e: &Expr, ty: &Ty) {
         // Lowering reads types back by span, so two expressions sharing one would give one of
         // them the wrong type: refuse in every build, not only debug ones.
         if self.types.insert(e.span, ty.clone()).is_some() {
             panic!("two expressions at {:?}", e.span);
         }
-        Ok(ty)
     }
 
     fn expr_kind(&mut self, e: &Expr, expected: Option<&Ty>) -> Result<Ty, Diag> {
@@ -1787,6 +1828,9 @@ impl<'a> Checker<'a> {
             let found = self.expr(&args[0], None)?;
             return Ok(Ty::Result(t.clone(), Box::new(found)));
         }
+        if takes_fn(&recv_ty, name) {
+            return self.fn_method(e, &recv_ty, name, args);
+        }
         let Some((params, ret)) = method(self.caps, &recv_ty, name) else {
             let names = method_names(self.caps, &recv_ty);
             let fn_field = match &recv_ty {
@@ -1835,6 +1879,79 @@ impl<'a> Checker<'a> {
         Ok(ret)
     }
 
+    /// A built-in method that takes a function (`takes_fn`), typed from the function's type. A
+    /// closure written as the argument takes its parameter type from the receiver and its
+    /// return type from its body.
+    fn fn_method(&mut self, e: &Expr, recv_ty: &Ty, name: &str, args: &[Expr]) -> Result<Ty, Diag> {
+        let decl = fn_declared(recv_ty, name);
+        if args.len() != 1 {
+            let msg = format!("`{name}` takes 1 arguments, found {}", args.len());
+            return Err(err(e.span, msg, Some(&decl)));
+        }
+        let param = match (recv_ty, name) {
+            (Ty::Result(_, err_ty), "map_err") => (**err_ty).clone(),
+            (Ty::Option(t) | Ty::Result(t, _) | Ty::List(t), _) => (**t).clone(),
+            _ => unreachable!("takes_fn"),
+        };
+        let shape = match (recv_ty, name) {
+            (Ty::Option(_), "and_then") => Some(Ty::Option(Box::new(Ty::Never))),
+            (Ty::Result(_, err_ty), "and_then") => Some(Ty::Result(Box::new(Ty::Never), err_ty.clone())),
+            _ => None,
+        };
+        let f = &args[0];
+        let found = match &f.kind {
+            ExprKind::Closure(ps, body) => {
+                if ps.len() != 1 {
+                    let msg = format!(
+                        "`{name}` takes a function of 1 parameter, found a closure of {} parameters",
+                        ps.len()
+                    );
+                    return Err(err(f.span, msg, Some(&decl)));
+                }
+                let want = (std::slice::from_ref(&param), None);
+                let ty = self.closure_with(f, ps, body, Some(want), shape, None)?;
+                self.record(f, &ty);
+                ty
+            }
+            _ => self.expr(f, None)?,
+        };
+        let Ty::Fn(ps, ret) = &found else {
+            let msg = format!("`{name}` takes a function, found {found}");
+            return Err(err(f.span, msg, Some(&decl)));
+        };
+        if ps.len() != 1 {
+            let msg = format!("`{name}` takes a function of 1 parameter, found {found}");
+            return Err(err(f.span, msg, Some(&decl)));
+        }
+        if ps[0] != param {
+            let msg = format!("`{name}` needs a function taking {param}, found {found}");
+            return Err(err(f.span, msg, Some(&decl)));
+        }
+        let ret = ret.clone();
+        let wrong_ret = |what: String| {
+            let msg = format!("`{name}` needs a function returning {what}, found {found}");
+            Err(err(f.span, msg, Some(&decl)))
+        };
+        match (recv_ty, name) {
+            (_, "filter" | "any" | "all") if *ret != Ty::Bool => wrong_ret("Bool".to_string()),
+            (Ty::List(_), "filter") => Ok(recv_ty.clone()),
+            (_, "any" | "all") => Ok(Ty::Bool),
+            (Ty::List(_), "map") => Ok(Ty::List(ret)),
+            (Ty::Option(_), "map") => Ok(Ty::Option(ret)),
+            (Ty::Result(_, err_ty), "map") => Ok(Ty::Result(ret, err_ty.clone())),
+            (Ty::Result(t, _), "map_err") => Ok(Ty::Result(t.clone(), ret)),
+            (Ty::Option(_), _) => match *ret {
+                Ty::Option(_) => Ok(*ret),
+                _ => wrong_ret("Option<..>".to_string()),
+            },
+            (Ty::Result(_, err_ty), _) => match &*ret {
+                Ty::Result(_, e2) if e2 == err_ty => Ok(*ret),
+                _ => wrong_ret(format!("Result<.., {err_ty}>")),
+            },
+            _ => unreachable!("takes_fn"),
+        }
+    }
+
     /// `None`, `Some(x)`, `Ok(x)` or `Err(x)`; all but `Some` take their type from `expected`.
     fn constructor(&mut self, e: &Expr, name: &str, args: &[Expr], expected: Option<&Ty>) -> Result<Ty, Diag> {
         let arity = usize::from(name != "None");
@@ -1846,6 +1963,12 @@ impl<'a> Checker<'a> {
                 "write `None` without arguments".to_string()
             };
             return Err(err(e.span, msg, Some(&hint)));
+        }
+        // In a closure given to `Result.and_then`, `Ok(x)` takes its error type from the receiver.
+        if let ("Ok", None, true, Some(Ty::Result(_, err_ty))) = (name, expected, self.ret_open, &self.try_shape) {
+            let err_ty = err_ty.clone();
+            let t = self.expr(&args[0], None)?;
+            return Ok(Ty::Result(Box::new(t), err_ty));
         }
         let payload = match (name, expected) {
             ("None", Some(Ty::Option(_))) => None,
@@ -1869,6 +1992,11 @@ impl<'a> Checker<'a> {
                     _ => "let x: Result<Int, Str> = Err(\"no\");",
                 };
                 let msg = format!("cannot tell the type of `{name}`");
+                if self.ret_open && self.try_shape.is_some() {
+                    let hint =
+                        "give the closure a type: `let f: fn(Str) -> Option<Int> = |s| ..;`, then `.and_then(f)`";
+                    return Err(err(e.span, msg, Some(hint)));
+                }
                 return Err(err(e.span, msg, Some(&format!("add a type: `{example}`"))));
             }
         };
@@ -1905,6 +2033,21 @@ impl<'a> Checker<'a> {
     fn try_expr(&mut self, e: &Expr, x: &Expr) -> Result<Ty, Diag> {
         let found = self.expr(x, None)?;
         if self.ret_open && self.ret == Ty::Never && matches!(found, Ty::Option(_) | Ty::Result(..)) {
+            // A closure passed to `and_then`: its return type is not known yet, but its kind is.
+            match (&found, &self.try_shape) {
+                (Ty::Option(t), Some(Ty::Option(_))) => return Ok((**t).clone()),
+                (Ty::Result(t, e_ty), Some(Ty::Result(_, want))) if e_ty == want => return Ok((**t).clone()),
+                (_, Some(shape)) => {
+                    let shape = match shape {
+                        Ty::Result(_, e_ty) => format!("Result<.., {e_ty}>"),
+                        _ => "Option<..>".to_string(),
+                    };
+                    let msg = format!("`?` on {found} in a closure returning {shape}");
+                    let hint = "`match` on the value, or convert it: `.ok_or(e)` makes an Option a Result";
+                    return Err(err(e.span, msg, Some(hint)));
+                }
+                (_, None) => {}
+            }
             let hint = "give the closure a type: `let f: fn(Int) -> Option<Int> = |x| ..`";
             let msg = "cannot tell what `?` returns from this closure".to_string();
             return Err(err(e.span, msg, Some(hint)));
@@ -2360,6 +2503,22 @@ impl<'a> Checker<'a> {
             let msg = format!("expected {ty}, found a closure of {} parameters", params.len());
             return Err(err(e.span, msg, Some(&format!("`{ty}` takes {}", ps.len()))));
         }
+        let want = want_fn.map(|(ps, r)| (ps.as_slice(), Some((**r).clone())));
+        self.closure_with(e, params, body, want, None, expected)
+    }
+
+    /// A closure whose parameter types, where not annotated, come from `want` (as many as
+    /// `params`), and whose return type is `want`'s, else its body's. `shape` is `try_shape`
+    /// for its body; `expected` is only for the error on an untyped parameter.
+    fn closure_with(
+        &mut self,
+        e: &Expr,
+        params: &[ClosureParam],
+        body: &Expr,
+        want: Option<(&[Ty], Option<Ty>)>,
+        shape: Option<Ty>,
+        expected: Option<&Ty>,
+    ) -> Result<Ty, Diag> {
         let mut scope = HashMap::new();
         let mut tys = Vec::new();
         for (i, p) in params.iter().enumerate() {
@@ -2368,7 +2527,7 @@ impl<'a> Checker<'a> {
                 let msg = format!("duplicate parameter `{}`", p.name);
                 return Err(err(p.span, msg, Some("rename one of them")));
             }
-            let ty = match (&p.ty, want_fn) {
+            let ty = match (&p.ty, &want) {
                 (Some(t), _) => {
                     let ty = resolve(t, self.caps, self.structs, self.enums, self.home)?;
                     if cap_in(&ty).is_some() {
@@ -2389,7 +2548,8 @@ impl<'a> Checker<'a> {
             tys.push(ty.clone());
             scope.insert(p.name.clone(), Local { ty, mutable: false });
         }
-        let ret = want_fn.map(|(_, r)| (**r).clone());
+        let ret = want.and_then(|(_, r)| r);
+        let outer_shape = std::mem::replace(&mut self.try_shape, shape);
         let outer_ret = std::mem::replace(&mut self.ret, ret.clone().unwrap_or(Ty::Never));
         let outer_open = std::mem::replace(&mut self.ret_open, ret.is_none());
         let outer_loops = std::mem::take(&mut self.loops);
@@ -2404,6 +2564,7 @@ impl<'a> Checker<'a> {
         let frame = self.closures.pop().expect("pushed above");
         self.loops = outer_loops;
         self.ret_open = outer_open;
+        self.try_shape = outer_shape;
         let ret = std::mem::replace(&mut self.ret, outer_ret);
         let found = found?;
         let ret = match ret {

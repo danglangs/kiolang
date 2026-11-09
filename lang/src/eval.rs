@@ -488,6 +488,29 @@ impl<'a> Interp<'a> {
                 }
             }
         }
+        self.enter(f, base)
+    }
+
+    /// Calls the function value `f` on one argument, for the built-ins that take a function.
+    fn apply(&mut self, f: &Value, arg: Value, span: Span) -> Res {
+        if self.calls == MAX_CALLS {
+            return Err(fail(span, "evaluation is too deep"));
+        }
+        let base = self.stack.len();
+        let f = match f {
+            Value::Fn(f) => *f,
+            Value::Closure(f, captured) => {
+                self.stack.extend_from_slice(captured);
+                *f
+            }
+            _ => unreachable!("checked function value"),
+        };
+        self.stack.push(arg);
+        self.enter(f, base)
+    }
+
+    /// Runs `f`, whose arguments are on the stack from `base`.
+    fn enter(&mut self, f: FuncId, base: usize) -> Res {
         let func = &self.m.funcs[f.0 as usize];
         self.stack.resize(base + func.locals.len(), Value::Unit);
         let caller = std::mem::replace(&mut self.base, base);
@@ -554,6 +577,11 @@ impl<'a> Interp<'a> {
     /// arguments could change the local, which a copy taken first would not see.
     #[inline(never)]
     fn builtin(&mut self, b: Builtin, recv: &'a Expr, args: &'a [Expr], span: Span) -> Res {
+        if takes_fn(b) {
+            let recv = self.expr(recv)?;
+            let f = self.expr(&args[0])?;
+            return self.with_fn(b, recv, &f, span);
+        }
         if in_place(recv) && args.iter().all(pure) {
             let start = self.path.len();
             let r = self.builtin_in_place(start, b, recv, args, span);
@@ -569,6 +597,55 @@ impl<'a> Interp<'a> {
         let root = self.steps(recv, start)?;
         let args = self.arg(args)?;
         builtin(&self.view(root, &self.path[start..]), b, args, span)
+    }
+
+    /// Built-in method `b`, which takes the function value `f`, on `recv`.
+    #[inline(never)]
+    fn with_fn(&mut self, b: Builtin, recv: Value, f: &Value, span: Span) -> Res {
+        use Builtin as B;
+        let truth = |v: Value| match v {
+            Value::Bool(b) => b,
+            _ => unreachable!("checked Bool"),
+        };
+        Ok(match (b, recv) {
+            // `None` is variant 0 of `Option`, `Ok` variant 0 of `Result`.
+            (B::OptionMap | B::OptionAndThen, Value::Enum(_, 0, _)) => none(),
+            (B::OptionMap, Value::Enum(_, _, mut p)) => some(self.apply(f, p.remove(0), span)?),
+            (B::OptionAndThen, Value::Enum(_, _, mut p)) => self.apply(f, p.remove(0), span)?,
+            (B::ResultMap, Value::Enum(_, 0, mut p)) => ok(self.apply(f, p.remove(0), span)?),
+            (B::ResultMapErr, Value::Enum(_, 1, mut p)) => {
+                Value::Enum(EnumRef::Result, 1, vec![self.apply(f, p.remove(0), span)?])
+            }
+            (B::ResultAndThen, Value::Enum(_, 0, mut p)) => self.apply(f, p.remove(0), span)?,
+            (B::ResultMap | B::ResultMapErr | B::ResultAndThen, r @ Value::Enum(..)) => r,
+            (B::ListMap, Value::List(xs)) => {
+                let mut out = Vec::with_capacity(xs.len());
+                for x in xs.iter() {
+                    out.push(self.apply(f, x.clone(), span)?);
+                }
+                Value::List(Rc::new(out))
+            }
+            (B::ListFilter, Value::List(xs)) => {
+                let mut out = Vec::new();
+                for x in xs.iter() {
+                    if truth(self.apply(f, x.clone(), span)?) {
+                        out.push(x.clone());
+                    }
+                }
+                Value::List(Rc::new(out))
+            }
+            (B::ListAny | B::ListAll, Value::List(xs)) => {
+                // `any` stops at the first true, `all` at the first false, as Rust's.
+                let stop = b == B::ListAny;
+                for x in xs.iter() {
+                    if truth(self.apply(f, x.clone(), span)?) == stop {
+                        return Ok(Value::Bool(stop));
+                    }
+                }
+                Value::Bool(!stop)
+            }
+            _ => unreachable!("checked receiver of {b:?}"),
+        })
     }
 
     /// The arguments a built-in method may take: at most two.
@@ -789,6 +866,27 @@ type Args = (Option<Value>, Option<Value>);
 
 fn some(v: Value) -> Value {
     Value::Enum(EnumRef::Option, 1, vec![v])
+}
+
+fn ok(v: Value) -> Value {
+    Value::Enum(EnumRef::Result, 0, vec![v])
+}
+
+/// The built-ins that take a function value, which `Eval::with_fn` runs.
+fn takes_fn(b: Builtin) -> bool {
+    use Builtin as B;
+    matches!(
+        b,
+        B::OptionMap
+            | B::OptionAndThen
+            | B::ResultMap
+            | B::ResultMapErr
+            | B::ResultAndThen
+            | B::ListMap
+            | B::ListFilter
+            | B::ListAny
+            | B::ListAll
+    )
 }
 
 fn none() -> Value {
