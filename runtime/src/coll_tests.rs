@@ -14,9 +14,10 @@ const CHAIN: u32 = 12;
 const PAIR: u32 = 13;
 const MAP_STR_LIST: u32 = 14;
 const DEEP: u32 = 15; // List<DEEP>
+const RES_STR: u32 = 16; // Result<Str, Str>
 
 const NAME: Name = Name { off: 0, len: 0 };
-const DESCS: [Desc; 16] = [
+const DESCS: [Desc; 17] = [
     Desc::Unit,
     Desc::Int,
     Desc::Bool,
@@ -54,6 +55,10 @@ const DESCS: [Desc; 16] = [
         value: LIST_INT,
     },
     Desc::List { elem: DEEP },
+    Desc::Enum {
+        name: NAME,
+        variants: Slice { start: 6, len: 2 },
+    },
 ];
 const SLOTS: [u32; 6] = [desc::INT, desc::STR, CHAIN, desc::STR, LIST_INT, LIST_INT];
 const FIELDS: [Name; 6] = [Name { off: 0, len: 0 }; 6];
@@ -63,13 +68,15 @@ const fn variant(start: u32, len: u32) -> Variant {
         slots: Slice { start, len },
     }
 }
-const VARIANTS: [Variant; 6] = [
+const VARIANTS: [Variant; 8] = [
     variant(0, 0),
     variant(0, 1),
     variant(0, 0),
     variant(1, 1),
     variant(0, 0),
     variant(2, 1),
+    variant(1, 1),
+    variant(1, 1),
 ];
 const T: Table = Table {
     descs: &DESCS,
@@ -293,7 +300,7 @@ fn map_get_insert_remove() {
     let m = coll::map_new(MAP_INT_STR);
     // SAFETY: `m` is a unique `Map<Int, Str>`.
     unsafe {
-        let none = coll::map_get(&T, m, 1, OPT_STR);
+        let none = coll::map_get(&T, m, 1, OPT_STR, core::ptr::null_mut());
         assert_eq!(*field_u32(none), 0);
         dec(none);
 
@@ -306,7 +313,7 @@ fn map_get_insert_remove() {
         coll::map_remove(&T, m, 9);
         assert_eq!(coll::map_len(m), 1);
 
-        let some = coll::map_get(&T, m, 1, OPT_STR);
+        let some = coll::map_get(&T, m, 1, OPT_STR, core::ptr::null_mut());
         assert_eq!(*field_u32(some), 1);
         assert_eq!(rc(from_slot(v)), 2);
         assert_eq!(str_of(*obj::slot(&T, some, 0)), b"new");
@@ -336,12 +343,12 @@ fn map_with_int_values_and_str_keys() {
         coll::map_insert(&T, m, b, 5);
         dec(from_slot(b));
         coll::map_remove(&T, m, k);
-        let g = coll::map_get(&T, m, k, OPT_INT);
+        let g = coll::map_get(&T, m, k, OPT_INT, core::ptr::null_mut());
         assert_eq!(*field_u32(g), 0);
         dec(g);
         dec(from_slot(k));
         let k = s("b");
-        let g = coll::map_get(&T, m, k, OPT_INT);
+        let g = coll::map_get(&T, m, k, OPT_INT, core::ptr::null_mut());
         assert_eq!(*obj::slot(&T, g, 0), 5);
         dec(g);
         dec(from_slot(k));
@@ -514,5 +521,168 @@ fn deep_lists_are_equal_and_freed() {
     dec(a);
     dec(b);
     dec(c);
+    assert_eq!(obj::live(), before);
+}
+
+/// A pinned `None` of `opt`, as codegen emits.
+fn pinned_none(opt: u32) -> *mut Header {
+    let p = obj::alloc(&T, opt, 0);
+    // SAFETY: `p` is live and ours.
+    unsafe { (*p).rc = obj::PINNED };
+    p
+}
+
+fn unpin(p: *mut Header) {
+    // SAFETY: `p` is live; give it a real count and drop it.
+    unsafe { (*p).rc = 1 };
+    dec(p);
+}
+
+/// The variant of an `Option` or `Result`, and its payload slot if it has one.
+fn parts(p: *mut Header) -> (u32, Option<u64>) {
+    // SAFETY: `p` is a live `Option` or `Result` of `T`.
+    unsafe {
+        let v = *field_u32(p);
+        let (_, ds) = obj::record(&T, p);
+        (v, (!ds.is_empty()).then(|| *obj::slot(&T, p, 0)))
+    }
+}
+
+#[test]
+fn list_contains_compares_by_value() {
+    let _l = lock();
+    let before = obj::live();
+    let (xs, empty, ss) = (ints(&[1, 2, -3]), ints(&[]), strs(&["a", "bc"]));
+    let (bc, b) = (s("bc"), s("b"));
+    // SAFETY: live lists and slot values of their element types.
+    unsafe {
+        assert!(coll::list_contains(&T, xs, 2) && coll::list_contains(&T, xs, -3i64 as u64));
+        assert!(!coll::list_contains(&T, xs, 3) && !coll::list_contains(&T, empty, 1));
+        assert!(coll::list_contains(&T, ss, bc) && !coll::list_contains(&T, ss, b));
+    }
+    for p in [xs, empty, ss, from_slot(bc), from_slot(b)] {
+        dec(p);
+    }
+    assert_eq!(obj::live(), before);
+}
+
+#[test]
+fn list_sort_ints_signed_and_strs_by_bytes() {
+    let _l = lock();
+    let before = obj::live();
+    let xs = ints(&[3, -1, 2, i64::MIN, 2, i64::MAX, 0]);
+    let empty = ints(&[]);
+    let ss = strs(&["b", "B", "a", "é", "", "ab"]);
+    // SAFETY: unique lists of `Int` and `Str`.
+    unsafe {
+        coll::list_sort(&T, xs);
+        coll::list_sort(&T, empty);
+        coll::list_sort(&T, ss);
+    }
+    assert_eq!(contents(xs), [i64::MIN, -1, 0, 2, 2, 3, i64::MAX]);
+    assert_eq!(contents(empty), []);
+    let got: alloc::vec::Vec<_> = (0..6).map(|i| str_at(ss, i)).collect();
+    assert_eq!(got, [&b""[..], b"B", b"a", b"ab", b"b", "é".as_bytes()]);
+    for p in [xs, empty, ss] {
+        dec(p);
+    }
+    assert_eq!(obj::live(), before);
+}
+
+/// `pop` moves the element into the `Some`: its count is unchanged, and freeing the `Some`
+/// frees it.
+#[test]
+fn list_pop_moves_the_element() {
+    let _l = lock();
+    let before = obj::live();
+    let none = pinned_none(OPT_STR);
+    let ss = strs(&["a", "b"]);
+    // SAFETY: a unique `List<Str>`; `none` is a `None` of `OPT_STR`.
+    unsafe {
+        let b = coll::list_get(&T, ss, 1).unwrap();
+        dec(from_slot(b));
+        let p = coll::list_pop(&T, ss, OPT_STR, none);
+        assert_eq!(parts(p), (1, Some(b)));
+        assert_eq!(rc(from_slot(b)), 1);
+        dec(p);
+        let a = coll::list_pop(&T, ss, OPT_STR, none);
+        assert_eq!(str_of(parts(a).1.unwrap()), b"a");
+        dec(a);
+        assert_eq!(coll::list_pop(&T, ss, OPT_STR, none), none);
+        assert_eq!(coll::list_len(ss), 0);
+        let fresh = coll::list_pop(&T, ss, OPT_STR, core::ptr::null_mut());
+        assert_eq!(parts(fresh), (0, None));
+        dec(fresh);
+        let xs = ints(&[7]);
+        let p = coll::list_pop(&T, xs, OPT_INT, core::ptr::null_mut());
+        assert_eq!(parts(p), (1, Some(7)));
+        dec(p);
+        dec(xs);
+    }
+    dec(ss);
+    unpin(none);
+    assert_eq!(obj::live(), before);
+}
+
+/// `ok`, `err` and `ok_or` borrow their arguments and hold new references.
+#[test]
+fn result_ok_err_and_option_ok_or() {
+    let _l = lock();
+    let before = obj::live();
+    let none = pinned_none(OPT_STR);
+    let (x, e) = (s("x"), s("e"));
+    let ok = obj::alloc(&T, RES_STR, 0);
+    let err = obj::alloc(&T, RES_STR, 1);
+    let some = obj::alloc(&T, OPT_STR, 1);
+    // SAFETY: fresh objects with one slot each, filled with owned references; then live
+    // values of the types each function takes.
+    unsafe {
+        obj::inc(from_slot(x));
+        obj::inc(from_slot(x));
+        obj::inc(from_slot(e));
+        *obj::slot(&T, ok, 0) = x;
+        *obj::slot(&T, some, 0) = x;
+        *obj::slot(&T, err, 0) = e;
+        assert_eq!(rc(from_slot(x)), 3);
+        let o = coll::result_variant(&T, ok, 0, OPT_STR, none);
+        assert_eq!((parts(o), rc(from_slot(x))), ((1, Some(x)), 4));
+        dec(o);
+        assert_eq!(coll::result_variant(&T, ok, 1, OPT_STR, none), none);
+        assert_eq!(coll::result_variant(&T, err, 0, OPT_STR, none), none);
+        let o = coll::result_variant(&T, err, 1, OPT_STR, none);
+        assert_eq!((parts(o), rc(from_slot(e))), ((1, Some(e)), 3));
+        dec(o);
+        let r = coll::option_ok_or(&T, some, e, RES_STR);
+        assert_eq!((parts(r), rc(from_slot(x)), rc(from_slot(e))), ((0, Some(x)), 4, 2));
+        dec(r);
+        let r = coll::option_ok_or(&T, none, e, RES_STR);
+        assert_eq!((parts(r), rc(from_slot(e))), ((1, Some(e)), 3));
+        dec(r);
+    }
+    for p in [ok, err, some, from_slot(x), from_slot(e)] {
+        dec(p);
+    }
+    unpin(none);
+    assert_eq!(obj::live(), before);
+}
+
+#[test]
+fn map_get_returns_the_pinned_none() {
+    let _l = lock();
+    let before = obj::live();
+    let none = pinned_none(OPT_INT);
+    let m = coll::map_new(MAP_STR_INT);
+    let k = s("k");
+    // SAFETY: a `Map<Str, Int>` and a `Str` key.
+    unsafe {
+        assert_eq!(coll::map_get(&T, m, k, OPT_INT, none), none);
+        coll::map_insert(&T, m, k, 5);
+        let g = coll::map_get(&T, m, k, OPT_INT, none);
+        assert_eq!(parts(g), (1, Some(5)));
+        dec(g);
+    }
+    dec(from_slot(k));
+    dec(m);
+    unpin(none);
     assert_eq!(obj::live(), before);
 }

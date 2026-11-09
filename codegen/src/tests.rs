@@ -24,9 +24,9 @@ fn the_component_validates() {
 }
 
 #[test]
-#[should_panic(expected = "codegen: builtin StrEndsWith")]
+#[should_panic(expected = "codegen: type Cap")]
 fn unsupported_ir_names_the_node() {
-    let _ = compile(&module("fn main() { \"12\".ends_with(\"2\"); }"));
+    let _ = compile(&module("fn main(input: Dir) {}"));
 }
 
 #[test]

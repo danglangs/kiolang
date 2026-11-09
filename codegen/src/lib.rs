@@ -293,6 +293,16 @@ struct FuncGen<'a, 'm> {
     code: Vec<u8>,
 }
 
+/// What a runtime operation takes before its operands: nothing; its result's descriptor (a
+/// `List<Str>`, `List<K>`, `Result`), or for an `Option` result also its pinned `None`, which it
+/// returns rather than allocating one.
+#[derive(Clone, Copy)]
+enum Pre {
+    Nothing,
+    Desc,
+    Opt,
+}
+
 #[derive(Clone, Copy)]
 enum Open {
     Block,
@@ -388,18 +398,27 @@ impl FuncGen<'_, '_> {
         self.owned.truncate(mark);
     }
 
-    /// Calls runtime export `name` on `xs`, which it borrows, with the result's descriptor
-    /// first if it takes one, and `site` last if it can fail.
-    fn rt_op(&mut self, name: &str, desc: Option<u32>, xs: &[&ir::Expr], site: Option<u32>) {
-        self.rt_op_slots(name, desc, xs, site, false)
+    /// Calls runtime export `name` on `xs`, which it borrows, with `site` last if it can fail.
+    fn rt_op(&mut self, name: &str, xs: &[&ir::Expr], site: Option<u32>) {
+        self.rt_op_slots(name, &[], xs, site, false)
     }
 
-    /// `rt_op`, passing the operands after the first as slots if `slots`: a map key, or the
-    /// default of `unwrap_or`.
-    fn rt_op_slots(&mut self, name: &str, desc: Option<u32>, xs: &[&ir::Expr], site: Option<u32>, slots: bool) {
+    /// The constants a runtime operation with result type `t` takes first.
+    fn pre(&mut self, pre: Pre, t: &Ty) -> Vec<u32> {
+        match pre {
+            Pre::Nothing => vec![],
+            Pre::Desc => vec![self.statics.desc(t)],
+            Pre::Opt => vec![self.statics.desc(t), self.statics.pinned(t, 0)],
+        }
+    }
+
+    /// `rt_op` with constants `pre` first (the result's descriptor, its pinned `None`), and the
+    /// operands after the first as slots if `slots`: a map key, a list element, the default of
+    /// `unwrap_or`, the error of `ok_or`.
+    fn rt_op_slots(&mut self, name: &str, pre: &[u32], xs: &[&ir::Expr], site: Option<u32>, slots: bool) {
         self.borrowing(xs, |g, temps| {
-            if let Some(d) = desc {
-                g.sink().i32_const(d as i32);
+            for &c in pre {
+                g.sink().i32_const(c as i32);
             }
             for (i, (x, t)) in xs.iter().zip(temps).enumerate() {
                 g.get(x, *t);
@@ -718,19 +737,27 @@ impl FuncGen<'_, '_> {
         self.owned.truncate(mark);
     }
 
-    /// `push`, `insert` and `remove` on a place: the indexes, then the arguments, then the
-    /// place made unique along its path, and the change.
-    fn mutate(&mut self, place: &ir::Place, op: Mut, args: &[ir::Expr], span: Span) {
-        if matches!(op, Mut::ListSort | Mut::ListPop) {
-            unimplemented!("codegen: mutation {op:?}");
-        }
+    /// `push`, `insert`, `remove`, `sort` and `pop` (of type `ty`) on a place: the indexes,
+    /// then the arguments, then the place made unique along its path, and the change.
+    fn mutate(&mut self, place: &ir::Place, op: Mut, args: &[ir::Expr], ty: &Ty, span: Span) {
         let (mut xs, sites) = self.indexes(place);
         let n = xs.len();
         xs.extend(args);
         let (mark, temps) = self.operands(&xs);
         let (cur, slot) = self.walk(place, &temps, &sites, place.steps.len(), &mut 0);
         let args: Vec<(&ir::Expr, Option<u32>)> = args.iter().zip(temps[n..].iter().copied()).collect();
-        if op == Mut::BytesPush {
+        if op == Mut::ListPop {
+            // The popped element moves into the `Some`, the expression's (+1) value.
+            let pre = self.pre(Pre::Opt, ty);
+            for c in pre {
+                self.sink().i32_const(c as i32);
+            }
+            self.sink().local_get(cur);
+            self.call_rt("rt_list_pop");
+        } else if op == Mut::ListSort {
+            self.sink().local_get(cur);
+            self.call_rt("rt_list_sort");
+        } else if op == Mut::BytesPush {
             // `rt_bytes_push` returns the object to store back: the same one or a larger one.
             let site = self.site(span, "byte {a} out of range 0..=255");
             if let Some(a) = slot {
@@ -895,7 +922,7 @@ impl FuncGen<'_, '_> {
                 }
                 self.close();
             }
-            ExprKind::Binary(BinOp::Concat, a, b) => self.rt_op("rt_concat", None, &[&**a, &**b], None),
+            ExprKind::Binary(BinOp::Concat, a, b) => self.rt_op("rt_concat", &[&**a, &**b], None),
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), a, b) if is_ptr(&a.ty) => {
                 let desc = self.statics.desc(&a.ty);
                 self.borrowing(&[&**a, &**b], |g, temps| {
@@ -948,49 +975,73 @@ impl FuncGen<'_, '_> {
                 self.sink().call(index);
             }
             ExprKind::Builtin(b, recv, args) => {
-                // Whether the runtime takes the result's descriptor (`List<Str>`, `List<K>`).
-                let (name, desc, error) = match b {
-                    Builtin::StrParseInt => ("rt_str_parse_int", true, None),
-                    Builtin::MapGet => ("rt_map_get", true, None),
-                    Builtin::OptionUnwrapOr => ("rt_option_unwrap_or", false, None),
-                    Builtin::ResultUnwrapOr => ("rt_result_unwrap_or", false, None),
-                    Builtin::OptionIsSome => ("rt_option_is_some", false, None),
-                    Builtin::OptionIsNone => ("rt_option_is_none", false, None),
-                    Builtin::ResultIsOk => ("rt_result_is_ok", false, None),
-                    Builtin::ResultIsErr => ("rt_result_is_err", false, None),
-                    Builtin::IntToStr => ("rt_int_to_str", false, None),
-                    Builtin::StrLen => ("rt_str_len", false, None),
-                    Builtin::StrToBytes => ("rt_str_to_bytes", false, None),
-                    Builtin::StrSplit => ("rt_str_split", true, Some("`split` needs a non-empty separator")),
-                    Builtin::StrLines => ("rt_str_lines", true, None),
-                    Builtin::StrTrim => ("rt_str_trim", false, None),
-                    Builtin::StrContains => ("rt_str_contains", false, None),
-                    Builtin::StrStartsWith => ("rt_str_starts_with", false, None),
-                    Builtin::BytesLen => ("rt_bytes_len", false, None),
-                    Builtin::BytesToStr => ("rt_bytes_to_str", false, Some("invalid UTF-8")),
-                    Builtin::ListLen => ("rt_list_len", false, None),
-                    Builtin::MapLen => ("rt_map_len", false, None),
-                    Builtin::MapKeys => ("rt_map_keys", true, None),
-                    b => unimplemented!("codegen: builtin {b:?}"),
+                use Pre::{Desc, Nothing, Opt};
+                let (name, pre, error) = match b {
+                    // L8 floats (C10) and L5b slices (C11).
+                    Builtin::IntToFloat
+                    | Builtin::StrParseFloat
+                    | Builtin::FloatToStr
+                    | Builtin::FloatToInt
+                    | Builtin::FloatAbs
+                    | Builtin::FloatFloor
+                    | Builtin::FloatCeil
+                    | Builtin::FloatRound
+                    | Builtin::FloatSqrt
+                    | Builtin::FloatIsNan
+                    | Builtin::FloatIsFinite
+                    | Builtin::FloatIsInfinite
+                    | Builtin::StrSlice
+                    | Builtin::BytesSlice => unimplemented!("codegen: builtin {b:?}"),
+                    Builtin::StrParseInt => ("rt_str_parse_int", Opt, None),
+                    Builtin::MapGet => ("rt_map_get", Opt, None),
+                    Builtin::OptionUnwrapOr => ("rt_option_unwrap_or", Nothing, None),
+                    Builtin::ResultUnwrapOr => ("rt_result_unwrap_or", Nothing, None),
+                    Builtin::OptionIsSome => ("rt_option_is_some", Nothing, None),
+                    Builtin::OptionIsNone => ("rt_option_is_none", Nothing, None),
+                    Builtin::ResultIsOk => ("rt_result_is_ok", Nothing, None),
+                    Builtin::ResultIsErr => ("rt_result_is_err", Nothing, None),
+                    Builtin::ResultOk => ("rt_result_ok", Opt, None),
+                    Builtin::ResultErr => ("rt_result_err", Opt, None),
+                    Builtin::OptionOkOr => ("rt_option_ok_or", Desc, None),
+                    Builtin::IntToStr => ("rt_int_to_str", Nothing, None),
+                    Builtin::StrLen => ("rt_str_len", Nothing, None),
+                    Builtin::StrToBytes => ("rt_str_to_bytes", Nothing, None),
+                    Builtin::StrSplit => ("rt_str_split", Desc, Some("`split` needs a non-empty separator")),
+                    Builtin::StrLines => ("rt_str_lines", Desc, None),
+                    Builtin::StrTrim => ("rt_str_trim", Nothing, None),
+                    Builtin::StrContains => ("rt_str_contains", Nothing, None),
+                    Builtin::StrStartsWith => ("rt_str_starts_with", Nothing, None),
+                    Builtin::StrEndsWith => ("rt_str_ends_with", Nothing, None),
+                    Builtin::StrStripPrefix => ("rt_str_strip_prefix", Opt, None),
+                    Builtin::StrStripSuffix => ("rt_str_strip_suffix", Opt, None),
+                    Builtin::StrFind => ("rt_str_find", Opt, None),
+                    Builtin::StrReplace => ("rt_str_replace", Nothing, None),
+                    Builtin::ListContains => ("rt_list_contains", Nothing, None),
+                    Builtin::BytesLen => ("rt_bytes_len", Nothing, None),
+                    Builtin::BytesToStr => ("rt_bytes_to_str", Nothing, Some("invalid UTF-8")),
+                    Builtin::ListLen => ("rt_list_len", Nothing, None),
+                    Builtin::MapLen => ("rt_map_len", Nothing, None),
+                    Builtin::MapKeys => ("rt_map_keys", Desc, None),
                 };
-                let desc = desc.then(|| self.statics.desc(&e.ty));
+                let pre = self.pre(pre, &e.ty);
                 let site = error.map(|t| self.site(e.span, t));
                 let xs: Vec<&ir::Expr> = std::iter::once(&**recv).chain(args).collect();
-                // A map key and an `unwrap_or` default go as slots; `unwrap_or` gives a slot.
+                // These take their argument as a slot; `unwrap_or` gives a slot.
                 let unwrap = matches!(b, Builtin::OptionUnwrapOr | Builtin::ResultUnwrapOr);
-                self.rt_op_slots(name, desc, &xs, site, unwrap || *b == Builtin::MapGet);
+                let slots = unwrap || matches!(b, Builtin::MapGet | Builtin::ListContains | Builtin::OptionOkOr);
+                self.rt_op_slots(name, &pre, &xs, site, slots);
                 if unwrap {
                     self.slot_out(&e.ty);
                 }
             }
             ExprKind::Index(base, i) if base.ty == Ty::Bytes => {
                 let site = self.site(e.span, OUT_OF_BOUNDS);
-                self.rt_op("rt_bytes_get", None, &[&**base, &**i], Some(site));
+                self.rt_op("rt_bytes_get", &[&**base, &**i], Some(site));
             }
             ExprKind::Index(base, i) => {
                 // The element is +1, as a slot.
                 let site = self.site(e.span, OUT_OF_BOUNDS);
-                self.rt_op("rt_list_get", None, &[&**base, &**i], Some(site));
+                self.rt_op("rt_list_get", &[&**base, &**i], Some(site));
                 self.slot_out(&e.ty);
             }
             ExprKind::List(items) => {
@@ -1016,7 +1067,7 @@ impl FuncGen<'_, '_> {
                 self.sink().i32_const(desc as i32);
                 self.call_rt("rt_map_new");
             }
-            ExprKind::Mutate(place, op, args) => self.mutate(place, *op, args, e.span),
+            ExprKind::Mutate(place, op, args) => self.mutate(place, *op, args, &e.ty, e.span),
             ExprKind::StructLit(_, inits) => {
                 let desc = self.statics.desc(&e.ty);
                 let inits: Vec<(u32, &ir::Expr)> = inits.iter().map(|(f, x)| (*f, x)).collect();
@@ -1390,29 +1441,23 @@ impl FuncGen<'_, '_> {
 fn entry(rt_init: u32, table: u32, main: u32, ret: &Ty) -> Function {
     let mut f = Function::new([]);
     f.instructions().i32_const(table as i32).call(rt_init).call(main);
-    match ret {
-        Ty::Int => {}
-        Ty::Bool | Ty::Str | Ty::Bytes | Ty::Struct(_) | Ty::Enum(_) | Ty::Option(_) => {
+    match val_type(ret) {
+        Some(ValType::I64) => {}
+        Some(_) => {
             f.instructions().i64_extend_i32_u();
         }
-        Ty::Unit => {
+        None => {
             f.instructions().i64_const(0);
         }
-        t => unimplemented!("codegen: main returning {}", node(t)),
     }
     f.instructions().end();
     f
 }
 
-/// The body of `kio_main_desc`: the descriptor of main's value. A `Result` waits for C3e,
-/// which shows a failed `Err` as the guest does.
+/// The body of `kio_main_desc`: the descriptor of main's value, which the runtime's `run`
+/// displays (a `Result` that is `Err` as a failure showing its error).
 fn entry_desc(statics: &mut Statics, ret: &Ty) -> Function {
-    let desc = match ret {
-        Ty::Unit | Ty::Int | Ty::Bool | Ty::Str | Ty::Bytes | Ty::Struct(_) | Ty::Enum(_) | Ty::Option(_) => {
-            statics.desc(ret)
-        }
-        t => unimplemented!("codegen: main returning {}", node(t)),
-    };
+    let desc = statics.desc(ret);
     let mut f = Function::new([]);
     f.instructions().i32_const(desc as i32).end();
     f

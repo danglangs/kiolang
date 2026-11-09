@@ -120,6 +120,29 @@ pub fn alloc(t: &Table, desc: u32, variant: u32) -> *mut Header {
     p
 }
 
+/// An `Option` of descriptor `opt` (variant 0 `None`, 1 `Some` with one slot): `Some(v)`
+/// taking `v`'s reference, or `none`, a pinned `None` of `opt` (no allocation), or a new `None`
+/// if `none` is null.
+///
+/// # Safety
+/// `none` is null or a `None` of `opt`; `v` is a slot value of `Some`'s payload type.
+pub unsafe fn option(t: &Table, opt: u32, none: *mut Header, v: Option<u64>) -> *mut Header {
+    match v {
+        Some(v) => {
+            let p = alloc(t, opt, 1);
+            // SAFETY: `p` is a fresh `Some`, with one slot.
+            unsafe { *slot(t, p, 0) = v };
+            p
+        }
+        None if none.is_null() => alloc(t, opt, 0),
+        None => {
+            // SAFETY: the caller's guarantee.
+            unsafe { inc(none) };
+            none
+        }
+    }
+}
+
 /// A `Str` or `Bytes` (by `desc`) holding a copy of `b`.
 pub fn new_bytes(desc: u32, b: &[u8]) -> *mut Header {
     new_bytes_cap(desc, b, b.len())

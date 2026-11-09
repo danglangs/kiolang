@@ -162,11 +162,44 @@ pub unsafe extern "C" fn rt_str_starts_with(s: u32, prefix: u32) -> bool {
     unsafe { text::starts_with(ptr(s), ptr(prefix)) }
 }
 
-/// `desc` is `Option<Int>`.
+/// `desc` is `Option<Int>`; `none` is its pinned `None`.
 #[no_mangle]
-pub unsafe extern "C" fn rt_str_parse_int(desc: u32, s: u32) -> u32 {
+pub unsafe extern "C" fn rt_str_parse_int(desc: u32, none: u32, s: u32) -> u32 {
     // SAFETY: the group's contract.
-    unsafe { addr(text::parse_int(&table(), desc, core::ptr::null_mut(), ptr(s))) }
+    unsafe { addr(text::parse_int(&table(), desc, ptr(none), ptr(s))) }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_str_ends_with(s: u32, suffix: u32) -> bool {
+    // SAFETY: the group's contract.
+    unsafe { text::ends_with(ptr(s), ptr(suffix)) }
+}
+
+/// `desc` is `Option<Str>`; `none` is its pinned `None`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_str_strip_prefix(desc: u32, none: u32, s: u32, p: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unsafe { addr(text::strip_prefix(&table(), desc, ptr(none), ptr(s), ptr(p))) }
+}
+
+/// `desc` is `Option<Str>`; `none` is its pinned `None`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_str_strip_suffix(desc: u32, none: u32, s: u32, p: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unsafe { addr(text::strip_suffix(&table(), desc, ptr(none), ptr(s), ptr(p))) }
+}
+
+/// `desc` is `Option<Int>`; `none` is its pinned `None`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_str_find(desc: u32, none: u32, s: u32, sub: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unsafe { addr(text::find(&table(), desc, ptr(none), ptr(s), ptr(sub))) }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_str_replace(s: u32, from: u32, to: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unsafe { addr(text::replace(ptr(s), ptr(from), ptr(to))) }
 }
 
 #[no_mangle]
@@ -226,11 +259,39 @@ pub unsafe extern "C" fn rt_map_keys(desc: u32, m: u32) -> u32 {
     unsafe { addr(coll::map_keys(&table(), ptr(m), desc)) }
 }
 
-/// `desc` is `Option<V>`; `k` is an `Int` or a `Str` pointer.
+/// `desc` is `Option<V>`, `none` its pinned `None`; `k` is an `Int` or a `Str` pointer.
 #[no_mangle]
-pub unsafe extern "C" fn rt_map_get(desc: u32, m: u32, k: i64) -> u32 {
+pub unsafe extern "C" fn rt_map_get(desc: u32, none: u32, m: u32, k: i64) -> u32 {
     // SAFETY: the group's contract.
-    unsafe { addr(coll::map_get(&table(), ptr(m), k as u64, desc)) }
+    unsafe { addr(coll::map_get(&table(), ptr(m), k as u64, desc, ptr(none))) }
+}
+
+/// `l.contains(v)`; `v` is a slot value of the element type.
+#[no_mangle]
+pub unsafe extern "C" fn rt_list_contains(l: u32, v: i64) -> bool {
+    // SAFETY: the group's contract.
+    unsafe { coll::list_contains(&table(), ptr(l), v as u64) }
+}
+
+/// `r.ok()`: `desc` is `Option<T>`, `none` its pinned `None`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_result_ok(desc: u32, none: u32, r: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unsafe { addr(coll::result_variant(&table(), ptr(r), 0, desc, ptr(none))) }
+}
+
+/// `r.err()`: `desc` is `Option<E>`, `none` its pinned `None`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_result_err(desc: u32, none: u32, r: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unsafe { addr(coll::result_variant(&table(), ptr(r), 1, desc, ptr(none))) }
+}
+
+/// `o.ok_or(e)`: `desc` is `Result<T, E>`; `e` is a slot value of `E`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_option_ok_or(desc: u32, o: u32, e: i64) -> u32 {
+    // SAFETY: the group's contract.
+    unsafe { addr(coll::option_ok_or(&table(), ptr(o), e as u64, desc)) }
 }
 
 /// `o.unwrap_or(d)` on an `Option`.
@@ -301,6 +362,21 @@ pub unsafe extern "C" fn rt_list_at(l: u32, i: i64, site: u32) -> u32 {
 pub unsafe extern "C" fn rt_list_push(l: u32, v: i64) {
     // SAFETY: the group's contract.
     unsafe { coll::list_push(ptr(l), v as u64) }
+}
+
+/// `l.sort()` on a `List<Int>` or `List<Str>`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_list_sort(l: u32) {
+    // SAFETY: the group's contract.
+    unsafe { coll::list_sort(&table(), ptr(l)) }
+}
+
+/// `l.pop()`: `desc` is `Option<T>`, `none` its pinned `None`. The element moves into the
+/// `Some`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_list_pop(desc: u32, none: u32, l: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unsafe { addr(coll::list_pop(&table(), ptr(l), desc, ptr(none))) }
 }
 
 /// `b.push(n)`: returns the `Bytes` to store back in the place, `b` or a larger copy (`b` then

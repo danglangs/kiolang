@@ -36,6 +36,28 @@ pub unsafe fn display(t: &Table, desc: u32, slot: u64) -> *mut Header {
     obj::new_bytes(desc::STR, &out)
 }
 
+/// `main`'s value as `run` reports it: whether it failed (a `Result` that is `Err`), and a
+/// fresh `Str` showing the `Err`'s payload alone if so (as the interpreter path does, so
+/// `Err("bad")` reads `bad`), else the value. `slot` is not consumed.
+///
+/// # Safety
+/// As `display`.
+pub unsafe fn outcome(t: &Table, desc: u32, slot: u64) -> (*mut Header, bool) {
+    if let Desc::Enum { name, .. } = t.desc(desc) {
+        let p = from_slot(slot);
+        // SAFETY: the caller's guarantee; an enum has its variant at HEADER, and a `Result`'s
+        // `Err` has one slot.
+        unsafe {
+            if t.name(name) == b"Result" && *field::<u32>(p, HEADER) == 1 {
+                let (_, ds) = obj::record(t, p);
+                return (display(t, ds[0], *obj::slot(t, p, 0)), true);
+            }
+        }
+    }
+    // SAFETY: the caller's guarantee.
+    (unsafe { display(t, desc, slot) }, false)
+}
+
 /// # Safety
 /// As `display`.
 unsafe fn write_value(t: &Table, desc: u32, slot: u64, out: &mut Vec<u8>) {

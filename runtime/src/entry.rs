@@ -2,7 +2,7 @@
 //! placeholder functions whose bodies codegen replaces with the program's entry. docs/codegen.md, "Entry".
 
 use crate::abi;
-use crate::display::display;
+use crate::display::outcome;
 use crate::obj;
 use alloc::vec::Vec;
 
@@ -13,10 +13,11 @@ struct Runtime;
 impl Guest for Runtime {
     fn run(_grants: Vec<Grant>) -> Result<Outcome, ()> {
         let slot = kio_main();
-        let p = display_main(slot);
-        // SAFETY: `display` made `p`, a live `Str`.
-        let value = unsafe { core::str::from_utf8(obj::bytes(p)).expect("a Str is UTF-8").into() };
         let t = abi::table();
+        // SAFETY: codegen's entry returns a value of `kio_main_desc` and has called `rt_init`.
+        let (p, failed) = unsafe { outcome(&t, kio_main_desc(), slot) };
+        // SAFETY: `outcome` made `p`, a live `Str`.
+        let value = unsafe { core::str::from_utf8(obj::bytes(p)).expect("a Str is UTF-8").into() };
         // SAFETY: `p` is ours and live, and so is main's value if it is a pointer.
         unsafe {
             abi::rt_dec(abi::addr(p));
@@ -28,13 +29,8 @@ impl Guest for Runtime {
         if live != 0 {
             rt_trap(LEAKED, i64::from(live), 0);
         }
-        Ok(Outcome { value, failed: false })
+        Ok(Outcome { value, failed })
     }
-}
-
-fn display_main(slot: u64) -> *mut obj::Header {
-    // SAFETY: codegen's entry returns a value of `kio_main_desc` and has called `rt_init`.
-    unsafe { display(&abi::table(), kio_main_desc(), slot) }
 }
 
 export!(Runtime);

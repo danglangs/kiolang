@@ -177,22 +177,103 @@ pub unsafe fn map_keys(t: &Table, p: *mut Header, list_desc: u32) -> *mut Header
 }
 
 /// `m.get(k)` as an `Option<V>` object of descriptor `option_desc` (variant 0 `None`, 1
-/// `Some`). `k` is an `Int` or a `Str` pointer, read not consumed. `Some` holds a new reference.
+/// `Some`). `k` is an `Int` or a `Str` pointer, read not consumed. `Some` holds a new reference;
+/// `none` as `obj::option`'s.
 ///
 /// # Safety
-/// `p` is a `Map`; `k` is a key of its key type; `option_desc` is `Option` of its value type.
-pub unsafe fn map_get(t: &Table, p: *mut Header, k: u64, option_desc: u32) -> *mut Header {
+/// `p` is a `Map`; `k` is a key of its key type; `option_desc` is `Option` of its value type;
+/// `none` is null or a `None` of it.
+pub unsafe fn map_get(t: &Table, p: *mut Header, k: u64, option_desc: u32, none: *mut Header) -> *mut Header {
     // SAFETY: the caller's guarantee.
     unsafe {
         let (key, value) = kv(t, p);
-        match map(p).get(&key_of(key, k)) {
-            None => obj::alloc(t, option_desc, 0),
-            Some(&v) => {
-                let o = obj::alloc(t, option_desc, 1);
-                *obj::slot(t, o, 0) = share(t, value, v);
-                o
-            }
+        let v = map(p).get(&key_of(key, k)).map(|&v| share(t, value, v));
+        obj::option(t, option_desc, none, v)
+    }
+}
+
+/// `xs.contains(v)`: `==` with each element. `v` is borrowed.
+///
+/// # Safety
+/// `p` is a `List`; `v` a slot value of its element type.
+pub unsafe fn list_contains(t: &Table, p: *mut Header, v: u64) -> bool {
+    // SAFETY: the caller's guarantee.
+    unsafe {
+        let d = elem(t, p);
+        list(p).iter().any(|&x| eq(t, d, x, v))
+    }
+}
+
+/// `xs.sort()` on a unique `List<Int>` (signed) or `List<Str>` (by bytes); stable, as the
+/// interpreter's `sort_by`.
+///
+/// # Safety
+/// `p` is a unique `List<Int>` or `List<Str>`.
+pub unsafe fn list_sort(t: &Table, p: *mut Header) {
+    // SAFETY: the caller's guarantee; a `List<Str>` holds live `Str`s.
+    unsafe {
+        match elem(t, p) {
+            desc::INT => list(p).sort_by_key(|&v| v as i64),
+            desc::STR => list(p).sort_by(|&a, &b| bytes(from_slot(a)).cmp(bytes(from_slot(b)))),
+            d => panic!("sort of a List of descriptor {d}"),
         }
+    }
+}
+
+/// `xs.pop()` on a unique list, as an `Option<T>` of descriptor `option_desc`: the last
+/// element moves into the `Some` (its reference is the `Some`'s now). `none` as `obj::option`'s.
+///
+/// # Safety
+/// `p` is a unique `List`; `option_desc` is `Option` of its element type; `none` is null or a
+/// `None` of it.
+pub unsafe fn list_pop(t: &Table, p: *mut Header, option_desc: u32, none: *mut Header) -> *mut Header {
+    // SAFETY: the caller's guarantee.
+    unsafe { obj::option(t, option_desc, none, list(p).pop()) }
+}
+
+/// The payload of `Option` or `Result` object `p`, shared, if it is variant `v`.
+///
+/// # Safety
+/// `p` is an `Option` or `Result`.
+unsafe fn payload_if(t: &Table, p: *mut Header, v: u32) -> Option<u64> {
+    // SAFETY: the caller's guarantee; each variant of these has one slot or none.
+    unsafe {
+        if *field::<u32>(p, BODY) != v {
+            return None;
+        }
+        let (_, ds) = obj::record(t, p);
+        Some(share(t, ds[0], *obj::slot(t, p, 0)))
+    }
+}
+
+/// `r.ok()` (`v` 0) or `r.err()` (`v` 1) as an `Option` of descriptor `option_desc`, holding a
+/// new reference to the payload; `none` as `obj::option`'s.
+///
+/// # Safety
+/// `r` is a `Result`; `option_desc` is `Option` of the chosen variant's payload type; `none` is
+/// null or a `None` of it.
+pub unsafe fn result_variant(t: &Table, r: *mut Header, v: u32, option_desc: u32, none: *mut Header) -> *mut Header {
+    // SAFETY: the caller's guarantee.
+    unsafe { obj::option(t, option_desc, none, payload_if(t, r, v)) }
+}
+
+/// `o.ok_or(e)` as a `Result` of descriptor `result_desc`: `Ok` with a new reference to `o`'s
+/// payload, or `Err` with a new reference to `e`, which is borrowed.
+///
+/// # Safety
+/// `o` is an `Option`; `result_desc` is `Result` of its payload type and `e`'s type, a slot
+/// value of which `e` is.
+pub unsafe fn option_ok_or(t: &Table, o: *mut Header, e: u64, result_desc: u32) -> *mut Header {
+    // SAFETY: the caller's guarantee; each variant of a `Result` has one slot.
+    unsafe {
+        let (v, x) = match payload_if(t, o, 1) {
+            Some(x) => (0, x),
+            None => (1, e),
+        };
+        let r = obj::alloc(t, result_desc, v);
+        let (_, ds) = obj::record(t, r);
+        *obj::slot(t, r, 0) = if v == 1 { share(t, ds[0], x) } else { x };
+        r
     }
 }
 

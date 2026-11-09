@@ -794,3 +794,139 @@ fn nested_patterns() {
         }"#;
     assert_eq!(value(src), "threezeros4t5nyesno7.");
 }
+
+/// `main`'s value and failed flag both ways: a `Result` that is `Err` fails and shows its error
+/// alone (a `Str` bare); anything else shows as a value.
+fn outcome(src: &str) -> (String, bool) {
+    let c = Compiled::run(src, limits()).unwrap().unwrap();
+    let i = Kio::new(limits()).unwrap().run(src, vec![]).unwrap().unwrap();
+    let (c, i) = ((c.value, c.failed), (i.value, i.failed));
+    assert_eq!(c, i, "compiled vs interpreted: {src}");
+    c
+}
+
+#[test]
+fn main_returns_any_type() {
+    let ok = |s: &str| (s.to_string(), false);
+    let failed = |s: &str| (s.to_string(), true);
+    assert_eq!(
+        outcome(r#"fn main() -> Result<Int, Str> { Err("x" + "") }"#),
+        failed("x")
+    );
+    assert_eq!(outcome(r#"fn main() -> Result<Int, Str> { Ok(3) }"#), ok("Ok(3)"));
+    assert_eq!(outcome("fn main() -> Result<(), Str> { Ok(()) }"), ok("Ok(())"));
+    assert_eq!(outcome("fn main() -> Result<Int, ()> { Err(()) }"), failed("()"));
+    assert_eq!(outcome("fn main() -> Result<Int, Int> { Err(7) }"), failed("7"));
+    assert_eq!(
+        outcome(r#"fn main() -> Result<Int, List<Str>> { Err(["a" + "", "b"]) }"#),
+        failed(r#"["a", "b"]"#)
+    );
+    let src = r#"enum E { Bad(Str) }
+        fn f(n: Int) -> Result<Int, E> { if n > 1 { Err(E::Bad("big" + "")) } else { Ok(n) } }
+        fn main() -> Result<Int, E> { let a = f(1)?; let b = f(a + 1)?; Ok(b) }"#;
+    assert_eq!(outcome(src), failed(r#"E::Bad("big")"#));
+    assert_eq!(
+        outcome("fn main() -> Option<Result<Int, Int>> { Some(Err(1)) }"),
+        ok("Some(Err(1))")
+    );
+    assert_eq!(
+        outcome(r#"fn main() -> List<Str> { ["a" + "", "b"] }"#),
+        ok(r#"["a", "b"]"#)
+    );
+    let src = r#"fn main() -> Map<Str, List<Int>> { let mut m: Map<Str, List<Int>> = Map::new(); m.insert("k", [1, 2]); m.insert("a", []); m }"#;
+    assert_eq!(outcome(src), ok(r#"{"a": [], "k": [1, 2]}"#));
+    assert_eq!(outcome("fn main() {}"), ok("()"));
+}
+
+/// The new `Str` methods, with Rust's edge cases: empty patterns, a whole-string match, and
+/// `None` returned many times (pinned, never freed).
+#[test]
+fn str_ends_with_strip_find_replace() {
+    let src = r#"fn show(o: Option<Str>) -> Str { match o { Some(s) => "[" + s + "]", None => "-" } }
+        fn at(o: Option<Int>) -> Str { match o { Some(i) => i.to_str(), None => "-" } }
+        fn main() -> Str {
+            let s = "a,b,,c" + "";
+            let mut out = "";
+            for i in 0..3 { out += show(s.strip_prefix("x")) + at(s.find("z")) + show(s.strip_suffix("q")); }
+            if s.ends_with(",c") && s.ends_with("") && !s.ends_with("b") { out += "E"; }
+            out += show(s.strip_prefix("a,")) + show(s.strip_suffix(",c")) + show(s.strip_prefix("")) + show(s.strip_prefix(s));
+            out += at(s.find(",")) + at(s.find("")) + at("héllo".find("l")) + at("".find(""));
+            out += s.replace(",", ";") + "|" + s.replace(",,", "") + "|" + "ab".replace("", "-") + "|" + "aaa".replace("aa", "b") + "|" + s.replace("q", "r");
+            out
+        }"#;
+    assert_eq!(
+        value(src),
+        "---------E[b,,c][a,b,][a,b,,c][]1030a;b;;c|a,bc|-a-b-|ba|a,b,,c"
+    );
+}
+
+/// `contains` borrows the list and the value (each compared by `==`); `ok`, `err` and `ok_or`
+/// borrow their receiver and argument and return new references, so every value here is used
+/// again after them, and nothing leaks or is freed twice.
+#[test]
+fn contains_ok_err_ok_or_borrow() {
+    let src = r#"struct P { s: Str }
+        fn main() -> Str {
+            let xs = [P { s: "a" + "" }, P { s: "b" + "" }];
+            let k = P { s: "b" + "" };
+            let mut out = "";
+            for i in 0..3 {
+                if xs.contains(k) && !xs.contains(P { s: "c" + "" }) && [[1], [2, 3]].contains([2, 3]) { out += "c"; }
+            }
+            let r: Result<Str, Str> = Ok("ok" + "");
+            let e: Result<Str, Str> = Err("er" + "");
+            let o: Option<Str> = Some("so" + "");
+            let n: Option<Str> = None;
+            let d = "dflt" + "";
+            for i in 0..2 {
+                out += r.ok().unwrap_or("-") + r.err().unwrap_or("-") + e.ok().unwrap_or("-") + e.err().unwrap_or("-");
+                out += o.ok_or(d).unwrap_or("-") + n.ok_or(d).err().unwrap_or("-");
+            }
+            let t = o.ok_or(d);
+            let u = n.ok_or(d);
+            out + "," + r.ok().unwrap_or("") + e.err().unwrap_or("") + o.unwrap_or("") + d + t.unwrap_or("") + u.err().unwrap_or("") + k.s + xs[1].s
+        }"#;
+    assert_eq!(value(src), "cccok--ersodfltok--ersodflt,okersodfltsodfltbb");
+}
+
+/// `pop` moves the last element into the `Some` without another reference, so it is freed
+/// once; on a shared list it copies first, at the root or below a field and an index.
+#[test]
+fn pop_moves_and_copies_a_shared_list() {
+    let src = r#"struct B { xs: List<List<Str>> }
+        fn main() -> Str {
+            let mut xs = ["a" + "", "b" + "", "c" + ""];
+            let ys = xs;
+            let mut out = "";
+            for i in 0..4 { match xs.pop() { Some(s) => { out += s; }, None => { out += "-"; } } }
+            let mut b = B { xs: [["p" + "", "q" + ""]] };
+            let c = b;
+            let inner = b.xs[0];
+            let q = b.xs[0].pop();
+            xs.push("z" + "");
+            xs.pop();
+            out + q.unwrap_or("") + b.xs[0].len().to_str() + c.xs[0].len().to_str() + inner.len().to_str() + ys.len().to_str() + xs.len().to_str() + ys[2]
+        }"#;
+    assert_eq!(value(src), "cba-q12230c");
+}
+
+/// `sort` on a shared list copies it; `Int` sorts signed, `Str` by bytes.
+#[test]
+fn sort_copies_a_shared_list() {
+    let src = r#"fn main() -> Str {
+            let mut a = [3, -1, 2, -9223372036854775807 - 1, 0];
+            let b = a;
+            a.sort();
+            let mut s = ["b" + "", "B", "a", "é", "", "ab"];
+            let t = s;
+            s.sort();
+            let mut l = [[5, 1]];
+            let m = l;
+            l[0].sort();
+            let mut out = "";
+            for x in a { out += x.to_str() + " "; }
+            for x in s { out += x + "."; }
+            out + b[0].to_str() + t[0] + l[0][0].to_str() + m[0][0].to_str()
+        }"#;
+    assert_eq!(value(src), "-9223372036854775808 -1 0 2 3 .B.a.ab.b.é.3b15");
+}

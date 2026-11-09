@@ -11,7 +11,7 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 | Done | Result |
 |---|---|
 | L3a, L3b, L4a, L4b | match arms `return`/`break`/`continue`; modules use each other; nested patterns and `if let` (Maranget exhaustiveness); Str and List built-ins |
-| C3a-d | runtime exports, descriptors, literals, leak check; Str, Bytes, List, Map, structs, enums, `Option`, `Result`, nested `match`, `?` compiled. Harness 46 to 173 ran both ways, 0 mismatches, 0 leaked; list and ADT code 4-6x faster than the interpreter |
+| C3 (a-f) | runtime exports, descriptors, literals, leak check; Str, Bytes, List, Map, structs, enums, `Option`, `Result`, nested `match`, `?`, every built-in, `main` returning any type. Harness 46 to 240 ran both ways, 0 unsupported, 0 mismatches, 0 leaked; list and ADT code 4-6x faster than the interpreter |
 | C6a, C6b | generator (Int, Bool, control, calls, lists, structs/enums/`Option`/`match`/`?`): 250 programs both ways per CI run; front-end fuzzing, 210,000 inputs, no panic |
 | D1, K1 | `Dir` `list`/`write`/`remove`/`exists`; `Kv` (`--kv name=:memory:` or a file). Both adversarially reviewed, fixes merged |
 | WS1 | WebSockets under `--listen`, a fresh sandbox per event; 7,800 echo events/s on one connection. Adversarially reviewed, fixes in (Origin check and `--ws-origin`; `close` always follows `open`) |
@@ -20,7 +20,7 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 
 ## Next
 
-1. **C3e, C3f** (`main` returning anything; built-ins added after C3 began), then C4 (capabilities), C5 (compiled only), C7 (review), C8 (measure, refcount elision).
+1. **C4** (capabilities), C5 (compiled only), C7 (review), C8 (measure, refcount elision).
 2. The checker rejects `o = None;` for an `Option` local ("cannot tell the type of `None`"; open_questions #61).
 3. L6b closures, L6c built-ins taking functions, then L7 generics; compiler support for `fn` values (C9) and `Float` (C10).
 

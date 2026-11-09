@@ -26,7 +26,7 @@ pub struct Features {
     /// Helpers that call themselves on a decreasing parameter.
     pub recursion: bool,
     /// `List<Int>` locals: literals, copies, indexing (mostly in range), `len`, `push`,
-    /// element assignment and `+=`, `==`, and `for x in xs`.
+    /// element assignment and `+=`, `==`, `for x in xs`, `contains`, `sort` and `pop`.
     pub lists: bool,
     /// The struct `S`, the enum `K` and `Option<Int>`: locals, construction, copies, field
     /// reads and writes, `==`, `unwrap_or`, `is_some`, `match` with nested patterns and a
@@ -523,11 +523,12 @@ impl Gen<'_> {
         }
     }
 
-    /// `push`, an element's `=`, `+=` or `-=`, the whole list's `=`, or `for x in xs`.
+    /// `push`, an element's `=`, `+=` or `-=`, the whole list's `=`, `for x in xs`, `sort` or
+    /// `pop`.
     fn list_stmt(&mut self) -> Option<String> {
         let pad = self.pad();
-        let kind = self.rng.below(6);
-        if kind >= 4 {
+        let kind = self.rng.below(8);
+        if kind == 4 || kind == 5 {
             return self.for_list();
         }
         let mult = self.mult;
@@ -551,6 +552,13 @@ impl Gen<'_> {
                 let op = *self.rng.pick(&["=", "+=", "-="]);
                 let e = self.expr(Ty::Int, 2);
                 Some(format!("{pad}{name}[{i}] {op} {e};\n"))
+            }
+            6 => Some(format!("{pad}{name}.sort();\n")),
+            7 => {
+                // A pass of an enclosing loop pops again: the list may be shorter by `mult`.
+                let v = self.var(&name);
+                v.min = v.min.saturating_sub(mult);
+                Some(format!("{pad}{name}.pop();\n"))
             }
             _ => {
                 let (e, min, max) = self.list_expr(false);
@@ -760,6 +768,11 @@ impl Gen<'_> {
             let (b, _, _) = self.list_expr(false);
             let op = *self.rng.pick(&["==", "!="]);
             return format!("({a} {op} {b})");
+        }
+        if lists && self.rng.chance(4) {
+            let (a, _, _) = self.list_expr(false);
+            let x = self.expr(Ty::Int, 1);
+            return format!("{a}.contains({x})");
         }
         if depth > 0 && self.features.adts && self.rng.chance(10) {
             return self.adt_bool(depth - 1);
@@ -990,5 +1003,17 @@ impl Gen<'_> {
             self.scopes.pop();
         }
         Some(format!("{pad}match {scrut} {{\n{}{pad}}}\n", arms.concat()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The list methods appear in a run of the default size.
+    #[test]
+    fn list_methods_are_generated() {
+        let all: String = (0..250).map(|s| super::program(s, &Default::default())).collect();
+        for m in [".sort()", ".pop()", ".contains("] {
+            assert!(all.matches(m).count() > 10, "{m}: {}", all.matches(m).count());
+        }
     }
 }

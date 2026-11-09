@@ -11,7 +11,7 @@
 //! `t`, and each is a `Str` or `Bytes` as the function says.
 
 use crate::desc::{self, Table};
-use crate::obj::{self, slot, to_slot, Header, List};
+use crate::obj::{self, to_slot, Header, List};
 use alloc::string::ToString;
 
 /// Why an operation failed.
@@ -163,28 +163,67 @@ pub unsafe fn starts_with(s: *mut Header, prefix: *mut Header) -> bool {
     unsafe { str_of(s).starts_with(str_of(prefix)) }
 }
 
-/// `Str.parse_int()`: an `Option<Int>` with descriptor `opt` (variants `None`, `Some`, one `Int`
-/// slot in `Some`), as Rust's `i64::from_str`: an optional `+` or `-` then digits, nothing else.
-/// `none` is a pinned `None` to return (cheaper, nothing to free), or 0 to allocate one.
+/// `Str.parse_int()`: an `Option<Int>` with descriptor `opt`, as Rust's `i64::from_str`: an
+/// optional `+` or `-` then digits, nothing else. `none` as `obj::option`'s.
 ///
 /// # Safety
-/// The module's contract; `none` is 0 or a `None` of `opt`.
+/// The module's contract; `none` is null or a `None` of `opt`.
 pub unsafe fn parse_int(t: &Table, opt: u32, none: *mut Header, s: *mut Header) -> *mut Header {
-    // SAFETY: the caller's guarantee; `p` is a fresh `Some` with one slot.
+    // SAFETY: the caller's guarantee.
+    unsafe { obj::option(t, opt, none, str_of(s).parse::<i64>().ok().map(|n| n as u64)) }
+}
+
+/// `Str.ends_with(suffix)`.
+///
+/// # Safety
+/// The module's contract.
+pub unsafe fn ends_with(s: *mut Header, suffix: *mut Header) -> bool {
+    // SAFETY: the caller's guarantee.
+    unsafe { str_of(s).ends_with(str_of(suffix)) }
+}
+
+/// `Str.strip_prefix(p)`: an `Option<Str>` with descriptor `opt`; `none` as `obj::option`'s.
+///
+/// # Safety
+/// The module's contract; `none` is null or a `None` of `opt`.
+pub unsafe fn strip_prefix(t: &Table, opt: u32, none: *mut Header, s: *mut Header, p: *mut Header) -> *mut Header {
+    // SAFETY: the caller's guarantee.
     unsafe {
-        match str_of(s).parse::<i64>() {
-            Ok(n) => {
-                let p = obj::alloc(t, opt, 1);
-                *slot(t, p, 0) = n as u64;
-                p
-            }
-            Err(_) if none.is_null() => obj::alloc(t, opt, 0),
-            Err(_) => {
-                obj::inc(none);
-                none
-            }
-        }
+        let r = str_of(s).strip_prefix(str_of(p));
+        obj::option(t, opt, none, r.map(|r| to_slot(new_str(r))))
     }
+}
+
+/// `Str.strip_suffix(p)`: an `Option<Str>` with descriptor `opt`; `none` as `obj::option`'s.
+///
+/// # Safety
+/// The module's contract; `none` is null or a `None` of `opt`.
+pub unsafe fn strip_suffix(t: &Table, opt: u32, none: *mut Header, s: *mut Header, p: *mut Header) -> *mut Header {
+    // SAFETY: the caller's guarantee.
+    unsafe {
+        let r = str_of(s).strip_suffix(str_of(p));
+        obj::option(t, opt, none, r.map(|r| to_slot(new_str(r))))
+    }
+}
+
+/// `Str.find(sub)`: the byte offset of the first match, an `Option<Int>` with descriptor `opt`;
+/// `none` as `obj::option`'s.
+///
+/// # Safety
+/// The module's contract; `none` is null or a `None` of `opt`.
+pub unsafe fn find(t: &Table, opt: u32, none: *mut Header, s: *mut Header, sub: *mut Header) -> *mut Header {
+    // SAFETY: the caller's guarantee.
+    unsafe { obj::option(t, opt, none, str_of(s).find(str_of(sub)).map(|i| i as u64)) }
+}
+
+/// `Str.replace(from, to)`: every non-overlapping match, left to right; an empty `from`
+/// matches before each char and at the end, as Rust's.
+///
+/// # Safety
+/// The module's contract.
+pub unsafe fn replace(s: *mut Header, from: *mut Header, to: *mut Header) -> *mut Header {
+    // SAFETY: the caller's guarantee.
+    unsafe { new_str(&str_of(s).replace(str_of(from), str_of(to))) }
 }
 
 /// `bytes[i]`; `OutOfBounds` unless `0 <= i < len`.

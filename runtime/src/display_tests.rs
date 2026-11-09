@@ -305,6 +305,32 @@ fn option_and_result() {
     );
 }
 
+/// `main`'s outcome: an `Err` fails and shows its payload alone, a top-level `Str` bare.
+#[test]
+fn outcome_of_main() {
+    let _l = lock();
+    let before = obj::live();
+    for (ret, src, d, want) in [
+        (
+            "Result<Option<Int>, Str>",
+            "Err(\"bad \\\"x\\\"\")",
+            RES,
+            ("bad \"x\"", true),
+        ),
+        ("Result<Option<Int>, Str>", "Ok(Some(1))", RES, ("Ok(Some(1))", false)),
+        ("Option<Int>", "Some(2)", OPT_INT, ("Some(2)", false)),
+    ] {
+        let prog = check_files(&[("app", &main_of(ret, src))], &CapTable::default()).unwrap();
+        let slot = build(d, &run(&prog, &mut NoCaps).unwrap());
+        // SAFETY: `slot` was built as a value of `d`.
+        let (s, failed) = unsafe { crate::display::outcome(&T, d, slot) };
+        assert_eq!((take(s).as_str(), failed), want);
+        // SAFETY: `slot` owns a reference.
+        unsafe { obj::dec(&T, from_slot(slot)) };
+    }
+    assert_eq!(obj::live(), before);
+}
+
 /// Shapes the interpreter's recursion cannot reach, so the expected strings are built here.
 #[test]
 fn deep_values_do_not_overflow_the_stack() {

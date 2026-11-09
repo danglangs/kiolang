@@ -5,11 +5,12 @@ use crate::text::{self, Err};
 use alloc::string::String;
 use alloc::vec::Vec;
 
-// List<Str>, Option<Int> = None | Some(Int)
+// List<Str>, Option<Int> = None | Some(Int), Option<Str>
 const LIST_STR: u32 = 5;
 const OPT: u32 = 6;
+const OPT_STR: u32 = 7;
 
-const DESCS: [Desc; 7] = [
+const DESCS: [Desc; 8] = [
     Desc::Unit,
     Desc::Int,
     Desc::Bool,
@@ -20,10 +21,14 @@ const DESCS: [Desc; 7] = [
         name: Name { off: 0, len: 6 },
         variants: Slice { start: 0, len: 2 },
     },
+    Desc::Enum {
+        name: Name { off: 0, len: 6 },
+        variants: Slice { start: 2, len: 2 },
+    },
 ];
-const SLOTS: [u32; 1] = [desc::INT];
-const FIELDS: [Name; 1] = [Name { off: 0, len: 0 }; 1];
-const VARIANTS: [Variant; 2] = [
+const SLOTS: [u32; 2] = [desc::INT, desc::STR];
+const FIELDS: [Name; 2] = [Name { off: 0, len: 0 }; 2];
+const VARIANTS: [Variant; 4] = [
     Variant {
         name: Name { off: 6, len: 4 },
         slots: Slice { start: 0, len: 0 },
@@ -31,6 +36,14 @@ const VARIANTS: [Variant; 2] = [
     Variant {
         name: Name { off: 10, len: 4 },
         slots: Slice { start: 0, len: 1 },
+    },
+    Variant {
+        name: Name { off: 6, len: 4 },
+        slots: Slice { start: 0, len: 0 },
+    },
+    Variant {
+        name: Name { off: 10, len: 4 },
+        slots: Slice { start: 1, len: 1 },
     },
 ];
 const T: Table = Table {
@@ -268,5 +281,139 @@ fn bytes_index_and_push() {
         assert_eq!(obj::bytes(t), b"abc");
         dec(t);
     }
+    assert_eq!(obj::live(), base);
+}
+
+/// A pinned `None` of `opt`, as codegen emits; `unpin` frees it.
+fn pinned_none(opt: u32) -> *mut Header {
+    let p = obj::alloc(&T, opt, 0);
+    // SAFETY: `p` is live and ours.
+    unsafe { (*p).rc = obj::PINNED };
+    p
+}
+
+fn unpin(p: *mut Header) {
+    // SAFETY: `p` is live; give it a real count and drop it.
+    unsafe { (*p).rc = 1 };
+    dec(p);
+}
+
+/// An `Option`'s payload as `f` reads it, then frees the option.
+fn opt<R>(p: *mut Header, f: impl Fn(u64) -> R) -> Option<R> {
+    // SAFETY: `p` is a live `Option`, owned here.
+    let r = unsafe {
+        match *obj::field::<u32>(p, 8) {
+            0 => None,
+            _ => Some(f(*obj::slot(&T, p, 0))),
+        }
+    };
+    dec(p);
+    r
+}
+
+fn str_slot(v: u64) -> String {
+    // SAFETY: a live `Str` slot.
+    String::from_utf8(unsafe { obj::bytes(from_slot(v)) }.to_vec()).unwrap()
+}
+
+/// Runs `f` on new `Str`s `a` and `b`, then frees them.
+fn with2<R>(a: &str, b: &str, f: impl FnOnce(*mut Header, *mut Header) -> R) -> R {
+    let (a, b) = (s(a), s(b));
+    let r = f(a, b);
+    dec(a);
+    dec(b);
+    r
+}
+
+#[test]
+fn ends_with_cases() {
+    let _g = lock();
+    let base = obj::live();
+    // SAFETY: live `Str`s.
+    let e = |a, b| with2(a, b, |a, b| unsafe { text::ends_with(a, b) });
+    assert!(e("abc", "bc") && e("abc", "") && e("", "") && e("abc", "abc"));
+    assert!(!e("", "a") && !e("abc", "abcd") && !e("abc", "b"));
+    assert_eq!(obj::live(), base);
+}
+
+#[test]
+fn strip_prefix_and_suffix_cases() {
+    let _g = lock();
+    let base = obj::live();
+    let pinned = pinned_none(OPT_STR);
+    for none in [core::ptr::null_mut(), pinned] {
+        // SAFETY: live `Str`s; `none` is null or a `None` of `OPT_STR`.
+        let pre = |a, b| {
+            with2(a, b, |a, b| {
+                opt(unsafe { text::strip_prefix(&T, OPT_STR, none, a, b) }, str_slot)
+            })
+        };
+        // SAFETY: as above.
+        let suf = |a, b| {
+            with2(a, b, |a, b| {
+                opt(unsafe { text::strip_suffix(&T, OPT_STR, none, a, b) }, str_slot)
+            })
+        };
+        assert_eq!(pre("abc", "ab"), Some("c".into()));
+        assert_eq!(pre("abc", "abc"), Some("".into()));
+        assert_eq!(pre("abc", ""), Some("abc".into()));
+        assert_eq!(pre("abc", "b"), None);
+        assert_eq!(pre("", "a"), None);
+        assert_eq!(pre("éa", "é"), Some("a".into()));
+        assert_eq!(suf("abc", "bc"), Some("a".into()));
+        assert_eq!(suf("abc", "abc"), Some("".into()));
+        assert_eq!(suf("abc", ""), Some("abc".into()));
+        assert_eq!(suf("abc", "b"), None);
+        assert_eq!(suf("", "a"), None);
+    }
+    // SAFETY: `pinned` is live.
+    assert_eq!(unsafe { (*pinned).rc }, obj::PINNED);
+    unpin(pinned);
+    assert_eq!(obj::live(), base);
+}
+
+#[test]
+fn find_cases() {
+    let _g = lock();
+    let base = obj::live();
+    let pinned = pinned_none(OPT);
+    for none in [core::ptr::null_mut(), pinned] {
+        // SAFETY: live `Str`s; `none` is null or a `None` of `OPT`.
+        let f = |a, b| {
+            with2(a, b, |a, b| {
+                opt(unsafe { text::find(&T, OPT, none, a, b) }, |v| v as i64)
+            })
+        };
+        assert_eq!(f("abcb", "b"), Some(1));
+        assert_eq!(f("abc", ""), Some(0));
+        assert_eq!(f("", ""), Some(0));
+        assert_eq!(f("abc", "z"), None);
+        assert_eq!(f("", "a"), None);
+        assert_eq!(f("éa", "a"), Some(2));
+        assert_eq!(f("aaa", "aa"), Some(0));
+    }
+    unpin(pinned);
+    assert_eq!(obj::live(), base);
+}
+
+#[test]
+fn replace_cases() {
+    let _g = lock();
+    let base = obj::live();
+    let r = |x: &str, from, to| {
+        let x = s(x);
+        // SAFETY: live `Str`s.
+        let out = with2(from, to, |a, b| take(unsafe { text::replace(x, a, b) }));
+        dec(x);
+        out
+    };
+    assert_eq!(r("abab", "b", "xy"), "axyaxy");
+    assert_eq!(r("aaa", "aa", "b"), "ba");
+    assert_eq!(r("abc", "z", "y"), "abc");
+    assert_eq!(r("abc", "", "-"), "-a-b-c-");
+    assert_eq!(r("", "", "-"), "-");
+    assert_eq!(r("abc", "b", ""), "ac");
+    assert_eq!(r("héé", "é", "e"), "hee");
+    assert_eq!(r("", "a", "b"), "");
     assert_eq!(obj::live(), base);
 }
