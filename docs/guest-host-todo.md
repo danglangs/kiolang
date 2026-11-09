@@ -1,6 +1,6 @@
 # guest and host TODO
 
-Run kio inside the Wasm sandbox. The interface is fixed in [caps.wit](../caps.wit); limits and the run walkthrough are in [design.md](design.md). Tasks run in order. Each is pinned before handoff, like [lang-todo.md](lang-todo.md).
+Run kio inside the Wasm sandbox. Since C5 there is no `guest` crate: G1-G4 and H7 describe the interpreter-in-Wasm design they built, kept as history; the host is what remains ([design.md](design.md)). The interface is fixed in [caps.wit](../caps.wit); limits and the run walkthrough are in [design.md](design.md). Tasks run in order. Each is pinned before handoff, like [lang-todo.md](lang-todo.md).
 
 ## Rules for every task
 

@@ -134,7 +134,7 @@ Each changes `caps.wit` or the language. Recommendation first, then the alternat
 2. **Not `wasi:http` (decided).** `wasi:http` 0.3 (final [June 2026](https://wasi.dev/releases/wasi-p3), Wasmtime 46+) has `handle: async func(request) -> result<response, error-code>` with resources, `stream<u8>` bodies and `future` trailers; 0.2 has nine resources and `wasi:io` streams ([types.wit](https://github.com/WebAssembly/wasi-http/blob/main/wit/types.wit)). Adopting it needs non-capability resources, a stream type and the program baked into the component. Later, the guest can also export `wasi:http/handler`, adapting to decision 1's parts, so kio apps run under `wasmtime serve`, Spin or wasmCloud. Host-side rules for decision 1: `method` uppercase as sent; `target` raw; header names lowercased, duplicates kept in order; non-UTF-8 headers or a body over the cap is answered 400/413 without starting a guest; a response status outside 100-599 or a header with CR or LF becomes 500; the host sets `content-length`.
 3. **Buffered bodies.** The host reads the whole request body (cap 1 MB) before starting the guest and writes the response after the instance is dropped. A slow client never holds an instance. Alt: streaming, which needs decision 2's alternative; see Later.
 4. **Execution.** Sync Wasmtime (as `kio run` today) on `tokio::task::spawn_blocking`, bounded by a semaphore (default: 2 × CPUs); when it is full, queue up to 100 more for 1 s, then 503. Engine, `Component` and `InstancePre` are built once at startup; today `Kio::with_stack` compiles the component on every call. Alt: Wasmtime async with epoch yields; needed once handlers call `Http`, so a slow upstream does not pin a thread.
-5. **Checking.** `kio run --listen` runs `check` once at startup, prints the report and refuses to start on a diag. The guest is pre-initialized with the checked `Program` (W13b, [`wasmtime-wizer`](https://docs.wasmtime.dev/api/wasmtime_wizer/index.html)), so instances start with it in copy-on-write memory and requests do not re-check. Since C5 the host checks and compiles once in `Server::new` and each request instantiates the compiled program; wizer and the snapshot are gone.
+5. **Checking (the wizer part is gone since C5: the host compiles once).** `kio run --listen` runs `check` once at startup, prints the report and refuses to start on a diag. The guest is pre-initialized with the checked `Program` (W13b, [`wasmtime-wizer`](https://docs.wasmtime.dev/api/wasmtime_wizer/index.html)), so instances start with it in copy-on-write memory and requests do not re-check. Since C5 the host checks and compiles once in `Server::new` and each request instantiates the compiled program; wizer and the snapshot are gone.
 6. **Modules (decided).** Rust's own syntax: `mod web;` appears once, in the file that owns the module, and loads `web.kio` beside it; other files refer to `web::f` without declaring it again; `pub fn` / `pub struct`; `web::f`, `web::T`. No `use` in v0. `check`, `run` and `serve` take `list<record file { path: string, source: string }>`; `Span` gains a file id. kio-web is vendored as one file: no package manager. Alt: concatenate files on the host; no language change, but diags and names collide.
 7. **Routing.** A `route` helper and `match`/early return, as in the sketch. Alt: route tables (`router.get("/", home)`), which need function values; see Later.
 8. **JSON.** Encode only: `json_str`, plus builders over `List<Field>` with `Str` values already encoded. Decoding waits for recursive types or an index-based tree.
@@ -289,16 +289,12 @@ Each changes `caps.wit` or the language. Recommendation first, then the alternat
 
 ## Later, driven by kio-web
 
-- **Function values.** Route tables and middleware as wrappers (`with_auth(handler)`). Today middleware is a call at the top of `handle`; timeouts, body limits and logging are host concerns.
-- **Typed JSON decoding** (into a struct) needs generics or derive; W12 decodes into a `Json` tree.
+Done since: function values and closures (L6), generics (L7), nested patterns (L4a), the W12 friction items except constants, `Kv` (K1), WebSockets (WS1). Still open:
+
+- **Route tables and middleware** as wrappers (`with_auth(handler)`) are possible now; kio-web does not use them yet. Timeouts, body limits and logging are host concerns.
+- **Typed JSON decoding** (into a struct) needs a derive or traits; W12 decodes into a `Json` tree.
 - **`Result<Response, Response>` from `handle`,** so `?` works in handlers.
-- **Nested patterns** (`Err(IoErr::NotFound)`); today a nested `match`.
-- **Friction from W12 (json.kio).** `==` on enums and structs; `is_some`/`is_none`, and `unwrap_or` on `Result`; string escapes `\r`, `\0`, `\u{..}`; `loop` (today `while true` needs an unreachable tail expression); constants (today a function returning the value).
 - **Outbound calls.** The `Http` capability, allowlisted per route; moves execution to Wasmtime async (decision 4).
 - **Streaming bodies, HTTP/2, `wasi:http` export.** Decision 2's alternative.
-- **Persistent connections and WebSockets (owner to decide).** HTTP keep-alive already works: hyper keeps the connection and each request gets a fresh sandbox; W8 adds the idle timeout. WebSockets are a long-lived two-way stream, which conflicts with bounded runs and synchronous handlers. Options:
-  1. **A fresh sandbox per message (recommended).** The host owns the socket; each message runs `main(msg: WsMessage, conn: WsSend, ..)`, bounded, isolated and logged like a request. State between messages goes through a capability such as `Kv`. A connection is just another grant. Needs `WsMessage`/`WsSend` in caps.wit, the upgrade and a connection table in the host, and `Kv`. Cloudflare Durable Objects and Spin work this way.
-  2. **One sandbox per connection.** `main(ws: WebSocket)` loops on a blocking `ws.recv()`; fuel and timeout apply per message, with an idle cap. Simpler programs, but a hung connection holds an instance.
-  3. **Async in the language.** `await` in kio: a large change and a one-way door, not needed for 1 or 2.
-- **Databases.** A `Kv` or `Sql` capability in caps.wit.
-- **Cookies, forms, multipart, websockets.**
+- **Databases.** `Kv` is done (K1); a `Sql` capability in caps.wit is not.
+- **Cookies, forms, multipart.**

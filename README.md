@@ -8,7 +8,7 @@ Most languages today are not AI-safe: any line can read files, open sockets or s
 
 kio is a fresh language built around that idea, using Rust's ecosystem for speed and tooling. The goal is a general-purpose systems language: near-native speed, no garbage collector, memory and capability safe.
 
-**Status:** v0 works end to end: checking, the authority report, a Wasm sandbox with enforced limits, files, HTTP and serving. `kio run` compiles every program to Wasm and native code, checked against the interpreter on every test program: within 1.1-3x of Rust on integer, float and call-heavy code, but 10-270x slower where the runtime allocates and copies (string building, maps, trees, JSON); optimizing that is next ([docs/roadmap.md](docs/roadmap.md), [bench/](bench/README.md)). Where work stands: [docs/status.md](docs/status.md).
+**Status:** v0 works end to end: checking, the authority report, a Wasm sandbox with enforced limits, files (`Dir`), a key-value store (`Kv`), HTTP, and serving over HTTP and WebSockets. The language has structs, enums, generics, closures, `Float`, slices and nested patterns. `kio run` compiles every program to Wasm and then native code (the interpreter is a test oracle, never shipped); every test program must give the same result both ways. Compiled code is within 1.1-2.1x of Rust on integer, float and call-heavy code and 1.2-10x where the runtime allocates (strings, trees, maps, JSON); it beats Python 3 except on word count and JSON (4-5x slower). More speed is next ([docs/roadmap.md](docs/roadmap.md), [bench/](bench/README.md)). Where work stands: [docs/status.md](docs/status.md).
 
 ## Quickstart
 
@@ -52,6 +52,7 @@ examples/tour/sneaky.kio:5: error: no ambient Http access: `Http::get` does not 
 
 ```
 $ kio run examples/tour/escape.kio --dir input=examples/tour/in
+main : input read
 error: IoErr::InvalidPath
 ```
 
@@ -79,11 +80,12 @@ On a loopback `--listen`, a request's `Host` must be `localhost`, `127.0.0.1` or
 
 ### More
 
+- `--http api=api.example` grants `Http` (`get` only) to one host over HTTPS; `--http api=http://127.0.0.1:9000` allows plain HTTP for local testing.
 - `--kv store=data.kv` grants a key-value store (`store: Kv`) that outlives runs and is shared by every `--listen` request; `--kv store=:memory:` keeps it for the process only. `swap` updates a key atomically.
 - `--audit log.jsonl` records every host call: capability, method, path, bytes and result. A call the report did not predict stops the run as a checker bug.
 - Every run is bounded: `--fuel`, `--timeout`, `--memory`, `--stack`, `--calls`, `--io`. Each limit's error names the flag that raises it.
 - Errors teach: `did you mean count?`, `declare it with let mut`.
-- Performance: about 60,000 requests/s with keep-alive, 21,000 without, with a fresh sandbox per request ([docs/perf.md](docs/perf.md)). `kio run` keeps compiled programs in `~/.cache/kio`, so a second run of the same program skips the compile; a run granted a `--dir` that contains, or is inside, the cache does not use it, and a `--kv` store there is refused.
+- Performance: about 74,000 requests/s with keep-alive and 18,000-20,000 without, with a fresh sandbox per request ([docs/roadmap.md](docs/roadmap.md), [docs/perf.md](docs/perf.md)). `kio run` keeps compiled programs in `~/.cache/kio`, so a second run of the same program skips the compile; a run granted a `--dir` that contains, or is inside, the cache does not use it, and a `--kv` store there is refused.
 - The language: [docs/language.md](docs/language.md). A web framework in kio: [kio-web](https://github.com/danglangs/kio-web).
 - A guided demo: `examples/tour/demo.sh` walks through the report, a rejected helper, a refused escape and a fuel stop.
 - From source: `cargo test` runs every suite; `cargo run -p kio -- run file.kio` runs without installing.
@@ -127,7 +129,7 @@ The cost is the ecosystem: kio has few libraries and no package manager yet. Two
 
 - **Adversary:** the agent writing the program. It may be buggy, prompt-injected or malicious.
 - **Defended:** the host machine, and every file and network host not granted to this run.
-- **Not defended:** misuse of what was granted. A program allowed to read `customers/` and POST to `partner.example` can send the customers to the partner. kio does not track where data came from.
+- **Not defended:** misuse of what was granted. A program allowed to read `customers/` and call `partner.example` can send the customers to the partner. kio does not track where data came from.
 
 ## v0 guarantees
 
@@ -171,16 +173,20 @@ Steps:
 8. Done: copy-on-write values (passing a value is cheap; semantics unchanged) and the program checked once per server, not per request.
 9. Done: lowering to a typed IR (the interpreter runs it, 3x faster), and a compiler to Wasm for `Int`, `Bool`, control flow and calls, with a differential harness against the interpreter ([docs/compiler-todo.md](docs/compiler-todo.md)).
 10. Done: the compiler for strings, collections, structs and capabilities; `kio run` and `--listen` compile (C5), and the interpreter is the test oracle only.
-11. Next: function values compiled (C9), a review of the runtime and codegen (C7); later attenuation.
+11. Done: `Dir` list/write/remove/exists, `Kv`, WebSockets, grants bound by type and DNS-rebinding defence (D1, K1, WS1, H10, H11); `Float`, slices, function values, closures, generic functions, structs and enums, all compiled (L6-L8, C9-C11); an adversarial review of the runtime and codegen (C7).
+12. Done: a differential harness and program generator (any compiled/interpreted disagreement fails CI), and speed work on strings, refcounts, allocation and borrowed parameters (C6, C8a-C8b4).
+13. Next: more speed (C8); bounds `T: Eq`/`Ord` on generics (L7c, waiting on a decision); later attenuation.
 
-v0 has no globals, reflection or `unsafe`. Capabilities are parameters only. See [docs/language.md](docs/language.md).
+There are no globals, reflection, `unsafe`, traits or tuples. Capabilities are parameters only. See [docs/language.md](docs/language.md).
 
 ## Docs
 
 - [CLAUDE.md](CLAUDE.md): how to work on kio, for people and agents; start with [docs/status.md](docs/status.md).
 - [docs/language.md](docs/language.md): one-screen primer and the rules the checker enforces.
 - [docs/design.md](docs/design.md): components, trust boundary, one run step by step, open questions.
-- [docs/lang-todo.md](docs/lang-todo.md): decisions and milestones for the native language crate (done for v0).
+- [docs/codegen.md](docs/codegen.md): how a checked program becomes Wasm, and the runtime it links.
+- [docs/perf.md](docs/perf.md): server latency and throughput, startup and memory.
+- [docs/lang-todo.md](docs/lang-todo.md): tasks for the `lang` crate: parser, checker, lowering, interpreter, and every language feature since.
 - [docs/guest-host-todo.md](docs/guest-host-todo.md): tasks for the Wasm sandbox and the `kio` binary.
 - [docs/web-support-todo.md](docs/web-support-todo.md): kio-web, a web framework in kio, and the language features it drives.
 - [docs/compiler-todo.md](docs/compiler-todo.md): compiling kio to Wasm, task by task, with the interpreter as the reference.

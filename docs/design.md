@@ -44,6 +44,7 @@ Everything runs in one OS process, the `kio` binary. The sandbox is a memory wal
 - `runtime`: compiled kio's runtime library, `no_std`, built to one core module (`compiled` world).
 - `codegen`: IR to Wasm, appended to the runtime and wrapped as a component.
 - `host`: the `kio` binary. Wasmtime, grants, limits, host functions, the audit log, `--listen`, `kio mcp`.
+- `tools/capgen` generates the checker's capability table from `caps.wit`; `tools/kiogen` generates programs for differential tests; `bench/` holds the benchmarks.
 
 ## Files and who owns them
 
@@ -68,7 +69,7 @@ kio run prog.kio --dir input=/srv/jobs/42/in --dir out=/srv/jobs/42/out
 | Step | What happens | Where |
 |---|---|---|
 | 1 | Host reads the files, parses and checks them against the capability table. On reject it prints the diagnostics; nothing has run. | host, native |
-| 2 | Host lowers the program to IR, generates its Wasm, appends it to the runtime and compiles the module to native code with Cranelift | host, native |
+| 2 | Host lowers the program to IR, generates its Wasm, appends it to the runtime and compiles the module to native code with Cranelift (or loads that code from the compile cache, `~/.cache/kio`) | host, native |
 | 3 | Host opens each granted directory with cap-std and builds the handle table `{0: input, 1: out}` | host, native |
 | 4 | Host binds each grant to the `main` parameter of the same name (host/src/grants.rs): a missing, unknown, repeated or mistyped grant is an error and no code runs | host, native |
 | 5 | Host instantiates the module with fuel, memory, stack and epoch limits, binds its imports to the host functions, and calls `run([dir(0), dir(1)])`, the grants in parameter order | wall crossed, into the sandbox |
@@ -86,6 +87,10 @@ kio run prog.kio --dir input=/srv/jobs/42/in --dir out=/srv/jobs/42/out
 **Dir.** Opened once with cap-std at grant time. Only regular files are read, created, written or removed; anything else is `denied`. `list` returns regular files and directories only. `write` writes a temp file with an unpredictable name beside the target and renames it over, so readers never see a partial file. Every path from the guest is resolved relative to that open directory, which refuses absolute paths, `..` above the root and symlinks that lead out. On Linux this is `openat2` with `RESOLVE_BENEATH`.
 
 **Http.** A grant names host and methods. The host checks the allowlist on the first request and on every redirect hop, refuses IP-literal hosts unless explicitly granted, and pins DNS resolution for the run. Response bodies are capped.
+
+**Kv.** `--kv name=:memory:` or a file: one store per grant, shared by every request; mutations go to an append-only log the host owns and locks, compacted when it grows ([open_questions](open_questions.md) #41-46).
+
+**Serving.** `--listen` binds `Incoming`/`Outgoing` (HTTP) or `WsMessage`/`WsSend` (WebSockets) to `main`'s parameters by type, whatever their names. On a loopback bind a request's `Host` must be `localhost`, `127.0.0.1`, `[::1]` or a `--host` name (DNS rebinding); a WebSocket upgrade from a browser needs a same-host `Origin` or `--ws-origin`.
 
 **Limits.** Wasmtime fuel bounds instructions. Epoch interruption bounds wall-clock, because fuel does not tick while a host call waits on a slow server. Each host call also has its own timeout and the run has a host-call count and total I/O byte budget.
 
@@ -126,7 +131,7 @@ Value semantics without a garbage collector or lifetimes. The interpreter is the
 |---|---|---|
 | v0 | every assignment, argument and container read clones | reference |
 | copy on write (done) | values share storage with a reference count; any write to shared storage, including `x.f = v` and `xs[i] = v`, copies it first | unchanged |
-| last-use moves | a variable's last use moves its storage instead of sharing it | unchanged |
+| last-use moves, borrowed parameters (done, C8b2, C8b4) | a variable's last use moves its storage instead of sharing it; a callee that only reads a parameter borrows it | unchanged |
 | `&mut` parameters | a callee changes the caller's value; shared storage is still copied first | new feature |
 
 No stored references and no shared mutable objects means no cycles, so reference counting never leaks. Compiled code uses the same model: the runtime holds the counts, codegen inserts the increments and decrements ([codegen.md](codegen.md), Ownership), and every differential test checks that no object is left alive.

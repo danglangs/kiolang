@@ -1,5 +1,7 @@
 # Performance
 
+Server and startup numbers. Compute benchmarks against Rust and Python, and the latest HTTP figure (73,800 req/s with keep-alive after C8b4, kio-web hello), are in [roadmap.md](roadmap.md) "Speed today".
+
 ## Compiled (C5, 2026-11-09)
 
 Since C5 `kio run` and `--listen` run compiled code. Measured on an Apple Silicon Mac (16 cores), release builds, before (3f82d33, the interpreter guest) and after back to back, two rounds each, with another agent's build using most cores (load average 13-15): treat differences under 2x as approximate. Server: `kio run examples/serve/app.kio --listen`, `GET /hello/kio` (route and JSON), 20,000 requests per `ab` run, zero failed.
@@ -25,6 +27,8 @@ Since C5 `kio run` and `--listen` run compiled code. Measured on an Apple Silico
 
 ## Interpreter guest (until C5)
 
+History: the guest, wizer and the pre-initialized checked program no longer exist (C5).
+
 Measured 2026-11-05 with ApacheBench on an Apple Silicon Mac, 12 cores, 32 GB, `kio` built in release. Server: `kio run examples/serve/app.kio --listen`, the kio-web example (route match and JSON, or a 2.7 KB file through a `Dir` grant). 20,000 requests per run, keep-alive off, zero failed requests in every run.
 
 | Concurrency | Route + JSON (req/s) | Mean | p99 |
@@ -41,4 +45,4 @@ Each request gets a fresh sandbox. The program is checked once at startup (W13b)
 
 What this implies:
 - The per-request sandbox is not the bottleneck at these rates; a fresh, isolated instance per request costs well under a millisecond.
-- The next win is per-request work inside the guest. P2 (copy-on-write) and P3 (lowering; the interpreter on the IR is 3x faster) are done; the compiler (docs/compiler-todo.md) replaces the interpreter at C5. Compute benchmarks against Rust and Python: docs/roadmap.md.
+- The next win is per-request work inside the guest. P2 (copy-on-write) and P3 (lowering; the interpreter on the IR is 3x faster) are done; the compiler replaced the interpreter at C5. Compute benchmarks against Rust and Python: docs/roadmap.md.

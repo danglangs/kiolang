@@ -47,9 +47,9 @@ fn main(input: Dir, out: Dir) -> Result<(), IoErr> {
 | User types | `struct`, and `enum` with payloads, generic or not (`struct Page<T>`); a type may contain itself only through `List` or `Map` |
 | Control | `if`, `if let`, `while`, `loop`, `for x in list`, `for i in 0..n`, `match`, `break`, `continue`, `return` |
 | Functions | free functions, recursion, generic functions `fn f<T>(..)`, function values of type `fn(T, ..) -> R`, closures |
-| Capabilities | `Dir`, `Http`, `Kv`, `WsMessage`, `WsSend`, generated from `caps.wit` |
+| Capabilities | `Dir`, `Http`, `Kv`, `Incoming`, `Outgoing`, `WsMessage`, `WsSend`, generated from `caps.wit` |
 
-Everything else is rejected with a message that names the kio alternative, for example `&str` (use `Str`), `Vec` (use `List`), `impl`, traits, bounds such as `T: Clone`, `use`, `mod`, tuples, globals, `unsafe`.
+Everything else is rejected with a message that names the kio alternative, for example `&str` (use `Str`), `Vec` (use `List`), `impl`, traits, bounds such as `T: Clone`, `use`, nested modules, tuples, globals, `unsafe`.
 
 ## Semantics
 
@@ -115,7 +115,7 @@ Everything else is rejected with a message that names the kio alternative, for e
 | `Option<T>` | `unwrap_or(T) -> T`, `is_some() -> Bool`, `is_none() -> Bool`, `ok_or(E) -> Result<T, E>`, `map(fn(T) -> U) -> Option<U>`, `and_then(fn(T) -> Option<U>) -> Option<U>` |
 | `Result<T, E>` | `unwrap_or(T) -> T`, `is_ok() -> Bool`, `is_err() -> Bool`, `ok() -> Option<T>`, `err() -> Option<E>`, `map(fn(T) -> U) -> Result<U, E>`, `map_err(fn(E) -> F) -> Result<T, F>`, `and_then(fn(T) -> Result<U, E>) -> Result<U, E>` |
 | `List<T>` | `xs[i]`, `len() -> Int`, `push(T)`, `pop() -> Option<T>`, `contains(T) -> Bool`, `sort()` (`List<Int>` and `List<Str>`, bytes order, stable), `map(fn(T) -> U) -> List<U>`, `filter(fn(T) -> Bool) -> List<T>`, `any(fn(T) -> Bool) -> Bool`, `all(fn(T) -> Bool) -> Bool` |
-| `Map<K, V>` | `Map::new()`, `get(K) -> Option<V>`, `insert(K, V)`, `remove(K)`, `keys() -> List<K>` |
+| `Map<K, V>` | `Map::new()`, `len() -> Int`, `get(K) -> Option<V>`, `insert(K, V)`, `remove(K)`, `keys() -> List<K>` |
 
 The methods taking `fn(..)` take any function value: a name (`json::as_str`), a closure or a local. A closure written as the argument gets its parameter type from the receiver and its return type from its body: `xs.filter(|x| x > 0).map(|x| x * 2)`. In one given to `and_then`, `?` returns the closure's `None` or `Err`, and `Ok(x)` takes the receiver's error type; `None` or `Err(e)` alone need a typed closure (`let f: fn(Str) -> Option<Int> = |s| ..`). The receiver is evaluated, then the function, then each call in list order; `any` and `all` stop at the first value that decides, as Rust's.
 
@@ -128,10 +128,12 @@ The checker's capability table is generated from [caps.wit](../caps.wit). Today:
 | `Dir` | `read(Str) -> Result<Bytes, IoErr>`, `create(Str, Bytes) -> Result<(), IoErr>` (new file only), `list(Str) -> Result<List<Str>, IoErr>` (`""` is the root; sorted names, a directory's ending in `/`), `write(Str, Bytes) -> Result<(), IoErr>` (create or replace atomically), `remove(Str) -> Result<(), IoErr>` (one regular file), `exists(Str) -> Result<Bool, IoErr>` |
 | `Http` | `get(Str) -> Result<Bytes, HttpErr>` |
 | `Kv` | `get(Str) -> Result<Option<Bytes>, KvErr>`, `set(Str, Bytes) -> Result<(), KvErr>`, `delete(Str) -> Result<(), KvErr>` (a missing key is fine), `keys(Str) -> Result<List<Str>, KvErr>` (keys with that prefix, sorted by bytes), `swap(Str, Option<Bytes>, Option<Bytes>) -> Result<Bool, KvErr>` |
+| `Incoming` | `method() -> Str`, `target() -> Str` (`/path?query` as sent), `header_names() -> List<Str>` (lowercase), `header_values() -> List<Str>`, `body() -> Bytes`; one per request under `--listen` |
+| `Outgoing` | `send(Int, List<Str>, List<Str>, Bytes) -> Result<(), WebErr>` (status, header names, header values, body; once per request) |
 | `WsMessage` | `kind() -> Str` (`"open"`, `"text"`, `"binary"` or `"close"`), `conn() -> Int` (the connection's id, unique per server run), `data() -> Bytes` (empty for open and close) |
 | `WsSend` | `text(Str) -> Result<(), WsErr>`, `binary(Bytes) -> Result<(), WsErr>`, `close(Int) -> Result<(), WsErr>`; written to the connection, in order, after `main` returns |
 
-`IoErr` is `NotFound`, `Denied`, `TooLarge`, `InvalidPath` or `Exists` (`create` on an existing path). `HttpErr` is `Denied`, `Timeout`, `TooLarge` or `Status(Int)`. `KvErr` is `TooLarge` (a key outside 1 to 1,024 bytes, a value over 1 MB, `keys` matching over 10,000) or `Full` (the store would pass `--kv-mb`). `WsErr` is `Closed` (after this run's `close`, on the close event, or once the connection closed), `TooLarge` (past 1 MB sent in one run) or `Invalid` (a close code other than 1000-1003, 1007-1013 or 3000-4999).
+`IoErr` is `NotFound`, `Denied`, `TooLarge`, `InvalidPath` or `Exists` (`create` on an existing path). `HttpErr` is `Denied`, `Timeout`, `TooLarge` or `Status(Int)`. `KvErr` is `TooLarge` (a key outside 1 to 1,024 bytes, a value over 1 MB, `keys` matching over 10,000) or `Full` (the store would pass `--kv-mb`). `WebErr` is `AlreadySent` or `Invalid` (a status outside 200-599, a header with CR or LF, lists of unequal length). `WsErr` is `Closed` (after this run's `close`, on the close event, or once the connection closed), `TooLarge` (past 1 MB sent in one run) or `Invalid` (a close code other than 1000-1003, 1007-1013 or 3000-4999).
 
 A WebSocket server is `fn main(msg: WsMessage, conn: WsSend, ..)` under `--listen`: each event of a connection runs `main` in a fresh sandbox, one at a time and in order; state between events goes in a `Kv`. A failed run closes the connection with 1011; the `close` event still runs. A browser page may connect only from the server's own host or an origin granted with `--ws-origin`.
 
@@ -159,7 +161,7 @@ A WebSocket server is `fn main(msg: WsMessage, conn: WsSend, ..)` under `--liste
 
 2. **Capabilities cannot be constructed.** There is no literal, constructor or cast that produces a `Dir`. Only the host provides them, as arguments to `main`.
 
-3. **`main` is the only entry point.** Its parameters are all capabilities and are the program's whole authority. Their names are what the operator binds with `--dir name=path`. It returns `()` or `Result<(), E>`.
+3. **`main` is the only entry point.** Its parameters are all capabilities and are the program's whole authority. Their names are what the operator binds with `--dir name=path`, `--http`, `--kv`; under `--listen`, `Incoming`, `Outgoing`, `WsMessage` and `WsSend` are bound by type, whatever the names. It may return any type: `kio run` prints it, and an `Err` exits 1.
 
 4. **`?` needs matching error types.** `d.read(x)?` inside a function returning `Result<_, IoErr>` is fine. Inside one returning `Option` or a different error type it is rejected. No implicit conversion.
 
@@ -212,3 +214,4 @@ error: kio has no references
 - The bounds `T: Eq` and `T: Ord` (planned: L7c).
 - Tuples.
 - `use` and nested modules.
+- Constants and globals ([open_questions](open_questions.md) #34).

@@ -4,12 +4,11 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 
 ## Now
 
-**Checkpoint reached (2026-11-06): compiled kio runs, proven against the interpreter.** P3 (IR, lowering, interpreter on the IR), C0 (design, [codegen.md](codegen.md)), C1 (runtime), C2a-c (pipeline, Int/Bool/control/calls, differential harness) are done. `host/tests/differential.rs` runs every corpus program both ways; any disagreement fails CI. A deliberate codegen bug (`<` as `<=`) was confirmed to fail it.
-
-**2026-11-08: new primary agent; work runs in parallel streams** (Opus for bulk code, a stronger model for design and security review; CLAUDE.md "How to work").
+Compiled-only kio covers the whole language and every capability; the active stream is speed (C8): code that stays in compiled Wasm is 1.1-2.1x Rust, runtime-heavy code 3-10x (table below). The differential harness runs 398 programs both ways (0 mismatches) and the generator 250 more per CI run.
 
 | Done | Result |
 |---|---|
+| P3, C0-C2 | IR and lowering; codegen design; the runtime; Int/Bool/control/calls compiled; `host/tests/differential.rs` runs every corpus program both ways and any disagreement fails CI (a deliberate `<` as `<=` bug was caught) |
 | L3a, L3b, L4a, L4b | match arms `return`/`break`/`continue`; modules use each other; nested patterns and `if let` (Maranget exhaustiveness); Str and List built-ins |
 | C3 (a-f) | runtime exports, descriptors, literals, leak check; Str, Bytes, List, Map, structs, enums, `Option`, `Result`, nested `match`, `?`, every built-in, `main` returning any type. Harness 46 to 240 ran both ways, 0 unsupported, 0 mismatches, 0 leaked; list and ADT code 4-6x faster than the interpreter |
 | C6a, C6b | generator (Int, Bool, control, calls, lists, structs/enums/`Option`/`match`/`?`): 250 programs both ways per CI run; front-end fuzzing, 210,000 inputs, no panic |
@@ -18,17 +17,16 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 | kio-web | `api.kio`; notes on Dir and on Kv, 22 checks each |
 | C10, C11 | `Float` and `slice` compiled; harness 267 ran both ways, 0 mismatches (left: `fn` values, C9, and capabilities, C4); kiogen generates floats; float loops compiled run at Rust's speed past ~20 ms of compiling (10 M multiply-adds 39 ms vs 1.49 s interpreted, Rust 20 ms) |
 | C4 | capabilities in compiled code: every caps.wit method, host-checked grants shared with the interpreter path, same host functions, quotas, report check and audit log. Harness 252 to 278 ran both ways (26 capability programs, compared with their audit logs); a forged handle is refused by the handle table |
-| L6a | `fn(T) -> R` types and function items as values, called as `f(x)` or `(e)(x)`; no capability inside a `fn` type; interpreter only |
-| L6b | closures, capturing by copy, lifted to functions in lowering; a closure cannot capture a capability; interpreter only |
-| L6c | `map`, `and_then`, `map_err`, `filter`, `any`, `all` on `Option`/`Result`/`List`, typed from the function; a closure argument takes its parameter type from the receiver; interpreter only (C9b) |
+| L6a | `fn(T) -> R` types and function items as values, called as `f(x)` or `(e)(x)`; no capability inside a `fn` type; compiled in C9a |
+| L6b | closures, capturing by copy, lifted to functions in lowering; a closure cannot capture a capability; compiled in C9a |
+| L6c | `map`, `and_then`, `map_err`, `filter`, `any`, `all` on `Option`/`Result`/`List`, typed from the function; a closure argument takes its parameter type from the receiver; compiled in C9b |
 | C9a | `fn` values and closures compiled: harness 300 ran both ways, 0 unsupported, 0 mismatches (left: capabilities, C4); a call through a value costs ~10 ns over a direct call (10 M: 144 ms vs 44 ms, incl. compiling) |
-| C5 | compiled only: `kio run` and `--listen` compile; the guest crate, its world, wizer and WASI are gone; the interpreter is the native test oracle (`Interp`). On-disk compile cache; fuel defaults a tenth. `Server::handle` 170 to 32 µs, `--listen` startup 0.95 to 0.17 s, idle RSS 66 to 28 MB. Programs with `fn` values fail "not compiled yet" until C9a/C9b |
+| C5 | compiled only: `kio run` and `--listen` compile; the guest crate, its world, wizer and WASI are gone; the interpreter is the native test oracle (`Interp`). On-disk compile cache; fuel defaults a tenth. `Server::handle` 170 to 32 µs, `--listen` startup 0.95 to 0.17 s, idle RSS 66 to 28 MB. |
 | C9b | L6c's built-ins taking functions compiled inline: harness 351 ran both ways, 0 unsupported, 0 mismatches, 0 leaked; kiogen generates them; 1 M `map` then `filter` 51 ms compiled vs 233 ms interpreted (a hand-written `for` 39 ms) |
 | C7a | C7 review follow-ups: hidden locals reused (17,000 calls in one function compile), more than 999 parameters a checker error, `--memory` below the initial memory reported as out of memory, a high-bits differential test over runtime slots, `Statics::desc` hashed (4,000 structs 263 to 226 ms) |
 | L7a | generic functions `fn f<T>(..)`: inferred from arguments, then the expected type, or `f::<Int>`; `T` opaque and never a capability; monomorphized in lowering (`first<Int>`), so compiled with no codegen change: harness 363 ran both ways, 0 mismatches. Adversarially reviewed (rule 1 holds) |
 | L7b | generic structs and enums (`struct Page<T>`, `enum Tree<T>`): inferred like calls, never holding a capability, one IR type per instance (displayed without arguments); no codegen change: harness 380 ran both ways, 0 mismatches. Adversarially reviewed (rule 1 holds) |
 | L7d | generic types usability: a literal, variant or call its values leave open waits for the expected type (`set(Page { items: [], next: None }, true)`); "expected Tree<Int>, found Other<..>"; the 65th instance through a type that does not grow names that type; `Box::<Int> { .. }` points to the `let`. Harness 398 ran both ways, 0 mismatches |
-
 | C8a | bench/ (`bench/run.sh`): 9 benchmarks and HTTP against Rust, Python and the interpreter, with profiles. Compiled-only code is 1.1-2.3x Rust; runtime-heavy code 3-271x (quadratic `s = s + x`, zero-filled buffers, allocation, refcount and runtime calls, fuel); ranked C8b list in roadmap.md |
 | C8b1 | in-place `Str` append (`s = s + x`, `s += x`) when the count is 1, no zero-filled byte buffers, inline `inc`/`dec`/`unique` and list `len`/`get`/`push` (a runtime-owned `ListBody` layout). Strings 1.37 s to 8.5 ms (2.4x Rust), JSON 554 to 144 ms, closures 36 to 13, list 52 to 28, tree 438 to 284 |
 | C8b2 | last-use moves and borrowed local operands (no inc/dec), word-at-a-time `Str` compare, one descriptor lookup per free, inline `Bytes` paths; kiogen generates strings. Tree 284 to 244 ms, JSON 143 to 101; word count unchanged (83 ms) |
@@ -37,14 +35,15 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 
 ## Next
 
-1. C8 next (roadmap.md): word count's map (`BTreeMap` node search, `split`'s allocations); fresh small blocks carved from chunks (dlmalloc's `malloc` is 17% of tree, while it is built); borrowed match bindings of a borrowed scrutinee (tree).
-2. L7c (bounds `Eq`, `Ord`): waiting on the owner's decision on `<` for `Str`.
+C8 (roadmap.md): word count's map (`BTreeMap` node search, `split`'s allocations); fresh small blocks carved from chunks (dlmalloc's `malloc` is 17% of tree, while it is built); borrowed match bindings of a borrowed scrutinee (tree).
 
 ## Waiting on the maintainer
 
-- **WebSocket upgrade headers:** a program cannot see the upgrade's path or headers; proposed `WsMessage.target()` and `header(name)` on the `open` event (caps.wit).
-
-- open_questions #34: whether to add constants (proposed: check-time literals only). Not decided; nothing depends on it.
+| Question | Proposal | Blocks |
+|---|---|---|
+| `<` on `Str` | whether to allow it; `Ord` is pinned as `Int` and `Str` only | L7c bounds `Eq`/`Ord` |
+| Fuel accounting | Wasmtime fuel off; codegen counts at loop heads and calls of the program only (changes what `--fuel` counts) | roadmap C8b #7: 10-25% on runtime-heavy code |
+| WebSocket upgrade headers | `WsMessage.target()` and `header(name)` on the `open` event (caps.wit) | a program cannot see the upgrade's path or headers |
 
 ## Speed (C8b4, 2026-11-09, release, run time; all in [roadmap.md](roadmap.md))
 

@@ -69,23 +69,23 @@ Most-used Rust crates, and kio's answer to each:
 
 | Need | Rust | kio today | Gap |
 |---|---|---|---|
-| HTTP server | axum, hyper, tokio | `--listen` plus kio-web | Done for buffered request/response, and WebSockets with a fresh sandbox per message (WS1). No streaming or HTTP/2. |
+| HTTP server | axum, hyper, tokio | `--listen` plus kio-web | Done for buffered request/response, and WebSockets with a fresh sandbox per message (WS1). No streaming or HTTP/2; a WebSocket program cannot see the upgrade's headers. |
 | HTTP client | reqwest | `Http.get` | GET only: POST, headers and JSON bodies need `caps.wit` methods. |
 | Async | tokio | none: a sandbox per request | Fine per request. Concurrent upstream calls inside one handler need host-side async (web decision 4). |
-| Serialization | serde, serde_json | json.kio (W12), untyped tree | Typed decode into structs needs generics or derive. |
-| Database | sqlx, diesel, redis | none | The largest gap for CRUD apps. Needs `Sql` and `Kv` capabilities (`caps.wit`, owner decision): the host holds the connection pool, the program gets a capability scoped to one database or key prefix. |
+| Serialization | serde, serde_json | json.kio (W12), untyped tree | Typed decode into structs needs a derive or traits; generics alone do not give it. |
+| Database | sqlx, diesel, redis | `Kv` (K1): get/set/delete/keys/swap, in memory or an append-only file the host owns | No SQL. A `Sql` capability (`caps.wit`, owner decision): the host holds the connection pool, the program gets a capability scoped to one database. |
 | Time, randomness, UUIDs | chrono, rand, uuid | none, by design (deterministic) | A `Clock` and `Rng` capability: granted explicitly, logged, and replayable. |
 | Crypto, hashing | ring, sha2, jsonwebtoken | none | Pure functions, so built-ins in `lang` (no capability needed), or host functions for speed. |
 | Errors | anyhow, thiserror | `Result`, `?`, enums | No conversion between error types (`From`). |
 | Logging, metrics | tracing | the audit log covers host calls | A `Log` capability for application logs. |
-| Regex, text | regex | `split`, `contains`, `starts_with` | Built-ins. |
+| Regex, text | regex | `split`, `lines`, `trim`, `find`, `replace`, `strip_prefix`, `contains`, `starts_with`, `slice` | No regex. |
 | CLI parsing | clap | none | Needs an `Args` capability; the operator grants argv. |
-| Floats | f64 | `Float` (f64; interpreted and compiled, C10) | JSON numbers still need json.kio support. |
-| Abstraction | traits, generics, closures | function values (`fn(T) -> R`, L6a), closures (L6b) and built-ins taking them (`map`, `filter`, `any`, `all`, `and_then`, `map_err`; L6c), interpreted and compiled (C9); generic functions (L7a) and generic structs and enums (L7b), monomorphized | Bounds `T: Eq`/`Ord` (L7c) next; no traits. |
+| Floats | f64 | `Float` (f64, compiled at Rust's speed) | JSON numbers still need json.kio support. |
+| Abstraction | traits, generics, closures | function values (`fn(T) -> R`, L6a), closures (L6b) and built-ins taking them (`map`, `filter`, `any`, `all`, `and_then`, `map_err`; L6c), compiled (C9); generic functions (L7a) and generic structs and enums (L7b, L7d), monomorphized | Bounds `T: Eq`/`Ord` (L7c) wait on the `<`-on-`Str` decision; no traits. |
 | Packages | cargo, crates.io | copy one file | A package manager, once there are a few libraries. |
 
-Non-starters today, in order of what blocks a real backend first: a database capability and an HTTP client beyond GET.
+Non-starters today, in order of what blocks a real backend first: an SQL capability and an HTTP client beyond GET.
 
 ## A target app
 
-A CRUD app over a `Dir` (W9) proves the language. A target app proves the ecosystem: a small, real web service that an agent writes and an operator runs with exactly its grants. Candidate: a link shortener or notes service with a JSON API, a `Kv` store, auth by a header token (a `Secret` capability), and HTML pages. Each piece it lacks becomes a task, as kio-web did for `--listen`. W9 first, then decide the `Kv` capability, then the target app.
+A CRUD app over a `Dir` (W9a) proves the language. A target app proves the ecosystem: a small, real web service that an agent writes and an operator runs with exactly its grants. Candidate: a link shortener or notes service with a JSON API, a `Kv` store, auth by a header token (a `Secret` capability), and HTML pages. Each piece it lacks becomes a task, as kio-web did for `--listen`. `Kv` exists, and kio-web has notes apps over `Dir` and over `Kv`; the target app is next.
