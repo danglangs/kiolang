@@ -1269,6 +1269,8 @@ fn function_values_display() {
     let p = check(src, &CapTable::default()).unwrap();
     let v = run(&p, &mut NoCaps).unwrap();
     assert_eq!(p.display(&v), "[<fn double>]");
+}
+
 /// `main`'s value as `kio run` prints it.
 fn shown(src: &str) -> String {
     let p = check(src, &CapTable::default()).unwrap_or_else(|d| panic!("{d:?}"));

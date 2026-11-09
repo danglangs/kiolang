@@ -1657,6 +1657,8 @@ fn calls_through_values_check_against_the_fn_type() {
     let src = "struct R { h: fn(Int) -> Int } fn f(r: R) -> Int { r.h(1) } fn main() {}";
     assert_eq!(reject(src).0, "no method `h` on R");
     assert_eq!(hint(src), "`h` is a field; call it as `(r.h)(..)`");
+}
+
 #[test]
 fn floats_typecheck() {
     ok("fn main() -> Bool {
