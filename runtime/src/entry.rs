@@ -1,17 +1,29 @@
-//! The `compiled` world's glue (caps.wit): the `run` export, `rt_trap`, and the two
+//! The `compiled` world's glue (caps.wit): the `run` export, `rt_trap`, `rt_grant`, and the two
 //! placeholder functions whose bodies codegen replaces with the program's entry. docs/codegen.md, "Entry".
 
 use crate::abi;
 use crate::display::outcome;
 use crate::obj;
 use alloc::vec::Vec;
+use core::cell::UnsafeCell;
 
 wit_bindgen::generate!({ world: "compiled", path: "../caps.wit" });
 
 struct Runtime;
 
 impl Guest for Runtime {
-    fn run(_grants: Vec<Grant>) -> Result<Outcome, ()> {
+    fn run(grants: Vec<Grant>) -> Result<Outcome, ()> {
+        let handles = grants.iter().map(|g| match g {
+            Grant::Dir(r) => (0, r.handle()),
+            Grant::Http(r) => (1, r.handle()),
+            Grant::Incoming(r) => (2, r.handle()),
+            Grant::Outgoing(r) => (3, r.handle()),
+            Grant::Kv(r) => (4, r.handle()),
+            Grant::WsMessage(r) => (5, r.handle()),
+            Grant::WsSend(r) => (6, r.handle()),
+        });
+        // SAFETY: one thread, and nothing else holds a reference to `GRANTED`.
+        unsafe { *GRANTED.0.get() = handles.collect() };
         let slot = kio_main();
         let t = abi::table();
         // SAFETY: codegen's entry returns a value of `kio_main_desc` and has called `rt_init`.
@@ -29,7 +41,31 @@ impl Guest for Runtime {
         if live != 0 {
             rt_trap(LEAKED, i64::from(live), 0);
         }
+        // The grants are dropped here, after main: the handles were theirs.
+        drop(grants);
         Ok(Outcome { value, failed })
+    }
+}
+
+/// `(kind, handle)` of each grant of this run, in `main`'s parameter order. A kind is the
+/// capability's index in the `CapTable`, which is the order of caps.wit's `grant` cases.
+struct Granted(UnsafeCell<Vec<(u32, u32)>>);
+
+// SAFETY: Wasm here has one thread.
+unsafe impl Sync for Granted {}
+
+static GRANTED: Granted = Granted(UnsafeCell::new(Vec::new()));
+
+/// The handle of grant `i`, which codegen's entry binds to main's parameter `i` of capability
+/// `kind`. The host has checked the grants against `main`'s parameters; a mismatch here is a
+/// bug, an internal error.
+#[no_mangle]
+pub extern "C" fn rt_grant(i: u32, kind: u32) -> u32 {
+    // SAFETY: one thread; `run` wrote it before calling `kio_main`.
+    let granted = unsafe { &*GRANTED.0.get() };
+    match granted.get(i as usize) {
+        Some(&(k, h)) if k == kind => h,
+        _ => panic!("grant {i} is not of kind {kind}"),
     }
 }
 

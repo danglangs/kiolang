@@ -76,7 +76,7 @@ pub fn compile(m: &Module) -> Result<Wasm> {
         rt: &rt,
         types,
         funcs,
-        entry: entry(rt.export("rt_init"), table, main_index, &main.ret),
+        entry: entry(&rt, table, main_index, main),
         entry_desc: main_desc,
         data: (data_addr, data),
     };
@@ -152,6 +152,8 @@ fn val_type(t: &Ty) -> Option<ValType> {
         Ty::Float => Some(ValType::F64),
         Ty::Str | Ty::Bytes | Ty::List(_) | Ty::Map(..) => Some(ValType::I32),
         Ty::Struct(_) | Ty::Enum(_) | Ty::Option(_) | Ty::Result(..) => Some(ValType::I32),
+        // A handle in the component's table, never counted.
+        Ty::Cap(_) => Some(ValType::I32),
         Ty::Unit | Ty::Never => None,
         t => unimplemented!("codegen: type {}", node(t)),
     }
@@ -227,6 +229,18 @@ const SLOT: wasm_encoder::MemArg = wasm_encoder::MemArg {
     memory_index: 0,
 };
 
+/// `WsMessage` as `ws_message`: a capability's part of its wrappers' names.
+fn snake(name: &str) -> String {
+    let mut s = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_ascii_uppercase() && i > 0 {
+            s.push('_');
+        }
+        s.push(c.to_ascii_lowercase());
+    }
+    s
+}
+
 /// The variant name of an IR node, for `unimplemented`.
 fn node(n: &impl Debug) -> String {
     let s = format!("{n:?}");
@@ -263,6 +277,7 @@ fn func<'m>(
     let mut g = FuncGen {
         rt,
         m,
+        f,
         ret: &f.ret,
         statics,
         sites,
@@ -287,6 +302,7 @@ fn func<'m>(
 struct FuncGen<'a, 'm> {
     rt: &'a Runtime,
     m: &'m Module,
+    f: &'m ir::Func,
     /// The function's return type, which `?` returns a `None` or `Err` of.
     ret: &'m Ty,
     statics: &'a mut Statics<'m>,
@@ -1133,6 +1149,7 @@ impl FuncGen<'_, '_> {
                 self.object(desc, *v, ENUM_SLOTS, &args);
             }
             ExprKind::Field(base, f) => self.field(base, *f, &e.ty),
+            ExprKind::CapCall(cap, method, args) => self.cap_call(*cap, *method, args, &e.ty),
             ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms, &e.ty),
             ExprKind::Try(x) => self.try_expr(x),
             k => unimplemented!("codegen: expression {}", node(k)),
@@ -1140,6 +1157,26 @@ impl FuncGen<'_, '_> {
         if e.ty == Ty::Never {
             self.sink().unreachable();
         }
+    }
+
+    /// A capability method: the runtime's wrapper (runtime/src/caps.rs) takes the result's
+    /// descriptor, the handle, then the arguments, which it borrows.
+    fn cap_call(&mut self, cap: ir::LocalId, method: u32, args: &[ir::Expr], ty: &Ty) {
+        let Ty::Cap(c) = self.f.locals[cap.0 as usize].ty else {
+            unreachable!("a capability call on a capability")
+        };
+        let def = &self.m.caps[c.0 as usize];
+        let name = format!("rt_cap_{}_{}", snake(&def.name), def.methods[method as usize].0);
+        let desc = self.statics.desc(ty);
+        let h = self.local(cap).expect("a capability has a value");
+        let xs: Vec<&ir::Expr> = args.iter().collect();
+        self.borrowing(&xs, |g, temps| {
+            g.sink().i32_const(desc as i32).local_get(h);
+            for (x, t) in xs.iter().zip(temps) {
+                g.get(x, *t);
+            }
+            g.call_rt(&name);
+        });
     }
 
     /// A new struct (`first` 8) or enum variant (`first` 16) of descriptor `desc`: the object
@@ -1527,12 +1564,22 @@ impl FuncGen<'_, '_> {
     }
 }
 
-/// The body of the runtime's `kio_main`: register the descriptor table, run `main`, return
-/// its value as a slot.
-fn entry(rt_init: u32, table: u32, main: u32, ret: &Ty) -> Function {
+/// The body of the runtime's `kio_main`: register the descriptor table, run `main` with the
+/// handle of grant `i` (`rt_grant(i, kind)`) as its parameter `i`, return its value as a slot.
+fn entry(rt: &Runtime, table: u32, index: u32, main: &ir::Func) -> Function {
     let mut f = Function::new([]);
-    f.instructions().i32_const(table as i32).call(rt_init).call(main);
-    match val_type(ret) {
+    f.instructions().i32_const(table as i32).call(rt.export("rt_init"));
+    for (i, l) in main.locals[..main.params as usize].iter().enumerate() {
+        let Ty::Cap(kind) = l.ty else {
+            unreachable!("main takes capabilities only")
+        };
+        f.instructions()
+            .i32_const(i as i32)
+            .i32_const(kind.0 as i32)
+            .call(rt.export("rt_grant"));
+    }
+    f.instructions().call(index);
+    match val_type(&main.ret) {
         Some(ValType::I64) => {}
         Some(ValType::F64) => {
             f.instructions().i64_reinterpret_f64();

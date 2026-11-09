@@ -24,7 +24,7 @@ pub(crate) fn table() -> Table<'static> {
     unsafe { RawTable::read(0, raw) }
 }
 
-fn ptr(a: u32) -> *mut Header {
+pub(crate) fn ptr(a: u32) -> *mut Header {
     core::ptr::with_exposed_provenance_mut(a as usize)
 }
 

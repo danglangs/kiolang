@@ -89,11 +89,9 @@ fn a_request_does_not_recheck() {
     let dirs = vec![("public".to_string(), open_dir(public.path()).unwrap())];
     let server = Server::new(files.clone(), limits).unwrap().unwrap();
     assert_eq!(server.handle(get("/hello/kio"), dirs).unwrap().status, 200);
+    // The host refuses a run without its grants before the guest checks, so check alone.
     let mut kio = kio_host::Kio::new(limits).unwrap();
-    assert!(
-        kio.run_files(&files, vec![], vec![]).is_err(),
-        "one-shot run checks too, so runs out"
-    );
+    assert!(kio.check_files(&files).is_err(), "checking in the guest runs out");
 }
 
 #[test]

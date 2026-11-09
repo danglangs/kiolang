@@ -25,7 +25,8 @@ fn program(lit: &str, comment: &str) -> String {
     s
 }
 
-/// Fuel needed to run `files` one-shot, which checks too.
+/// Fuel needed to check `files` in the guest, as a one-shot run does. (A run without its grants
+/// is refused by the host before the guest checks, so `check_files` measures it.)
 fn one_shot_fuel(files: &[(String, String)]) -> u64 {
     let (mut lo, mut hi) = (0u64, 4_000_000_000u64);
     while lo + 1 < hi {
@@ -36,7 +37,7 @@ fn one_shot_fuel(files: &[(String, String)]) -> u64 {
         };
         let mut kio = Kio::new(limits).unwrap();
         // Any reply, even a diagnostic, means it did not run out of fuel.
-        match kio.run_files(files, vec![], vec![]) {
+        match kio.check_files(files) {
             Ok(_) => hi = mid,
             Err(_) => lo = mid,
         }

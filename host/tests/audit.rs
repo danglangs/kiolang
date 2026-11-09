@@ -1,4 +1,4 @@
-use kio_host::{Kio, Limits};
+use kio_host::{Compiled, Kio, Limits};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
@@ -30,6 +30,11 @@ impl Log {
 
 /// Run the primer with `input` holding `invoices.csv` and `out` holding `out_files`.
 fn primer(limits: Limits, out_files: &[&str], hide: Option<(&str, &str)>) -> (Log, bool) {
+    primer_on(false, limits, out_files, hide)
+}
+
+/// `primer`, compiled if `compiled`.
+fn primer_on(compiled: bool, limits: Limits, out_files: &[&str], hide: Option<(&str, &str)>) -> (Log, bool) {
     let src = std::fs::read_to_string("../examples/invoices.kio").unwrap();
     let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     std::fs::write(a.path().join("invoices.csv"), "a,1\nb,2\n").unwrap();
@@ -41,16 +46,58 @@ fn primer(limits: Limits, out_files: &[&str], hide: Option<(&str, &str)>) -> (Lo
         ("out".to_string(), kio_host::open_dir(b.path()).unwrap()),
     ];
     let log = Log::default();
+    let paths = vec![("input".into(), "/in".into()), ("out".into(), "/out".into())];
+    if compiled {
+        let mut c = Compiled::new(limits);
+        c.audit(log.clone(), paths);
+        if let Some((cap, m)) = hide {
+            c.hide_from_report(cap, m);
+        }
+        let stopped = c.run_with(&src, dirs, vec![]).is_err();
+        return (log, stopped);
+    }
     let mut kio = Kio::new(limits).unwrap();
-    kio.audit(
-        log.clone(),
-        vec![("input".into(), "/in".into()), ("out".into(), "/out".into())],
-    );
+    kio.audit(log.clone(), paths);
     if let Some((c, m)) = hide {
         kio.hide_from_report(c, m);
     }
     let stopped = kio.run(&src, dirs).is_err();
     (log, stopped)
+}
+
+/// C4: compiled code makes the same host calls through the same host functions, so its log is
+/// the interpreted one's, apart from durations and the trailer's peak memory and fuel. This
+/// covers a refused call, a quota stop and the report check.
+#[test]
+fn compiled_log_is_the_interpreted_one() {
+    let calls = Limits {
+        calls: 1,
+        ..Limits::default()
+    };
+    let io = Limits {
+        io: 4,
+        ..Limits::default()
+    };
+    type Case<'a> = (Limits, &'a [&'a str], Option<(&'a str, &'a str)>);
+    let cases: [Case; 5] = [
+        (Limits::default(), &[], None),
+        (Limits::default(), &["total.txt"], None),
+        (calls, &[], None),
+        (io, &[], None),
+        (Limits::default(), &[], Some(("out", "create"))),
+    ];
+    let cut = |l: &String| match l.find(r#","peak_memory":"#) {
+        Some(i) => l[..i].to_string(),
+        None => l.clone(),
+    };
+    for (limits, out_files, hide) in cases {
+        let (i, i_stopped) = primer_on(false, limits, out_files, hide);
+        let (c, c_stopped) = primer_on(true, limits, out_files, hide);
+        let (i, c): (Vec<_>, Vec<_>) = (i.lines().iter().map(cut).collect(), c.lines().iter().map(cut).collect());
+        assert_eq!(c, i, "{out_files:?} {hide:?}");
+        assert_eq!(c_stopped, i_stopped);
+        assert!(c.len() >= 3, "{c:?}");
+    }
 }
 
 #[test]

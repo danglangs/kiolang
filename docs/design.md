@@ -64,7 +64,7 @@ Adding a method to `caps.wit` regenerates the capability table, the guest import
 
 ## One run, step by step
 
-Today `kio run` uses the interpreter guest, as below. Compiled runs (the default from C5) differ in steps 3 to 6 and 9: the host checks, lowers and compiles first, the guest's `run` receives the grants in `main`'s parameter order, and compiled code, not the interpreter, makes the import calls.
+Today `kio run` uses the interpreter guest, as below. Compiled runs (the default from C5) differ in steps 3 to 6 and 9: the host checks, lowers and compiles first, the compiled `run` receives the grants in `main`'s parameter order, and compiled code, not the interpreter, makes the import calls through the same host functions (`kio_host::Compiled`, C4).
 
 ```
 kio run prog.kio --dir input=/srv/jobs/42/in --dir out=/srv/jobs/42/out
@@ -76,7 +76,7 @@ kio run prog.kio --dir input=/srv/jobs/42/in --dir out=/srv/jobs/42/out
 | 2 | Host instantiates the guest with fuel, memory and epoch limits, and binds the WIT imports to its host functions | Wasmtime |
 | 3 | Host calls `run(files, [{input, 0}, {out, 1}], [], [], [])` | wall crossed, into the guest |
 | 4 | Guest parses and checks against the embedded capability table. On reject it returns the diagnostics. No I/O has happened. | guest |
-| 5 | Guest binds each grant to the `main` parameter of the same name; a missing or mistyped grant is an error and no code runs | guest |
+| 5 | Guest binds each grant to the `main` parameter of the same name. The host has already checked the binding before step 3 (host/src/grants.rs, shared with compiled runs): a missing, unknown, repeated or mistyped grant is an error and no code runs | host, then guest |
 | 6 | Interpreter starts `main` with `Cap(Dir, 0)` and `Cap(Dir, 1)` | guest |
 | 7 | On `input.read("invoices.csv")` the interpreter calls the import `dir.read(0, "invoices.csv")` | wall crossed, out of the guest |
 | 8 | Host looks up handle 0, checks its kind, charges the call quota, resolves the path beneath the root, enforces the size limit, reads, returns bytes | host, native |

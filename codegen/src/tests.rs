@@ -24,9 +24,51 @@ fn the_component_validates() {
 }
 
 #[test]
-#[should_panic(expected = "codegen: type Cap")]
+#[should_panic(expected = "codegen: type Fn")]
 fn unsupported_ir_names_the_node() {
-    let _ = compile(&module("fn main(input: Dir) {}"));
+    let _ = compile(&module("fn f() {} fn main() { let g = f; }"));
+}
+
+/// Every caps.wit method, called from a program: the runtime has a wrapper for each
+/// (runtime/src/caps.rs), and the component validates, so each wrapper's signature is the one
+/// codegen calls. The grant kinds `rt_grant` numbers are the `CapTable`'s order.
+#[test]
+fn every_capability_method_compiles() {
+    let caps = lang::CapTable::v0();
+    let names: Vec<&str> = caps.caps.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["Dir", "Http", "Incoming", "Outgoing", "Kv", "WsMessage", "WsSend"],
+        "runtime/src/entry.rs `run` numbers caps.wit's `grant` cases in this order"
+    );
+    let mut calls = 0;
+    let mut body = String::new();
+    for c in &caps.caps {
+        for (method, params, _) in &c.methods {
+            let args: Vec<&str> = params
+                .iter()
+                .map(|t| match t {
+                    lang::check::Ty::Str => "\"a\"",
+                    lang::check::Ty::Bytes => "\"a\".to_bytes()",
+                    lang::check::Ty::Int => "1",
+                    lang::check::Ty::List(_) => "[\"a\"]",
+                    lang::check::Ty::Option(_) => "Some(\"a\".to_bytes())",
+                    t => panic!("a test argument of type {t:?}"),
+                })
+                .collect();
+            body += &format!(
+                "    let r{calls} = {}.{method}({});\n",
+                c.name.to_lowercase(),
+                args.join(", ")
+            );
+            calls += 1;
+        }
+    }
+    let params: Vec<String> = names.iter().map(|n| format!("{}: {n}", n.to_lowercase())).collect();
+    let src = format!("fn main({}) {{\n{body}}}", params.join(", "));
+    let wasm = compile(&module(&src)).unwrap();
+    wasmparser::Validator::new().validate_all(&wasm.component).unwrap();
+    assert_eq!(calls, 24);
 }
 
 #[test]

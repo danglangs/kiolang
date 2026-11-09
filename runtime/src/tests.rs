@@ -225,3 +225,23 @@ fn use_after_free_is_caught() {
         obj::dec(&T, p);
     }
 }
+
+/// A string the host returns lands in `bytes_room` and becomes an object in place; freeing it
+/// uses the layout it was allocated with (Miri checks).
+#[test]
+fn adopted_bytes_are_objects() {
+    let _l = lock();
+    let before = obj::live();
+    for (desc, data) in [(desc::STR, b"hello".as_slice()), (desc::BYTES, b"")] {
+        let room = obj::bytes_room(data.len());
+        // SAFETY: `room` has `data.len()` bytes; it is adopted once, and the object freed once.
+        unsafe {
+            core::ptr::copy_nonoverlapping(data.as_ptr(), room, data.len());
+            let p = obj::adopt(desc, room, data.len());
+            assert_eq!((rc(p), (*p).desc, obj::bytes(p)), (1, desc, data));
+            assert_eq!(obj::live() - before, 1);
+            obj::dec(&T, p);
+        }
+    }
+    assert_eq!(obj::live(), before);
+}

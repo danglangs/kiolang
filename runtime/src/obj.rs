@@ -164,6 +164,39 @@ pub fn new_bytes_cap(desc: u32, b: &[u8], cap: usize) -> *mut Header {
     p
 }
 
+/// Room for the `len` bytes of a `Str` or `Bytes` that `adopt` turns into one: the address
+/// of its data, after space for the header. For `cabi_realloc` (runtime/src/caps.rs), so a
+/// string the host returns lands in its object with no copy.
+pub fn bytes_room(len: usize) -> *mut u8 {
+    let layout = layout(BYTES_DATA + len);
+    // SAFETY: the size is at least BYTES_DATA, so not zero.
+    let p = unsafe { alloc::alloc::alloc(layout) };
+    if p.is_null() {
+        handle_alloc_error(layout);
+    }
+    // SAFETY: inside the allocation.
+    unsafe { p.add(BYTES_DATA) }
+}
+
+/// The `Str` or `Bytes` (by `desc`) holding the `len` bytes at `data`, count 1.
+///
+/// # Safety
+/// `data` came from `bytes_room(len)`, its bytes are initialized (UTF-8 for a `Str`), and it
+/// is adopted once.
+pub unsafe fn adopt(desc: u32, data: *mut u8, len: usize) -> *mut Header {
+    assert!(desc == desc::STR || desc == desc::BYTES);
+    let n = u32::try_from(len).expect("over 4 GiB");
+    // SAFETY: `bytes_room` left BYTES_DATA bytes before `data`, 8-aligned.
+    unsafe {
+        let p = data.sub(BYTES_DATA).cast::<Header>();
+        p.write(Header { rc: 1, desc });
+        field::<u32>(p, 8).write(n);
+        field::<u32>(p, 12).write(n);
+        live_add(1);
+        p
+    }
+}
+
 /// A `Str`'s or `Bytes`' contents.
 ///
 /// # Safety

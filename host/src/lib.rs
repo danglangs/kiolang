@@ -21,8 +21,9 @@ wasmtime::component::bindgen!({ world: "guest", path: "../caps.wit", imports: { 
 
 mod compiled;
 mod config;
+mod grants;
 pub mod kv;
-pub use compiled::Compiled;
+pub use compiled::{Compiled, CompiledRun};
 pub use config::MAX_STACK;
 pub mod listen;
 pub mod ws;
@@ -321,6 +322,9 @@ pub struct State {
     /// `(capability parameter, method)` pairs on `main`'s report line; any other call is a checker
     /// bug. Set at the start of every run, whether or not a log is written.
     allowed: HashSet<(String, String)>,
+    /// `main`'s parameters, which the grants must match; `None` when the program does not check
+    /// (the guest then reports why).
+    params: Option<grants::Params>,
     /// Grant name and kind of each handle.
     handles: HashMap<u32, (String, &'static str)>,
     audit_msg: String,
@@ -378,6 +382,7 @@ impl State {
             audit: None,
             unexpected: false,
             allowed: HashSet::new(),
+            params: None,
             handles: HashMap::new(),
             audit_msg: String::new(),
             trap_c: 0,
@@ -969,6 +974,40 @@ pub struct Response {
 /// What `run` returns: the outcome, or the diagnostics.
 type RunResult = std::result::Result<Outcome, Vec<Diag>>;
 
+/// The `Incoming` and `Outgoing` grants for one request, named `names`, and the slot the
+/// `Outgoing` fills.
+fn web_grants(store: &mut Store<State>, request: Request, names: (&str, &str)) -> Result<(Sent, Handles)> {
+    let sent = Sent::default();
+    let req = store.data_mut().table.push(request)?;
+    let res = store.data_mut().table.push(sent.clone())?;
+    let handles = Handles {
+        incomings: vec![(names.0.to_string(), Resource::new_own(req.rep()))],
+        outgoings: vec![(names.1.to_string(), Resource::new_own(res.rep()))],
+        ..Handles::default()
+    };
+    Ok((sent, handles))
+}
+
+/// The `WsMessage` and `WsSend` grants for one event, named `names`, and the outbox the
+/// sends fill. `closed` makes every send `closed`.
+fn ws_grants(
+    store: &mut Store<State>,
+    event: ws::WsEvent,
+    closed: bool,
+    names: &(String, String),
+) -> Result<(ws::Sends, Handles)> {
+    let sends = ws::Sends::default();
+    sends.lock().unwrap_or_else(PoisonError::into_inner).closed = closed;
+    let msg = store.data_mut().table.push(event)?;
+    let conn = store.data_mut().table.push(sends.clone())?;
+    let handles = Handles {
+        messages: vec![(names.0.clone(), Resource::new_own(msg.rep()))],
+        senders: vec![(names.1.clone(), Resource::new_own(conn.rep()))],
+        ..Handles::default()
+    };
+    Ok((sends, handles))
+}
+
 /// One request's or event's grants, already in the store's table, by `main` parameter name.
 #[derive(Default)]
 struct Handles {
@@ -1276,6 +1315,36 @@ fn limit_trap(e: &wasmtime::Error, l: &Limits) -> Option<String> {
     })
 }
 
+/// The message for a run in `s` that hit one of `l`'s limits, or `None` for any other error.
+fn explain(s: &State, l: &Limits, e: &wasmtime::Error) -> Option<String> {
+    // A refused memory grow makes the guest's allocator abort, so the trap itself is generic.
+    if s.out_of_memory {
+        return Some(format!(
+            "out of memory (limit {} MB; raise it with --memory)",
+            l.memory >> 20
+        ));
+    }
+    if s.unexpected {
+        return Some(s.audit_msg.clone());
+    }
+    if s.too_many_calls {
+        return Some(format!(
+            "too many host calls (limit {}; raise it with --calls)",
+            l.calls
+        ));
+    }
+    if s.too_much_io {
+        return Some(format!("too much I/O (limit {} MB; raise it with --io)", l.io >> 20));
+    }
+    if s.timed_out {
+        return Some(format!(
+            "timed out after {} s (raise it with --timeout)",
+            l.timeout_secs
+        ));
+    }
+    limit_trap(e, l)
+}
+
 /// A fresh instance of the embedded guest, for one run: fuel, deadline, call and I/O counters
 /// are not reset, so make a new `Kio` per run.
 pub struct Kio {
@@ -1353,33 +1422,7 @@ impl Kio {
 
     /// The message for a run that hit one of its limits, or `None` for any other error.
     pub fn explain(&self, e: &wasmtime::Error) -> Option<String> {
-        let l = &self.limits;
-        // A refused memory grow makes the guest's allocator abort, so the trap itself is generic.
-        if self.store.data().out_of_memory {
-            return Some(format!(
-                "out of memory (limit {} MB; raise it with --memory)",
-                l.memory >> 20
-            ));
-        }
-        if self.store.data().unexpected {
-            return Some(self.store.data().audit_msg.clone());
-        }
-        if self.store.data().too_many_calls {
-            return Some(format!(
-                "too many host calls (limit {}; raise it with --calls)",
-                l.calls
-            ));
-        }
-        if self.store.data().too_much_io {
-            return Some(format!("too much I/O (limit {} MB; raise it with --io)", l.io >> 20));
-        }
-        if self.store.data().timed_out {
-            return Some(format!(
-                "timed out after {} s (raise it with --timeout)",
-                l.timeout_secs
-            ));
-        }
-        limit_trap(e, l)
+        explain(self.store.data(), &self.limits, e)
     }
 
     /// Parse and check `source`: the report lines, or the diagnostics.
@@ -1439,44 +1482,27 @@ impl Kio {
         dirs: Vec<(String, RealDir)>,
         request: Request,
     ) -> Result<(RunResult, Option<Response>)> {
-        let (sent, handles) = self.web_grants(request, ("req", "res"))?;
+        let (sent, handles) = web_grants(&mut self.store, request, ("req", "res"))?;
         let outcome = self.run_all(&[single(source)], dirs, vec![], handles)?;
         let response = sent.lock().unwrap_or_else(PoisonError::into_inner).take();
         Ok((outcome, response))
     }
 
-    /// The `Incoming` and `Outgoing` grants for one request, named `names`, and the slot the
-    /// `Outgoing` fills.
-    fn web_grants(&mut self, request: Request, names: (&str, &str)) -> Result<(Sent, Handles)> {
-        let sent = Sent::default();
-        let req = self.store.data_mut().table.push(request)?;
-        let res = self.store.data_mut().table.push(sent.clone())?;
-        let handles = Handles {
-            incomings: vec![(names.0.to_string(), Resource::new_own(req.rep()))],
-            outgoings: vec![(names.1.to_string(), Resource::new_own(res.rep()))],
-            ..Handles::default()
-        };
-        Ok((sent, handles))
-    }
-
-    /// The `WsMessage` and `WsSend` grants for one event, named `names`, and the outbox the
-    /// sends fill. `closed` makes every send `closed`.
-    fn ws_grants(
+    /// Run `main(m: WsMessage, w: WsSend, ..)` for one event, with the two named `names` and
+    /// `dirs` granted by name; `closed` makes every send `closed`. Returns the outcome and the
+    /// frames `main` sent.
+    pub fn run_ws(
         &mut self,
+        source: &str,
+        dirs: Vec<(String, RealDir)>,
         event: ws::WsEvent,
         closed: bool,
         names: &(String, String),
-    ) -> Result<(ws::Sends, Handles)> {
-        let sends = ws::Sends::default();
-        sends.lock().unwrap_or_else(PoisonError::into_inner).closed = closed;
-        let msg = self.store.data_mut().table.push(event)?;
-        let conn = self.store.data_mut().table.push(sends.clone())?;
-        let handles = Handles {
-            messages: vec![(names.0.clone(), Resource::new_own(msg.rep()))],
-            senders: vec![(names.1.clone(), Resource::new_own(conn.rep()))],
-            ..Handles::default()
-        };
-        Ok((sends, handles))
+    ) -> Result<(RunResult, Vec<ws::WsFrame>)> {
+        let (sends, handles) = ws_grants(&mut self.store, event, closed, names)?;
+        let outcome = self.run_all(&[single(source)], dirs, vec![], handles)?;
+        let frames = std::mem::take(&mut sends.lock().unwrap_or_else(PoisonError::into_inner).frames);
+        Ok((outcome, frames))
     }
 
     fn run_all(
@@ -1490,7 +1516,7 @@ impl Kio {
         self.run_armed(files, dirs, https, handles)
     }
 
-    /// `run_all` with `State::allowed` already set.
+    /// `run_all` with `State::allowed` and `State::params` already set.
     fn run_armed(
         &mut self,
         files: &[(String, String)],
@@ -1498,156 +1524,92 @@ impl Kio {
         https: Vec<(String, Origin)>,
         handles: Handles,
     ) -> Result<std::result::Result<Outcome, Vec<Diag>>> {
-        self.start_audit(files, &dirs, &https, &handles)?;
-        let result = self.run_granted(files, dirs, https, handles);
-        self.end_audit(&result)?;
+        let bound = push_grants(&mut self.store, dirs, https, handles, std::mem::take(&mut self.kvs))?;
+        if let Some((out, paths)) = self.audit.take() {
+            start_audit(self.store.data_mut(), out, &paths, &self.limits, files, &bound)?;
+        }
+        let result = self.run_bound(files, &bound);
+        let outcome = match &result {
+            Ok(Ok(o)) if !o.failed => "ok",
+            Ok(Ok(_)) => "failed",
+            _ => "error",
+        };
+        end_audit(&mut self.store, &self.limits, outcome)?;
         result
     }
 
-    /// Set the `(parameter, method)` pairs a call may use. The host checks the files itself, so
-    /// they do not come from the guest.
+    /// Set the `(parameter, method)` pairs a call may use and `main`'s parameters. The host
+    /// checks the files itself, so they do not come from the guest.
     fn arm_report(&mut self, files: &[(String, String)]) {
+        let pairs: Vec<(&str, &str)> = files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
+        let caps = lang::CapTable::v0();
+        let (allowed, params) = match lang::check_files(&pairs, &caps) {
+            Ok(p) => (
+                main_calls(&lang::report(&p)),
+                Some(grants::main_params(&lang::lower::lower(&p, &caps))),
+            ),
+            Err(_) => (HashSet::new(), None),
+        };
         #[cfg_attr(not(feature = "test-hooks"), allow(unused_mut))]
-        let mut allowed = allowed_calls(files);
+        let mut allowed = allowed;
         #[cfg(feature = "test-hooks")]
         if let Some(h) = &self.hidden {
             allowed.remove(h);
         }
         self.store.data_mut().allowed = allowed;
+        self.store.data_mut().params = params;
     }
 
-    /// Write the audit header and arm the per-call log, if `audit` was called.
-    fn start_audit(
-        &mut self,
-        files: &[(String, String)],
-        dirs: &[(String, RealDir)],
-        https: &[(String, Origin)],
-        handles: &Handles,
-    ) -> Result<()> {
-        let Some((out, dir_paths)) = self.audit.take() else {
-            return Ok(());
-        };
-        let mut grant_json = Vec::new();
-        let mut grant = |name: &str, kind: &'static str, target: Option<String>| {
-            let t = target.map_or("null".into(), |t| json(&t));
-            grant_json.push(format!(r#"{{"name":{},"kind":"{kind}","target":{t}}}"#, json(name)));
-        };
-        for (name, _) in dirs {
-            let path = dir_paths.iter().find(|(n, _)| n == name).map(|(_, p)| p.clone());
-            grant(name, "Dir", path);
+    /// Check the grants against `main`'s parameters, then run the guest with them.
+    fn run_bound(&mut self, files: &[(String, String)], bound: &[Bound]) -> Result<RunResult> {
+        if let Some(params) = &self.store.data().params {
+            if let Err(diags) = grants::bind(params, &named(bound)) {
+                return Ok(Err(diags.into_iter().map(wit_diag).collect()));
+            }
         }
-        for (name, o) in https {
-            grant(name, "Http", Some(o.target()));
-        }
-        for (name, kind, _) in handles.each() {
-            grant(&name, kind, None);
-        }
-        for (name, store) in &self.kvs {
-            grant(name, "Kv", Some(store.target().to_string()));
-        }
-        let l = &self.limits;
-        let header = format!(
-            r#"{{"event":"start","program_hash":"{}","grants":[{}],"limits":{{"fuel":{},"timeout_secs":{},"stack":{},"memory":{},"calls":{},"io":{}}}}}"#,
-            program_hash(files),
-            grant_json.join(","),
-            l.fuel,
-            l.timeout_secs,
-            l.stack,
-            l.memory,
-            l.calls,
-            l.io
-        );
-        let mut audit = Audit { out, seq: 0 };
-        audit.line(&header)?;
-        self.store.data_mut().audit = Some(audit);
-        Ok(())
-    }
-
-    /// Write the audit trailer, even when the run stopped.
-    fn end_audit(&mut self, result: &Result<std::result::Result<Outcome, Vec<Diag>>>) -> Result<()> {
-        let fuel_used = self.limits.fuel.saturating_sub(self.store.get_fuel().unwrap_or(0));
-        let d = self.store.data_mut();
-        let Some(a) = d.audit.as_mut() else { return Ok(()) };
-        let outcome = match result {
-            Ok(Ok(o)) if !o.failed => "ok",
-            Ok(Ok(_)) => "failed",
-            _ => "error",
-        };
-        let line = format!(
-            r#"{{"event":"end","outcome":"{outcome}","calls":{},"io":{},"peak_memory":{},"fuel_used":{fuel_used}}}"#,
-            d.calls, d.io, d.peak_memory
-        );
-        a.line(&line)?;
-        Ok(())
-    }
-
-    fn run_granted(
-        &mut self,
-        files: &[(String, String)],
-        dirs: Vec<(String, RealDir)>,
-        https: Vec<(String, Origin)>,
-        handles: Handles,
-    ) -> Result<std::result::Result<Outcome, Vec<Diag>>> {
-        let mut grants = Vec::new();
-        for (name, dir) in dirs {
-            let h = self.store.data_mut().table.push(Granted(dir))?;
-            self.name_handle(h.rep(), &name, "Dir");
-            grants.push(DirGrant {
-                name,
-                dir: Resource::new_own(h.rep()),
-            });
-        }
-        let mut http_grants = Vec::new();
-        for (name, origin) in https {
-            let h = self.store.data_mut().table.push(origin)?;
-            self.name_handle(h.rep(), &name, "Http");
-            http_grants.push(HttpGrant {
-                name,
-                http: Resource::new_own(h.rep()),
-            });
-        }
-        for (name, kind, rep) in handles.each() {
-            self.name_handle(rep, &name, kind);
-        }
-        let Handles {
-            incomings,
-            outgoings,
-            messages,
-            senders,
-        } = handles;
-        let incomings: Vec<_> = incomings
-            .into_iter()
-            .map(|(name, incoming)| IncomingGrant { name, incoming })
-            .collect();
-        let outgoings: Vec<_> = outgoings
-            .into_iter()
-            .map(|(name, outgoing)| OutgoingGrant { name, outgoing })
-            .collect();
-        let messages: Vec<_> = messages
-            .into_iter()
-            .map(|(name, message)| WsMessageGrant { name, message })
-            .collect();
-        let senders: Vec<_> = senders
-            .into_iter()
-            .map(|(name, sender)| WsSendGrant { name, sender })
-            .collect();
-        let mut kv_grants = Vec::new();
-        for (name, store) in std::mem::take(&mut self.kvs) {
-            let h = self.store.data_mut().table.push(store)?;
-            self.name_handle(h.rep(), &name, "Kv");
-            kv_grants.push(KvGrant {
-                name,
-                kv: Resource::new_own(h.rep()),
-            });
+        let (mut dirs, mut https, mut incomings, mut outgoings) = (vec![], vec![], vec![], vec![]);
+        let (mut kvs, mut messages, mut senders) = (vec![], vec![], vec![]);
+        for b in bound {
+            let (name, rep) = (b.name.clone(), b.rep);
+            match b.kind {
+                "Dir" => dirs.push(DirGrant {
+                    name,
+                    dir: Resource::new_own(rep),
+                }),
+                "Http" => https.push(HttpGrant {
+                    name,
+                    http: Resource::new_own(rep),
+                }),
+                "Incoming" => incomings.push(IncomingGrant {
+                    name,
+                    incoming: Resource::new_own(rep),
+                }),
+                "Outgoing" => outgoings.push(OutgoingGrant {
+                    name,
+                    outgoing: Resource::new_own(rep),
+                }),
+                "Kv" => kvs.push(KvGrant {
+                    name,
+                    kv: Resource::new_own(rep),
+                }),
+                "WsMessage" => messages.push(WsMessageGrant {
+                    name,
+                    message: Resource::new_own(rep),
+                }),
+                _ => senders.push(WsSendGrant {
+                    name,
+                    sender: Resource::new_own(rep),
+                }),
+            }
         }
         self.guest.call_run(
             &mut self.store,
             &file_list(files),
-            &grants,
-            &http_grants,
+            &dirs,
+            &https,
             &incomings,
             &outgoings,
-            &kv_grants,
+            &kvs,
             &messages,
             &senders,
         )
@@ -1666,19 +1628,108 @@ impl Handles {
     }
 }
 
-impl Kio {
-    /// Record which grant a handle is, for the report check and the log.
-    fn name_handle(&mut self, rep: u32, name: &str, kind: &'static str) {
-        self.store.data_mut().handles.insert(rep, (name.to_string(), kind));
-    }
+/// A grant in the store's table: the `main` parameter it is for, its kind (`Dir`), its handle,
+/// and for the audit header what it reaches (a `Dir`'s path comes from `DirPaths`).
+struct Bound {
+    name: String,
+    kind: &'static str,
+    rep: u32,
+    target: Option<String>,
 }
 
-/// The `(parameter, method)` pairs on `main`'s line of the report for `files`; none if they do
-/// not check.
-fn allowed_calls(files: &[(String, String)]) -> HashSet<(String, String)> {
-    let pairs: Vec<(&str, &str)> = files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
-    let report = lang::check_files(&pairs, &lang::CapTable::v0()).map(|p| lang::report(&p));
-    main_calls(report.as_deref().unwrap_or(""))
+/// `(name, kind)` of each grant, for `grants::bind`.
+fn named(bound: &[Bound]) -> Vec<(String, &'static str)> {
+    bound.iter().map(|b| (b.name.clone(), b.kind)).collect()
+}
+
+/// Put one run's grants in `store`'s table (`handles` are there already) and record which grant
+/// each handle is, for the report check and the log. In the order the audit header lists them.
+fn push_grants(
+    store: &mut Store<State>,
+    dirs: Vec<(String, RealDir)>,
+    https: Vec<(String, Origin)>,
+    handles: Handles,
+    kvs: KvGrants,
+) -> Result<Vec<Bound>> {
+    let s = store.data_mut();
+    let mut bound = Vec::new();
+    let mut add = |name: String, kind, rep, target| {
+        bound.push(Bound {
+            name,
+            kind,
+            rep,
+            target,
+        })
+    };
+    for (name, dir) in dirs {
+        add(name, "Dir", s.table.push(Granted(dir))?.rep(), None);
+    }
+    for (name, origin) in https {
+        let target = Some(origin.target());
+        add(name, "Http", s.table.push(origin)?.rep(), target);
+    }
+    for (name, kind, rep) in handles.each() {
+        add(name, kind, rep, None);
+    }
+    for (name, store) in kvs {
+        let target = Some(store.target().to_string());
+        add(name, "Kv", s.table.push(store)?.rep(), target);
+    }
+    for b in &bound {
+        s.handles.insert(b.rep, (b.name.clone(), b.kind));
+    }
+    Ok(bound)
+}
+
+/// Write the audit header (H8) for a run of `files` with `bound` grants to `out`, and arm the
+/// per-call log.
+fn start_audit(
+    s: &mut State,
+    out: Box<dyn Write + Send>,
+    dir_paths: &DirPaths,
+    l: &Limits,
+    files: &[(String, String)],
+    bound: &[Bound],
+) -> Result<()> {
+    let grant_json: Vec<String> = bound
+        .iter()
+        .map(|b| {
+            let target = match b.kind {
+                "Dir" => dir_paths.iter().find(|(n, _)| *n == b.name).map(|(_, p)| p.clone()),
+                _ => b.target.clone(),
+            };
+            let t = target.map_or("null".into(), |t| json(&t));
+            format!(r#"{{"name":{},"kind":"{}","target":{t}}}"#, json(&b.name), b.kind)
+        })
+        .collect();
+    let header = format!(
+        r#"{{"event":"start","program_hash":"{}","grants":[{}],"limits":{{"fuel":{},"timeout_secs":{},"stack":{},"memory":{},"calls":{},"io":{}}}}}"#,
+        program_hash(files),
+        grant_json.join(","),
+        l.fuel,
+        l.timeout_secs,
+        l.stack,
+        l.memory,
+        l.calls,
+        l.io
+    );
+    let mut audit = Audit { out, seq: 0 };
+    audit.line(&header)?;
+    s.audit = Some(audit);
+    Ok(())
+}
+
+/// Write the audit trailer, even when the run stopped. `outcome` is `ok`, `failed` or `error`.
+fn end_audit(store: &mut Store<State>, l: &Limits, outcome: &str) -> Result<()> {
+    let fuel_used = l.fuel.saturating_sub(store.get_fuel().unwrap_or(0));
+    let d = store.data_mut();
+    let Some(a) = d.audit.as_mut() else { return Ok(()) };
+    let line = format!(
+        r#"{{"event":"end","outcome":"{outcome}","calls":{},"io":{},"peak_memory":{},"fuel_used":{fuel_used}}}"#,
+        d.calls, d.io, d.peak_memory
+    );
+    a.line(&line)?;
+    Ok(())
 }
 
 /// A lone root file, for callers with one source.
@@ -1703,6 +1754,7 @@ pub struct Server {
     pre: InstancePre<State>,
     files: Vec<(String, String)>,
     allowed: HashSet<(String, String)>,
+    params: grants::Params,
     report: String,
     limits: Limits,
     stop: Arc<AtomicBool>,
@@ -1735,6 +1787,7 @@ impl Server {
         };
         let report = lang::report(&program);
         let allowed = main_calls(&report);
+        let bound = grants::main_params(&lang::lower::lower(&program, &lang::CapTable::v0()));
         let params = program.main_params();
         let param = |ty: &str| params.iter().find(|(_, t)| t == ty).map(|(n, _)| n.clone());
         let ws = param("WsMessage").zip(param("WsSend"));
@@ -1761,6 +1814,7 @@ impl Server {
             pre,
             files,
             allowed,
+            params: bound,
             report,
             limits,
             stop,
@@ -1791,7 +1845,7 @@ impl Server {
     pub fn handle(&self, request: Request, dirs: Vec<(String, RealDir)>) -> std::result::Result<Response, String> {
         let mut sent = Sent::default();
         let result = self.run_fresh(dirs, |kio| {
-            let (s, handles) = kio.web_grants(request, (&self.http.0, &self.http.1))?;
+            let (s, handles) = web_grants(&mut kio.store, request, (&self.http.0, &self.http.1))?;
             sent = s;
             Ok(handles)
         })?;
@@ -1828,7 +1882,7 @@ impl Server {
         let names = self.ws.as_ref().ok_or("main takes no WsMessage")?;
         let mut sends = ws::Sends::default();
         let result = self.run_fresh(dirs, |kio| {
-            let (s, handles) = kio.ws_grants(event, closed, names)?;
+            let (s, handles) = ws_grants(&mut kio.store, event, closed, names)?;
             sends = s;
             Ok(handles)
         })?;
@@ -1854,6 +1908,7 @@ impl Server {
     ) -> std::result::Result<std::result::Result<Outcome, String>, String> {
         let mut kio = self.instance().map_err(|e| format!("cannot start instance: {e:#}"))?;
         kio.store.data_mut().allowed = self.allowed.clone();
+        kio.store.data_mut().params = Some(self.params.clone());
         kio.kvs = self.kvs.clone();
         let handles = grant(&mut kio).map_err(|e| e.to_string())?;
         Ok(match kio.run_armed(&self.files, dirs, vec![], handles) {

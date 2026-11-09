@@ -6,6 +6,7 @@
 //! - `obj`: object layout, allocation, `inc`, `dec`, `unique`; the safe-to-call Rust layer.
 //! - `abi`: the `extern "C"` functions generated code calls, over `u32` addresses (wasm32 only).
 //! - `entry`: the `compiled` world's `run` export, and the entry codegen fills (wasm32 only).
+//! - `caps`: capability calls over the world's imports, and `cabi_realloc` (wasm32 only).
 //!
 //! `no_std` + `alloc`. On wasm32 the allocator is dlmalloc and a panic is a Wasm trap; natively
 //! (tests) std supplies the system allocator and the panic handler.
@@ -26,6 +27,8 @@ pub mod text;
 
 #[cfg(target_arch = "wasm32")]
 mod abi;
+#[cfg(target_arch = "wasm32")]
+mod caps;
 #[cfg(target_arch = "wasm32")]
 mod entry;
 
