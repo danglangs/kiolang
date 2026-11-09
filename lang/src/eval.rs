@@ -787,6 +787,17 @@ fn none() -> Value {
     Value::Enum(EnumRef::Option, 0, Vec::new())
 }
 
+/// The checked offsets of a `slice` call as a range within `len`, or the out-of-bounds error.
+fn slice_range(a: Option<Value>, b: Option<Value>, len: usize, span: Span) -> Result<(usize, usize), Box<Stop>> {
+    let (Some(Value::Int(a)), Some(Value::Int(b))) = (a, b) else {
+        unreachable!("checked arguments");
+    };
+    match (usize::try_from(a), usize::try_from(b)) {
+        (Ok(x), Ok(y)) if x <= y && y <= len => Ok((x, y)),
+        _ => Err(fail(span, &format!("slice {a}..{b} out of bounds for length {len}"))),
+    }
+}
+
 fn str_arg(arg: Option<Value>) -> Rc<str> {
     match arg {
         Some(Value::Str(s)) => s,
@@ -889,6 +900,19 @@ fn builtin(recv: &Value, b: Builtin, (arg, arg2): Args, span: Span) -> Res {
         (B::FloatRound, Value::Float(x)) => Value::Float(x.round()),
         (B::FloatSqrt, Value::Float(x)) => Value::Float(x.sqrt()),
         (B::FloatIsNan, Value::Float(x)) => Value::Bool(x.is_nan()),
+        (B::FloatIsFinite, Value::Float(x)) => Value::Bool(x.is_finite()),
+        (B::FloatIsInfinite, Value::Float(x)) => Value::Bool(x.is_infinite()),
+        (B::StrSlice, Value::Str(s)) => {
+            let (a, b) = slice_range(arg, arg2, s.len(), span)?;
+            match s.get(a..b) {
+                Some(p) => Value::Str(p.into()),
+                None => return Err(fail(span, &format!("slice {a}..{b} is not on a character boundary"))),
+            }
+        }
+        (B::BytesSlice, Value::Bytes(v)) => {
+            let (a, b) = slice_range(arg, arg2, v.len(), span)?;
+            Value::Bytes(Rc::new(v[a..b].to_vec()))
+        }
         (B::OptionOkOr, Value::Enum(_, i, payload)) => {
             if *i == 1 {
                 Value::Enum(EnumRef::Result, 0, vec![payload[0].clone()])

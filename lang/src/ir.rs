@@ -280,6 +280,10 @@ pub enum Builtin {
     FloatRound,
     FloatSqrt,
     FloatIsNan,
+    FloatIsFinite,
+    FloatIsInfinite,
+    StrSlice,
+    BytesSlice,
 }
 
 /// Every built-in method that changes its receiver.

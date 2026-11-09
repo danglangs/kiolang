@@ -1473,3 +1473,63 @@ fn assignment_of_untyped_values() {
                }";
     assert_eq!(shown(src), "[3, 0, 0]");
 }
+
+#[test]
+fn slices() {
+    let s = |e: &str| shown(&format!("fn main() -> Str {{ {e} }}"));
+    assert_eq!(s("\"hello\".slice(1, 3)"), "el");
+    assert_eq!(s("\"hello\".slice(2, 2)"), "");
+    assert_eq!(s("\"hello\".slice(0, 5)"), "hello");
+    assert_eq!(s("\"hello\".slice(5, 5)"), "");
+    assert_eq!(s("\"\".slice(0, 0)"), "");
+    // "aé" is 61 c3 a9: boundaries at 0, 1, 3.
+    assert_eq!(s("\"aé\".slice(1, 3)"), "é");
+    assert_eq!(s("\"aé\".slice(0, 1)"), "a");
+    let b = |e: &str| shown(&format!("fn main() -> Bytes {{ {e} }}"));
+    assert_eq!(
+        b("\"abc\".to_bytes().slice(1, 3)"),
+        shown("fn main() -> Bytes { \"bc\".to_bytes() }")
+    );
+    assert_eq!(
+        b("\"abc\".to_bytes().slice(3, 3)"),
+        shown("fn main() -> Bytes { \"\".to_bytes() }")
+    );
+    assert_eq!(
+        b("\"abc\".to_bytes().slice(0, 3)"),
+        shown("fn main() -> Bytes { \"abc\".to_bytes() }")
+    );
+    let bad = |call: &str, msg: &str| {
+        let src = format!("fn main() -> Int {{ {call}.len() }}");
+        fails(&src, msg);
+        let e = exec(&src).unwrap_err();
+        assert_eq!(&src[e.span.start..e.span.end], call);
+    };
+    bad("\"abc\".slice(2, 4)", "slice 2..4 out of bounds for length 3");
+    bad("\"abc\".slice(3, 1)", "slice 3..1 out of bounds for length 3");
+    bad("\"abc\".slice(-1, 2)", "slice -1..2 out of bounds for length 3");
+    bad("\"abc\".slice(4, 4)", "slice 4..4 out of bounds for length 3");
+    bad("\"aé\".slice(0, 2)", "slice 0..2 is not on a character boundary");
+    bad("\"aé\".slice(2, 3)", "slice 2..3 is not on a character boundary");
+    bad(
+        "\"abc\".to_bytes().slice(1, 9)",
+        "slice 1..9 out of bounds for length 3",
+    );
+    bad(
+        "\"abc\".to_bytes().slice(2, 1)",
+        "slice 2..1 out of bounds for length 3",
+    );
+}
+
+#[test]
+fn float_finite() {
+    let t = |e: &str| int(&format!("fn main() -> Bool {{ {e} }}"));
+    assert_eq!(
+        t("1.0.is_finite() && !(1.0 / 0.0).is_finite() && !(0.0 / 0.0).is_finite()"),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        t("(1.0 / 0.0).is_infinite() && (-1.0 / 0.0).is_infinite()"),
+        Value::Bool(true)
+    );
+    assert_eq!(t("1.0.is_infinite() || (0.0 / 0.0).is_infinite()"), Value::Bool(false));
+}

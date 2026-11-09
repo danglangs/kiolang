@@ -480,6 +480,10 @@ impl<'a> Lowerer<'a> {
                     (T::Float, "round") => Builtin::FloatRound,
                     (T::Float, "sqrt") => Builtin::FloatSqrt,
                     (T::Float, "is_nan") => Builtin::FloatIsNan,
+                    (T::Float, "is_finite") => Builtin::FloatIsFinite,
+                    (T::Float, "is_infinite") => Builtin::FloatIsInfinite,
+                    (T::Str, "slice") => Builtin::StrSlice,
+                    (T::Bytes, "slice") => Builtin::BytesSlice,
                     _ => unreachable!("checked method"),
                 };
                 return ir::ExprKind::Builtin(b, Box::new(self.expr(recv)), self.exprs(args));

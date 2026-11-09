@@ -83,9 +83,9 @@ Everything else is rejected with a message that names the kio alternative, for e
 | Type | Methods |
 |---|---|
 | `Int` | `to_str() -> Str`, `to_float() -> Float` |
-| `Float` | `to_str() -> Str` (as Rust's `{}`: `1`, `0.30000000000000004`, `NaN`, `inf`, `-0`), `to_int() -> Option<Int>` (toward zero; `None` if NaN, infinite or out of range), `abs()`, `floor()`, `ceil()`, `round()` (half away from zero), `sqrt()`, all `-> Float`, `is_nan() -> Bool` |
-| `Str` | `len() -> Int`, `split(Str) -> List<Str>`, `lines() -> List<Str>`, `trim() -> Str`, `contains(Str) -> Bool`, `starts_with(Str) -> Bool`, `ends_with(Str) -> Bool`, `strip_prefix(Str) -> Option<Str>`, `strip_suffix(Str) -> Option<Str>`, `find(Str) -> Option<Int>` (byte offset), `replace(Str, Str) -> Str`, `parse_int() -> Option<Int>`, `parse_float() -> Option<Float>` (as Rust's `f64::from_str`: `1e3`, `inf`, `NaN`), `to_bytes() -> Bytes` |
-| `Bytes` | `b[i] -> Int` (0-255), `len() -> Int`, `push(Int)` (0-255), `to_str() -> Str` |
+| `Float` | `to_str() -> Str` (as Rust's `{}`: `1`, `0.30000000000000004`, `NaN`, `inf`, `-0`), `to_int() -> Option<Int>` (toward zero; `None` if NaN, infinite or out of range), `abs()`, `floor()`, `ceil()`, `round()` (half away from zero), `sqrt()`, all `-> Float`, `is_nan() -> Bool`, `is_finite() -> Bool`, `is_infinite() -> Bool` |
+| `Str` | `len() -> Int`, `split(Str) -> List<Str>`, `lines() -> List<Str>`, `trim() -> Str`, `contains(Str) -> Bool`, `starts_with(Str) -> Bool`, `ends_with(Str) -> Bool`, `strip_prefix(Str) -> Option<Str>`, `strip_suffix(Str) -> Option<Str>`, `find(Str) -> Option<Int>` (byte offset), `replace(Str, Str) -> Str`, `parse_int() -> Option<Int>`, `parse_float() -> Option<Float>` (as Rust's `f64::from_str`: `1e3`, `inf`, `NaN`), `slice(Int, Int) -> Str` (byte offsets as Rust's `&s[a..b]`; out of range, `a > b`, negative or not on a character boundary is a runtime error), `to_bytes() -> Bytes` |
+| `Bytes` | `b[i] -> Int` (0-255), `len() -> Int`, `push(Int)` (0-255), `slice(Int, Int) -> Bytes` (as `Str.slice`, without the boundary rule), `to_str() -> Str` |
 | `Option<T>` | `unwrap_or(T) -> T`, `is_some() -> Bool`, `is_none() -> Bool`, `ok_or(E) -> Result<T, E>` |
 | `Result<T, E>` | `unwrap_or(T) -> T`, `is_ok() -> Bool`, `is_err() -> Bool`, `ok() -> Option<T>`, `err() -> Option<E>` |
 | `List<T>` | `xs[i]`, `len() -> Int`, `push(T)`, `pop() -> Option<T>`, `contains(T) -> Bool`, `sort()` (`List<Int>` and `List<Str>`, bytes order, stable) |

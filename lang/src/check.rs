@@ -913,7 +913,9 @@ fn method(caps: &CapTable, recv: &Ty, name: &str) -> Option<(Vec<Ty>, Ty)> {
         (Ty::Float, "to_str") => Some((vec![], Ty::Str)),
         (Ty::Float, "to_int") => Some((vec![], Ty::Option(Box::new(Ty::Int)))),
         (Ty::Float, "abs" | "floor" | "ceil" | "round" | "sqrt") => Some((vec![], Ty::Float)),
-        (Ty::Float, "is_nan") => Some((vec![], Ty::Bool)),
+        (Ty::Float, "is_nan" | "is_finite" | "is_infinite") => Some((vec![], Ty::Bool)),
+        (Ty::Str, "slice") => Some((vec![Ty::Int, Ty::Int], Ty::Str)),
+        (Ty::Bytes, "slice") => Some((vec![Ty::Int, Ty::Int], Ty::Bytes)),
         _ => None,
     }
 }
@@ -941,6 +943,8 @@ const METHODS: &[&str] = &[
     "get",
     "insert",
     "is_err",
+    "is_finite",
+    "is_infinite",
     "is_nan",
     "is_none",
     "is_ok",
@@ -957,6 +961,7 @@ const METHODS: &[&str] = &[
     "remove",
     "replace",
     "round",
+    "slice",
     "sort",
     "split",
     "sqrt",
