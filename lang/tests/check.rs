@@ -1375,8 +1375,13 @@ fn rust_isms_are_rejected_with_the_kio_way() {
         ("fn main() { let x: f64 = 1; }", "unknown type `f64`", "use `Float`"),
         (
             "fn main() { let ys = [1].iter().map(|x| x + 1); }",
-            "kio has no closures",
-            "use a `for` loop",
+            "no method `iter` on List<Int>",
+            "a List has no iterators; loop over it with `for x in xs { .. }`",
+        ),
+        (
+            "fn main() { let f = move |x: Int| x; }",
+            "`move` is not supported in kio",
+            "closures always capture by copy; remove `move`",
         ),
         (
             "impl Row {} fn main() {}",
@@ -1770,4 +1775,182 @@ fn assignment_passes_the_place_type() {
     assert_eq!(msg, "expected Option<Int>, found Int");
     let (msg, _) = reject("fn main() { let mut x = 1; x = None; }");
     assert_eq!(msg, "expected Int, found an Option");
+}
+
+#[test]
+fn closures_check() {
+    // Parameter types from annotations, a `let` type, a parameter, a field, a list, an `Option`.
+    ok("fn main() -> Int { let n = 1; let f = |x: Int| x + n; f(2) }");
+    ok("fn main() -> Int { let n = 1; let f: fn(Int) -> Int = |x| x + n; f(2) }");
+    ok("fn apply(f: fn(Int, Int) -> Int, x: Int) -> Int { f(x, x) } fn main() -> Int { apply(|a, b| { a * b }, 3) }");
+    ok("struct R { h: fn(Str) -> Int } fn main() -> Int { let r = R { h: |s| s.len() }; (r.h)(\"ab\") }");
+    ok("fn main() -> Int { let fs: List<fn(Int) -> Int> = [|x| x, |x| x + 1]; (fs[1])(1) }");
+    ok("fn main() -> Int { let o: Option<fn() -> Int> = Some(|| 7); match o { Some(f) => f(), None => 0 } }");
+    // A closure returned from a function, and one returning a closure.
+    ok("fn adder(n: Int) -> fn(Int) -> Int { |x| x + n } fn main() -> Int { adder(1)(2) }");
+    ok("fn main() -> Int { let add = |x: Int| |y: Int| x + y; add(1)(2) }");
+    // Assigned to a `let mut` of `fn` type; `return` returns from the closure.
+    ok("fn main() -> Int { let mut f: fn(Int) -> Int = |x| x; f = |x| x * 2; f(1) }");
+    ok("fn main() -> Int { let f = |x: Int| { if x > 0 { return 1; } 2 }; f(1) }");
+    ok("fn main() -> Option<Int> { let f: fn(Str) -> Option<Int> = |s| { let n = s.parse_int()?; Some(n + 1) }; f(\"1\") }");
+    // A loop inside a closure may `break`; a parameter may shadow an outer local.
+    ok("fn main() -> Int { let n = 5; let f = |n: Int| { let mut i = 0; loop { i += 1; if i == n { break; } } i }; f(n) }");
+    // A closure is a value without equality.
+    let (msg, _) = reject("fn main() -> Bool { let f = |x: Int| x; f == f }");
+    assert_eq!(msg, "cannot compare `fn(Int) -> Int` values");
+}
+
+#[test]
+fn closure_rejections() {
+    let cases = [
+        (
+            "fn main() { let f = |x| x; }",
+            "cannot tell the type of `x`",
+            "x",
+            "add a type: `|x: Int| ..`",
+        ),
+        (
+            "fn main() { let n: Int = |x| x; }",
+            "expected Int, found a closure",
+            "x",
+            "add a type: `|x: Int| ..`",
+        ),
+        (
+            "fn main() { let f: fn(Int) -> Int = |a, b| a; }",
+            "expected fn(Int) -> Int, found a closure of 2 parameters",
+            "|a, b| a",
+            "`fn(Int) -> Int` takes 1",
+        ),
+        (
+            "fn main() { let mut n = 1; let f = || { n = 2; }; }",
+            "`n` is captured by copy and cannot be assigned",
+            "n",
+            "return the new value instead",
+        ),
+        (
+            "fn main() { let mut n = 1; let f = |x: Int| { n += x; }; }",
+            "`n` is captured by copy and cannot be assigned",
+            "n",
+            "return the new value instead",
+        ),
+        (
+            "fn main() { let mut xs = [1]; let f = || xs.push(2); }",
+            "`xs` is captured by copy and cannot be changed",
+            "xs",
+            "return the new value instead",
+        ),
+        (
+            "fn main() { loop { let f = || { break; }; } }",
+            "`break` cannot leave a closure",
+            "break;",
+            "return from the closure instead",
+        ),
+        (
+            "fn main() { for i in 0..3 { let f = || { continue; }; } }",
+            "`continue` cannot leave a closure",
+            "continue;",
+            "return from the closure instead",
+        ),
+        (
+            "fn main() { let f = |a: Int, a: Int| a; }",
+            "duplicate parameter `a`",
+            "a: Int",
+            "rename one of them",
+        ),
+        (
+            "fn main() { let f = |None: Int| 1; }",
+            "`None` is a built-in constructor",
+            "None: Int",
+            "choose another name",
+        ),
+        (
+            "fn main() { let f = |x: Int| { let y = Some(x)?; y }; }",
+            "cannot tell what `?` returns from this closure",
+            "Some(x)?",
+            "give the closure a type: `let f: fn(Int) -> Option<Int> = |x| ..`",
+        ),
+    ];
+    for (src, msg, at, h) in cases {
+        assert_eq!(reject(src), (msg.to_string(), at.to_string()), "{src}");
+        assert_eq!(hint(src), h, "{src}");
+    }
+    // The body against the expected return type, and against an earlier `return`.
+    let (msg, at) = reject("fn main() { let f: fn(Int) -> Str = |x| x; }");
+    assert_eq!((msg.as_str(), at.as_str()), ("expected Str, found Int", "x"));
+    let (msg, at) = reject("fn main() { let f = |x: Int| { if x > 0 { return \"a\"; } x }; }");
+    assert_eq!((msg.as_str(), at.as_str()), ("expected Str, found Int", "x"));
+    // A closure's own locals and parameters are not captures.
+    ok("fn main() -> Int { let f = |x: Int| { let mut y = x; y += 1; y }; f(1) }");
+}
+
+/// Security: a closure cannot reach a capability by any path, and its type cannot name one.
+#[test]
+fn closures_cannot_reach_capabilities() {
+    let caps = common::caps();
+    let captures = |src: &str, cap: &str, ty: &str| {
+        let d = &check(src, &caps).expect_err(src)[0];
+        assert_eq!(d.msg, format!("closure captures capability `{cap}`"), "{src}");
+        assert_eq!(
+            d.hint.as_deref(),
+            Some(&*format!("take it as a parameter: `|{cap}: {ty}, ..|`"))
+        );
+        assert_eq!(&src[d.span.start..d.span.end], cap, "{src}");
+    };
+    // A method call on a capability of `main`, or on a parameter of any function.
+    captures("fn main(out: Dir) { let f = || out.read(\"a\"); }", "out", "Dir");
+    captures("fn g(h: Http) { let f = |u: Str| h.get(u); } fn main() {}", "h", "Http");
+    // Passed to a helper, or through a value of `fn` type, from inside the body.
+    captures(
+        "fn load(d: Dir) {} fn main(out: Dir) { let f = || load(out); }",
+        "out",
+        "Dir",
+    );
+    captures(
+        "fn main(out: Dir) { let f = || { let g = |x: Int| x; g(out) }; }",
+        "out",
+        "Dir",
+    );
+    // Bound to a local, compared, called, assigned, or used as a value.
+    captures("fn main(out: Dir) { let f = || { let d = out; }; }", "out", "Dir");
+    captures("fn main(out: Dir) { let f = || out == out; }", "out", "Dir");
+    captures("fn main(out: Dir) { let f = || out(1); }", "out", "Dir");
+    captures("fn main(out: Dir) { let f = || { out = out; }; }", "out", "Dir");
+    captures("fn main(out: Dir) { let f = || Some(out); }", "out", "Dir");
+    // Through nested closures and a nested block.
+    captures(
+        "fn main(out: Dir) { let f = || || { { out.read(\"a\") } }; }",
+        "out",
+        "Dir",
+    );
+    captures(
+        "fn main(kv: Kv) { let f = |k: Str| { let g = || kv.get(k); 1 }; }",
+        "kv",
+        "Kv",
+    );
+    // The hint's fix is rejected by the `fn` type rule: the real fix is a named function.
+    let fn_cap = |src: &str| {
+        let d = &check(src, &caps).expect_err(src)[0];
+        assert_eq!(d.msg, "function values cannot take or return capabilities", "{src}");
+        assert_eq!(
+            d.hint.as_deref(),
+            Some("pass the capability to a named function instead")
+        );
+        src[d.span.start..d.span.end].to_string()
+    };
+    assert_eq!(
+        fn_cap("fn main(out: Dir) { let f = |out: Dir| out.read(\"a\"); }"),
+        "Dir"
+    );
+    assert_eq!(
+        fn_cap("fn main() { let f = |x: Int, o: Option<Dir>| x; }"),
+        "Option<Dir>"
+    );
+    assert_eq!(fn_cap("fn main() { let f = |g: fn(Dir)| 1; }"), "fn(Dir)");
+    assert_eq!(fn_cap("fn main() { let f: fn(Dir) = |d| {}; }"), "fn(Dir)");
+    // A parameter that shadows a capability is a plain value, not a capture.
+    assert!(check("fn main(out: Dir) { let f = |out: Int| out + 1; }", &caps).is_ok());
+    // A named function with the capability parameter is the way.
+    let src = "fn save(out: Dir, s: Str) -> Result<(), IoErr> { out.create(\"a\", s.to_bytes()) }
+               fn main(out: Dir) -> Result<(), IoErr> { let f = |n: Int| n.to_str(); save(out, f(1)) }";
+    assert!(check(src, &caps).is_ok());
 }

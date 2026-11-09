@@ -163,6 +163,16 @@ pub enum ExprKind {
     Match(Box<Expr>, Vec<Arm>),
     /// `e?`
     Try(Box<Expr>),
+    /// `|x: Int, y| body`; `|| body` has no parameters.
+    Closure(Vec<ClosureParam>, Box<Expr>),
+}
+
+/// A closure parameter; without a type, the checker takes it from the expected `fn` type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClosureParam {
+    pub name: String,
+    pub ty: Option<Type>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

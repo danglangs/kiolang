@@ -9,6 +9,7 @@ use crate::ast::{self, ExprKind, PatKind, StmtKind};
 use crate::check::{self, builtin, key, shape, variant, CapTable, Program};
 use crate::ir::{self, *};
 use crate::Span;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 /// Lowers `p`, which `check` built with `caps`.
@@ -27,9 +28,13 @@ pub fn lower(p: &Program, caps: &CapTable) -> Module {
         structs: index(&structs),
         enums: index(&enums),
         caps: index(&caps.caps.iter().map(|c| c.name.clone()).collect::<Vec<_>>()),
+        lifted: RefCell::new(Vec::new()),
+        closures: Cell::new(0),
     };
+    let mut lowered: Vec<Func> = funcs.iter().map(|k| ids.func(p, caps, k)).collect();
+    lowered.extend(ids.lifted.take().into_iter().map(|f| f.expect("lifted closure")));
     Module {
-        funcs: funcs.iter().map(|k| ids.func(p, caps, k)).collect(),
+        funcs: lowered,
         structs: (structs.iter())
             .map(|k| StructDef {
                 name: k.clone(),
@@ -66,6 +71,10 @@ struct Ids {
     structs: HashMap<String, u32>,
     enums: HashMap<String, u32>,
     caps: HashMap<String, u32>,
+    /// Closures lifted to functions, which follow the named ones; `None` while one is lowered.
+    lifted: RefCell<Vec<Option<Func>>>,
+    /// Closures lifted so far from the named function being lowered, for their names.
+    closures: Cell<u32>,
 }
 
 impl Ids {
@@ -101,11 +110,13 @@ impl Ids {
 
     fn func(&self, p: &Program, caps: &CapTable, k: &str) -> Func {
         let (f, sig) = (&p.funcs[k], &p.sigs[k]);
+        self.closures.set(0);
         let mut l = Lowerer {
             p,
             caps,
             ids: self,
             module: check::module_of(k),
+            owner: k,
             locals: Vec::new(),
             scope: Vec::new(),
         };
@@ -131,6 +142,8 @@ struct Lowerer<'a> {
     ids: &'a Ids,
     /// The module of the function.
     module: &'a str,
+    /// The key of the named function, or of the one a closure is in, for closure names.
+    owner: &'a str,
     locals: Vec<Local>,
     /// Names in scope, innermost last.
     scope: Vec<(&'a str, LocalId)>,
@@ -139,10 +152,14 @@ struct Lowerer<'a> {
 impl<'a> Lowerer<'a> {
     /// A new slot for `name`, which shadows any earlier one.
     fn bind(&mut self, name: &'a str, ty: &check::Ty, span: Span) -> LocalId {
+        self.bind_ty(name, self.ids.held(ty), span)
+    }
+
+    fn bind_ty(&mut self, name: &'a str, ty: Ty, span: Span) -> LocalId {
         let id = LocalId(self.locals.len() as u32);
         self.locals.push(Local {
             name: name.to_string(),
-            ty: self.ids.held(ty),
+            ty,
             span,
         });
         self.scope.push((name, id));
@@ -376,6 +393,7 @@ impl<'a> Lowerer<'a> {
                 ir::ExprKind::Match(Box::new(scrut), arms)
             }
             ExprKind::Try(x) => ir::ExprKind::Try(Box::new(self.expr(x))),
+            ExprKind::Closure(params, body) => self.closure(e.span, ty, params, body),
         };
         Expr {
             kind,
@@ -398,6 +416,63 @@ impl<'a> Lowerer<'a> {
             _ => return ir::ExprKind::CallValue(Box::new(self.expr(callee)), self.exprs(args)),
         };
         ir::ExprKind::Call(self.func(&k), self.exprs(args))
+    }
+
+    /// Lifts the closure at `span`, of type `ty`, to a new function whose parameters are its
+    /// captures, then its own; the closure value copies the captured locals.
+    fn closure(
+        &mut self,
+        span: Span,
+        ty: &check::Ty,
+        params: &'a [ast::ClosureParam],
+        body: &'a ast::Expr,
+    ) -> ir::ExprKind {
+        let check::Ty::Fn(tys, ret) = ty else {
+            unreachable!("checked closure");
+        };
+        let mut inner = Lowerer {
+            p: self.p,
+            caps: self.caps,
+            ids: self.ids,
+            module: self.module,
+            owner: self.owner,
+            locals: Vec::new(),
+            scope: Vec::new(),
+        };
+        let names = &self.p.captures[&span];
+        let mut captured = Vec::new();
+        for name in names {
+            let x = self.lookup(name);
+            let local = &self.locals[x.0 as usize];
+            // The checker refuses this; a capability in a closure would carry authority.
+            assert!(!matches!(local.ty, Ty::Cap(_)), "closure captures capability `{name}`");
+            inner.bind_ty(name, local.ty.clone(), local.span);
+            captured.push(x);
+        }
+        for (p, t) in params.iter().zip(tys) {
+            inner.bind(&p.name, t, p.span);
+        }
+        let n = self.ids.closures.get();
+        self.ids.closures.set(n + 1);
+        let index = {
+            let mut lifted = self.ids.lifted.borrow_mut();
+            lifted.push(None);
+            lifted.len() - 1
+        };
+        let body = inner.expr(body);
+        let f = Func {
+            name: format!("{}::{{closure#{n}}}", self.owner),
+            locals: inner.locals,
+            params: (names.len() + params.len()) as u32,
+            ret: self.ids.ty(ret),
+            body: Block {
+                stmts: Vec::new(),
+                tail: Some(Box::new(body)),
+            },
+            span,
+        };
+        self.ids.lifted.borrow_mut()[index] = Some(f);
+        ir::ExprKind::Closure(FuncId((self.ids.funcs.len() + index) as u32), captured)
     }
 
     /// `E::V(args)`, `Some(x)` and the like, where `ty` is the value's enum type.

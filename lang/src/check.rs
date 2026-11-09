@@ -46,6 +46,9 @@ pub struct Program {
     /// The type of every expression and assignment target, by its span, which no other
     /// expression has; and the type of each `let`'s local, by the span of the `let`.
     pub(crate) types: HashMap<Span, Ty>,
+    /// The outer locals each closure uses, by the closure's span, in order of first use: what
+    /// it copies when it is created.
+    pub(crate) captures: HashMap<Span, Vec<String>>,
     /// The program lowered, which `run` evaluates.
     pub(crate) ir: ir::Module,
 }
@@ -118,6 +121,7 @@ impl Program {
             }
             Value::Cap(name) => name.clone(),
             Value::Fn(f) => format!("<fn {}>", self.ir.funcs[f.0 as usize].name),
+            Value::Closure(..) => "<closure>".to_string(),
         }
     }
 
@@ -443,6 +447,17 @@ pub(crate) struct Sig {
 struct Local {
     ty: Ty,
     mutable: bool,
+}
+
+/// A closure being checked.
+struct ClosureFrame {
+    /// The index in `Checker::scopes` of its parameters' scope: a local found below it is a
+    /// capture.
+    base: usize,
+    /// Its captures, in order of first use.
+    captures: Vec<String>,
+    /// Whether a loop encloses it, for the error on `break` inside it.
+    in_loop: bool,
 }
 
 fn err(span: Span, msg: String, hint: Option<&str>) -> Diag {
@@ -1241,6 +1256,7 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
         .collect();
 
     let mut types = HashMap::new();
+    let mut captures = HashMap::new();
     for ((module, f), sig_err) in fns.iter().zip(sig_errs) {
         let mut c = Checker {
             caps,
@@ -1252,12 +1268,16 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
             home: Scope { module, mods: &mods },
             scopes: Vec::new(),
             ret: Ty::Unit,
+            ret_open: false,
             loops: Vec::new(),
+            closures: Vec::new(),
             main_caps: &main_caps,
             types: HashMap::new(),
+            captures: HashMap::new(),
         };
         diags.extend(sig_err.or_else(|| c.function(f).err()));
         types.extend(c.types);
+        captures.extend(c.captures);
     }
     if !fns.iter().any(|(m, f)| m.is_empty() && f.name == "main") {
         let hint = "add `fn main() { .. }`";
@@ -1277,6 +1297,7 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
         fields,
         sigs,
         types,
+        captures,
         cap_methods: (caps.caps.iter())
             .flat_map(|c| {
                 c.methods
@@ -1307,15 +1328,21 @@ struct Checker<'a> {
     /// The module being checked.
     home: Scope<'a>,
     scopes: Vec<HashMap<String, Local>>,
-    /// Return type of the function being checked.
+    /// Return type of the function or closure being checked. For a closure with no expected
+    /// type (`ret_open`), `Never` until a `return` sets it.
     ret: Ty,
-    /// Loops enclosing the statement being checked.
+    ret_open: bool,
+    /// Loops enclosing the statement being checked, inside the innermost function or closure.
     /// One entry per enclosing loop: whether a `break` has been seen in it.
     loops: Vec<bool>,
+    /// Closures enclosing the expression being checked, innermost last.
+    closures: Vec<ClosureFrame>,
     /// Name and type of each capability parameter of `main`.
     main_caps: &'a [(String, String)],
     /// As `Program::types`.
     types: HashMap<Span, Ty>,
+    /// As `Program::captures`.
+    captures: HashMap<Span, Vec<String>>,
 }
 
 impl<'a> Checker<'a> {
@@ -1387,8 +1414,37 @@ impl<'a> Checker<'a> {
         err(span, format!("unknown variant `{en}::{v}`"), Some(&hint))
     }
 
-    fn lookup(&mut self, name: &str) -> Option<&mut Local> {
-        self.scopes.iter_mut().rev().find_map(|s| s.get_mut(name))
+    /// The local `name`, used at `span`. A local declared outside a closure being checked is
+    /// recorded as a capture of that closure; a capability cannot be one. Every use of a local
+    /// goes through here, so no path gives a closure a capability.
+    fn lookup(&mut self, name: &str, span: Span) -> Result<Option<&mut Local>, Diag> {
+        let Some(i) = self.scopes.iter().rposition(|s| s.contains_key(name)) else {
+            return Ok(None);
+        };
+        let mut captured = false;
+        for c in self.closures.iter_mut().filter(|c| i < c.base) {
+            captured = true;
+            if !c.captures.iter().any(|n| n == name) {
+                c.captures.push(name.to_string());
+            }
+        }
+        if let (true, Ty::Cap(ty)) = (captured, &self.scopes[i][name].ty) {
+            let hint = format!("take it as a parameter: `|{name}: {ty}, ..|`");
+            return Err(err(span, format!("closure captures capability `{name}`"), Some(&hint)));
+        }
+        Ok(self.scopes[i].get_mut(name))
+    }
+
+    /// Whether `name` is a capture of the innermost closure being checked.
+    fn is_capture(&self, name: &str) -> bool {
+        let found = self.scopes.iter().rposition(|s| s.contains_key(name));
+        matches!((found, self.closures.last()), (Some(i), Some(c)) if i < c.base)
+    }
+
+    /// The error for changing capture `name` at `span`; `verb` is `assigned` or `changed`.
+    fn capture_changed(span: Span, name: &str, verb: &str) -> Diag {
+        let msg = format!("`{name}` is captured by copy and cannot be {verb}");
+        err(span, msg, Some("return the new value instead"))
     }
 
     fn block(&mut self, b: &Block, expected: Option<&Ty>) -> Result<Ty, Diag> {
@@ -1420,7 +1476,7 @@ impl<'a> Checker<'a> {
                     .map(|t| resolve(t, self.caps, self.structs, self.enums, self.home));
                 let declared = declared.transpose()?;
                 if let ExprKind::Name(from) = &init.kind {
-                    if let Some(Local { ty: Ty::Cap(_), .. }) = self.lookup(from) {
+                    if let Some(Local { ty: Ty::Cap(_), .. }) = self.lookup(from, init.span)? {
                         let msg = format!("capability `{from}` bound to local `{name}`");
                         return Err(err(init.span, msg, Some(&format!("pass `{from}` directly instead"))));
                     }
@@ -1452,6 +1508,23 @@ impl<'a> Checker<'a> {
                     return Err(binary_err(&op[..1], op, &ty, &found, s.span));
                 }
                 Ok(Ty::Unit)
+            }
+            StmtKind::Return(value) if self.ret_open => {
+                // A closure with no expected type: the first `return` sets its return type.
+                let found = match value {
+                    Some(e) => self.expr(e, None)?,
+                    None => Ty::Unit,
+                };
+                if self.ret == Ty::Never {
+                    self.ret = found;
+                } else {
+                    let ret = self.ret.clone();
+                    match value {
+                        Some(e) => want_expr(e, &found, &ret)?,
+                        None => want(s.span, &found, &ret)?,
+                    }
+                }
+                Ok(Ty::Never)
             }
             StmtKind::Return(value) => {
                 let ret = self.ret.clone();
@@ -1508,6 +1581,10 @@ impl<'a> Checker<'a> {
                     } else {
                         "continue"
                     };
+                    if self.closures.last().is_some_and(|c| c.in_loop) {
+                        let msg = format!("`{word}` cannot leave a closure");
+                        return Err(err(s.span, msg, Some("return from the closure instead")));
+                    }
                     let hint = "use `return` to leave a function";
                     return Err(err(s.span, format!("`{word}` outside a loop"), Some(hint)));
                 }
@@ -1541,7 +1618,7 @@ impl<'a> Checker<'a> {
             ExprKind::Bool(_) => Ok(Ty::Bool),
             ExprKind::Unit => Ok(Ty::Unit),
             ExprKind::Name(name) if builtin(name).is_some() => self.constructor(e, name, &[], expected),
-            ExprKind::Name(name) => match self.lookup(name) {
+            ExprKind::Name(name) => match self.lookup(name, e.span)? {
                 Some(Local { ty: Ty::Cap(_), .. }) => {
                     let hint = "call methods on the parameter itself";
                     Err(err(e.span, "capability used as a value".to_string(), Some(hint)))
@@ -1575,7 +1652,7 @@ impl<'a> Checker<'a> {
                         if let ExprKind::Name(n) = &x.kind {
                             if let Some(Local {
                                 ty: ty @ Ty::Cap(_), ..
-                            }) = self.lookup(n)
+                            }) = self.lookup(n, x.span)?
                             {
                                 let hint = Some("capabilities have no equality");
                                 return Err(err(e.span, format!("cannot compare `{ty}` values"), hint));
@@ -1632,6 +1709,7 @@ impl<'a> Checker<'a> {
             },
             ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms, expected),
             ExprKind::Try(x) => self.try_expr(e, x),
+            ExprKind::Closure(params, body) => self.closure(e, params, body, expected),
         }
     }
 
@@ -1641,7 +1719,7 @@ impl<'a> Checker<'a> {
             if builtin(name).is_none() {
                 if let Some(Local {
                     ty: ty @ Ty::Cap(_), ..
-                }) = self.lookup(name)
+                }) = self.lookup(name, e.span)?
                 {
                     let ty = ty.clone();
                     self.types.insert(e.span, ty.clone());
@@ -1721,6 +1799,8 @@ impl<'a> Checker<'a> {
                     _ => "..",
                 };
                 format!("`{name}` is a field; call it as `({r}.{name})(..)`")
+            } else if matches!((&recv_ty, name), (Ty::List(_), "iter" | "into_iter")) {
+                "a List has no iterators; loop over it with `for x in xs { .. }`".to_string()
             } else if names.is_empty() {
                 format!("{recv_ty} has no methods")
             } else {
@@ -1824,6 +1904,11 @@ impl<'a> Checker<'a> {
     /// `x?`: the value of an `Option` or `Result`, or an early return of the `None` or `Err`.
     fn try_expr(&mut self, e: &Expr, x: &Expr) -> Result<Ty, Diag> {
         let found = self.expr(x, None)?;
+        if self.ret_open && self.ret == Ty::Never && matches!(found, Ty::Option(_) | Ty::Result(..)) {
+            let hint = "give the closure a type: `let f: fn(Int) -> Option<Int> = |x| ..`";
+            let msg = "cannot tell what `?` returns from this closure".to_string();
+            return Err(err(e.span, msg, Some(hint)));
+        }
         match (&found, &self.ret) {
             (Ty::Option(t), Ty::Option(_)) => Ok((**t).clone()),
             (Ty::Result(t, e_ty), Ty::Result(_, ret_err)) if e_ty == ret_err => Ok((**t).clone()),
@@ -2099,9 +2184,13 @@ impl<'a> Checker<'a> {
     fn place(&mut self, target: &Expr) -> Result<Ty, Diag> {
         let ty = match &target.kind {
             ExprKind::Name(name) => {
-                let Some(local) = self.lookup(name) else {
+                let captured = self.is_capture(name);
+                let Some(local) = self.lookup(name, target.span)? else {
                     return Err(self.unknown_name(target.span, name));
                 };
+                if captured {
+                    return Err(Self::capture_changed(target.span, name, "assigned"));
+                }
                 if !local.mutable {
                     let msg = format!("cannot assign to `{name}`, it is not `mut`");
                     return Err(err(target.span, msg, Some("declare it with `let mut`")));
@@ -2153,7 +2242,10 @@ impl<'a> Checker<'a> {
                 Some(&hint),
             ));
         };
-        if !self.lookup(name).is_some_and(|l| l.mutable) {
+        if self.is_capture(name) {
+            return Err(Self::capture_changed(root.span, name, "changed"));
+        }
+        if !self.lookup(name, root.span)?.is_some_and(|l| l.mutable) {
             let msg = format!("cannot `{method}`{to} `{name}`, it is not `mut`");
             return Err(err(root.span, msg, Some("declare it with `let mut`")));
         }
@@ -2161,10 +2253,14 @@ impl<'a> Checker<'a> {
     }
 
     fn call(&mut self, e: &Expr, callee: &Expr, args: &[Expr], expected: Option<&Ty>) -> Result<Ty, Diag> {
+        if let ExprKind::Name(name) = &callee.kind {
+            // A local hides a function of the same name, as in Rust.
+            if builtin(name).is_none() && self.lookup(name, callee.span)?.is_some() {
+                return self.call_value(e, callee, args);
+            }
+        }
         let (name, module) = match &callee.kind {
             ExprKind::Name(name) if builtin(name).is_some() => return self.constructor(e, name, args, expected),
-            // A local hides a function of the same name, as in Rust.
-            ExprKind::Name(name) if self.lookup(name).is_some() => return self.call_value(e, callee, args),
             ExprKind::Name(name) => (name, None),
             ExprKind::Path(en, v) if en == "Map" && v == "new" => return self.map_new(e, args, expected),
             ExprKind::Path(en, v) => return self.variant_value(e, &self.enum_key(en), v, args),
@@ -2227,7 +2323,7 @@ impl<'a> Checker<'a> {
         let (ty, what) = match &callee.kind {
             ExprKind::Name(name) => {
                 // Not `expr`, which would refuse a capability before this says it is not a function.
-                let ty = self.lookup(name).expect("a local").ty.clone();
+                let ty = self.lookup(name, callee.span)?.expect("a local").ty.clone();
                 self.types.insert(callee.span, ty.clone());
                 (ty, format!("`{name}`"))
             }
@@ -2250,6 +2346,86 @@ impl<'a> Checker<'a> {
             want_expr(a, &self.operand(a, Some(param))?, param)?;
         }
         Ok((**ret).clone())
+    }
+
+    /// `|a, b: T| body`. Parameter types come from the annotations, else from an expected `fn`
+    /// type; the return type from the expected type, else from the body and its `return`s.
+    fn closure(&mut self, e: &Expr, params: &[ClosureParam], body: &Expr, expected: Option<&Ty>) -> Result<Ty, Diag> {
+        let want_fn = match expected {
+            Some(Ty::Fn(ps, r)) => Some((ps, r)),
+            _ => None,
+        };
+        if let Some((ps, _)) = want_fn.filter(|(ps, _)| ps.len() != params.len()) {
+            let ty = expected.expect("a fn type");
+            let msg = format!("expected {ty}, found a closure of {} parameters", params.len());
+            return Err(err(e.span, msg, Some(&format!("`{ty}` takes {}", ps.len()))));
+        }
+        let mut scope = HashMap::new();
+        let mut tys = Vec::new();
+        for (i, p) in params.iter().enumerate() {
+            not_builtin(&p.name, p.span)?;
+            if params[..i].iter().any(|q| q.name == p.name) {
+                let msg = format!("duplicate parameter `{}`", p.name);
+                return Err(err(p.span, msg, Some("rename one of them")));
+            }
+            let ty = match (&p.ty, want_fn) {
+                (Some(t), _) => {
+                    let ty = resolve(t, self.caps, self.structs, self.enums, self.home)?;
+                    if cap_in(&ty).is_some() {
+                        return Err(fn_cap_err(t.span));
+                    }
+                    ty
+                }
+                (None, Some((ps, _))) => ps[i].clone(),
+                (None, None) => {
+                    let msg = match expected {
+                        Some(t) if *t != Ty::Never => format!("expected {t}, found a closure"),
+                        _ => format!("cannot tell the type of `{}`", p.name),
+                    };
+                    let hint = format!("add a type: `|{}: Int| ..`", p.name);
+                    return Err(err(p.span, msg, Some(&hint)));
+                }
+            };
+            tys.push(ty.clone());
+            scope.insert(p.name.clone(), Local { ty, mutable: false });
+        }
+        let ret = want_fn.map(|(_, r)| (**r).clone());
+        let outer_ret = std::mem::replace(&mut self.ret, ret.clone().unwrap_or(Ty::Never));
+        let outer_open = std::mem::replace(&mut self.ret_open, ret.is_none());
+        let outer_loops = std::mem::take(&mut self.loops);
+        self.closures.push(ClosureFrame {
+            base: self.scopes.len(),
+            captures: Vec::new(),
+            in_loop: !outer_loops.is_empty() || self.closures.last().is_some_and(|c| c.in_loop),
+        });
+        self.scopes.push(scope);
+        let found = self.expr(body, ret.as_ref());
+        self.scopes.pop();
+        let frame = self.closures.pop().expect("pushed above");
+        self.loops = outer_loops;
+        self.ret_open = outer_open;
+        let ret = std::mem::replace(&mut self.ret, outer_ret);
+        let found = found?;
+        let ret = match ret {
+            // No expected type and no `return`: the body's type; `()` if it never finishes.
+            Ty::Never if found == Ty::Never => Ty::Unit,
+            Ty::Never => found,
+            ret => {
+                let at = match &body.kind {
+                    ExprKind::Block(Block { tail: Some(t), .. }) => t,
+                    _ => body,
+                };
+                want_expr(at, &found, &ret)?;
+                ret
+            }
+        };
+        let ty = Ty::Fn(tys, Box::new(ret));
+        // Unreachable: parameters are checked above, and no expression has a capability type.
+        if cap_in(&ty).is_some() {
+            return Err(fn_cap_err(e.span));
+        }
+        self.captures.insert(e.span, frame.captures);
+        Ok(ty)
     }
 
     /// Whether a value of `ty` can hold a function, which has no equality.

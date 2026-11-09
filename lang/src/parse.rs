@@ -30,6 +30,7 @@ fn reserved_hint(word: &str) -> &'static str {
         "impl" | "trait" | "dyn" => "kio has no traits or `impl`; use free functions",
         "use" | "crate" | "super" | "self" | "Self" => "write the full path, like `web::text`",
         "const" | "static" => "kio has no globals; pass values as arguments",
+        "move" => "closures always capture by copy; remove `move`",
         _ => "this Rust keyword is reserved in kio",
     }
 }
@@ -501,6 +502,10 @@ impl Parser {
         let depth = self.depth;
         let mut lhs = self.unary()?;
         while let Some(&Kind::Sym(op)) = self.peek() {
+            if op == "|" {
+                let hint = "use `||` for logical or; `|x| ..` starts a closure only where a value starts";
+                return Err(err(self.span(), "`|` is not an operator in kio", Some(hint)));
+            }
             let p = prec(op);
             if p < min || p == 0 {
                 break;
@@ -619,6 +624,7 @@ impl Parser {
             Some(Kind::Keyword(k)) if k == "match" => return self.match_expr(),
             Some(Kind::Sym("(")) => return self.paren(),
             Some(Kind::Sym("[")) => return self.list_lit(),
+            Some(Kind::Sym("|" | "||")) => return self.closure(),
             Some(Kind::Sym("{")) => {
                 let b = self.block()?;
                 return Ok(Expr {
@@ -639,6 +645,40 @@ impl Parser {
         let fields = self.list("}", Self::field_init)?;
         Ok(Expr {
             kind: ExprKind::StructLit(name, fields),
+            span: self.since(start),
+        })
+    }
+
+    /// `|a: Int, b| body` or `|| body`; the body extends as far as an expression can.
+    fn closure(&mut self) -> Result<Expr, Diag> {
+        let depth = self.depth;
+        self.enter()?;
+        let start = self.span().start;
+        let params = if self.eat("||") {
+            Vec::new()
+        } else {
+            self.pos += 1;
+            self.list("|", Self::closure_param)?
+        };
+        if self.at("->") {
+            let hint = "remove `-> T`: a closure returns its body's type";
+            return Err(err(self.span(), "a closure has no return type annotation", Some(hint)));
+        }
+        let body = self.expr()?;
+        self.depth = depth;
+        Ok(Expr {
+            kind: ExprKind::Closure(params, Box::new(body)),
+            span: self.since(start),
+        })
+    }
+
+    fn closure_param(&mut self) -> Result<ClosureParam, Diag> {
+        let start = self.span().start;
+        let name = self.ident()?;
+        let ty = if self.eat(":") { Some(self.ty()?) } else { None };
+        Ok(ClosureParam {
+            name,
+            ty,
             span: self.since(start),
         })
     }
@@ -735,6 +775,10 @@ impl Parser {
         while !self.at("}") {
             let arm_start = self.span().start;
             let pat = self.pat()?;
+            if self.at("|") {
+                let hint = "write one arm per pattern";
+                return Err(err(self.span(), "`|` patterns are not supported", Some(hint)));
+            }
             if self.at_kw("if") {
                 let hint = "test the condition inside the arm with `if`";
                 return Err(err(self.span(), "match guards are not supported", Some(hint)));

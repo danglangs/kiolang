@@ -1533,3 +1533,89 @@ fn float_finite() {
     );
     assert_eq!(t("1.0.is_infinite() || (0.0 / 0.0).is_infinite()"), Value::Bool(false));
 }
+
+#[test]
+fn closure_captures_by_copy() {
+    // A later change to `n` is not seen; the closure's copy is its own.
+    let src = "fn main() -> Int {
+                   let mut n = 1;
+                   let f = |x: Int| x + n;
+                   n = 100;
+                   f(1) * 1000 + n
+               }";
+    assert_eq!(int(src), Value::Int(2100));
+    // A list is copied too.
+    let src = "fn main() -> Int {
+                   let mut xs = [1];
+                   let f = || xs.len();
+                   xs.push(2);
+                   f() * 10 + xs.len()
+               }";
+    assert_eq!(int(src), Value::Int(12));
+}
+
+#[test]
+fn closures_in_fields_and_lists() {
+    let src = "struct Op { name: Str, run: fn(Int) -> Int }
+               fn apply(ops: List<Op>, x: Int) -> Str {
+                   let mut out = \"\";
+                   for op in ops { out += op.name + \"=\" + (op.run)(x).to_str() + \" \"; }
+                   out
+               }
+               fn main() -> Str {
+                   let k = 10;
+                   let ops = [Op { name: \"add\", run: |x| x + k }, Op { name: \"mul\", run: |x| x * k }];
+                   let fs: List<fn(Int) -> Int> = [|x| x - k, |x| x];
+                   apply(ops, 3) + (fs[0])(3).to_str()
+               }";
+    assert_eq!(int(src), Value::Str("add=13 mul=30 -7".into()));
+}
+
+#[test]
+fn closure_returning_a_closure() {
+    let src = "fn adder(n: Int) -> fn(Int) -> Int { |x| x + n }
+               fn main() -> Int {
+                   let add = |x: Int| |y: Int| x * 10 + y;
+                   let a5 = adder(5);
+                   add(1)(2) * 100 + a5(1)
+               }";
+    assert_eq!(int(src), Value::Int(1206));
+}
+
+#[test]
+fn nested_closures_capture_through_each_other() {
+    // `g` uses `a` from `main` and `x` from `f`, so `f` captures `a` to hand it on.
+    let src = "fn main() -> Int {
+                   let a = 1;
+                   let f = |x: Int| {
+                       let b = 10;
+                       let g = |y: Int| x + y + a + b;
+                       g(100)
+                   };
+                   f(1000)
+               }";
+    assert_eq!(int(src), Value::Int(1111));
+}
+
+#[test]
+fn return_inside_a_closure_returns_from_it() {
+    let src = "fn main() -> Int {
+                   let f = |x: Int| { if x > 0 { return 1; } 2 };
+                   let g = |n: Int| { let mut i = 0; loop { i += 1; if i == n { break; } } i };
+                   f(5) * 100 + f(-1) * 10 + g(3)
+               }";
+    assert_eq!(int(src), Value::Int(123));
+}
+
+#[test]
+fn closures_display_and_count_toward_depth() {
+    assert_eq!(
+        shown("fn main() -> List<fn(Int) -> Int> { let n = 1; [|x| x + n] }"),
+        "[<closure>]"
+    );
+    fails(
+        "fn spin(f: fn(Int) -> Int, n: Int) -> Int { let g = |x: Int| spin(f, x); g(n) }
+         fn main() -> Int { spin(|x| x, 1) }",
+        "evaluation is too deep",
+    );
+}

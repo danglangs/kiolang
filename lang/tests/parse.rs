@@ -24,6 +24,13 @@ fn show(e: &Expr) -> String {
         ExprKind::Index(r, i) => format!("([] {} {})", show(r), show(i)),
         ExprKind::List(items) => format!("(list{})", list(items)),
         ExprKind::Try(x) => format!("(? {})", show(x)),
+        ExprKind::Closure(ps, body) => {
+            let ps = ps.iter().fold(String::new(), |s, p| match &p.ty {
+                Some(t) => s + &format!(" {}: {}", p.name, ty(t)),
+                None => s + " " + &p.name,
+            });
+            format!("(|{ps} | {})", show(body))
+        }
         ExprKind::Path(e, v) => format!("{e}::{v}"),
         ExprKind::Module(m, x) => format!("{m}::{}", show(x)),
         ExprKind::Match(s, arms) => {
@@ -728,4 +735,50 @@ fn jumps_as_match_arms_equal_their_block_form() {
     );
     let d = fail("fn f() { match x { A => break 1, } }");
     assert_eq!(d.hint.as_deref(), Some("use a `let mut` and `break`"));
+}
+
+#[test]
+fn closures() {
+    assert_eq!(expr("|x: Int| x + n"), "(| x: Int | (+ x n))");
+    assert_eq!(expr("|a, b| { a }"), "(| a b | {tail a})");
+    assert_eq!(expr("|| 1"), "(| | 1)");
+    assert_eq!(expr("| | 1"), "(| | 1)");
+    assert_eq!(
+        expr("|f: fn(Int) -> Int, xs: List<Int>,| f"),
+        "(| f: fn(Int)->Int xs: List<Int> | f)"
+    );
+    // The body extends as far as an expression can; an argument list ends it.
+    assert_eq!(expr("apply(|x| x * 2, xs)"), "(call apply (| x | (* x 2)) xs)");
+    assert_eq!(expr("|x| |y| x + y"), "(| x | (| y | (+ x y)))");
+    // `||` after an operand is logical or; where an expression starts, a closure.
+    assert_eq!(expr("a || b"), "(|| a b)");
+    assert_eq!(expr("a || || b"), "(|| a (| | b))");
+    assert_eq!(body("let f = |x| x; f(1)"), "{(let f (| x | x)); tail (call f 1)}");
+}
+
+#[test]
+fn rejects_closure_syntax() {
+    rejected_with(
+        "fn f() { let g = |x| -> Int { x }; }",
+        "->",
+        "a closure has no return type annotation",
+        Some("remove `-> T`: a closure returns its body's type"),
+    );
+    rejected_with("fn f() { let g = |mut x| x; }", "mut", "expected a name", None);
+    rejected_with(
+        "fn f() -> Int { a | b }",
+        "|",
+        "`|` is not an operator in kio",
+        Some("use `||` for logical or; `|x| ..` starts a closure only where a value starts"),
+    );
+    rejected_with(
+        "fn f() { match x { 1 | 2 => 1, _ => 2 } }",
+        "|",
+        "`|` patterns are not supported",
+        Some("write one arm per pattern"),
+    );
+    // Closures count toward the parser's depth limit.
+    let deep = format!("fn f() {{ {}1; }}", "|x| ".repeat(65));
+    assert_eq!(fail(&deep).msg, "nesting is too deep");
+    assert!(parse(&format!("fn f() {{ {}1; }}", "|x| ".repeat(20))).is_ok());
 }

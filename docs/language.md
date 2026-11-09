@@ -46,10 +46,10 @@ fn main(input: Dir, out: Dir) -> Result<(), IoErr> {
 | Errors | `Option<T>`, `Result<T, E>`, `?` |
 | User types | `struct`, and `enum` with payloads; a type may contain itself only through `List` or `Map` |
 | Control | `if`, `if let`, `while`, `loop`, `for x in list`, `for i in 0..n`, `match`, `break`, `continue`, `return` |
-| Functions | free functions, recursion, function values of type `fn(T, ..) -> R` |
+| Functions | free functions, recursion, function values of type `fn(T, ..) -> R`, closures |
 | Capabilities | `Dir`, `Http`, `Kv`, `WsMessage`, `WsSend`, generated from `caps.wit` |
 
-Everything else is rejected with a message that names the kio alternative, for example `&str` (use `Str`), `Vec` (use `List`), closures (use `for`), `impl`, traits, generics, `use`, `mod`, tuples, globals, `unsafe`.
+Everything else is rejected with a message that names the kio alternative, for example `&str` (use `Str`), `Vec` (use `List`), `impl`, traits, generics, `use`, `mod`, tuples, globals, `unsafe`.
 
 ## Semantics
 
@@ -75,6 +75,12 @@ Everything else is rejected with a message that names the kio alternative, for e
     for r in routes { if r.path == req.path { return (r.handler)(req); } }
     not_found()
   }
+  ```
+- **Closures.** `|x: Int| x + n`, `|a, b| { .. }` and `|| e` are values of `fn` type. A parameter without a type takes it from the expected `fn` type (of a parameter, field, annotated `let`, list element or assigned place); with none, write it. The return type is the body's. Every outer local the body uses is copied into the closure when it is created: a later change to the local is not seen, and the closure cannot assign to it ("`n` is captured by copy and cannot be assigned"). `return` returns from the closure; `break` and `continue` cannot leave it. `||` after a value is logical or; where an expression starts it begins a closure with no parameters. A closure has no `-> T` and no `move`. One prints as `<closure>`.
+
+  ```
+  fn adder(n: Int) -> fn(Int) -> Int { |x| x + n }
+  let ops: List<fn(Int) -> Int> = [adder(1), |x| x * k];
   ```
 - **Modules.** `mod web;` in the root file loads `web.kio`; its `pub` items are used as `web::f`, `web::T`. Modules are flat: one file each, declared only in the root. A module may use another declared module's `pub` items the same way (cycles are fine) but not the root's.
 
@@ -123,7 +129,9 @@ A WebSocket server is `fn main(msg: WsMessage, conn: WsSend, ..)` under `--liste
 
    A `fn` type may not mention a capability (`fn(Dir)`, `fn() -> Option<Dir>`), and a function with a capability parameter cannot be used as a value: "function values cannot take or return capabilities". Pass the capability to a named function instead.
 
-   So a function's authority is exactly its capability parameters, and the report is read off the signatures. A function value carries none.
+   A closure cannot capture a capability: "closure captures capability `out`". The hint, taking it as a parameter `|out: Dir, ..|`, is then refused by the `fn` type rule, so code that needs a capability is a named function that takes it as a parameter.
+
+   So a function's authority is exactly its capability parameters, and the report is read off the signatures. A function value or closure carries none. The report lists named functions only; a closure's body is part of the function it is written in.
 
 2. **Capabilities cannot be constructed.** There is no literal, constructor or cast that produces a `Dir`. Only the host provides them, as arguments to `main`.
 
@@ -157,6 +165,9 @@ error: cannot return `Dir` from `pick`
 error: function values cannot take or return capabilities
   pass the capability to a named function instead
 
+error: closure captures capability `out`
+  take it as a parameter: `|out: Dir, ..|`
+
 error: `?` on `Result<Bytes, IoErr>` in a function returning `Option<Int>`
   change the return type or `match` on the result
 
@@ -170,6 +181,6 @@ error: kio has no references
 ## Not in v0
 
 - Attenuation: deriving a narrower cap, such as a sub-directory. First candidate for v1.
-- Closures, traits, `impl` and user generics.
+- Traits, `impl` and user generics.
 - Tuples.
 - `use` and nested modules.

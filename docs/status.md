@@ -17,12 +17,12 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 | WS1 | WebSockets under `--listen`, a fresh sandbox per event; 7,800 echo events/s on one connection. Adversarially reviewed, fixes in (Origin check and `--ws-origin`; `close` always follows `open`) |
 | kio-web | `api.kio`; notes on Dir and on Kv, 22 checks each |
 | L6a | `fn(T) -> R` types and function items as values, called as `f(x)` or `(e)(x)`; no capability inside a `fn` type; interpreter only |
+| L6b | closures, capturing by copy, lifted to functions in lowering; a closure cannot capture a capability; interpreter only |
 
 ## Next
 
-1. **C4** (capabilities), C5 (compiled only), C7 (review), C8 (measure, refcount elision).
-2. The checker rejects `o = None;` for an `Option` local ("cannot tell the type of `None`"; open_questions #61).
-3. L6b closures, L6c built-ins taking functions, then L7 generics; compiler support for `fn` values (C9) and `Float` (C10).
+1. **C4** (capabilities), C5 (compiled only), C7 (review), C8 (measure, refcount elision); C9-C11 (function values, `Float`, slices compiled).
+2. L6c built-ins taking functions, then L7 generics; the closures adversarial review.
 
 ## Waiting on the maintainer
 

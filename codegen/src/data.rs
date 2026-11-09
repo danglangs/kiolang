@@ -271,7 +271,7 @@ impl<'m> Statics<'m> {
                 self.str(s);
             }
             ExprKind::Int(_) | ExprKind::Bool(_) | ExprKind::Unit | ExprKind::Local(_) | ExprKind::MapNew => {}
-            ExprKind::FnRef(_) | ExprKind::CallValue(..) => {
+            ExprKind::FnRef(_) | ExprKind::CallValue(..) | ExprKind::Closure(..) => {
                 unimplemented!("codegen: expression {}", crate::node(&e.kind))
             }
             ExprKind::Float(_) => unimplemented!("codegen: expression {}", crate::node(&e.kind)),

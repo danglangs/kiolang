@@ -262,9 +262,12 @@ fn rejects_reference() {
     );
 }
 
+/// `|` is a symbol; the parser decides whether it starts a closure. `||` stays one token.
 #[test]
-fn rejects_closure() {
-    rejects("a |x| x", (2, 3), "kio has no closures", Some("use a `for` loop"));
+fn bar_and_double_bar() {
+    use Kind::Sym;
+    assert_eq!(kinds("|x| ||"), [Sym("|"), ident("x"), Sym("|"), Sym("||")]);
+    assert_eq!(kinds("| |"), [Sym("|"), Sym("|")]);
 }
 
 #[test]

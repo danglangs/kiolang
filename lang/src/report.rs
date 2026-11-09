@@ -113,7 +113,10 @@ fn walk_block(b: &Block, visit: &mut dyn FnMut(&Expr)) {
 fn walk(e: &Expr, visit: &mut dyn FnMut(&Expr)) {
     visit(e);
     match &e.kind {
-        ExprKind::Unary(_, a) | ExprKind::Try(a) | ExprKind::Field(a, _) => walk(a, visit),
+        // A closure's body is charged to the function it is written in. It can reach no
+        // capability (the checker refuses a capture of one), so this only keeps the report an
+        // upper bound should that rule ever fail.
+        ExprKind::Unary(_, a) | ExprKind::Try(a) | ExprKind::Field(a, _) | ExprKind::Closure(_, a) => walk(a, visit),
         ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) => {
             walk(a, visit);
             walk(b, visit);

@@ -178,6 +178,9 @@ pub enum ExprKind {
     FnRef(FuncId),
     /// A call through a value of `fn` type: the callee is evaluated first, then the arguments.
     CallValue(Box<Expr>, Vec<Expr>),
+    /// A closure: the function it was lifted to, whose leading parameters are its captures,
+    /// and the locals copied into them when the closure is created. No capture is a capability.
+    Closure(FuncId, Vec<LocalId>),
     /// A capability method: the capability is always a local, since capabilities are
     /// parameters only. `method` indexes `CapDef::methods`.
     CapCall(LocalId, u32, Vec<Expr>),

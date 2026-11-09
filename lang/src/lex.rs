@@ -33,7 +33,7 @@ const RESERVED: &[&str] = &[
 // Two-character symbols come first so that `==` wins over `=`.
 const SYMBOLS: &[&str] = &[
     "::", "..", "->", "=>", "+=", "-=", "==", "!=", "<=", ">=", "&&", "||", "(", ")", "{", "}", "[", "]", ",", ";",
-    ":", ".", "=", "+", "-", "*", "/", "%", "<", ">", "!", "?",
+    ":", ".", "=", "+", "-", "*", "/", "%", "<", ">", "!", "?", "|",
 ];
 
 const HINT_STR: &str = "add a closing `\"`";
@@ -92,9 +92,6 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diag> {
                     "kio has no references",
                     Some("pass by value; use `Str` instead of `&str`"),
                 ));
-            }
-            b'|' if bytes.get(i + 1) != Some(&b'|') => {
-                return Err(err(i, i + 1, "kio has no closures", Some("use a `for` loop")));
             }
             b'\'' => {
                 return Err(err(i, i + 1, "kio has no chars or lifetimes", Some("use `Str`")));

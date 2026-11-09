@@ -33,6 +33,10 @@ impl Caps for StubDir {
         if &*path == "fn-value" {
             return Ok(Value::Enum(EnumRef::Result, 0, vec![Value::Fn(FuncId(0))]));
         }
+        if &*path == "closure-value" {
+            let c = Value::Closure(FuncId(0), vec![Value::Int(1)].into());
+            return Ok(Value::Enum(EnumRef::Result, 0, vec![c]));
+        }
         if &*path == "wrong-payload" {
             return Ok(Value::Enum(EnumRef::Result, 0, vec![Value::Int(5)]));
         }
@@ -165,6 +169,9 @@ fn host_value_of_wrong_payload_type_stops_the_run() {
 #[test]
 fn host_cannot_return_a_function() {
     let src = "fn main(d: Dir) -> Int { let b = d.read(\"fn-value\"); 1 }";
+    let (r, _) = exec(src, stub(&[("d", &[])]));
+    assert_eq!(r.unwrap_err().msg, "host returned a malformed value for `read`");
+    let src = "fn main(d: Dir) -> Int { let b = d.read(\"closure-value\"); 1 }";
     let (r, _) = exec(src, stub(&[("d", &[])]));
     assert_eq!(r.unwrap_err().msg, "host returned a malformed value for `read`");
 }

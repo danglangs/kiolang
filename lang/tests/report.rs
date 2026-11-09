@@ -109,3 +109,13 @@ fn main(input: Dir) -> Int {{ let load = size; apply(load, input) }}"
         "apply : d read\nload  : d read\nmain  : input read\nsize  : none"
     );
 }
+
+#[test]
+fn lifted_closures_are_not_listed() {
+    // A closure reaches no capability; its body counts as part of the function it is written in.
+    let src = format!(
+        "{LOAD}
+fn main(input: Dir) -> Int {{ let n = 1; let f = |b: Bytes| b.len() + n; match load(input) {{ Ok(b) => f(b), Err(_) => 0 }} }}"
+    );
+    assert_eq!(rep(&src), "load : d read\nmain : input read");
+}

@@ -305,6 +305,10 @@ impl Printer<'_> {
                 self.expr(out, x, depth);
                 *out += "?";
             }
+            ExprKind::Closure(f, captured) => {
+                let captured: Vec<_> = captured.iter().map(|x| self.local(*x)).collect();
+                *out += &format!("closure {}[{}]", self.m.funcs[f.0 as usize].name, captured.join(", "));
+            }
         }
     }
 }
@@ -365,6 +369,34 @@ fn function_values() {
          }
          fn pick() -> fn(Int) -> Int {
            fn double
+         }",
+    );
+}
+
+/// Each closure is lifted to a function after the named ones; its captures come first.
+#[test]
+fn closures_are_lifted() {
+    snapshot(
+        "fn f(a: Int) -> Int {
+             let n = 2;
+             let g = |x: Int| { let h = |y: Int| x + y + a; h(n) };
+             g(3)
+         }",
+        "fn f(a#0: Int) -> Int {
+           let n#1 = 2
+           let g#2 = closure f::{closure#0}[a#0, n#1]
+           (g#2)(3)
+         }
+         locals n#1: Int, g#2: fn(Int) -> Int
+         fn f::{closure#0}(a#0: Int, n#1: Int, x#2: Int) -> Int {
+           {
+             let h#3 = closure f::{closure#1}[x#2, a#0]
+             (h#3)(n#1)
+           }
+         }
+         locals h#3: fn(Int) -> Int
+         fn f::{closure#1}(x#0: Int, a#1: Int, y#2: Int) -> Int {
+           ((x#0 Add y#2) Add a#1)
          }",
     );
 }
@@ -780,6 +812,20 @@ impl Types<'_> {
             ExprKind::FnRef(f) => {
                 let g = &self.m.funcs[f.0 as usize];
                 let ps = g.locals[..g.params as usize].iter().map(|l| l.ty.clone()).collect();
+                Some(Ty::Fn(ps, Box::new(g.ret.clone())))
+            }
+            ExprKind::Closure(f, captured) => {
+                // The captures fill the lifted function's leading parameters; the rest are the
+                // closure's own, which its type lists.
+                let g = &self.m.funcs[f.0 as usize];
+                for (x, l) in captured.iter().zip(&g.locals) {
+                    self.agree(self.local(*x), &l.ty, "capture");
+                    assert!(!matches!(l.ty, Ty::Cap(_)), "a closure captures a capability");
+                }
+                let ps = g.locals[captured.len()..g.params as usize]
+                    .iter()
+                    .map(|l| l.ty.clone())
+                    .collect();
                 Some(Ty::Fn(ps, Box::new(g.ret.clone())))
             }
             ExprKind::CallValue(f, args) => {

@@ -40,6 +40,9 @@ pub enum Value {
     Cap(String),
     /// A function used as a value.
     Fn(FuncId),
+    /// A closure: its lifted function and the values it captured, which that function takes
+    /// before its own arguments.
+    Closure(FuncId, Rc<[Value]>),
 }
 
 // Lists, structs and enums hold values inline, so keep `Value` small: 40 bytes on 64-bit targets.
@@ -398,13 +401,16 @@ impl<'a> Interp<'a> {
             ExprKind::Binary(op, a, b) => self.binary(*op, a, b, e.span),
             ExprKind::If(cond, then, els) => self.if_expr(cond, then, els.as_deref()),
             ExprKind::Block(b) => self.block(b),
-            ExprKind::Call(f, args) => self.call(*f, args, e.span),
+            ExprKind::Call(f, args) => self.call(*f, &[], args, e.span),
             ExprKind::FnRef(f) => Ok(Value::Fn(*f)),
-            ExprKind::CallValue(f, args) => {
-                let Value::Fn(f) = self.expr(f)? else {
-                    unreachable!("checked function value");
-                };
-                self.call(f, args, e.span)
+            ExprKind::CallValue(f, args) => match self.expr(f)? {
+                Value::Fn(f) => self.call(f, &[], args, e.span),
+                Value::Closure(f, captured) => self.call(f, &captured, args, e.span),
+                _ => unreachable!("checked function value"),
+            },
+            ExprKind::Closure(f, captured) => {
+                let vals = captured.iter().map(|x| self.local(*x).clone()).collect();
+                Ok(Value::Closure(*f, vals))
             }
             ExprKind::CapCall(cap, method, args) => self.cap_call(*cap, *method, args, e.span),
             ExprKind::Builtin(b, recv, args) => self.builtin(*b, recv, args, e.span),
@@ -464,13 +470,15 @@ impl<'a> Interp<'a> {
         exprs.iter().map(|x| self.expr(x)).collect()
     }
 
-    /// Evaluates the arguments into the callee's frame, above the caller's.
+    /// Evaluates the arguments into the callee's frame, above the caller's, after a closure's
+    /// `captured` values.
     #[inline(never)]
-    fn call(&mut self, f: FuncId, args: &'a [Expr], span: Span) -> Res {
+    fn call(&mut self, f: FuncId, captured: &[Value], args: &'a [Expr], span: Span) -> Res {
         if self.calls == MAX_CALLS {
             return Err(fail(span, "evaluation is too deep"));
         }
         let base = self.stack.len();
+        self.stack.extend_from_slice(captured);
         for a in args {
             match self.expr(a) {
                 Ok(v) => self.stack.push(v),
@@ -753,7 +761,7 @@ fn in_place(e: &Expr) -> bool {
 fn pure(e: &Expr) -> bool {
     match &e.kind {
         ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Unit => true,
-        ExprKind::Local(_) | ExprKind::MapNew | ExprKind::FnRef(_) => true,
+        ExprKind::Local(_) | ExprKind::MapNew | ExprKind::FnRef(_) | ExprKind::Closure(..) => true,
         ExprKind::CallValue(f, xs) => pure(f) && xs.iter().all(pure),
         ExprKind::Block(_) | ExprKind::If(..) | ExprKind::Match(..) | ExprKind::Mutate(..) => false,
         ExprKind::Unary(_, x) | ExprKind::Field(x, _) | ExprKind::Try(x) => pure(x),

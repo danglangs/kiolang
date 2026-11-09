@@ -173,7 +173,7 @@ Steps:
 9. Done: lowering to a typed IR (the interpreter runs it, 3x faster), and a compiler to Wasm for `Int`, `Bool`, control flow and calls, with a differential harness against the interpreter ([docs/compiler-todo.md](docs/compiler-todo.md)).
 10. Next: the compiler for strings, collections, structs and capabilities, then `kio run` compiled by default; later attenuation.
 
-v0 has no closures, globals, reflection or `unsafe`. Capabilities are parameters only. See [docs/language.md](docs/language.md).
+v0 has no globals, reflection or `unsafe`. Capabilities are parameters only. See [docs/language.md](docs/language.md).
 
 ## Docs
 
