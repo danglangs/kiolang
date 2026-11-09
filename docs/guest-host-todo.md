@@ -105,3 +105,21 @@ host/    the kio binary: Wasmtime, cap-std, limits, host functions
   - `kio run`: `()` or `Ok(())` prints nothing; `Err(e)` prints `error: e` to stderr and exits 1; anything else prints the value to stdout. The authority report goes to stderr, and only when `main` takes capabilities; `kio check` always prints it to stdout.
   - `kio` with no arguments or `--help` prints one line on what kio is, then the usage.
   Done: hello world prints `hello, kio`; examples print readable values; README, docs and all tests updated to the new output.
+
+- [ ] **D1. `Dir` gains `list`, `write`, `remove`, `exists`.** Owner approved 2026-11-08. caps.wit, `fs` interface:
+  ```wit
+  variant io-err { not-found, denied, too-large, invalid-path, exists }   // `exists` appended: ids stay
+  list:   func(path: string) -> result<list<string>, io-err>;  // entries of a directory beneath the root
+  write:  func(path: string, data: list<u8>) -> result<_, io-err>;  // create or replace
+  remove: func(path: string) -> result<_, io-err>;  // one regular file
+  exists: func(path: string) -> result<bool, io-err>;
+  ```
+  - `create` on an existing file returns `exists` (was `denied`); update open_questions #17.
+  - `list`: `""` or `"."` is the root. Names only, sorted by bytes; a directory's name ends in `/`; symlinks, FIFOs and devices are left out. More than 10,000 entries is `too-large`. The names' bytes are charged to `--io`. Not a directory: `not-found` if missing, else `denied`.
+  - `write`: writes a temporary file beside the target (a name the program cannot predict, inside the same granted dir), then renames it over the target, so a reader sees the old or the new file, never a partial one; on any failure the temp is removed. Refused (`denied`) if the target exists and is not a regular file. Missing parent: `not-found`. Charged to `--io` like `create`.
+  - `remove`: regular files only; a directory or anything else is `denied`; missing is `not-found`.
+  - `exists`: `true` for a regular file or directory, `false` if missing; no bytes charged.
+  - Every path goes through the same validation and cap-std confinement as `read` (empty, NUL, over 4,096 bytes, absolute, `..` out, symlink out: `invalid-path`), runs under `State::within` (deadline), counts against `--calls`, and is audited (H8) with its path and bytes. capgen regenerates `lang/src/caps_gen.rs`; the guest and the compiled runtime pick the methods up from caps.wit.
+  - Docs: language.md capability table and `IoErr`, README if it lists Dir methods, design.md "The host" Dir paragraph.
+  Done: host tests in temp dirs for each method's success and each error above, including `write` over an existing file leaving no temp file behind, `write` and `remove` refused on a directory, `list` leaving out a symlink and marking a subdirectory, escapes via each new method `invalid-path`, a too-large listing; the audit log shows each new method; the report lists them; kio-web's notes app gains `PUT` and `DELETE` and uses `list` (separate kio-web commit). Then an independent adversarial review of the four methods (strong model), findings fixed or logged.
+
