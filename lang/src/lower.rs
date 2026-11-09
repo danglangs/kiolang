@@ -751,6 +751,26 @@ impl<'a> Lowerer<'a> {
                 let m = methods.iter().position(|(n, ..)| n == name).expect("checked method");
                 return ir::ExprKind::CapCall(self.lookup(cap), m as u32, self.exprs(args));
             }
+            (T::Bool, "to_str") => {
+                let lit = |s: &str| Expr {
+                    kind: ir::ExprKind::Str(s.into()),
+                    ty: self.ids.ty(&T::Str),
+                    span: recv.span,
+                };
+                let no = Expr {
+                    kind: ir::ExprKind::Block(Block {
+                        stmts: Vec::new(),
+                        tail: Some(Box::new(lit("false"))),
+                    }),
+                    ty: self.ids.ty(&T::Str),
+                    span: recv.span,
+                };
+                let yes = Block {
+                    stmts: Vec::new(),
+                    tail: Some(Box::new(lit("true"))),
+                };
+                return ir::ExprKind::If(Box::new(self.expr(recv)), yes, Some(Box::new(no)));
+            }
             (T::List(_), "push") => Mut::ListPush,
             (T::List(_), "sort") => Mut::ListSort,
             (T::List(_), "pop") => Mut::ListPop,

@@ -830,12 +830,16 @@ fn binary_err(
     span: Span,
     operands: (&Expr, &Expr),
 ) -> Diag {
-    let text_and_number = matches!((l, r), (Ty::Str, Ty::Int | Ty::Float) | (Ty::Int | Ty::Float, Ty::Str));
+    let text_and_number = matches!(
+        (l, r),
+        (Ty::Str, Ty::Int | Ty::Float | Ty::Bool) | (Ty::Int | Ty::Float | Ty::Bool, Ty::Str)
+    );
     if op == "+" && text_and_number {
         let number = if *l == Ty::Str { operands.1 } else { operands.0 };
         let shown = match &number.kind {
             ExprKind::Int(n) if *n >= 0 => n.to_string(),
             ExprKind::Float(x) if f64::from_bits(*x) >= 0.0 => format!("{:?}", f64::from_bits(*x)),
+            ExprKind::Bool(b) => b.to_string(),
             ExprKind::Name(n) => n.clone(),
             _ => "x".to_string(),
         };
@@ -1526,7 +1530,7 @@ fn method(caps: &CapTable, recv: &Ty, name: &str) -> Option<(Vec<Ty>, Ty)> {
             let (_, params, ret) = cap_methods(caps, c).iter().find(|m| m.0 == name)?;
             Some((params.clone(), ret.clone()))
         }
-        (Ty::Int, "to_str") | (Ty::Bytes, "to_str") => Some((vec![], Ty::Str)),
+        (Ty::Int | Ty::Bool | Ty::Bytes, "to_str") => Some((vec![], Ty::Str)),
         (Ty::Str, "len") | (Ty::Bytes, "len") | (Ty::List(_), "len") => Some((vec![], Ty::Int)),
         (Ty::List(t), "push") => Some((vec![(**t).clone()], Ty::Unit)),
         (Ty::List(t), "contains") => Some((vec![(**t).clone()], Ty::Bool)),

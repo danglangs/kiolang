@@ -547,3 +547,18 @@ fn main() -> Str {
 }"#;
     assert_eq!(shows(src), "3cba");
 }
+
+/// L17: `Bool.to_str()`, as Rust's `to_string`.
+#[test]
+fn bool_to_str() {
+    let src = r#"
+fn flag(n: Int) -> Bool { n > 1 }
+fn main() -> Str {
+    let t = true;
+    t.to_str() + "," + false.to_str() + "," + flag(1).to_str() + "," + (1 < 2 && flag(2)).to_str()
+}"#;
+    assert_eq!(shows(src), "true,false,false,true");
+    let (msg, hint) = rejects("fn main() { true.to_str(1); }");
+    assert_eq!(msg, "`to_str` takes 0 arguments, found 1");
+    assert_eq!(hint.as_deref(), Some("`Bool.to_str` is declared as `to_str() -> Str`"));
+}

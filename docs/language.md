@@ -124,6 +124,7 @@ Everything else is rejected with a message that names the kio alternative, for e
 
 | Type | Methods |
 |---|---|
+| `Bool` | `to_str() -> Str` (`"true"` or `"false"`) |
 | `Int` | `to_str() -> Str`, `to_float() -> Float`, `min(Int) -> Int`, `max(Int) -> Int` |
 | `Float` | `to_str() -> Str` (as Rust's `{}`: `1`, `0.30000000000000004`, `NaN`, `inf`, `-0`), `to_int() -> Option<Int>` (toward zero; `None` if NaN, infinite or out of range), `abs()`, `floor()`, `ceil()`, `round()` (half away from zero), `sqrt()`, all `-> Float`, `is_nan() -> Bool`, `is_finite() -> Bool`, `is_infinite() -> Bool`, `min(Float) -> Float`, `max(Float) -> Float` (as Rust's: a NaN is ignored unless both are; `-0.0` is below `0.0`) |
 | `Str` | `len() -> Int`, `split(Str) -> List<Str>`, `lines() -> List<Str>`, `trim() -> Str`, `contains(Str) -> Bool`, `starts_with(Str) -> Bool`, `ends_with(Str) -> Bool`, `strip_prefix(Str) -> Option<Str>`, `strip_suffix(Str) -> Option<Str>`, `find(Str) -> Option<Int>` (byte offset), `replace(Str, Str) -> Str`, `parse_int() -> Option<Int>`, `parse_float() -> Option<Float>` (as Rust's `f64::from_str`: `1e3`, `inf`, `NaN`), `parse_json() -> Result<Json, Str>` (below), `slice(Int, Int) -> Str` (byte offsets as Rust's `&s[a..b]`; out of range, `a > b`, negative or not on a character boundary is a runtime error), `to_bytes() -> Bytes`, `to_lowercase() -> Str`, `to_uppercase() -> Str` (Rust's Unicode mapping: `"straße"` to `"STRASSE"`), `sha256() -> Bytes` (of its UTF-8 bytes), `ct_eq(Str) -> Bool` (as `Bytes.ct_eq`) |

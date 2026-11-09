@@ -896,7 +896,7 @@ fn methods() {
     ok("fn main() { let a: List<Str> = \"a\".split(\",\"); let b: List<Str> = \"a\".lines(); let c: Str = \"a\".trim(); let d: Bool = \"a\".contains(\"a\") && \"a\".starts_with(\"a\"); let e: Option<Int> = \"1\".parse_int(); }");
     assert_eq!(reject("fn main() { \"a\".split(1); }").0, "expected Str, found Int");
     assert_eq!(hint("fn main() { 1.zzzzzz(); }"), "Int has: max, min, to_float, to_str");
-    assert_eq!(hint("fn main() { true.len(); }"), "Bool has no methods");
+    assert_eq!(hint("fn main() { true.len(); }"), "Bool has: to_str");
     let src = "fn main() { \"a\".len(1); }";
     assert_eq!(reject(src).0, "`len` takes 0 arguments, found 1");
     assert_eq!(hint(src), "`Str.len` is declared as `len() -> Int`");
@@ -2162,6 +2162,16 @@ fn l12_text_plus_number_and_try_hints() {
             "fn main() -> Str { let n = 2.5; \"n=\" + n }",
             "\"n=\" + n",
             "convert with `n.to_str()`",
+        ),
+        (
+            "fn main() -> Str { let b = true; \"ok=\" + b }",
+            "\"ok=\" + b",
+            "convert with `b.to_str()`",
+        ),
+        (
+            "fn main() -> Str { \"ok=\" + false }",
+            "\"ok=\" + false",
+            "convert with `false.to_str()`",
         ),
         (
             "fn main() { let mut s = \"a\"; s += 3; }",
