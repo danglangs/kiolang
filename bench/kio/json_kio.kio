@@ -1,0 +1,365 @@
+// JSON for kio-web: `parse` and `encode` over a `JsonKio` tree, plus accessors that return Option.
+// Numbers are Int, or Float when they have a fraction or exponent or do not fit Int. Input is read as bytes, with `byte` giving -1 past the end.
+
+pub enum JsonKio { Null, Bool(Bool), Num(Int), Float(Float), Str(Str), Arr(List<JsonKio>), Obj(Map<Str, JsonKio>) }
+
+// A parsed value and the offset just after it.
+struct Parsed { value: JsonKio, pos: Int }
+// A parsed string and the offset just after its closing quote.
+struct Scanned { text: Str, pos: Int }
+
+// Containers may nest at most this deep, well under kio's evaluation depth limit.
+fn max_depth() -> Int { 64 }
+
+// Parse one JSON document; the Err message names the byte offset.
+pub fn parse(s: Str) -> Result<JsonKio, Str> {
+    let b = s.to_bytes();
+    let p = value(b, skip_ws(b, 0), 0)?;
+    let end = skip_ws(b, p.pos);
+    if end != b.len() { return Err(err_at("expected end of input", end)); }
+    Ok(p.value)
+}
+
+fn err_at(msg: Str, i: Int) -> Str { msg + " at byte " + i.to_str() }
+
+fn byte(b: Bytes, i: Int) -> Int {
+    if i < b.len() { b[i] } else { -1 }
+}
+
+fn skip_ws(b: Bytes, i: Int) -> Int {
+    let mut j = i;
+    while byte(b, j) == 32 || byte(b, j) == 9 || byte(b, j) == 10 || byte(b, j) == 13 { j += 1; }
+    j
+}
+
+// The value starting at b[i]; `depth` counts the containers around it.
+fn value(b: Bytes, i: Int, depth: Int) -> Result<Parsed, Str> {
+    let c = byte(b, i);
+    match c {
+        110 => literal(b, i, "null", JsonKio::Null),
+        116 => literal(b, i, "true", JsonKio::Bool(true)),
+        102 => literal(b, i, "false", JsonKio::Bool(false)),
+        34 => {
+            let s = string(b, i)?;
+            Ok(Parsed { value: JsonKio::Str(s.text), pos: s.pos })
+        }
+        91 => array(b, i, depth + 1),
+        123 => object(b, i, depth + 1),
+        _ => if c == 45 || is_digit(c) { number(b, i) } else { Err(err_at("expected a value", i)) },
+    }
+}
+
+fn literal(b: Bytes, i: Int, word: Str, v: JsonKio) -> Result<Parsed, Str> {
+    let w = word.to_bytes();
+    for k in 0..w.len() {
+        if byte(b, i + k) != w[k] { return Err(err_at("expected '" + word + "'", i)); }
+    }
+    Ok(Parsed { value: v, pos: i + w.len() })
+}
+
+// A number. Without fraction or exponent it is an Int, accumulated downward so that the
+// smallest Int parses and nothing overflows; if it does not fit, or has a fraction or
+// exponent, the text is parsed as a Float.
+fn number(b: Bytes, i: Int) -> Result<Parsed, Str> {
+    let neg = byte(b, i) == 45;
+    let mut j = if neg { i + 1 } else { i };
+    if !is_digit(byte(b, j)) { return Err(err_at("expected a digit", j)); }
+    let mut n = 0;
+    let mut fits = true;
+    // A leading 0 ends the integer part, as JSON allows no leading zeros.
+    if byte(b, j) == 48 {
+        j += 1;
+    } else {
+        while is_digit(byte(b, j)) {
+            let d = byte(b, j) - 48;
+            if n < (-9223372036854775807 - 1 + d) / 10 { fits = false; } else { n = n * 10 - d; }
+            j += 1;
+        }
+    }
+    if !neg && fits && n == -9223372036854775807 - 1 { fits = false; }
+    let mut real = false;
+    if byte(b, j) == 46 {
+        real = true;
+        j = digits(b, j + 1)?;
+    }
+    if byte(b, j) == 101 || byte(b, j) == 69 {
+        real = true;
+        j += 1;
+        if byte(b, j) == 43 || byte(b, j) == 45 { j += 1; }
+        j = digits(b, j)?;
+    }
+    if !real && fits { return Ok(Parsed { value: JsonKio::Num(if neg { n } else { -n }), pos: j }); }
+    let mut text = "".to_bytes();
+    for k in i..j { text.push(b[k]); }
+    let f = text.to_str().parse_float().unwrap_or(0.0);
+    // Infinity (a literal beyond f64's range) has no JSON form.
+    if (f - f).is_nan() { return Err(err_at("number out of range", i)); }
+    Ok(Parsed { value: JsonKio::Float(f), pos: j })
+}
+
+// The offset after one or more digits starting at b[i].
+fn digits(b: Bytes, i: Int) -> Result<Int, Str> {
+    if !is_digit(byte(b, i)) { return Err(err_at("expected a digit", i)); }
+    let mut j = i;
+    while is_digit(byte(b, j)) { j += 1; }
+    Ok(j)
+}
+
+// The string whose opening quote is b[i].
+fn string(b: Bytes, i: Int) -> Result<Scanned, Str> {
+    let mut out = "".to_bytes();
+    let mut j = i + 1;
+    while byte(b, j) != 34 {
+        let c = byte(b, j);
+        if c < 0 { return Err(err_at("unterminated string starting", i)); }
+        if c < 32 { return Err(err_at("unescaped control character", j)); }
+        if c != 92 {
+            out.push(c);
+            j += 1;
+        } else if byte(b, j + 1) == 117 {
+            let mut cp = hex4(b, j + 2)?;
+            j += 6;
+            if cp >= 55296 && cp <= 56319 {
+                if byte(b, j) != 92 || byte(b, j + 1) != 117 { return Err(err_at("lone surrogate", j - 6)); }
+                let lo = hex4(b, j + 2)?;
+                if lo < 56320 || lo > 57343 { return Err(err_at("lone surrogate", j - 6)); }
+                cp = 65536 + (cp - 55296) * 1024 + (lo - 56320);
+                j += 6;
+            } else if cp >= 56320 && cp <= 57343 {
+                return Err(err_at("lone surrogate", j - 6));
+            }
+            let u = utf8(cp);
+            for k in 0..u.len() { out.push(u[k]); }
+        } else {
+            match unescape(byte(b, j + 1)) {
+                Some(e) => { out.push(e); j += 2; }
+                None => return Err(err_at("invalid escape", j)),
+            }
+        }
+    }
+    Ok(Scanned { text: out.to_str(), pos: j + 1 })
+}
+
+// The byte a single-character escape stands for, given the character after the backslash.
+fn unescape(c: Int) -> Option<Int> {
+    match c {
+        34 => Some(34),
+        92 => Some(92),
+        47 => Some(47),
+        98 => Some(8),
+        102 => Some(12),
+        110 => Some(10),
+        114 => Some(13),
+        116 => Some(9),
+        _ => None,
+    }
+}
+
+// The four hex digits at b[i..i + 4], as a number.
+fn hex4(b: Bytes, i: Int) -> Result<Int, Str> {
+    let mut n = 0;
+    for k in 0..4 {
+        match hex_digit(byte(b, i + k)) {
+            Some(d) => { n = n * 16 + d; }
+            None => return Err(err_at("expected 4 hex digits", i)),
+        }
+    }
+    Ok(n)
+}
+
+fn utf8(cp: Int) -> Bytes {
+    let mut u = "".to_bytes();
+    if cp < 128 {
+        u.push(cp);
+    } else if cp < 2048 {
+        u.push(192 + cp / 64);
+        u.push(128 + cp % 64);
+    } else if cp < 65536 {
+        u.push(224 + cp / 4096);
+        u.push(128 + cp / 64 % 64);
+        u.push(128 + cp % 64);
+    } else {
+        u.push(240 + cp / 262144);
+        u.push(128 + cp / 4096 % 64);
+        u.push(128 + cp / 64 % 64);
+        u.push(128 + cp % 64);
+    }
+    u
+}
+
+// The array whose '[' is b[i]; `depth` includes this array.
+fn array(b: Bytes, i: Int, depth: Int) -> Result<Parsed, Str> {
+    if depth > max_depth() { return Err(err_at("nesting deeper than 64", i)); }
+    let mut items: List<JsonKio> = [];
+    let mut j = skip_ws(b, i + 1);
+    if byte(b, j) == 93 { return Ok(Parsed { value: JsonKio::Arr(items), pos: j + 1 }); }
+    while true {
+        let p = value(b, j, depth)?;
+        items.push(p.value);
+        j = skip_ws(b, p.pos);
+        let c = byte(b, j);
+        if c == 93 { return Ok(Parsed { value: JsonKio::Arr(items), pos: j + 1 }); }
+        if c != 44 { return Err(err_at("expected ',' or ']'", j)); }
+        j = skip_ws(b, j + 1);
+    }
+    Err(err_at("unreachable", j))
+}
+
+// The object whose '{' is b[i]; `depth` includes this object.
+fn object(b: Bytes, i: Int, depth: Int) -> Result<Parsed, Str> {
+    if depth > max_depth() { return Err(err_at("nesting deeper than 64", i)); }
+    let mut fields: Map<Str, JsonKio> = Map::new();
+    let mut j = skip_ws(b, i + 1);
+    if byte(b, j) == 125 { return Ok(Parsed { value: JsonKio::Obj(fields), pos: j + 1 }); }
+    while true {
+        if byte(b, j) != 34 { return Err(err_at("expected a string key", j)); }
+        let k = string(b, j)?;
+        j = skip_ws(b, k.pos);
+        if byte(b, j) != 58 { return Err(err_at("expected ':'", j)); }
+        let p = value(b, skip_ws(b, j + 1), depth)?;
+        fields.insert(k.text, p.value);
+        j = skip_ws(b, p.pos);
+        let c = byte(b, j);
+        if c == 125 { return Ok(Parsed { value: JsonKio::Obj(fields), pos: j + 1 }); }
+        if c != 44 { return Err(err_at("expected ',' or '}'", j)); }
+        j = skip_ws(b, j + 1);
+    }
+    Err(err_at("unreachable", j))
+}
+
+fn is_digit(c: Int) -> Bool { c >= 48 && c <= 57 }
+
+fn hex_digit(c: Int) -> Option<Int> {
+    if c >= 65 && c <= 70 { return Some(c - 55); }
+    if c >= 97 && c <= 102 { return Some(c - 87); }
+    if is_digit(c) { Some(c - 48) } else { None }
+}
+
+// Compact JSON text; object keys in Map order. `parse(encode(j)) == j`.
+pub fn encode(j: JsonKio) -> Str {
+    match j {
+        JsonKio::Null => "null",
+        JsonKio::Bool(v) => if v { "true" } else { "false" },
+        JsonKio::Num(n) => n.to_str(),
+        JsonKio::Float(f) => float_text(f),
+        JsonKio::Str(s) => quote(s),
+        JsonKio::Arr(xs) => {
+            let mut out = "[";
+            for i in 0..xs.len() {
+                if i > 0 { out = out + ","; }
+                out = out + encode(xs[i]);
+            }
+            out + "]"
+        }
+        JsonKio::Obj(m) => {
+            let mut out = "{";
+            let mut first = true;
+            for k in m.keys() {
+                if !first { out = out + ","; }
+                first = false;
+                out = out + quote(k) + ":" + encode(m.get(k).unwrap_or(JsonKio::Null));
+            }
+            out + "}"
+        }
+    }
+}
+
+// A Float as JSON text: Rust's `{}` form, with `.0` added when it has no `.`, `e` or `E`
+// so it parses back as a Float. NaN and infinities have no JSON form and become null.
+fn float_text(f: Float) -> Str {
+    if (f - f).is_nan() { return "null"; }
+    let t = f.to_str();
+    let b = t.to_bytes();
+    for k in 0..b.len() {
+        if b[k] == 46 || b[k] == 101 || b[k] == 69 { return t; }
+    }
+    t + ".0"
+}
+
+// A JSON string literal: quotes, backslashes and control bytes escaped.
+fn quote(s: Str) -> Str {
+    let b = s.to_bytes();
+    let mut out = "\"".to_bytes();
+    for i in 0..b.len() {
+        let c = b[i];
+        if c == 34 || c == 92 {
+            out.push(92);
+            out.push(c);
+        } else if c == 10 {
+            out.push(92);
+            out.push(110);
+        } else if c == 9 {
+            out.push(92);
+            out.push(116);
+        } else if c < 32 {
+            // \u00XX
+            out.push(92);
+            out.push(117);
+            out.push(48);
+            out.push(48);
+            out.push(hex_char(c / 16));
+            out.push(hex_char(c % 16));
+        } else {
+            out.push(c);
+        }
+    }
+    out.push(34);
+    out.to_str()
+}
+
+fn hex_char(n: Int) -> Int {
+    if n < 10 { 48 + n } else { 87 + n }
+}
+
+// The field `key` of an object.
+pub fn get(j: JsonKio, key: Str) -> Option<JsonKio> {
+    match j {
+        JsonKio::Obj(m) => m.get(key),
+        _ => None,
+    }
+}
+
+// The element `i` of an array.
+pub fn at(j: JsonKio, i: Int) -> Option<JsonKio> {
+    match j {
+        JsonKio::Arr(xs) => if i >= 0 && i < xs.len() { Some(xs[i]) } else { None },
+        _ => None,
+    }
+}
+
+pub fn as_str(j: JsonKio) -> Option<Str> {
+    match j {
+        JsonKio::Str(s) => Some(s),
+        _ => None,
+    }
+}
+
+pub fn as_int(j: JsonKio) -> Option<Int> {
+    match j {
+        JsonKio::Num(n) => Some(n),
+        _ => None,
+    }
+}
+
+// A Float, or a Num converted.
+pub fn as_float(j: JsonKio) -> Option<Float> {
+    match j {
+        JsonKio::Float(f) => Some(f),
+        JsonKio::Num(n) => Some(n.to_float()),
+        _ => None,
+    }
+}
+
+pub fn as_bool(j: JsonKio) -> Option<Bool> {
+    match j {
+        JsonKio::Bool(v) => Some(v),
+        _ => None,
+    }
+}
+
+pub fn as_list(j: JsonKio) -> Option<List<JsonKio>> {
+    match j {
+        JsonKio::Arr(xs) => Some(xs),
+        _ => None,
+    }
+}
