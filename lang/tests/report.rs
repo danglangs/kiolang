@@ -37,6 +37,20 @@ fn main(input: Dir) -> Result<(), IoErr> {{ let _b = mid(input)?; Ok(()) }}"
     assert_eq!(rep(&src), "load : d read\nmain : input read\nmid  : x read");
 }
 
+/// A generic function is listed once: its capability parameters have concrete types, so its
+/// authority is the same for every instance. A turbofish call is charged as any call.
+#[test]
+fn generic_function_listed_once() {
+    let src = format!(
+        "{LOAD} {SAVE}
+fn via<T>(d: Dir, x: T) -> T {{ let _b = load(d); x }}
+fn put<T>(o: Dir, x: T) -> T {{ let _r = save(o, \"\".to_bytes()); x }}
+fn main(input: Dir, out: Dir) -> Int {{ via(input, 1) + via(input, \"a\").len() + put::<Int>(out, 2) }}"
+    );
+    let want = "load : d read\nmain : input read, out create\nput  : o create\nsave : o create\nvia  : d read";
+    assert_eq!(rep(&src), want);
+}
+
 #[test]
 fn mutual_recursion_gives_both_the_union() {
     let src = r#"

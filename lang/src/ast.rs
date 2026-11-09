@@ -13,6 +13,8 @@ pub enum Item {
 pub struct Fn {
     pub public: bool,
     pub name: String,
+    /// Type parameters `<T, U>`, each with its span; empty for a function that is not generic.
+    pub tparams: Vec<(String, Span)>,
     pub params: Vec<Param>,
     /// `()` when the source has no `->`.
     pub ret: Type,
@@ -163,6 +165,8 @@ pub enum ExprKind {
     Match(Box<Expr>, Vec<Arm>),
     /// `e?`
     Try(Box<Expr>),
+    /// `first::<Int>`: a function named with explicit type arguments.
+    Turbofish(String, Vec<Type>),
     /// `|x: Int, y| body`; `|| body` has no parameters.
     Closure(Vec<ClosureParam>, Box<Expr>),
 }

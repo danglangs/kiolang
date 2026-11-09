@@ -32,6 +32,7 @@ fn show(e: &Expr) -> String {
             format!("(|{ps} | {})", show(body))
         }
         ExprKind::Path(e, v) => format!("{e}::{v}"),
+        ExprKind::Turbofish(f, tys) => format!("{f}::<{}>", tys.iter().map(ty).collect::<Vec<_>>().join(",")),
         ExprKind::Module(m, x) => format!("{m}::{}", show(x)),
         ExprKind::Match(s, arms) => {
             let arms = arms.iter().fold(String::new(), |a, arm| {
@@ -781,4 +782,46 @@ fn rejects_closure_syntax() {
     let deep = format!("fn f() {{ {}1; }}", "|x| ".repeat(65));
     assert_eq!(fail(&deep).msg, "nesting is too deep");
     assert!(parse(&format!("fn f() {{ {}1; }}", "|x| ".repeat(20))).is_ok());
+}
+
+#[test]
+fn generic_functions_and_turbofish() {
+    let items = parse("fn pair<A, B>(a: A, b: B) -> List<A> { [a] }").unwrap();
+    let Item::Fn(f) = &items[0] else { panic!() };
+    let names: Vec<&str> = f.tparams.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["A", "B"]);
+    assert_eq!(ty(&f.params[1].ty), "B");
+    assert_eq!(expr("first::<Int>(xs)"), "(call first::<Int> xs)");
+    assert_eq!(expr("first::<List<Int>>"), "first::<List<Int>>");
+    assert_eq!(expr("web::first::<Str, Int>(xs)"), "(call web::first::<Str,Int> xs)");
+    rejected_with(
+        "fn f<T: Eq>(x: T) {}",
+        ":",
+        "type parameter bounds are not supported",
+        Some("remove the bound: a `T` can be passed, stored and returned without one"),
+    );
+    rejected_with(
+        "fn f<>() {}",
+        ">",
+        "empty type parameters",
+        Some("write `fn f(..)` without `<>`"),
+    );
+    rejected_with(
+        "fn f() { g::<>(); }",
+        ">",
+        "empty type arguments",
+        Some("write `g` without `::<>`"),
+    );
+    rejected_with(
+        "struct Page<T> { items: List<T> }",
+        "<",
+        "generic structs are not supported yet",
+        Some("give each field a concrete type"),
+    );
+    rejected_with(
+        "enum Tree<T> { Leaf }",
+        "<",
+        "generic enums are not supported yet",
+        Some("give each payload a concrete type"),
+    );
 }

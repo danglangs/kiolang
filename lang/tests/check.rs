@@ -1442,6 +1442,16 @@ fn rust_isms_are_rejected_with_the_kio_way() {
             "`impl` is not supported in kio",
             "kio has no traits or `impl`; use free functions",
         ),
+        (
+            "fn f<T: Clone>(x: T) -> T { x } fn main() {}",
+            "type parameter bounds are not supported",
+            "remove the bound: a `T` can be passed, stored and returned without one",
+        ),
+        (
+            "fn f<T>(x: T) -> T { x.clone() } fn main() {}",
+            "no method `clone` on T",
+            "`T` is a type parameter, which has no methods; take a function for it, like `f: fn(T) -> Str`",
+        ),
     ];
     for (src, msg, hint) in cases {
         let d = &check(src, &CapTable::default()).expect_err(src)[0];

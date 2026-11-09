@@ -137,7 +137,9 @@ impl Parser {
             return Ok(None);
         };
         let lower = name.starts_with(|c: char| c.is_lowercase());
-        if !lower || self.toks.get(self.pos + 1).is_none_or(|t| t.kind != Kind::Sym("::")) {
+        let at = |i: usize, sym| self.toks.get(self.pos + i).is_some_and(|t| t.kind == Kind::Sym(sym));
+        // `first::<Int>` is a function with type arguments, not a module.
+        if !lower || !at(1, "::") || at(2, "<") {
             return Ok(None);
         }
         let name = self.ident()?;
@@ -223,6 +225,7 @@ impl Parser {
         let public = self.eat_kw("pub");
         if self.eat_kw("struct") {
             let name = self.ident()?;
+            self.not_generic("structs", "give each field a concrete type")?;
             self.expect("{")?;
             let fields = self.list("}", Self::param)?;
             return Ok(Item::Struct(Struct {
@@ -234,6 +237,7 @@ impl Parser {
         }
         if self.eat_kw("enum") {
             let name = self.ident()?;
+            self.not_generic("enums", "give each payload a concrete type")?;
             self.expect("{")?;
             let variants = self.list("}", Self::variant)?;
             return Ok(Item::Enum(Enum {
@@ -247,6 +251,15 @@ impl Parser {
             return Err(self.unexpected("`fn`"));
         }
         let name = self.ident()?;
+        let tparams = if self.eat("<") {
+            if self.at(">") {
+                let hint = format!("write `fn {name}(..)` without `<>`");
+                return Err(err(self.span(), "empty type parameters", Some(&hint)));
+            }
+            self.list(">", Self::tparam)?
+        } else {
+            Vec::new()
+        };
         self.expect("(")?;
         let params = self.list(")", Self::param)?;
         let ret = self.ret()?;
@@ -254,11 +267,32 @@ impl Parser {
         Ok(Item::Fn(Fn {
             public,
             name,
+            tparams,
             params,
             ret,
             body,
             span: self.since(start),
         }))
+    }
+
+    /// Refuses `<T>` after a struct or enum name, which L7b adds.
+    fn not_generic(&self, what: &str, hint: &str) -> Result<(), Diag> {
+        if self.at("<") {
+            let msg = format!("generic {what} are not supported yet");
+            return Err(err(self.span(), &msg, Some(hint)));
+        }
+        Ok(())
+    }
+
+    /// A type parameter `T`; bounds such as `T: Eq` are not supported yet.
+    fn tparam(&mut self) -> Result<(String, Span), Diag> {
+        let start = self.span().start;
+        let name = self.ident()?;
+        if self.at(":") {
+            let hint = format!("remove the bound: a `{name}` can be passed, stored and returned without one");
+            return Err(err(self.span(), "type parameter bounds are not supported", Some(&hint)));
+        }
+        Ok((name, self.since(start)))
     }
 
     fn variant(&mut self) -> Result<Variant, Diag> {
@@ -611,6 +645,17 @@ impl Parser {
                 let start = span.start;
                 let enum_name = self.ident()?;
                 self.pos += 1;
+                if self.eat("<") {
+                    if self.at(">") {
+                        let hint = format!("write `{enum_name}` without `::<>`");
+                        return Err(err(self.span(), "empty type arguments", Some(&hint)));
+                    }
+                    let tys = self.list(">", Self::ty)?;
+                    return Ok(Expr {
+                        kind: ExprKind::Turbofish(enum_name, tys),
+                        span: self.since(start),
+                    });
+                }
                 let variant = self.ident()?;
                 return Ok(Expr {
                     kind: ExprKind::Path(enum_name, variant),

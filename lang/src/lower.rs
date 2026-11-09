@@ -19,7 +19,8 @@ pub fn lower(p: &Program, caps: &CapTable) -> Module {
         keys.sort();
         keys
     };
-    let funcs = sorted(p.funcs.keys().collect());
+    // A generic function becomes one function per instance, made when a use is lowered.
+    let funcs = sorted(p.funcs.keys().filter(|k| p.sigs[*k].tparams.is_empty()).collect());
     let structs = sorted(p.structs.keys().collect());
     let mut enums: Vec<String> = caps.enums.iter().map(|e| e.name.clone()).collect();
     enums.extend(sorted(p.enums.keys().filter(|k| !enums.contains(k)).collect()));
@@ -29,10 +30,25 @@ pub fn lower(p: &Program, caps: &CapTable) -> Module {
         enums: index(&enums),
         caps: index(&caps.caps.iter().map(|c| c.name.clone()).collect::<Vec<_>>()),
         lifted: RefCell::new(Vec::new()),
+        instances: RefCell::new(HashMap::new()),
+        pending: RefCell::new(Vec::new()),
         closures: Cell::new(0),
     };
-    let mut lowered: Vec<Func> = funcs.iter().map(|k| ids.func(p, caps, k)).collect();
-    lowered.extend(ids.lifted.take().into_iter().map(|f| f.expect("lifted closure")));
+    let mut lowered: Vec<Func> = funcs.iter().map(|k| ids.func(p, caps, k, Vec::new())).collect();
+    // Lowering an instance can find more; `check` proved there are finitely many.
+    for next in 0.. {
+        let item = ids.pending.borrow().get(next).cloned();
+        let Some((index, k, args)) = item else { break };
+        let binds = p.sigs[&k].tparams.iter().cloned().zip(args).collect();
+        let f = ids.func(p, caps, &k, binds);
+        ids.lifted.borrow_mut()[index] = Some(f);
+    }
+    lowered.extend(
+        ids.lifted
+            .take()
+            .into_iter()
+            .map(|f| f.expect("lifted closure or instance")),
+    );
     Module {
         funcs: lowered,
         structs: (structs.iter())
@@ -71,13 +87,39 @@ struct Ids {
     structs: HashMap<String, u32>,
     enums: HashMap<String, u32>,
     caps: HashMap<String, u32>,
-    /// Closures lifted to functions, which follow the named ones; `None` while one is lowered.
+    /// Closures lifted to functions and instances of generic functions, which follow the
+    /// named ones in the order they are found; `None` until lowered.
     lifted: RefCell<Vec<Option<Func>>>,
-    /// Closures lifted so far from the named function being lowered, for their names.
+    /// The id of each instance, by generic function key and type arguments.
+    instances: RefCell<HashMap<(String, Vec<check::Ty>), FuncId>>,
+    /// Every instance: its index in `lifted`, key and type arguments.
+    pending: RefCell<Vec<(usize, String, Vec<check::Ty>)>>,
+    /// Closures lifted so far from the function being lowered, for their names.
     closures: Cell<u32>,
 }
 
 impl Ids {
+    /// A slot after the named functions, filled once its function is lowered.
+    fn reserve(&self) -> (usize, FuncId) {
+        let mut lifted = self.lifted.borrow_mut();
+        lifted.push(None);
+        let index = lifted.len() - 1;
+        (index, FuncId((self.funcs.len() + index) as u32))
+    }
+
+    /// The instance of generic function `k` for type arguments `args`, which hold no type
+    /// parameter; lowered later if new.
+    fn instance(&self, k: &str, args: Vec<check::Ty>) -> FuncId {
+        let id = (k.to_string(), args);
+        if let Some(f) = self.instances.borrow().get(&id) {
+            return *f;
+        }
+        let (index, f) = self.reserve();
+        self.pending.borrow_mut().push((index, id.0.clone(), id.1.clone()));
+        self.instances.borrow_mut().insert(id, f);
+        f
+    }
+
     fn ty(&self, t: &check::Ty) -> Ty {
         let inner = |t| Box::new(self.held(t));
         match t {
@@ -96,6 +138,7 @@ impl Ids {
             check::Ty::Cap(c) => Ty::Cap(CapId(self.caps[c])),
             check::Ty::Fn(ps, r) => Ty::Fn(ps.iter().map(|t| self.held(t)).collect(), inner(r)),
             check::Ty::Never => Ty::Never,
+            check::Ty::Param(t) => unreachable!("type parameter `{t}` outside an instance"),
         }
     }
 
@@ -108,27 +151,38 @@ impl Ids {
         }
     }
 
-    fn func(&self, p: &Program, caps: &CapTable, k: &str) -> Func {
+    /// Function `k`, or its instance for `binds` (each type parameter and its type), named
+    /// like `first<Int>`.
+    fn func(&self, p: &Program, caps: &CapTable, k: &str, binds: Vec<(String, check::Ty)>) -> Func {
         let (f, sig) = (&p.funcs[k], &p.sigs[k]);
+        let name = match binds.is_empty() {
+            true => k.to_string(),
+            false => {
+                let args: Vec<String> = binds.iter().map(|(_, t)| t.to_string()).collect();
+                format!("{k}<{}>", args.join(", "))
+            }
+        };
         self.closures.set(0);
         let mut l = Lowerer {
             p,
             caps,
             ids: self,
             module: check::module_of(k),
-            owner: k,
+            owner: name.clone(),
+            binds,
             locals: Vec::new(),
             scope: Vec::new(),
         };
         for (param, ty) in f.params.iter().zip(&sig.params) {
-            l.bind(&param.name, ty, param.span);
+            l.bind(&param.name, &l.subst(ty), param.span);
         }
         let body = l.block(&f.body);
+        let ret = self.ty(&l.subst(&sig.ret));
         Func {
-            name: k.to_string(),
+            name,
             locals: l.locals,
             params: f.params.len() as u32,
-            ret: self.ty(&sig.ret),
+            ret,
             body,
             span: f.span,
         }
@@ -142,8 +196,10 @@ struct Lowerer<'a> {
     ids: &'a Ids,
     /// The module of the function.
     module: &'a str,
-    /// The key of the named function, or of the one a closure is in, for closure names.
-    owner: &'a str,
+    /// The name of the function, or of the one a closure is in, for closure names.
+    owner: String,
+    /// The type arguments of the instance being lowered; empty for a function not generic.
+    binds: Vec<(String, check::Ty)>,
     locals: Vec<Local>,
     /// Names in scope, innermost last.
     scope: Vec<(&'a str, LocalId)>,
@@ -175,13 +231,23 @@ impl<'a> Lowerer<'a> {
         self.scope.iter().rev().find(|(n, _)| *n == name).map(|(_, id)| *id)
     }
 
-    fn func(&self, k: &str) -> FuncId {
-        FuncId(self.ids.funcs[k])
+    /// Function `k` named by the expression at `span`: the instance the checker recorded
+    /// there, for a generic function.
+    fn func(&self, span: Span, k: &str) -> FuncId {
+        match self.p.instances.get(&span) {
+            Some((g, args)) => self.ids.instance(g, args.iter().map(|t| self.subst(t)).collect()),
+            None => FuncId(self.ids.funcs[k]),
+        }
     }
 
-    /// The checker's type of the expression or `let` at `span`.
-    fn checked(&self, span: Span) -> &'a check::Ty {
-        &self.p.types[&span]
+    /// `ty` in the instance being lowered.
+    fn subst(&self, ty: &check::Ty) -> check::Ty {
+        check::subst(ty, &self.binds)
+    }
+
+    /// The checker's type of the expression or `let` at `span`, in this instance.
+    fn checked(&self, span: Span) -> check::Ty {
+        self.subst(&self.p.types[&span])
     }
 
     fn block(&mut self, b: &'a ast::Block) -> Block {
@@ -196,7 +262,7 @@ impl<'a> Lowerer<'a> {
         let kind = match &s.kind {
             StmtKind::Let { name, init, .. } => {
                 let init = self.expr(init);
-                ir::StmtKind::Let(self.bind(name, self.checked(s.span), s.span), init)
+                ir::StmtKind::Let(self.bind(name, &self.checked(s.span), s.span), init)
             }
             StmtKind::Assign { target, op, value } => {
                 let place = self.place(target);
@@ -223,7 +289,7 @@ impl<'a> Lowerer<'a> {
                         let check::Ty::List(t) = self.checked(xs.span) else {
                             unreachable!("checked list");
                         };
-                        let x = self.bind(name, t, s.span);
+                        let x = self.bind(name, &t, s.span);
                         ir::StmtKind::ForList(x, xs, self.block(body))
                     }
                     ast::Iter::Range(a, b) => {
@@ -269,7 +335,7 @@ impl<'a> Lowerer<'a> {
         let check::Ty::Struct(s) = self.checked(base) else {
             unreachable!("checked field");
         };
-        self.p.fields[s]
+        self.p.fields[&s]
             .iter()
             .position(|(n, _)| n == name)
             .expect("checked field") as u32
@@ -292,7 +358,7 @@ impl<'a> Lowerer<'a> {
     }
 
     fn expr(&mut self, e: &'a ast::Expr) -> Expr {
-        let ty = self.checked(e.span);
+        let ty = &self.checked(e.span);
         let kind = match &e.kind {
             ExprKind::Int(n) => ir::ExprKind::Int(*n),
             ExprKind::Float(x) => ir::ExprKind::Float(f64::from_bits(*x)),
@@ -302,8 +368,9 @@ impl<'a> Lowerer<'a> {
             ExprKind::Name(name) if builtin(name).is_some() => self.variant_value(ty, name, &[]),
             ExprKind::Name(name) => match self.local(name) {
                 Some(x) => ir::ExprKind::Local(x),
-                None => ir::ExprKind::FnRef(self.func(&key(self.module, name))),
+                None => ir::ExprKind::FnRef(self.func(e.span, &key(self.module, name))),
             },
+            ExprKind::Turbofish(name, _) => ir::ExprKind::FnRef(self.func(e.span, &key(self.module, name))),
             ExprKind::Unary(op, x) => {
                 let op = match *op {
                     "-" if *ty == check::Ty::Float => UnOp::FNeg,
@@ -313,7 +380,7 @@ impl<'a> Lowerer<'a> {
                 ir::ExprKind::Unary(op, Box::new(self.expr(x)))
             }
             ExprKind::Binary(op, a, b) => {
-                let float = *self.checked(a.span) == check::Ty::Float;
+                let float = self.checked(a.span) == check::Ty::Float;
                 let op = match *op {
                     "+" if float => BinOp::FAdd,
                     "-" if float => BinOp::FSub,
@@ -361,14 +428,16 @@ impl<'a> Lowerer<'a> {
             ExprKind::Module(m, inner) => match &inner.kind {
                 ExprKind::StructLit(_, inits) => self.struct_lit(ty, inits),
                 ExprKind::Path(_, v) => self.variant_value(ty, v, &[]),
-                ExprKind::Name(name) => ir::ExprKind::FnRef(self.func(&format!("{m}::{name}"))),
+                ExprKind::Name(name) | ExprKind::Turbofish(name, _) => {
+                    ir::ExprKind::FnRef(self.func(e.span, &format!("{m}::{name}")))
+                }
                 _ => unreachable!("checked module path"),
             },
             ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms),
             ExprKind::IfLet(pat, scrut, then, els) => {
                 let scrut = self.expr(scrut);
                 let mark = self.scope.len();
-                let pat = self.pat(pat, self.checked(scrut.span));
+                let pat = self.pat(pat, &self.checked(scrut.span));
                 let then = Expr {
                     kind: ir::ExprKind::Block(self.block(then)),
                     ty: self.ids.ty(ty),
@@ -406,16 +475,17 @@ impl<'a> Lowerer<'a> {
         let k = match &callee.kind {
             ExprKind::Name(name) if builtin(name).is_some() => return self.variant_value(ty, name, args),
             ExprKind::Name(name) if self.local(name).is_none() => key(self.module, name).into_owned(),
+            ExprKind::Turbofish(name, _) => key(self.module, name).into_owned(),
             ExprKind::Path(en, _) if en == "Map" => return ir::ExprKind::MapNew,
             ExprKind::Path(_, v) => return self.variant_value(ty, v, args),
             ExprKind::Module(m, inner) => match &inner.kind {
-                ExprKind::Name(name) => format!("{m}::{name}"),
+                ExprKind::Name(name) | ExprKind::Turbofish(name, _) => format!("{m}::{name}"),
                 ExprKind::Path(_, v) => return self.variant_value(ty, v, args),
                 _ => unreachable!("checked callee"),
             },
             _ => return ir::ExprKind::CallValue(Box::new(self.expr(callee)), self.exprs(args)),
         };
-        ir::ExprKind::Call(self.func(&k), self.exprs(args))
+        ir::ExprKind::Call(self.func(callee.span, &k), self.exprs(args))
     }
 
     /// Lifts the closure at `span`, of type `ty`, to a new function whose parameters are its
@@ -435,7 +505,8 @@ impl<'a> Lowerer<'a> {
             caps: self.caps,
             ids: self.ids,
             module: self.module,
-            owner: self.owner,
+            owner: self.owner.clone(),
+            binds: self.binds.clone(),
             locals: Vec::new(),
             scope: Vec::new(),
         };
@@ -454,11 +525,7 @@ impl<'a> Lowerer<'a> {
         }
         let n = self.ids.closures.get();
         self.ids.closures.set(n + 1);
-        let index = {
-            let mut lifted = self.ids.lifted.borrow_mut();
-            lifted.push(None);
-            lifted.len() - 1
-        };
+        let (index, id) = self.ids.reserve();
         let body = inner.expr(body);
         let f = Func {
             name: format!("{}::{{closure#{n}}}", self.owner),
@@ -472,7 +539,7 @@ impl<'a> Lowerer<'a> {
             span,
         };
         self.ids.lifted.borrow_mut()[index] = Some(f);
-        ir::ExprKind::Closure(FuncId((self.ids.funcs.len() + index) as u32), captured)
+        ir::ExprKind::Closure(id, captured)
     }
 
     /// `E::V(args)`, `Some(x)` and the like, where `ty` is the value's enum type.
@@ -498,7 +565,7 @@ impl<'a> Lowerer<'a> {
 
     fn method(&mut self, recv: &'a ast::Expr, name: &str, args: &'a [ast::Expr]) -> ir::ExprKind {
         use check::Ty as T;
-        let mutation = match (self.checked(recv.span), name) {
+        let mutation = match (&self.checked(recv.span), name) {
             (T::Cap(c), _) => {
                 let ExprKind::Name(cap) = &recv.kind else {
                     unreachable!("checked capability receiver");
@@ -584,7 +651,7 @@ impl<'a> Lowerer<'a> {
         let arms = (arms.iter())
             .map(|arm| {
                 let mark = self.scope.len();
-                let pat = self.pat(&arm.pat, st);
+                let pat = self.pat(&arm.pat, &st);
                 let body = self.expr(&arm.body);
                 self.scope.truncate(mark);
                 Arm { pat, body }

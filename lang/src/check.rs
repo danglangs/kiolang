@@ -45,11 +45,17 @@ pub struct Program {
     /// Resolved signature of each function, by key.
     pub(crate) sigs: HashMap<String, Sig>,
     /// The type of every expression and assignment target, by its span, which no other
-    /// expression has; and the type of each `let`'s local, by the span of the `let`.
+    /// expression has; and the type of each `let`'s local, by the span of the `let`. Inside a
+    /// generic function a type may hold its type parameters (`Ty::Param`); lowering
+    /// substitutes each instance's type arguments.
     pub(crate) types: HashMap<Span, Ty>,
     /// The outer locals each closure uses, by the closure's span, in order of first use: what
     /// it copies when it is created.
     pub(crate) captures: HashMap<Span, Vec<String>>,
+    /// Each use of a generic function, called or as a value, by the span of the expression
+    /// naming it: the function's key and its type arguments, which may hold the type
+    /// parameters of the function the use is in.
+    pub(crate) instances: HashMap<Span, (String, Vec<Ty>)>,
     /// The program lowered, which `run` evaluates.
     pub(crate) ir: ir::Module,
 }
@@ -131,7 +137,7 @@ impl Program {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ty {
     Int,
     Float,
@@ -149,8 +155,49 @@ pub enum Ty {
     Cap(String),
     /// A function value: parameter types and return type. Never mentions a capability.
     Fn(Vec<Ty>, Box<Ty>),
+    /// A type parameter `T` of the generic function being checked: opaque, so it can be
+    /// passed, stored and returned, and nothing else. Never a capability.
+    Param(String),
     /// A block that always returns; it matches any type.
     Never,
+}
+
+/// `ty` with each type parameter named in `binds` replaced by its type.
+pub(crate) fn subst(ty: &Ty, binds: &[(String, Ty)]) -> Ty {
+    let s = |t: &Ty| Box::new(subst(t, binds));
+    match ty {
+        Ty::Param(n) => match binds.iter().find(|(b, _)| b == n) {
+            Some((_, t)) => t.clone(),
+            None => ty.clone(),
+        },
+        Ty::Option(t) => Ty::Option(s(t)),
+        Ty::List(t) => Ty::List(s(t)),
+        Ty::Result(t, e) => Ty::Result(s(t), s(e)),
+        Ty::Map(k, v) => Ty::Map(s(k), s(v)),
+        Ty::Fn(ps, r) => Ty::Fn(ps.iter().map(|p| subst(p, binds)).collect(), s(r)),
+        _ => ty.clone(),
+    }
+}
+
+/// Whether `ty` mentions a type parameter.
+fn has_param(ty: &Ty) -> bool {
+    match ty {
+        Ty::Param(_) => true,
+        Ty::Option(t) | Ty::List(t) => has_param(t),
+        Ty::Result(t, e) | Ty::Map(t, e) => has_param(t) || has_param(e),
+        Ty::Fn(ps, r) => ps.iter().any(has_param) || has_param(r),
+        _ => false,
+    }
+}
+
+/// The number of type constructors in `ty`, to bound the type arguments of instances.
+fn ty_size(ty: &Ty) -> usize {
+    1 + match ty {
+        Ty::Option(t) | Ty::List(t) => ty_size(t),
+        Ty::Result(t, e) | Ty::Map(t, e) => ty_size(t) + ty_size(e),
+        Ty::Fn(ps, r) => ps.iter().map(ty_size).sum::<usize>() + ty_size(r),
+        _ => 0,
+    }
 }
 
 impl fmt::Display for Ty {
@@ -162,7 +209,7 @@ impl fmt::Display for Ty {
             Ty::Str => f.write_str("Str"),
             Ty::Bytes => f.write_str("Bytes"),
             Ty::Unit => f.write_str("()"),
-            Ty::Struct(name) | Ty::Enum(name) | Ty::Cap(name) => f.write_str(name),
+            Ty::Struct(name) | Ty::Enum(name) | Ty::Cap(name) | Ty::Param(name) => f.write_str(name),
             Ty::Option(t) => write!(f, "Option<{t}>"),
             Ty::Result(t, e) => write!(f, "Result<{t}, {e}>"),
             Ty::List(t) => write!(f, "List<{t}>"),
@@ -206,14 +253,20 @@ fn reserved(caps: &CapTable, name: &str) -> bool {
         || caps.caps.iter().any(|c| c.name == name)
 }
 
-/// The module being checked and the modules the root declares.
+/// The module being checked, the modules the root declares, and the type parameters of the
+/// function being checked.
 #[derive(Clone, Copy)]
 struct Scope<'a> {
     module: &'a str,
     mods: &'a HashSet<String>,
+    tparams: &'a [(String, Span)],
 }
 
 impl Scope<'_> {
+    fn is_tparam(&self, name: &str) -> bool {
+        self.tparams.iter().any(|(t, _)| t == name)
+    }
+
     /// The key of a type `name` as written in this module; built-in types are visible everywhere.
     fn own(&self, caps: &CapTable, name: &str) -> String {
         if reserved(caps, name) {
@@ -453,9 +506,25 @@ pub(crate) struct Sig {
     public: bool,
     /// The declaration as written, like `fn f(a: Int, b: Str)`, for hints.
     decl: String,
+    /// Type parameters, which `params` and `ret` name as `Ty::Param`; empty if not generic.
+    pub(crate) tparams: Vec<String>,
     pub(crate) params: Vec<Ty>,
     pub(crate) ret: Ty,
 }
+
+/// What a call has fixed a type parameter to: its type, and the span and argument number
+/// (from 1; 0 for the expected type or a turbofish) that fixed it.
+#[derive(Clone)]
+struct Bound {
+    ty: Ty,
+    at: Span,
+    arg: usize,
+}
+
+/// Distinct instances one generic function may have, and the size of each type argument
+/// (`ty_size`), beyond which instantiating stops: recursion that changes the type arguments.
+const MAX_INSTANCES: usize = 64;
+const MAX_TYPE_ARG: usize = 256;
 
 struct Local {
     ty: Ty,
@@ -579,6 +648,17 @@ fn binary_err(op: &str, written: &str, l: &Ty, r: &Ty, span: Span) -> Diag {
         let hint = Some("convert with `.to_float()` or `.to_int()`");
         return err(span, format!("cannot {verb} {l} and {r}"), hint);
     }
+    if matches!(op, "==" | "!=") && l == r && has_param(l) {
+        return no_param_equality(span, l);
+    }
+    if let Some(Ty::Param(t)) = [l, r].into_iter().find(|t| matches!(t, Ty::Param(_))) {
+        let hint = format!("`{t}` is a type parameter, which has no operators; take a function for it, like `add: fn({t}, {t}) -> {t}`");
+        return err(
+            span,
+            format!("`{written}` cannot be applied to {l} and {r}"),
+            Some(&hint),
+        );
+    }
     err(
         span,
         format!("`{written}` cannot be applied to {l} and {r}"),
@@ -596,9 +676,141 @@ fn binary_ty(op: &str, l: &Ty, r: &Ty) -> Option<Ty> {
         ("+" | "-" | "*" | "/" | "%", Float, Float) => Some(Float),
         ("<" | "<=" | ">" | ">=", Float, Float) => Some(Bool),
         ("&&" | "||", Bool, Bool) => Some(Bool),
-        ("==" | "!=", a, b) if a == b && *a != Never && cap_in(a).is_none() => Some(Bool),
+        ("==" | "!=", a, b) if a == b && *a != Never && cap_in(a).is_none() && !has_param(a) => Some(Bool),
         _ => None,
     }
+}
+
+/// A generic function as written at a use (`first`, `web::first`) and its signature.
+type Generic<'s> = (&'s str, &'s Sig);
+
+/// `p`, a type in `sig`, with its type parameters replaced by their bindings; `None` while
+/// one of them is unbound.
+fn known(p: &Ty, sig: &Sig, binds: &[Option<Bound>]) -> Option<Ty> {
+    let mut pairs = Vec::new();
+    for (t, b) in sig.tparams.iter().zip(binds) {
+        match b {
+            Some(b) => pairs.push((t.clone(), b.ty.clone())),
+            None if mentions(p, t) => return None,
+            None => {}
+        }
+    }
+    Some(subst(p, &pairs))
+}
+
+/// Whether `ty` mentions type parameter `t`.
+fn mentions(ty: &Ty, t: &str) -> bool {
+    match ty {
+        Ty::Param(n) => n == t,
+        Ty::Option(x) | Ty::List(x) => mentions(x, t),
+        Ty::Result(x, y) | Ty::Map(x, y) => mentions(x, t) || mentions(y, t),
+        Ty::Fn(ps, r) => ps.iter().any(|p| mentions(p, t)) || mentions(r, t),
+        _ => false,
+    }
+}
+
+/// First-order matching of `p`, a type in the generic function's signature, against `a`, the
+/// type found at `(span, argument number)` (0: the expected type): each type parameter in `p`
+/// is bound where it first occurs. `strict` refuses a later occurrence of another type and a
+/// shape that cannot match; otherwise only unbound parameters are filled. A capability is
+/// never bound (rule 1). `!` fixes nothing.
+fn unify(
+    p: &Ty,
+    a: &Ty,
+    (written, sig): Generic,
+    binds: &mut [Option<Bound>],
+    (span, arg): (Span, usize),
+    strict: bool,
+) -> Result<(), Diag> {
+    let mut go = |p, a| unify(p, a, (written, sig), binds, (span, arg), strict);
+    match (p, a) {
+        (_, Ty::Never) => Ok(()),
+        (Ty::Param(t), a) => {
+            let i = sig
+                .tparams
+                .iter()
+                .position(|x| x == t)
+                .expect("a type parameter of the callee");
+            match &binds[i] {
+                Some(b) if b.ty == *a || !strict => Ok(()),
+                Some(b) => {
+                    let first = match b.arg {
+                        0 => "from the expected type".to_string(),
+                        _ => "here".to_string(),
+                    };
+                    let msg = format!("`{t}` is {} {first} but {a} at argument {arg}", b.ty);
+                    let hint = format!("`{written}` is declared as `{}`", sig.decl);
+                    Err(err(b.at, msg, Some(&hint)))
+                }
+                None if cap_in(a).is_some() => Err(cap_type_arg(span, t, a)),
+                None => {
+                    binds[i] = Some(Bound {
+                        ty: a.clone(),
+                        at: span,
+                        arg,
+                    });
+                    Ok(())
+                }
+            }
+        }
+        (Ty::Option(p), Ty::Option(a)) | (Ty::List(p), Ty::List(a)) => go(p, a),
+        (Ty::Result(p, q), Ty::Result(a, b)) | (Ty::Map(p, q), Ty::Map(a, b)) => {
+            go(p, a)?;
+            go(q, b)
+        }
+        (Ty::Fn(ps, r), Ty::Fn(qs, s)) if ps.len() == qs.len() => {
+            for (p, q) in ps.iter().zip(qs) {
+                go(p, q)?;
+            }
+            go(r, s)
+        }
+        // Without a type parameter, the caller compares the whole types.
+        _ if !strict || !has_param(p) => Ok(()),
+        _ => {
+            let msg = format!("expected {p}, found {a}");
+            let hint = format!("`{written}` is declared as `{}`", sig.decl);
+            Err(err(span, msg, Some(&hint)))
+        }
+    }
+}
+
+/// The type of each type parameter, or "cannot infer" at `span` for the first unbound one;
+/// `call` says whether the hint shows a call or a value.
+fn all_bound(span: Span, g: Generic, binds: &[Option<Bound>], call: bool) -> Result<Vec<Ty>, Diag> {
+    let tys: Option<Vec<Ty>> = binds.iter().map(|b| b.as_ref().map(|b| b.ty.clone())).collect();
+    tys.ok_or_else(|| cannot_infer(span, g, binds, call))
+}
+
+fn cannot_infer(span: Span, (written, sig): Generic, binds: &[Option<Bound>], call: bool) -> Diag {
+    let i = binds.iter().position(Option::is_none).unwrap_or(0);
+    let placeholders = vec!["Int"; sig.tparams.len()].join(", ");
+    let args = if call { "(..)" } else { "" };
+    err(
+        span,
+        format!("cannot infer `{}`", sig.tparams[i]),
+        Some(&format!("write `{written}::<{placeholders}>{args}`")),
+    )
+}
+
+/// Rule 1 for type arguments: type parameter `t` cannot be `ty`, which holds a capability.
+fn cap_type_arg(span: Span, t: &str, ty: &Ty) -> Diag {
+    let cap = cap_in(ty).unwrap_or("Dir");
+    err(
+        span,
+        format!("`{t}` cannot be `{ty}`: capabilities are parameters only"),
+        Some(&format!(
+            "pass the {cap} to a function whose parameter has type `{cap}`"
+        )),
+    )
+}
+
+/// `==` (or `List.contains`) on values of `ty`, which mentions a type parameter.
+fn no_param_equality(span: Span, ty: &Ty) -> Diag {
+    err(
+        span,
+        format!("cannot compare `{ty}` values"),
+        Some("a type parameter has no `==` yet; take a function for it, like `eq: fn(T, T) -> Bool`"),
+    )
 }
 
 fn resolve(
@@ -636,6 +848,11 @@ fn resolve(
             ))
         }
         TypeKind::Named(n, args) => match (n.as_str(), args.as_slice()) {
+            (_, []) if scope.is_tparam(n) => Ok(Ty::Param(n.clone())),
+            (_, _) if scope.is_tparam(n) => {
+                let msg = format!("type parameter `{n}` takes no type arguments");
+                Err(err(t.span, msg, Some(&format!("write `{n}`"))))
+            }
             ("Option", [a]) => Ok(Ty::Option(Box::new(resolve(a, caps, structs, enums, scope)?))),
             ("Result", [a, b]) => {
                 let (a, b) = (
@@ -795,6 +1012,32 @@ fn signature(
         let what = format!("`{}` takes {} parameters", f.name, f.params.len());
         return Err(too_many_params(p.span, what));
     }
+    for (i, (t, span)) in f.tparams.iter().enumerate() {
+        if scope.module.is_empty() && f.name == "main" {
+            let hint = "remove `<..>`: `main` takes only capabilities";
+            return Err(err(*span, "`main` cannot be generic".to_string(), Some(hint)));
+        }
+        if !t.starts_with(|c: char| c.is_ascii_uppercase()) {
+            let fixed = t.to_ascii_uppercase();
+            let msg = format!("type parameters start with an uppercase letter: `{t}`");
+            return Err(err(*span, msg, Some(&format!("rename it `{fixed}`"))));
+        }
+        if f.tparams[..i].iter().any(|(u, _)| u == t) {
+            let msg = format!("duplicate type parameter `{t}`");
+            return Err(err(*span, msg, Some("rename one of them")));
+        }
+        let builtin = ["Int", "Float", "Bool", "Str", "Bytes", "List"].contains(&t.as_str()) || reserved(caps, t);
+        if builtin {
+            let msg = format!("`{t}` is a built-in type");
+            return Err(err(*span, msg, Some("name type parameters `T`, `U`, ..")));
+        }
+        let k = key(scope.module, t);
+        let kind = (structs.contains_key(&*k).then_some("struct")).or(enums.contains_key(&*k).then_some("enum"));
+        if let Some(kind) = kind {
+            let msg = format!("type parameter `{t}` has the name of {kind} `{t}`");
+            return Err(err(*span, msg, Some("rename the type parameter")));
+        }
+    }
     let mut params = Vec::new();
     for (i, p) in f.params.iter().enumerate() {
         not_builtin(&p.name, p.span)?;
@@ -819,9 +1062,15 @@ fn signature(
         .collect();
     let ret = resolve(&f.ret, caps, structs, enums, scope)?;
     cap_type_ok(&ret, f.ret.span, Place::Return(&f.name))?;
+    let tparams: Vec<String> = f.tparams.iter().map(|(t, _)| t.clone()).collect();
+    let generic = match tparams.is_empty() {
+        true => String::new(),
+        false => format!("<{}>", tparams.join(", ")),
+    };
     Ok(Sig {
         public: f.public,
-        decl: format!("fn {}({})", f.name, typed.join(", ")),
+        decl: format!("fn {}{generic}({})", f.name, typed.join(", ")),
+        tparams,
         params,
         ret,
     })
@@ -1268,6 +1517,7 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
         let scope = Scope {
             module: module_of(name),
             mods: &mods,
+            tparams: &[],
         };
         let resolved = match structs.get(name) {
             Some(s) => struct_fields(s, caps, &structs, &enums, scope).map(|f| drop(fields.insert(name.clone(), f))),
@@ -1294,7 +1544,11 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
     let mut sigs = HashMap::new();
     let mut sig_errs = Vec::new();
     for (module, f) in &fns {
-        let scope = Scope { module, mods: &mods };
+        let scope = Scope {
+            module,
+            mods: &mods,
+            tparams: &f.tparams,
+        };
         match signature(f, &sigs, caps, &structs, &enums, scope) {
             Ok(sig) => {
                 sigs.insert(key(module, &f.name).into_owned(), sig);
@@ -1317,6 +1571,7 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
     let match_budget = Cell::new(PROGRAM_MATCH_BUDGET);
     let mut types = HashMap::new();
     let mut captures = HashMap::new();
+    let mut uses = HashMap::new();
     for ((module, f), sig_err) in fns.iter().zip(sig_errs) {
         let mut c = Checker {
             caps,
@@ -1325,7 +1580,11 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
             variants: &variants,
             structs: &structs,
             enums: &enums,
-            home: Scope { module, mods: &mods },
+            home: Scope {
+                module,
+                mods: &mods,
+                tparams: &f.tparams,
+            },
             scopes: Vec::new(),
             ret: Ty::Unit,
             ret_open: false,
@@ -1336,10 +1595,12 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
             match_budget: &match_budget,
             types: HashMap::new(),
             captures: HashMap::new(),
+            uses: Vec::new(),
         };
         diags.extend(sig_err.or_else(|| c.function(f).err()));
         types.extend(c.types);
         captures.extend(c.captures);
+        uses.insert(key(module, &f.name).into_owned(), c.uses);
     }
     if !fns.iter().any(|(m, f)| m.is_empty() && f.name == "main") {
         let hint = "add `fn main() { .. }`";
@@ -1348,6 +1609,10 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
     if !diags.is_empty() {
         return Err(diags);
     }
+    instantiate(&sigs, &uses).map_err(|d| vec![d])?;
+    let instances = (uses.into_values().flatten())
+        .map(|(span, g, args)| (span, (g, args)))
+        .collect();
     let mut p = Program {
         funcs: fns
             .into_iter()
@@ -1360,6 +1625,7 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
         sigs,
         types,
         captures,
+        instances,
         cap_methods: (caps.caps.iter())
             .flat_map(|c| {
                 c.methods
@@ -1378,6 +1644,44 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
     };
     p.ir = crate::lower::lower(&p, caps);
     Ok(p)
+}
+
+/// A use of a generic function in a function's body: the span naming it, its key and its type
+/// arguments, which may hold the enclosing function's type parameters.
+type Use = (Span, String, Vec<Ty>);
+
+/// Finds every instance lowering will make, from the functions that are not generic, as
+/// lowering does, and refuses a generic function with more than `MAX_INSTANCES` of them or a
+/// type argument larger than `MAX_TYPE_ARG`: `f<T>` calling `f<List<T>>` never ends.
+fn instantiate(sigs: &HashMap<String, Sig>, uses: &HashMap<String, Vec<Use>>) -> Result<(), Diag> {
+    let mut seen: HashMap<&str, HashSet<Vec<Ty>>> = HashMap::new();
+    let mut todo: Vec<(&str, Vec<(String, Ty)>)> = (uses.keys())
+        .filter(|k| sigs[k.as_str()].tparams.is_empty())
+        .map(|k| (k.as_str(), Vec::new()))
+        .collect();
+    // Popped in name order, so the error is the same on every run.
+    todo.sort_by(|a, b| b.0.cmp(a.0));
+    while let Some((f, binds)) = todo.pop() {
+        for (span, g, args) in &uses[f] {
+            let args: Vec<Ty> = args.iter().map(|t| subst(t, &binds)).collect();
+            let instances = seen.entry(g).or_default();
+            if instances.contains(&args) {
+                continue;
+            }
+            if instances.len() == MAX_INSTANCES || args.iter().any(|t| ty_size(t) > MAX_TYPE_ARG) {
+                let name = bare(g);
+                let hint = format!(
+                    "each call gives `{name}` larger type arguments; keep them the same in calls inside `{name}`"
+                );
+                let msg = "this generic function instantiates without end".to_string();
+                return Err(err(*span, msg, Some(&hint)));
+            }
+            instances.insert(args.clone());
+            let binds = sigs[g].tparams.iter().cloned().zip(args).collect();
+            todo.push((g, binds));
+        }
+    }
+    Ok(())
 }
 
 struct Checker<'a> {
@@ -1410,6 +1714,8 @@ struct Checker<'a> {
     types: HashMap<Span, Ty>,
     /// As `Program::captures`.
     captures: HashMap<Span, Vec<String>>,
+    /// The uses of generic functions in this function, closures included.
+    uses: Vec<Use>,
 }
 
 impl<'a> Checker<'a> {
@@ -1698,7 +2004,7 @@ impl<'a> Checker<'a> {
                 None => {
                     let k = key(self.home.module, name);
                     if self.sigs.contains_key(&*k) {
-                        return self.fn_value(e.span, &k);
+                        return self.fn_value(e.span, &k, None, expected);
                     }
                     let mut d = self.unknown_name(e.span, name);
                     if !self.home.module.is_empty() && self.sigs.contains_key(name.as_str()) {
@@ -1774,10 +2080,18 @@ impl<'a> Checker<'a> {
                 ExprKind::Path(en, v) => self.module_variant(e, m, en, v, &[]),
                 ExprKind::Name(name) => {
                     let (k, _) = self.named_fn(e.span, name, Some(m))?;
-                    self.fn_value(e.span, &k)
+                    self.fn_value(e.span, &k, None, expected)
+                }
+                ExprKind::Turbofish(name, tys) => {
+                    let (k, _) = self.named_fn(e.span, name, Some(m))?;
+                    self.fn_value(e.span, &k, Some(tys), expected)
                 }
                 _ => Err(nested_path(e.span)),
             },
+            ExprKind::Turbofish(name, tys) => {
+                let (k, _) = self.turbofish_fn(e.span, name)?;
+                self.fn_value(e.span, &k, Some(tys), expected)
+            }
             ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms, expected),
             ExprKind::Try(x) => self.try_expr(e, x),
             ExprKind::Closure(params, body) => self.closure(e, params, body, expected),
@@ -1875,6 +2189,10 @@ impl<'a> Checker<'a> {
                 format!("`{name}` is a field; call it as `({r}.{name})(..)`")
             } else if matches!((&recv_ty, name), (Ty::List(_), "iter" | "into_iter")) {
                 "a List has no iterators; loop over it with `for x in xs { .. }`".to_string()
+            } else if let Ty::Param(t) = &recv_ty {
+                format!(
+                    "`{t}` is a type parameter, which has no methods; take a function for it, like `f: fn({t}) -> Str`"
+                )
             } else if names.is_empty() {
                 format!("{recv_ty} has no methods")
             } else {
@@ -1889,6 +2207,9 @@ impl<'a> Checker<'a> {
         if let (Ty::List(t), "contains") = (&recv_ty, name) {
             if self.has_fn(t) {
                 return Err(no_fn_equality(e.span, t));
+            }
+            if has_param(t) {
+                return Err(no_param_equality(e.span, t));
             }
         }
         if let (Ty::List(t), "sort") = (&recv_ty, name) {
@@ -2164,9 +2485,10 @@ impl<'a> Checker<'a> {
             let hint = Some("compare with `<` or `==`");
             return Err(err(scrut.span, "cannot match on Float".to_string(), hint));
         }
+        // A type parameter is matched only as a whole: by a name or `_`.
         if !matches!(
             st,
-            Ty::Int | Ty::Bool | Ty::Str | Ty::Enum(_) | Ty::Option(_) | Ty::Result(..)
+            Ty::Int | Ty::Bool | Ty::Str | Ty::Enum(_) | Ty::Option(_) | Ty::Result(..) | Ty::Param(_)
         ) {
             let hint = "match works on Int, Bool, Str and enums";
             return Err(err(scrut.span, format!("cannot match on {st}"), Some(hint)));
@@ -2437,28 +2759,177 @@ impl<'a> Checker<'a> {
                 return self.call_value(e, callee, args);
             }
         }
-        let (name, module) = match &callee.kind {
+        let (name, module, explicit) = match &callee.kind {
             ExprKind::Name(name) if builtin(name).is_some() => return self.constructor(e, name, args, expected),
-            ExprKind::Name(name) => (name, None),
+            ExprKind::Name(name) => (name, None, None),
+            ExprKind::Turbofish(name, tys) => (name, None, Some(tys.as_slice())),
             ExprKind::Path(en, v) if en == "Map" && v == "new" => return self.map_new(e, args, expected),
             ExprKind::Path(en, v) => return self.variant_value(e, &self.enum_key(en), v, args),
             ExprKind::Module(m, inner) => match &inner.kind {
-                ExprKind::Name(name) => (name, Some(m)),
+                ExprKind::Name(name) => (name, Some(m.as_str()), None),
+                ExprKind::Turbofish(name, tys) => (name, Some(m.as_str()), Some(tys.as_slice())),
                 ExprKind::Path(en, v) => return self.module_variant(e, m, en, v, args),
                 _ => return Err(nested_path(callee.span)),
             },
             _ => return self.call_value(e, callee, args),
         };
-        let (_, sig) = self.named_fn(callee.span, name, module.map(String::as_str))?;
+        let (k, sig) = match (module, explicit) {
+            (None, Some(_)) => self.turbofish_fn(callee.span, name)?,
+            _ => self.named_fn(callee.span, name, module)?,
+        };
         if args.len() != sig.params.len() {
             let msg = format!("`{name}` takes {} arguments, found {}", sig.params.len(), args.len());
             let hint = format!("`{name}` is declared as `{}`", sig.decl);
             return Err(err(e.span, msg, Some(&hint)));
         }
+        if !sig.tparams.is_empty() || explicit.is_some() {
+            let written = module.map_or(name.to_string(), |m| format!("{m}::{name}"));
+            let (at, sig) = (callee.span, (k.as_str(), written.as_str(), sig));
+            return self.generic_call(e, at, sig, explicit, args, expected);
+        }
         for (a, param) in args.iter().zip(&sig.params) {
             want_expr(a, &self.operand(a, Some(param))?, param)?;
         }
         Ok(sig.ret.clone())
+    }
+
+    /// A call of a generic function, named at `at` and given as (key, name as written,
+    /// signature). Its type arguments come from `explicit`, else from the arguments' types,
+    /// then from `expected` for those only the return type mentions. An argument that needs an
+    /// expected type (`None`, `[]`, a closure) and whose parameter type is not known yet is
+    /// checked after the others. Records the instance; returns the call's type.
+    fn generic_call(
+        &mut self,
+        e: &Expr,
+        at: Span,
+        (k, written, sig): (&str, &str, &Sig),
+        explicit: Option<&[Type]>,
+        args: &[Expr],
+        expected: Option<&Ty>,
+    ) -> Result<Ty, Diag> {
+        let g = (written, sig);
+        let mut binds = self.explicit_args(at, g, explicit)?;
+        let mut found = vec![None; args.len()];
+        let mut later = Vec::new();
+        for (i, (a, p)) in args.iter().zip(&sig.params).enumerate() {
+            if let Some(k) = known(p, sig, &binds) {
+                // Matched too, so that `same(1, "a")` names where `T` became Int. A turbofish
+                // fixed every type parameter: the caller compares the whole types.
+                let t = self.operand(a, Some(&k))?;
+                if explicit.is_none() {
+                    unify(p, &t, g, &mut binds, (a.span, i + 1), true)?;
+                }
+                found[i] = Some(t);
+            } else if self.needs_expected(a) {
+                later.push(i);
+            } else {
+                let t = self.operand(a, None)?;
+                unify(p, &t, g, &mut binds, (a.span, i + 1), true)?;
+                found[i] = Some(t);
+            }
+        }
+        if let Some(want) = expected {
+            unify(&sig.ret, want, g, &mut binds, (e.span, 0), false)?;
+        }
+        for i in later {
+            let (a, p) = (&args[i], &sig.params[i]);
+            let t = if let Some(p) = known(p, sig, &binds) {
+                self.operand(a, Some(&p))?
+            } else {
+                // Only the parameter types of a `fn` parameter may be known: enough for a
+                // closure, or for a generic function named as a value.
+                let Ty::Fn(fps, _) = p else {
+                    return Err(cannot_infer(e.span, g, &binds, true));
+                };
+                let pts: Option<Vec<Ty>> = fps.iter().map(|t| known(t, sig, &binds)).collect();
+                match (&a.kind, pts) {
+                    (ExprKind::Closure(ps, body), Some(pts)) if ps.len() == pts.len() => {
+                        let ty = self.closure_with(a, ps, body, Some((&pts, None)), None, None)?;
+                        self.record(a, &ty);
+                        ty
+                    }
+                    (ExprKind::Closure(ps, _), _) if ps.iter().all(|q| q.ty.is_some()) => self.expr(a, None)?,
+                    (ExprKind::Name(_), Some(pts)) => self.expr(a, Some(&Ty::Fn(pts, Box::new(Ty::Never))))?,
+                    _ => return Err(cannot_infer(e.span, g, &binds, true)),
+                }
+            };
+            if explicit.is_none() {
+                unify(p, &t, g, &mut binds, (a.span, i + 1), true)?;
+            }
+            found[i] = Some(t);
+        }
+        let tys = all_bound(e.span, g, &binds, true)?;
+        let pairs: Vec<(String, Ty)> = sig.tparams.iter().cloned().zip(tys.iter().cloned()).collect();
+        for ((a, p), t) in args.iter().zip(&sig.params).zip(found) {
+            want_expr(a, &t.expect("every argument is checked"), &subst(p, &pairs))?;
+        }
+        self.uses.push((at, k.to_string(), tys));
+        Ok(subst(&sig.ret, &pairs))
+    }
+
+    /// The type arguments written after `::<` for a generic function given as (name as
+    /// written, signature), one slot per type parameter; all empty without a turbofish.
+    fn explicit_args(
+        &self,
+        at: Span,
+        (written, sig): (&str, &Sig),
+        explicit: Option<&[Type]>,
+    ) -> Result<Vec<Option<Bound>>, Diag> {
+        let mut binds = vec![None; sig.tparams.len()];
+        let Some(tys) = explicit else { return Ok(binds) };
+        if sig.tparams.is_empty() {
+            let msg = format!("`{written}` is not generic");
+            return Err(err(at, msg, Some(&format!("remove `::<..>`: write `{written}`"))));
+        }
+        if tys.len() != sig.tparams.len() {
+            let n = sig.tparams.len();
+            let msg = format!("`{written}` takes {n} type arguments, found {}", tys.len());
+            return Err(err(
+                at,
+                msg,
+                Some(&format!("`{written}` is declared as `{}`", sig.decl)),
+            ));
+        }
+        for ((t, slot), name) in tys.iter().zip(&mut binds).zip(&sig.tparams) {
+            let ty = resolve(t, self.caps, self.structs, self.enums, self.home)?;
+            if cap_in(&ty).is_some() {
+                return Err(cap_type_arg(t.span, name, &ty));
+            }
+            *slot = Some(Bound { ty, at: t.span, arg: 0 });
+        }
+        Ok(binds)
+    }
+
+    /// Whether argument `a` takes its type from the parameter's: it is checked after the
+    /// arguments that can fix the type parameters.
+    fn needs_expected(&self, a: &Expr) -> bool {
+        match &a.kind {
+            ExprKind::Closure(..) => true,
+            ExprKind::List(items) => items.is_empty(),
+            ExprKind::Name(n) if n == "None" => true,
+            ExprKind::Call(f, _) => match &f.kind {
+                ExprKind::Name(n) => n == "Ok" || n == "Err",
+                ExprKind::Path(m, n) => m == "Map" && n == "new",
+                _ => false,
+            },
+            // A generic function named as a value.
+            ExprKind::Name(n) => {
+                let local = self.scopes.iter().any(|s| s.contains_key(n));
+                let sig = self.sigs.get(&*key(self.home.module, n));
+                !local && sig.is_some_and(|s| !s.tparams.is_empty())
+            }
+            _ => false,
+        }
+    }
+
+    /// The key and signature of function `name` written with a turbofish, which a local of
+    /// that name would hide.
+    fn turbofish_fn(&self, span: Span, name: &str) -> Result<(String, &'a Sig), Diag> {
+        if self.scopes.iter().any(|s| s.contains_key(name)) {
+            let msg = format!("the local `{name}` hides the function `{name}`");
+            return Err(err(span, msg, Some("rename the local")));
+        }
+        self.named_fn(span, name, None)
     }
 
     /// The key and signature of function `name`, written `m::name` when `module` is `Some(m)`.
@@ -2483,17 +2954,32 @@ impl<'a> Checker<'a> {
     }
 
     /// Function `k` named as a value at `span`. Its parameters hold no capability, so calling
-    /// the value never adds authority.
-    fn fn_value(&self, span: Span, k: &str) -> Result<Ty, Diag> {
+    /// the value never adds authority. A generic function's type arguments come from
+    /// `explicit`, else from the `expected` `fn` type.
+    fn fn_value(&mut self, span: Span, k: &str, explicit: Option<&[Type]>, expected: Option<&Ty>) -> Result<Ty, Diag> {
         if k == "main" {
             let hint = "move the code into another function and use that";
             return Err(err(span, "`main` cannot be used as a value".to_string(), Some(hint)));
         }
-        let sig = &self.sigs[k];
+        let sigs = self.sigs;
+        let sig = &sigs[k];
         if sig.params.iter().any(|p| cap_in(p).is_some()) {
             return Err(fn_cap_err(span));
         }
-        Ok(Ty::Fn(sig.params.clone(), Box::new(sig.ret.clone())))
+        let ty = Ty::Fn(sig.params.clone(), Box::new(sig.ret.clone()));
+        if sig.tparams.is_empty() && explicit.is_none() {
+            return Ok(ty);
+        }
+        let written = if module_of(k) == self.home.module { bare(k) } else { k };
+        let g = (written, sig);
+        let mut binds = self.explicit_args(span, g, explicit)?;
+        if let Some(want) = expected {
+            unify(&ty, want, g, &mut binds, (span, 0), false)?;
+        }
+        let tys = all_bound(span, g, &binds, false)?;
+        let pairs: Vec<(String, Ty)> = sig.tparams.iter().cloned().zip(tys.iter().cloned()).collect();
+        self.uses.push((span, k.to_string(), tys));
+        Ok(subst(&ty, &pairs))
     }
 
     /// `f(x)` where `f` is a local, or `(e)(x)`: a call through a value of `fn` type.

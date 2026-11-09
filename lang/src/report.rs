@@ -34,11 +34,13 @@ pub fn report(p: &Program) -> String {
                     }
                 }
                 ExprKind::Call(callee, args) => {
-                    // `Some(x)` and the like are calls on names that are not functions.
+                    // `Some(x)` and the like are calls on names that are not functions. A
+                    // generic function's capability parameters are concrete, so every instance
+                    // is charged the same.
                     let g = match &callee.kind {
-                        ExprKind::Name(g) => key(module_of(name), g).into_owned(),
+                        ExprKind::Name(g) | ExprKind::Turbofish(g, _) => key(module_of(name), g).into_owned(),
                         ExprKind::Module(m, inner) => match &inner.kind {
-                            ExprKind::Name(g) => format!("{m}::{g}"),
+                            ExprKind::Name(g) | ExprKind::Turbofish(g, _) => format!("{m}::{g}"),
                             _ => return,
                         },
                         _ => return,
@@ -165,6 +167,7 @@ fn walk(e: &Expr, visit: &mut dyn FnMut(&Expr)) {
         | ExprKind::Bool(_)
         | ExprKind::Unit
         | ExprKind::Name(_)
+        | ExprKind::Turbofish(..)
         | ExprKind::Path(..) => {}
     }
 }

@@ -46,10 +46,10 @@ fn main(input: Dir, out: Dir) -> Result<(), IoErr> {
 | Errors | `Option<T>`, `Result<T, E>`, `?` |
 | User types | `struct`, and `enum` with payloads; a type may contain itself only through `List` or `Map` |
 | Control | `if`, `if let`, `while`, `loop`, `for x in list`, `for i in 0..n`, `match`, `break`, `continue`, `return` |
-| Functions | free functions, recursion, function values of type `fn(T, ..) -> R`, closures |
+| Functions | free functions, recursion, generic functions `fn f<T>(..)`, function values of type `fn(T, ..) -> R`, closures |
 | Capabilities | `Dir`, `Http`, `Kv`, `WsMessage`, `WsSend`, generated from `caps.wit` |
 
-Everything else is rejected with a message that names the kio alternative, for example `&str` (use `Str`), `Vec` (use `List`), `impl`, traits, generics, `use`, `mod`, tuples, globals, `unsafe`.
+Everything else is rejected with a message that names the kio alternative, for example `&str` (use `Str`), `Vec` (use `List`), `impl`, traits, bounds such as `T: Clone`, generic structs and enums, `use`, `mod`, tuples, globals, `unsafe`.
 
 ## Semantics
 
@@ -82,6 +82,16 @@ Everything else is rejected with a message that names the kio alternative, for e
   ```
   fn adder(n: Int) -> fn(Int) -> Int { |x| x + n }
   let ops: List<fn(Int) -> Int> = [adder(1), |x| x * k];
+  ```
+- **Generic functions.** Type parameters are uppercase names after the function's name. In the body a `T` is opaque: it can be passed, returned, held in `List<T>`, `Option<T>`, `Result` or as a `Map` value, and matched by a name or `_`; it has no methods, operators, `==` or literals, so take a function for what the code needs (`eq: fn(T, T) -> Bool`). At a call each type parameter comes from the arguments, where it first appears (a later one must agree: "`T` is Int here but Str at argument 2"), then from the expected type; arguments that need a type (`None`, `[]`, `Map::new()`, a closure) are checked after the others, so `or(None, 5)` works. Otherwise write it: `empty::<Int>()`. A generic function used as a value needs its types fixed by `::<..>` or an expected `fn` type. A type parameter is never a capability (rule 1). Each distinct list of type arguments makes one copy of the function, named `first<Int>` (a value prints `<fn first<Int>>`); recursion that keeps changing them (`f<T>` calling `f<List<T>>`) is refused: "this generic function instantiates without end".
+
+  ```
+  fn first<T>(xs: List<T>) -> Option<T> { if xs.len() == 0 { None } else { Some(xs[0]) } }
+  fn apply<T, U>(f: fn(T) -> U, x: T) -> U { f(x) }
+  let a = first(["x"]);                       // T = Str
+  let xs: List<Int> = empty();                // T from the expected type
+  let n = apply(|x| x + 1, 41);               // T from 41, then U from the closure
+  let f: fn(List<Int>) -> Option<Int> = first;
   ```
 - **Modules.** `mod web;` in the root file loads `web.kio`; its `pub` items are used as `web::f`, `web::T`. Modules are flat: one file each, declared only in the root. A module may use another declared module's `pub` items the same way (cycles are fine) but not the root's.
 
@@ -134,6 +144,8 @@ A WebSocket server is `fn main(msg: WsMessage, conn: WsSend, ..)` under `--liste
 
    A closure cannot capture a capability: "closure captures capability `out`". The hint, taking it as a parameter `|out: Dir, ..|`, is then refused by the `fn` type rule, so code that needs a capability is a named function that takes it as a parameter.
 
+   A type parameter is never a capability, however it would be fixed (`id(d)`, `id::<Dir>`, an expected type): "`T` cannot be `Dir`: capabilities are parameters only". A generic function takes a capability as a parameter of its own type (`fn keep<T>(d: Dir, x: T)`), so every copy of it has the same authority and the report lists it once.
+
    So a function's authority is exactly its capability parameters, and the report is read off the signatures. A function value or closure carries none. The report lists named functions only; a closure's body is part of the function it is written in.
 
 2. **Capabilities cannot be constructed.** There is no literal, constructor or cast that produces a `Dir`. Only the host provides them, as arguments to `main`.
@@ -168,6 +180,9 @@ error: cannot return `Dir` from `pick`
 error: function values cannot take or return capabilities
   pass the capability to a named function instead
 
+error: cannot infer `T`
+  write `empty::<Int>(..)`
+
 error: closure captures capability `out`
   take it as a parameter: `|out: Dir, ..|`
 
@@ -184,6 +199,7 @@ error: kio has no references
 ## Not in v0
 
 - Attenuation: deriving a narrower cap, such as a sub-directory. First candidate for v1.
-- Traits, `impl` and user generics.
+- Traits and `impl`.
+- Generic structs and enums, and the bounds `T: Eq` and `T: Ord` (planned: L7b, L7c).
 - Tuples.
 - `use` and nested modules.

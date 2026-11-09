@@ -401,6 +401,54 @@ fn closures_are_lifted() {
     );
 }
 
+/// One function per instance, after the named ones in the order found; an instance lowers its
+/// own closures and the instances it uses. The generic function itself is not lowered.
+#[test]
+fn generic_functions_are_monomorphized() {
+    snapshot(
+        "fn first<T>(xs: List<T>) -> Option<T> { if xs.len() == 0 { None } else { Some(xs[0]) } }
+         fn wrap<T>(x: T) -> Option<T> { let f = |y: T| first([y]); f(x) }
+         fn main() -> Int { first([1]).unwrap_or(0) + wrap(2).unwrap_or(0) + first::<Int>([3]).unwrap_or(0) }
+         fn g() -> Option<Str> { wrap(\"a\") }",
+        "fn g() -> Option<Str> {
+           wrap<Str>(\"a\")
+         }
+         fn main() -> Int {
+           ((first<Int>([1]).OptionUnwrapOr(0) Add wrap<Int>(2).OptionUnwrapOr(0)) Add first<Int>([3]).OptionUnwrapOr(0))
+         }
+         fn wrap<Str>(x#0: Str) -> Option<Str> {
+           let f#1 = closure wrap<Str>::{closure#0}[]
+           (f#1)(x#0)
+         }
+         locals f#1: fn(Str) -> Option<Str>
+         fn first<Int>(xs#0: List<Int>) -> Option<Int> {
+           if (xs#0.ListLen() Eq 0) {
+             None[0]
+           } else {
+             Some[1](xs#0[0])
+           }
+         }
+         fn wrap<Int>(x#0: Int) -> Option<Int> {
+           let f#1 = closure wrap<Int>::{closure#0}[]
+           (f#1)(x#0)
+         }
+         locals f#1: fn(Int) -> Option<Int>
+         fn wrap<Str>::{closure#0}(y#0: Str) -> Option<Str> {
+           first<Str>([y#0])
+         }
+         fn first<Str>(xs#0: List<Str>) -> Option<Str> {
+           if (xs#0.ListLen() Eq 0) {
+             None[0]
+           } else {
+             Some[1](xs#0[0])
+           }
+         }
+         fn wrap<Int>::{closure#0}(y#0: Int) -> Option<Int> {
+           first<Int>([y#0])
+         }",
+    );
+}
+
 #[test]
 fn calls_across_modules() {
     let caps = CapTable::v0();
