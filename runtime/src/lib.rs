@@ -3,13 +3,15 @@
 //!
 //! - `desc`: type descriptors, the table codegen emits as data.
 //! - `display`: a value as `kio run` prints it.
+//! - `heap`: the allocator, size-class free lists over dlmalloc.
 //! - `obj`: object layout, allocation, `inc`, `dec`, `unique`; the safe-to-call Rust layer.
 //! - `abi`: the `extern "C"` functions generated code calls, over `u32` addresses (wasm32 only).
 //! - `entry`: the `compiled` world's `run` export, and the entry codegen fills (wasm32 only).
 //! - `caps`: capability calls over the world's imports, and `cabi_realloc` (wasm32 only).
 //!
-//! `no_std` + `alloc`. On wasm32 the allocator is dlmalloc and a panic is a Wasm trap; natively
-//! (tests) std supplies the system allocator and the panic handler.
+//! `no_std` + `alloc`. On wasm32 the allocator is `heap`'s free lists over dlmalloc (dlmalloc
+//! alone with `test-heap`) and a panic is a Wasm trap; natively (tests) std supplies the
+//! system allocator and the panic handler.
 
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -22,6 +24,7 @@ pub mod coll;
 pub mod desc;
 pub mod display;
 pub mod float;
+pub mod heap;
 pub mod obj;
 pub mod text;
 
@@ -39,11 +42,17 @@ mod display_tests;
 #[cfg(test)]
 mod float_tests;
 #[cfg(test)]
+mod heap_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod text_tests;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(feature = "test-heap")))]
+#[global_allocator]
+static ALLOC: heap::Heap<dlmalloc::GlobalDlmalloc> = heap::Heap::new(dlmalloc::GlobalDlmalloc);
+
+#[cfg(all(target_arch = "wasm32", feature = "test-heap"))]
 #[global_allocator]
 static ALLOC: dlmalloc::GlobalDlmalloc = dlmalloc::GlobalDlmalloc;
 

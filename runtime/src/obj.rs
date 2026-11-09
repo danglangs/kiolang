@@ -25,7 +25,8 @@
 //! Each `unsafe fn` here has the one contract: its pointers keep these invariants for `t`.
 
 use crate::desc::{self, Desc, Table};
-use alloc::alloc::{alloc_zeroed, handle_alloc_error, Layout};
+use crate::heap;
+use alloc::alloc::{handle_alloc_error, Layout};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -231,20 +232,13 @@ fn layout(size: usize) -> Layout {
     Layout::from_size_align(size, 8).unwrap()
 }
 
-/// A fresh object of `size` bytes, `rc` 1. The bytes after the header are zero if `zeroed`,
-/// else uninitialized for the caller to write: a `List`'s or `Map`'s body, a copy's bytes, or
-/// a `Str`'s or `Bytes`' header and the bytes below its `len` (those above it are never read).
-fn new(size: usize, desc: u32, zeroed: bool) -> *mut Header {
+/// A fresh object of `size` bytes, `rc` 1. The bytes after the header are uninitialized for
+/// the caller to write: a record's slots, a `List`'s or `Map`'s body, a copy's bytes, or a
+/// `Str`'s or `Bytes`' header and the bytes below its `len` (those above it are never read).
+fn new(size: usize, desc: u32) -> *mut Header {
     let layout = layout(size);
     // SAFETY: `size` is at least HEADER, so not zero.
-    let p = unsafe {
-        if zeroed {
-            alloc_zeroed(layout)
-        } else {
-            alloc::alloc::alloc(layout)
-        }
-    }
-    .cast::<Header>();
+    let p = unsafe { heap::alloc(layout) }.cast::<Header>();
     if p.is_null() {
         handle_alloc_error(layout);
     }
@@ -263,7 +257,10 @@ pub fn alloc(t: &Table, desc: u32, variant: u32) -> *mut Header {
         Desc::Fn { slots, .. } => (ENUM_SLOTS, slots.len, true),
         d => panic!("rt_alloc of {d:?}"),
     };
-    let p = new(off + 8 * n as usize, desc, true);
+    let size = off + 8 * n as usize;
+    let p = new(size, desc);
+    // SAFETY: `p` has `size` bytes, 8-aligned.
+    unsafe { heap::zero(field(p, HEADER), size - HEADER) };
     if is_enum {
         // SAFETY: an enum object has its variant at HEADER.
         unsafe { field::<u32>(p, HEADER).write(variant) };
@@ -305,7 +302,7 @@ pub fn new_bytes_cap(desc: u32, b: &[u8], cap: usize) -> *mut Header {
     assert!(cap >= b.len());
     let len = u32::try_from(b.len()).expect("over 4 GiB");
     let cap = u32::try_from(cap).expect("over 4 GiB");
-    let p = new(BYTES_DATA + cap as usize, desc, false);
+    let p = new(BYTES_DATA + cap as usize, desc);
     // SAFETY: `p` has `len` and `cap` at 8 and 12, then room for `cap` >= `len` bytes: the
     // first `len` are written here, the rest are never read.
     unsafe {
@@ -337,7 +334,7 @@ pub unsafe fn regrow(p: *mut Header, cap: usize) -> *mut Header {
 pub fn bytes_room(len: usize) -> *mut u8 {
     let layout = layout(BYTES_DATA + len);
     // SAFETY: the size is at least BYTES_DATA, so not zero.
-    let p = unsafe { alloc::alloc::alloc(layout) };
+    let p = unsafe { heap::alloc(layout) };
     if p.is_null() {
         handle_alloc_error(layout);
     }
@@ -375,7 +372,7 @@ pub unsafe fn bytes<'a>(p: *mut Header) -> &'a [u8] {
 
 /// A `List` with descriptor `desc`, owning its elements' references.
 pub fn new_list(desc: u32, v: List) -> *mut Header {
-    let p = new(HEADER + size_of::<ListBody>(), desc, false);
+    let p = new(HEADER + size_of::<ListBody>(), desc);
     // SAFETY: room for a `ListBody` at HEADER, aligned (asserted above).
     unsafe { body(p).write(ListBody::of(v)) };
     p
@@ -383,7 +380,7 @@ pub fn new_list(desc: u32, v: List) -> *mut Header {
 
 /// A `Map` with descriptor `desc`, owning its values' references.
 pub fn new_map(desc: u32, m: Map) -> *mut Header {
-    let p = new(HEADER + size_of::<Map>(), desc, false);
+    let p = new(HEADER + size_of::<Map>(), desc);
     // SAFETY: room for a `Map` at HEADER, aligned (asserted above).
     unsafe { field::<Map>(p, HEADER).write(m) };
     p
@@ -523,7 +520,7 @@ unsafe fn copy(t: &Table, p: *mut Header) -> *mut Header {
             // Only the bytes below `len` are initialized; the copy keeps the capacity.
             return new_bytes_cap(desc, bytes(p), size - BYTES_DATA);
         }
-        let q = new(size, desc, false);
+        let q = new(size, desc);
         match t.desc(desc) {
             Desc::List { .. } => body(q).write(ListBody::of(elems(p).to_vec())),
             Desc::Map { .. } => field::<Map>(q, HEADER).write((*field::<Map>(p, HEADER)).clone()),
@@ -624,8 +621,8 @@ unsafe fn free_memory(p: *mut Header, size: usize) {
         ptr::write_bytes(p.cast::<u8>(), POISON, size)
     };
     #[cfg(not(all(any(test, feature = "test-heap"), not(miri))))]
-    // SAFETY: `p` was allocated by `new` with this size.
+    // SAFETY: `p` was allocated by `new` (or `bytes_room`) with this size.
     unsafe {
-        alloc::alloc::dealloc(p.cast(), layout(size))
+        heap::dealloc(p.cast(), layout(size))
     };
 }

@@ -32,11 +32,12 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 | C8a | bench/ (`bench/run.sh`): 9 benchmarks and HTTP against Rust, Python and the interpreter, with profiles. Compiled-only code is 1.1-2.3x Rust; runtime-heavy code 3-271x (quadratic `s = s + x`, zero-filled buffers, allocation, refcount and runtime calls, fuel); ranked C8b list in roadmap.md |
 | C8b1 | in-place `Str` append (`s = s + x`, `s += x`) when the count is 1, no zero-filled byte buffers, inline `inc`/`dec`/`unique` and list `len`/`get`/`push` (a runtime-owned `ListBody` layout). Strings 1.37 s to 8.5 ms (2.4x Rust), JSON 554 to 144 ms, closures 36 to 13, list 52 to 28, tree 438 to 284 |
 | C8b2 | last-use moves and borrowed local operands (no inc/dec), word-at-a-time `Str` compare, one descriptor lookup per free, inline `Bytes` paths; kiogen generates strings. Tree 284 to 244 ms, JSON 143 to 101; word count unchanged (83 ms) |
+| C8b3 | size-class free lists (8-64 bytes) over dlmalloc, handed back past 256 KB or when memory runs out. Tree 243 to 179 ms, JSON 100 to 82, word count 83 to 75, strings 7.9 to 5.2 |
 
 ## Next
 
-1. C8 next (roadmap.md): borrowed parameters; fewer allocations (a size-class free list, a list's buffer in its object; malloc/free are ~25% of tree and JSON); word count's map (key copy per lookup, `BTreeMap` node search).
-2. L7c (bounds `Eq`, `Ord`).
+1. C8 next (roadmap.md): borrowed parameters; word count's map (key copy per lookup, `BTreeMap` node search); fresh small blocks carved from chunks (dlmalloc's `malloc` is 17% of tree, while it is built).
+2. L7c (bounds `Eq`, `Ord`): waiting on the owner's decision on `<` for `Str`.
 
 ## Waiting on the maintainer
 
@@ -44,11 +45,11 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 
 - open_questions #34: whether to add constants (proposed: check-time literals only). Not decided; nothing depends on it.
 
-## Speed (C8b2, 2026-11-09, release, run time; all in [roadmap.md](roadmap.md))
+## Speed (C8b3, 2026-11-09, release, run time; all in [roadmap.md](roadmap.md))
 
 | | fib(35) | 30 M loop | tree | JSON 1 MB | 100 k concatenations |
 |---|---|---|---|---|---|
 | Rust | 24 ms | 97 ms | 33 ms | 7.5 ms | 3.5 ms |
-| kio compiled (plus 20-25 ms compile, cached) | 55 ms | 111 ms | 244 ms | 101 ms | 7.8 ms |
+| kio compiled (plus 20-25 ms compile, cached) | 53 ms | 108 ms | 179 ms | 82 ms | 5.2 ms |
 | Python 3.13 | 732 ms | 928 ms | 2.87 s | 16 ms | 7.0 ms |
 | kio interpreter (the test oracle) | 1.62 s | 1.32 s | 1.05 s | 868 ms | 1.57 s |
