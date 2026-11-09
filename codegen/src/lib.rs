@@ -6,7 +6,10 @@
 //! entry functions keep their indexes and get new bodies. wit-component then wraps the one
 //! module as a component.
 
+mod data;
+
 use anyhow::{anyhow, Context, Result};
+use data::Statics;
 use lang::ir::{self, BinOp, ExprKind, Module, StmtKind, Ty, UnOp};
 use lang::Span;
 use std::collections::HashMap;
@@ -47,6 +50,8 @@ impl Site {
 /// Compiles `m`. Panics with `unimplemented` on IR that codegen does not handle yet.
 pub fn compile(m: &Module) -> Result<Wasm> {
     let rt = Runtime::scan(RUNTIME)?;
+    let data_addr = rt.pages * PAGE;
+    let statics = Statics::new(m, data_addr);
     let mut sites = Vec::new();
     let mut types: Vec<FuncSig> = Vec::new();
     let mut funcs = Vec::new();
@@ -61,16 +66,16 @@ pub fn compile(m: &Module) -> Result<Wasm> {
         };
         funcs.push((rt.types + ty as u32, body));
     }
-    let data_addr = rt.pages * PAGE;
+    let (data, table) = statics.finish();
     let main = &m.funcs[m.main.0 as usize];
     let main_index = rt.funcs + m.main.0;
     let mut app = Append {
         rt: &rt,
         types,
         funcs,
-        entry: entry(rt.export("rt_init"), data_addr, main_index, &main.ret),
+        entry: entry(rt.export("rt_init"), table, main_index, &main.ret),
         entry_desc: entry_desc(&main.ret),
-        data: (data_addr, table(data_addr)),
+        data: (data_addr, data),
     };
     let mut module = wasm_encoder::Module::new();
     app.parse_core_module(&mut module, Parser::new(0), RUNTIME)
@@ -585,22 +590,6 @@ fn entry_desc(ret: &Ty) -> Function {
     let mut f = Function::new([]);
     f.instructions().i32_const(desc).end();
     f
-}
-
-/// The descriptor table as data at `addr`: the runtime's `RawTable` (five address and length
-/// pairs), then the descriptors every program has, `Unit`, `Int`, `Bool`, `Str`, `Bytes`,
-/// each a `u32` tag padded to 20 bytes (runtime/src/desc.rs).
-fn table(addr: u32) -> Vec<u8> {
-    let descs = addr + 40;
-    let mut raw = vec![descs, 5];
-    // The other arrays are empty; an empty slice still needs an aligned address.
-    raw.extend([descs, 0].repeat(4));
-    let mut data: Vec<u8> = raw.iter().flat_map(|w| w.to_le_bytes()).collect();
-    for tag in 0u32..5 {
-        data.extend(tag.to_le_bytes());
-        data.extend([0; 16]);
-    }
-    data
 }
 
 /// Re-encodes the runtime with the program appended.

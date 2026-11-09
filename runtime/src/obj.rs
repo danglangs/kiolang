@@ -334,21 +334,20 @@ unsafe fn size(t: &Table, p: *mut Header) -> usize {
     }
 }
 
-// Test builds count live objects, and poison freed ones without reusing them, so a use after
-// free fails `check_live`. Under Miri memory is really freed: Miri catches the use itself.
+// Every build counts live objects, for the leak check at the end of a run (pinned statics are
+// never allocated, so never counted). Test builds also poison freed objects without reusing
+// them, so a use after free fails `check_live`. Under Miri memory is really freed: Miri
+// catches the use itself.
 
-#[cfg(any(test, feature = "test-heap"))]
 static LIVE: core::sync::atomic::AtomicIsize = core::sync::atomic::AtomicIsize::new(0);
 
 /// Objects allocated and not yet freed.
-#[cfg(any(test, feature = "test-heap"))]
 pub fn live() -> isize {
     LIVE.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-fn live_add(_n: isize) {
-    #[cfg(any(test, feature = "test-heap"))]
-    LIVE.fetch_add(_n, core::sync::atomic::Ordering::Relaxed);
+fn live_add(n: isize) {
+    LIVE.fetch_add(n, core::sync::atomic::Ordering::Relaxed);
 }
 
 #[cfg(all(any(test, feature = "test-heap"), not(miri)))]

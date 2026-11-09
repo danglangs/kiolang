@@ -191,6 +191,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "lang",
+ "runtime",
  "wasm-encoder 0.261.0",
  "wasmparser 0.261.0",
  "wit-component 0.261.0",

@@ -16,6 +16,7 @@
 //!   because their payload slots do.
 
 use core::mem::{align_of, size_of};
+use core::slice;
 
 pub const UNIT: u32 = 0;
 pub const INT: u32 = 1;
@@ -118,4 +119,48 @@ impl<'t> Table<'t> {
     pub fn name(&self, n: Name) -> &'t [u8] {
         &self.names[n.off as usize..][..n.len as usize]
     }
+}
+
+/// `Table`'s arrays as codegen lays them out in linear memory: each array's address and
+/// element count.
+#[repr(C)]
+pub struct RawTable {
+    descs: [u32; 2],
+    slots: [u32; 2],
+    fields: [u32; 2],
+    variants: [u32; 2],
+    names: [u32; 2],
+}
+
+impl RawTable {
+    /// The table whose `RawTable` is at `addr`, in a memory whose address 0 is at `base` (0 in
+    /// Wasm, a buffer's address in native tests).
+    ///
+    /// # Safety
+    /// A `RawTable` is at `addr`, and each of its arrays is where it says: aligned, never
+    /// written, and keeping the invariants above.
+    pub unsafe fn read(base: usize, addr: u32) -> Table<'static> {
+        // SAFETY: the caller's guarantee.
+        unsafe {
+            let raw = &*at::<RawTable>(base, addr);
+            Table {
+                descs: array(base, raw.descs),
+                slots: array(base, raw.slots),
+                fields: array(base, raw.fields),
+                variants: array(base, raw.variants),
+                names: array(base, raw.names),
+            }
+        }
+    }
+}
+
+fn at<T>(base: usize, addr: u32) -> *const T {
+    core::ptr::with_exposed_provenance(base + addr as usize)
+}
+
+/// # Safety
+/// `len` `T`s at `addr`, aligned, never written.
+unsafe fn array<T>(base: usize, [addr, len]: [u32; 2]) -> &'static [T] {
+    // SAFETY: the caller's guarantee.
+    unsafe { slice::from_raw_parts(at(base, addr), len as usize) }
 }

@@ -18,6 +18,10 @@ impl Guest for Runtime {
         let value = unsafe { core::str::from_utf8(obj::bytes(p)).expect("a Str is UTF-8").into() };
         // SAFETY: `p` is ours and live.
         unsafe { abi::rt_dec(abi::addr(p)) };
+        let live = abi::rt_live();
+        if live != 0 {
+            rt_trap(LEAKED, i64::from(live), 0);
+        }
         Ok(Outcome { value, failed: false })
     }
 }
@@ -31,6 +35,10 @@ export!(Runtime);
 
 /// The error site of a runtime bug; program sites count from 0.
 pub const INTERNAL: u32 = u32::MAX;
+
+/// The error site of objects left alive when a run ends (a codegen bug), with their count as
+/// `a`. The host reports it (host/src/compiled.rs); the differential tests rely on it.
+pub const LEAKED: u32 = u32::MAX - 1;
 
 /// A runtime error at `site`: the host formats the message with `a` and `b`. Generated code
 /// calls this, not the import, and the call keeps the import in the module, so codegen never

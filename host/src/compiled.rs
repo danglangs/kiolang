@@ -18,6 +18,10 @@ mod bindings {
 }
 use bindings::{Compiled as World, CompiledImports, Outcome};
 
+/// The runtime's site for objects still alive when `run` ends, a codegen bug
+/// (runtime/src/entry.rs `LEAKED`).
+const LEAKED: u32 = u32::MAX - 1;
+
 /// A `trap` call: the run stops with the error at `site`.
 #[derive(Debug)]
 struct Trapped {
@@ -46,7 +50,8 @@ pub struct Compiled;
 impl Compiled {
     /// Check `source`, compile it and run `main`: its displayed value, the checker's
     /// diagnostics, or a runtime error with the interpreter's span and message. A run stopped
-    /// by a limit is an `Err` whose message is `Kio::explain`'s.
+    /// by a limit is an `Err` whose message is `Kio::explain`'s. The runtime counts live
+    /// objects and traps if any remain when the run ends: that is an `Err` too.
     pub fn run(source: &str, limits: Limits) -> Result<std::result::Result<Outcome, Vec<Diag>>> {
         let caps = lang::CapTable::v0();
         let program = match lang::check(source, &caps) {
@@ -69,6 +74,10 @@ impl Compiled {
             // outside the table (the runtime's internal-error site, or a bug) is a host error,
             // never an index panic.
             Err(e) => match e.downcast_ref::<Trapped>() {
+                Some(t) if t.site == LEAKED => {
+                    let msg = format!("compiled program leaked {} objects", t.a);
+                    Err(e.context(msg))
+                }
                 Some(t) => match wasm.sites.get(t.site as usize) {
                     Some(site) => Ok(Err(vec![runtime_err(site, t.a, t.b)])),
                     None => Err(e.context("compiled program trapped at an unknown error site")),

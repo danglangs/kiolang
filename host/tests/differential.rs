@@ -74,6 +74,7 @@ fn differential() {
     let mut capabilities = 0;
     let mut unsupported: BTreeMap<String, usize> = BTreeMap::new();
     let mut mismatches = Vec::new();
+    let mut leaks = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for files in corpus::sources(Path::new("../")) {
         let [(_, src)] = files.as_slice() else { continue };
@@ -95,6 +96,14 @@ fn differential() {
                 continue;
             }
         };
+        // The runtime traps when objects are left alive at the end of a run that did not trap.
+        if let End::Done(Err((m, _, _))) = &c {
+            if m.contains("compiled program leaked") {
+                ran += 1;
+                leaks.push(format!("{m}\n{src}"));
+                continue;
+            }
+        }
         let i = interpreted(src);
         match (c, i) {
             (End::Done(c), End::Done(i)) => {
@@ -112,8 +121,10 @@ fn differential() {
         }
     }
     println!(
-        "ran both ways {ran}, agreed {agreed}, excluded by limits {limited}, skipped: capabilities {capabilities}, unsupported by node kind {unsupported:?}"
+        "ran both ways {ran}, agreed {agreed}, excluded by limits {limited}, leaked {}, skipped: capabilities {capabilities}, unsupported by node kind {unsupported:?}",
+        leaks.len()
     );
+    assert!(leaks.is_empty(), "{} leaked:\n{}", leaks.len(), leaks.join("\n----\n"));
     assert!(
         mismatches.is_empty(),
         "{} mismatches:\n{}",

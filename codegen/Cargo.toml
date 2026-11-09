@@ -11,3 +11,7 @@ lang = { path = "../lang" }
 wasm-encoder = { version = "0.261", features = ["wasmparser"] }
 wasmparser = "0.261"
 wit-component = "0.261"
+
+[dev-dependencies]
+# The descriptor table test reads emitted data back through the runtime's own types.
+runtime = { path = "../runtime" }
