@@ -36,6 +36,9 @@ pub struct Features {
     /// extremes, halves), every operator, `+=` and `-=`, comparisons, `to_str`, `to_int`,
     /// `to_float`, `parse_float`, `abs`, `floor`, `ceil`, `round`, `sqrt` and the `is_` tests.
     pub floats: bool,
+    /// `map`, `filter`, `any` and `all` on `List<Int>` values, each with a closure applying one
+    /// operator to the element and a literal or a captured `Int` local.
+    pub closures: bool,
 }
 
 impl Default for Features {
@@ -48,6 +51,7 @@ impl Default for Features {
             lists: true,
             adts: true,
             floats: true,
+            closures: true,
         }
     }
 }
@@ -497,6 +501,14 @@ impl Gen<'_> {
     /// one unless `empty`, since `[]` needs a type from its context). Returns it with the
     /// bounds on its length.
     fn list_expr(&mut self, empty: bool) -> (String, u64, u64) {
+        if self.features.closures && self.rng.chance(10) {
+            // Not `[]`, which has no type before `.map`.
+            let (a, min, max) = self.list_expr(false);
+            if self.rng.chance(50) {
+                return (format!("{a}.map({})", self.closure(false)), min, max);
+            }
+            return (format!("{a}.filter({})", self.closure(true)), 0, max);
+        }
         let lists = self.visible(|v| v.ty == Ty::List);
         if !lists.is_empty() && self.rng.chance(30) {
             let name = self.rng.pick(&lists).clone();
@@ -507,6 +519,18 @@ impl Gen<'_> {
         let n = self.rng.below(6).max(u64::from(!empty));
         let items: Vec<String> = (0..n).map(|_| self.expr(Ty::Int, 1)).collect();
         (format!("[{}]", items.join(", ")), n, n)
+    }
+
+    /// A closure on an element `el` for `map` (`Int` to `Int`) or, if `pred`, for `filter`,
+    /// `any` and `all`: one operator on `el` and a leaf, which may capture a visible `Int`.
+    fn closure(&mut self, pred: bool) -> String {
+        let ops: &[&str] = if pred {
+            &["<", "<=", ">", ">=", "==", "!="]
+        } else {
+            &["+", "-", "*", "/", "%"]
+        };
+        let op = *self.rng.pick(ops);
+        format!("|el| el {op} {}", self.leaf(Ty::Int))
     }
 
     fn let_list(&mut self) -> String {
@@ -795,6 +819,11 @@ impl Gen<'_> {
             let (a, _, _) = self.list_expr(false);
             let x = self.expr(Ty::Int, 1);
             return format!("{a}.contains({x})");
+        }
+        if lists && self.features.closures && self.rng.chance(5) {
+            let (a, _, _) = self.list_expr(false);
+            let m = *self.rng.pick(&["any", "all"]);
+            return format!("{a}.{m}({})", self.closure(true));
         }
         if depth > 0 && self.features.adts && self.rng.chance(10) {
             return self.adt_bool(depth - 1);
@@ -1118,6 +1147,15 @@ mod tests {
     fn list_methods_are_generated() {
         let all: String = (0..250).map(|s| super::program(s, &Default::default())).collect();
         for m in [".sort()", ".pop()", ".contains("] {
+            assert!(all.matches(m).count() > 10, "{m}: {}", all.matches(m).count());
+        }
+    }
+
+    /// The built-ins taking closures appear in a run of the default size.
+    #[test]
+    fn closures_are_generated() {
+        let all: String = (0..250).map(|s| super::program(s, &Default::default())).collect();
+        for m in [".map(|el| ", ".filter(|el| ", ".any(|el| ", ".all(|el| "] {
             assert!(all.matches(m).count() > 10, "{m}: {}", all.matches(m).count());
         }
     }

@@ -13,7 +13,6 @@ use data::Statics;
 use lang::ir::{self, BinOp, Builtin, ExprKind, Module, Mut, StmtKind, Ty, UnOp};
 use lang::Span;
 use std::collections::HashMap;
-use std::fmt::Debug;
 use wasm_encoder::reencode::{self, Reencode};
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, DataSection, ElementSection, Elements, Encode, Function, Ieee64, Instruction,
@@ -49,7 +48,8 @@ impl Site {
     }
 }
 
-/// Compiles `m`. Panics with `unimplemented` on IR that codegen does not handle yet.
+/// Compiles `m`. Panics with `unimplemented!("codegen: ..")` on IR that codegen does not handle
+/// yet (none today: a new IR node gets such an arm until its compiler task).
 pub fn compile(m: &Module) -> Result<Wasm> {
     let rt = Runtime::scan(RUNTIME)?;
     let data_addr = rt.pages * PAGE;
@@ -214,6 +214,22 @@ fn inline_builtin(b: Builtin) -> bool {
     )
 }
 
+/// Whether built-in `b` takes a function value (`FuncGen::with_fn`).
+fn takes_fn(b: Builtin) -> bool {
+    matches!(
+        b,
+        Builtin::OptionMap
+            | Builtin::OptionAndThen
+            | Builtin::ResultMap
+            | Builtin::ResultMapErr
+            | Builtin::ResultAndThen
+            | Builtin::ListMap
+            | Builtin::ListFilter
+            | Builtin::ListAny
+            | Builtin::ListAll
+    )
+}
+
 /// The payload types of variant `v` of enum type `t` (a user enum, `Option` or `Result`).
 fn payload(m: &Module, t: &Ty, v: u32) -> Vec<Ty> {
     match t {
@@ -286,12 +302,6 @@ fn slot_out(s: &mut InstructionSink, t: &Ty) {
             s.drop();
         }
     }
-}
-
-/// The variant name of an IR node, for `unimplemented`.
-fn node(n: &impl Debug) -> String {
-    let s = format!("{n:?}");
-    s.split(['(', ' ', '{']).next().unwrap_or_default().to_string()
 }
 
 fn func<'m>(
@@ -1054,7 +1064,7 @@ impl FuncGen<'_, '_> {
                     // `()` has no value: equal always.
                     (BinOp::Eq, Ty::Unit) => Instruction::I32Const(1),
                     (BinOp::Ne, Ty::Unit) => Instruction::I32Const(0),
-                    (op, t) => unimplemented!("codegen: {op:?} on {}", node(t)),
+                    (op, t) => unreachable!("checked: {op:?} on {t:?}"),
                 };
                 i.encode(&mut self.code);
             }
@@ -1091,6 +1101,7 @@ impl FuncGen<'_, '_> {
             }
             ExprKind::Closure(f, captured) => self.closure(*f, captured),
             ExprKind::CallValue(callee, args) => self.call_value(callee, args),
+            ExprKind::Builtin(b, recv, args) if takes_fn(*b) => self.with_fn(*b, recv, &args[0], &e.ty, e.span),
             ExprKind::Builtin(b, recv, _) if inline_builtin(*b) => {
                 self.expr(recv);
                 self.scalar_builtin(*b);
@@ -1150,7 +1161,7 @@ impl FuncGen<'_, '_> {
                     | Builtin::ListMap
                     | Builtin::ListFilter
                     | Builtin::ListAny
-                    | Builtin::ListAll => unimplemented!("codegen: builtin {b:?}"),
+                    | Builtin::ListAll => unreachable!("with_fn"),
                 };
                 let pre = self.pre(pre, &e.ty);
                 let mut sites: Vec<u32> = error.map(|t| self.site(e.span, t)).into_iter().collect();
@@ -1301,9 +1312,209 @@ impl FuncGen<'_, '_> {
             self.get(x, *t);
         }
         self.owned.truncate(mark);
+        self.call_through(c, params, ret);
+        self.dec(c);
+    }
+
+    /// Calls the `fn(params) -> ret` value in local `c` through its table entry, on the object
+    /// and the arguments on the stack.
+    fn call_through(&mut self, c: u32, params: &[Ty], ret: &Ty) {
         let ty = self.rt.types + type_index(self.types, value_sig(params, ret));
         self.sink().local_get(c).i32_load(VARIANT).call_indirect(0, ty);
+        if *ret == Ty::Never {
+            self.sink().unreachable();
+        }
+    }
+
+    /// A built-in taking a function value `f` (`takes_fn`), inline: the receiver, then `f`,
+    /// each evaluated once and owned; then the calls, in the interpreter's order, each through
+    /// `f` as `call_value` does, with the element or payload passed +1; then the receiver and
+    /// `f` are dropped. Between the operands and the drops nothing leaves the function (a call
+    /// returns or traps), so neither needs its place in `owned` past its evaluation.
+    fn with_fn(&mut self, b: Builtin, recv: &ir::Expr, f: &ir::Expr, ty: &Ty, span: Span) {
+        let (mark, temps) = self.operands(&[recv, f]);
+        self.owned.truncate(mark);
+        let (Some(r), Some(c), Ty::Fn(params, ret)) = (temps[0], temps[1], &f.ty) else {
+            // The receiver or `f` is `!`: nothing after it runs.
+            self.sink().unreachable();
+            return;
+        };
+        let sig = (&params[..], &**ret);
+        match b {
+            Builtin::ListMap => self.list_map(r, c, &recv.ty, sig, ty, span),
+            Builtin::ListFilter => self.list_filter(r, c, &recv.ty, sig, ty, span),
+            Builtin::ListAny => self.list_any(true, r, c, &recv.ty, sig, span),
+            Builtin::ListAll => self.list_any(false, r, c, &recv.ty, sig, span),
+            _ => self.enum_map(b, r, c, &recv.ty, sig, ty),
+        }
+        self.dec(r);
         self.dec(c);
+    }
+
+    /// Opens a loop over the elements of list `r`: `i` from 0 to its length, read once.
+    /// Returns `(i, brk, top)`; the pass's code follows, then `next_pass`.
+    fn list_loop(&mut self, r: u32) -> (u32, u32, u32) {
+        let (n, i) = (self.temp(ValType::I64), self.temp(ValType::I64));
+        self.sink().local_get(r);
+        self.call_rt("rt_list_len");
+        self.sink().local_set(n).i64_const(0).local_set(i);
+        let brk = self.open(Open::Block, BlockType::Empty);
+        let top = self.open(Open::Loop, BlockType::Empty);
+        self.sink().local_get(i).local_get(n).i64_ge_s();
+        self.br_if(brk);
+        (i, brk, top)
+    }
+
+    /// Pushes element `i` of list `r` as a slot, +1. In bounds: nothing changes `r` while a
+    /// built-in holds it.
+    fn list_slot(&mut self, r: u32, i: u32, span: Span) {
+        let site = self.site(span, OUT_OF_BOUNDS);
+        self.sink().local_get(r).local_get(i).i32_const(site as i32);
+        self.call_rt("rt_list_get");
+    }
+
+    /// Ends a pass of `list_loop`'s loop and the loop.
+    fn next_pass(&mut self, i: u32, top: u32) {
+        self.sink().local_get(i).i64_const(1).i64_add().local_set(i);
+        self.br(top);
+        self.close();
+        self.close();
+    }
+
+    /// `xs.map(f)`: a new list of type `ty`, with `xs`'s length as capacity, which takes each
+    /// result.
+    fn list_map(&mut self, r: u32, c: u32, xs: &Ty, (params, ret): (&[Ty], &Ty), ty: &Ty, span: Span) {
+        let out = self.temp(ValType::I32);
+        let desc = self.statics.desc(ty);
+        self.sink().i32_const(desc as i32).local_get(r);
+        self.call_rt("rt_list_len");
+        self.sink().i32_wrap_i64();
+        self.call_rt("rt_list_new");
+        self.sink().local_set(out);
+        let (i, _, top) = self.list_loop(r);
+        self.sink().local_get(out).local_get(c);
+        self.list_slot(r, i, span);
+        self.slot_out(elem(xs));
+        self.call_through(c, params, ret);
+        self.slot_in(ret);
+        self.call_rt("rt_list_push");
+        self.next_pass(i, top);
+        self.sink().local_get(out);
+    }
+
+    /// `xs.filter(f)`: a new list of type `ty` holding each element for which `f` returns true,
+    /// +1 again, since the call consumed the reference `rt_list_get` gave.
+    fn list_filter(&mut self, r: u32, c: u32, xs: &Ty, (params, ret): (&[Ty], &Ty), ty: &Ty, span: Span) {
+        let t = elem(xs);
+        let (out, x) = (self.temp(ValType::I32), self.temp(ValType::I64));
+        let desc = self.statics.desc(ty);
+        self.sink().i32_const(desc as i32).i32_const(0);
+        self.call_rt("rt_list_new");
+        self.sink().local_set(out);
+        let (i, _, top) = self.list_loop(r);
+        self.list_slot(r, i, span);
+        self.sink().local_set(x).local_get(c).local_get(x);
+        self.slot_out(t);
+        self.call_through(c, params, ret);
+        self.open(Open::If, BlockType::Empty);
+        if is_ptr(t) {
+            self.sink().local_get(x).i32_wrap_i64();
+            self.call_rt("rt_inc");
+        }
+        self.sink().local_get(out).local_get(x);
+        self.call_rt("rt_list_push");
+        self.close();
+        self.next_pass(i, top);
+        self.sink().local_get(out);
+    }
+
+    /// `xs.any(f)` (`any`) or `xs.all(f)`: stops at the first call returning `any`, as Rust's.
+    fn list_any(&mut self, any: bool, r: u32, c: u32, xs: &Ty, (params, ret): (&[Ty], &Ty), span: Span) {
+        let res = self.temp(ValType::I32);
+        self.sink().i32_const(!any as i32).local_set(res);
+        let (i, brk, top) = self.list_loop(r);
+        self.sink().local_get(c);
+        self.list_slot(r, i, span);
+        self.slot_out(elem(xs));
+        self.call_through(c, params, ret);
+        self.sink().local_tee(res);
+        if !any {
+            self.sink().i32_eqz();
+        }
+        self.br_if(brk);
+        self.next_pass(i, top);
+        self.sink().local_get(res);
+    }
+
+    /// `map`, `and_then` and `map_err` on the `Option` or `Result` in `r`, of type `from`: on
+    /// the variant `f` takes, the call on its payload (+1), whose result `map` and `map_err`
+    /// wrap in that variant of `ty`; on the other, that variant rebuilt as a `ty`.
+    fn enum_map(&mut self, b: Builtin, r: u32, c: u32, from: &Ty, (params, ret): (&[Ty], &Ty), ty: &Ty) {
+        // `None` and `Ok` are variant 0, `Some` and `Err` variant 1.
+        let (called, wrap) = match b {
+            Builtin::OptionMap => (1, true),
+            Builtin::OptionAndThen => (1, false),
+            Builtin::ResultMap => (0, true),
+            Builtin::ResultMapErr => (1, true),
+            Builtin::ResultAndThen => (0, false),
+            b => unreachable!("{b:?} on an enum"),
+        };
+        self.sink().local_get(r).i32_load(VARIANT).i32_const(called).i32_eq();
+        self.open(Open::If, BlockType::Result(ValType::I32));
+        let o = wrap.then(|| self.temp(ValType::I32));
+        if let Some(o) = o {
+            let desc = self.statics.desc(ty);
+            self.sink().i32_const(desc as i32).i32_const(called);
+            self.call_rt("rt_alloc");
+            self.sink().local_tee(o);
+        }
+        self.sink().local_get(c);
+        let t = &payload(self.m, from, called as u32)[0];
+        self.payload_owned(r, t);
+        self.call_through(c, params, ret);
+        if let Some(o) = o {
+            self.slot_in(ret);
+            self.sink().i64_store(slot_at(ENUM_SLOTS)).local_get(o);
+        }
+        self.sink().else_();
+        self.rebuild(r, from, ty, 1 - called);
+        self.close();
+    }
+
+    /// Pushes the payload of the `Some`, `Ok` or `Err` in `r`, of type `t`, +1.
+    fn payload_owned(&mut self, r: u32, t: &Ty) {
+        self.sink().local_get(r).i64_load(slot_at(ENUM_SLOTS));
+        self.slot_out(t);
+        if is_ptr(t) {
+            let v = self.temp(ValType::I32);
+            self.sink().local_tee(v);
+            self.call_rt("rt_inc");
+            self.sink().local_get(v);
+        }
+    }
+
+    /// Pushes a new reference to variant `v` of the `Option` or `Result` in `r`, of type
+    /// `from`, as a value of type `to`, as `?` does: the pinned `None` of `to`; `r` itself if
+    /// `to` is `from`; else a new object of `to`'s descriptor holding the payload, +1.
+    fn rebuild(&mut self, r: u32, from: &Ty, to: &Ty, v: i32) {
+        if let Ty::Option(_) = from {
+            let none = self.statics.pinned(to, 0);
+            self.sink().i32_const(none as i32);
+        } else if from == to {
+            self.sink().local_get(r);
+            self.call_rt("rt_inc");
+            self.sink().local_get(r);
+        } else {
+            let t = &payload(self.m, from, v as u32)[0];
+            let o = self.temp(ValType::I32);
+            let desc = self.statics.desc(to);
+            self.sink().i32_const(desc as i32).i32_const(v);
+            self.call_rt("rt_alloc");
+            self.sink().local_tee(o);
+            self.payload_owned(r, t);
+            self.slot_in(t);
+            self.sink().i64_store(slot_at(ENUM_SLOTS)).local_get(o);
+        }
     }
 
     /// `base.f`: a new reference to the field's value. A base that is a local, or a field of
@@ -1652,7 +1863,7 @@ impl FuncGen<'_, '_> {
                     s.i64_rem_s().local_set(r);
                 }
             }
-            op => unimplemented!("codegen: {op:?} on Int"),
+            op => unreachable!("checked: {op:?} on Int"),
         }
         self.sink().local_get(r);
     }

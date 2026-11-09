@@ -23,12 +23,6 @@ fn the_component_validates() {
     );
 }
 
-#[test]
-#[should_panic(expected = "codegen: builtin ListAny")]
-fn unsupported_ir_names_the_node() {
-    let _ = compile(&module("fn main() -> Bool { [1].any(|x| x > 0) }"));
-}
-
 /// Every caps.wit method, called from a program: the runtime has a wrapper for each
 /// (runtime/src/caps.rs), and the component validates, so each wrapper's signature is the one
 /// codegen calls. The grant kinds `rt_grant` numbers are the `CapTable`'s order.

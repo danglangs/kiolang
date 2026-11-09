@@ -1257,3 +1257,166 @@ fn deep_recursion_through_values_is_a_stack_overflow() {
     .join()
     .unwrap();
 }
+
+/// C9b: `map`, `filter`, `any` and `all` pass each element +1, which the function consumes:
+/// the list keeps its own reference and is intact afterwards.
+#[test]
+fn list_builtins_pass_each_element_owned() {
+    let src = r#"fn b(x: Bool) -> Str { if x { "true" } else { "false" } }
+        fn main() -> Str {
+            let xs = ["a" + "", "bb" + "", "ccc" + ""];
+            let n = xs.map(|s| s.len());
+            let any = xs.any(|s| s == "zz");
+            let all = xs.all(|s| s.len() > 0);
+            let f = xs.filter(|s| s.len() == 9);
+            xs[0] + xs[1] + xs[2] + n[2].to_str() + b(any) + b(all) + f.len().to_str()
+        }"#;
+    assert_eq!(value(src), "abbccc3falsetrue0");
+}
+
+/// `filter` keeps an element with a reference of its own (the call consumed the one it was
+/// given): both lists outlive each other's drop.
+#[test]
+fn filter_keeps_its_own_reference() {
+    let src = r#"fn keep(xs: List<Str>) -> List<Str> { xs.filter(|s| s.len() > 1) }
+        fn main() -> Str {
+            let mut ys = ["x" + ""];
+            if true { let xs = ["a" + "", "bb" + "", "ccc" + ""]; ys = keep(xs); }
+            let zs = ys.filter(|s| true);
+            ys = [];
+            zs[0] + zs[1] + zs.len().to_str()
+        }"#;
+    assert_eq!(value(src), "bbccc2");
+    let src = "fn main() -> List<List<Int>> { let xs = [[1], [2, 3], []]; xs.filter(|l| l.len() > 0) }";
+    assert_eq!(value(src), "[[1], [2, 3]]");
+}
+
+/// `map`'s new list takes each result: nothing is left over when it is dropped.
+#[test]
+fn map_results_go_into_the_new_list() {
+    let src = r#"fn main() -> Str {
+            let xs = [1, 2, 3];
+            let ys = xs.map(|x| x.to_str() + "!");
+            let zs = ys.map(|s| [s, s]);
+            ys[2] + zs[0][1] + zs.len().to_str()
+        }"#;
+    assert_eq!(value(src), "3!1!3");
+}
+
+/// The receiver and the function value are released on every path of every method: an empty
+/// list, a short-circuiting `any`/`all`, each variant of `Option` and `Result`, and a receiver
+/// made fresh for the call.
+#[test]
+fn receiver_and_function_are_released() {
+    let src = r#"fn b(x: Bool) -> Str { if x { "true" } else { "false" } }
+        fn main() -> Str {
+            let k = "k" + "";
+            let e: List<Str> = [];
+            let xs = ["a" + "", "b" + ""];
+            let mut out = "";
+            out += e.map(|s| s + k).len().to_str() + e.filter(|s| s == k).len().to_str();
+            out += b(e.any(|s| s == k)) + b(e.all(|s| s == k));
+            out += b(xs.any(|s| s + k == "ak")) + b(xs.all(|s| s + k == "bk"));
+            out += ["x" + ""].map(|s| s + k)[0] + ["y" + ""].filter(|s| s != k)[0];
+            let some = Some("s" + "");
+            let none: Option<Str> = None;
+            out += some.map(|s| s + k).unwrap_or("") + none.map(|s| s + k).unwrap_or("-");
+            out += some.and_then(|s| Some(s + k)).unwrap_or("") + none.and_then(|s| Some(s + k)).unwrap_or("-");
+            let ok: Result<Str, Str> = Ok("o" + "");
+            let err: Result<Str, Str> = Err("e" + "");
+            out += ok.map(|s| s + k).unwrap_or("") + err.map(|s| s + k).unwrap_or("-");
+            out += ok.map_err(|s| s + k).unwrap_or("") + err.map_err(|s| s + k).err().unwrap_or("");
+            out += ok.and_then(|s| Ok(s + k)).unwrap_or("") + err.and_then(|s| Ok(s + k)).unwrap_or("-");
+            out += Some("t" + "").map(|s| s + k).unwrap_or("");
+            out
+        }"#;
+    assert_eq!(value(src), "00falsetruetruefalsexkysk-sk-ok-oekok-tk");
+}
+
+/// The variant a built-in does not call on is rebuilt as the result's type: the pinned `None`
+/// of `Option<Str>`; a new `Err` of the result's descriptor holding its own reference to the
+/// error; the receiver itself when the types are equal.
+#[test]
+fn untouched_variants_are_rebuilt() {
+    let src = r#"fn main() -> List<Option<Str>> {
+            let n: Option<Int> = None;
+            let m = n.map(|x| x.to_str());
+            [m, n.and_then(|x| Some(x.to_str())), m]
+        }"#;
+    assert_eq!(value(src), "[None, None, None]");
+    let src = r#"fn main() -> Str {
+            let mut out = "";
+            let r: Result<Int, Str> = Err("bad" + "");
+            let a = r.map(|x| x.to_str());
+            let b = r.map(|x| x + 1);
+            let c = r.and_then(|x| Ok([x]));
+            if true { let d = r; }
+            let s: Result<Int, Str> = Ok(4);
+            let t = s.map_err(|e| e.len());
+            out += a.err().unwrap_or("") + b.err().unwrap_or("") + c.err().unwrap_or("");
+            match t { Ok(v) => { out += v.to_str(); } Err(_) => {} }
+            out
+        }"#;
+    assert_eq!(value(src), "badbadbad4");
+    let src = r#"fn main() -> Result<List<Int>, Str> { let r: Result<Int, Str> = Err("x" + ""); r.map(|x| [x]) }"#;
+    assert_eq!(both(src), Ok("x".to_string()));
+    // The reused `Err` outlives the receiver's local; the objects made after it would take
+    // its memory if it had no reference of its own.
+    let src = r#"fn g(n: Int) -> Result<Int, Str> { let r: Result<Int, Str> = Err(n.to_str() + "!"); r.map(|x| x + 1) }
+        fn main() -> Str {
+            let a = g(1);
+            let b = g(2);
+            let mut out = "";
+            match a { Err(e) => { out += e; } Ok(_) => {} }
+            match b { Err(e) => { out += e; } Ok(_) => {} }
+            out
+        }"#;
+    assert_eq!(value(src), "1!2!");
+}
+
+/// A closure capturing a `Str`, called by `map` on 1,000 elements: each call gets its own
+/// reference to the capture, and nothing leaks.
+#[test]
+fn map_with_a_capturing_closure_over_many_elements() {
+    let src = r#"fn main() -> Int {
+            let s = "abc" + "";
+            let mut xs: List<Int> = [];
+            for i in 0..1000 { xs.push(i); }
+            let ys = xs.map(|x| s + x.to_str());
+            let zs = ys.filter(|y| y.len() == 5).map(|y| y.len() + s.len());
+            ys.len() + zs.len() + zs[0] + s.len()
+        }"#;
+    assert_eq!(value(src), "1101");
+}
+
+/// The interpreter's order: the receiver, then the function value once, then the calls in list
+/// order; `any`/`all` stop early; an error inside the function has the function's span.
+#[test]
+fn functions_given_to_builtins_run_in_order() {
+    assert_eq!(value("fn main() -> Bool { [1, 0].any(|x| 10 / x > 0) }"), "true");
+    assert_eq!(value("fn main() -> Bool { [-1, 0].all(|x| 10 / x > 0) }"), "false");
+    let src = "fn main() -> Bool { [0, 1].all(|x| 10 / x > 0) }";
+    let (m, start, end) = both(src).unwrap_err();
+    assert_eq!((m.as_str(), &src[start..end]), ("division by zero", "10 / x"));
+    let src = "fn main() -> Int {
+            let mut n = 1;
+            let xs = [{ n = n * 10; n }, 0];
+            xs.map({ n = n + 1; |x: Int| x + n })[0]
+        }";
+    assert_eq!(value(src), "21");
+    // `?` in the function returns from the function; an exit while the function value is
+    // evaluated releases the receiver.
+    let src = r#"fn half(x: Int) -> Result<Int, Str> { if x % 2 == 0 { Ok(x / 2) } else { Err("odd" + "") } }
+        fn f(r: Result<Int, Str>, stop: Bool) -> Result<Int, Str> {
+            let xs = ["a" + ""];
+            let ys = xs.map(if stop { return Err("stop" + ""); } else { |s: Str| s });
+            r.and_then(|x| { let h = half(x)?; Ok(h + ys.len()) })
+        }
+        fn main() -> Str {
+            let a = f(Ok(4), false);
+            let b = f(Ok(3), false);
+            let c = f(Ok(4), true);
+            a.unwrap_or(0).to_str() + b.err().unwrap_or("") + c.err().unwrap_or("")
+        }"#;
+    assert_eq!(value(src), "3oddstop");
+}
