@@ -687,7 +687,7 @@ fn methods() {
     assert_eq!(hint("fn main() { \"a\".lenn(); }"), "did you mean `len`?");
     assert_eq!(
         hint("fn main() { \"a\".zzzzzz(); }"),
-        "Str has: contains, len, lines, parse_int, split, starts_with, to_bytes, trim"
+        "Str has: contains, ends_with, find, len, lines, parse_int, replace, split, starts_with, strip_prefix, strip_suffix, to_bytes, trim"
     );
     ok("fn main() { let a: List<Str> = \"a\".split(\",\"); let b: List<Str> = \"a\".lines(); let c: Str = \"a\".trim(); let d: Bool = \"a\".contains(\"a\") && \"a\".starts_with(\"a\"); let e: Option<Int> = \"1\".parse_int(); }");
     assert_eq!(reject("fn main() { \"a\".split(1); }").0, "expected Str, found Int");
@@ -1023,6 +1023,52 @@ fn list_methods() {
         "did you mean `push`?"
     );
     reject("fn main() { let mut xs = [1]; xs.push(); }");
+}
+
+#[test]
+fn builtins_l4b() {
+    ok("fn main() { let s = \"ab\"; let a: Bool = s.ends_with(\"b\"); let b: Option<Str> = s.strip_prefix(\"a\"); let c: Option<Str> = s.strip_suffix(\"b\"); let d: Option<Int> = s.find(\"b\"); let e: Str = s.replace(\"a\", \"c\"); }");
+    assert_eq!(
+        reject("fn main() { \"a\".replace(\"a\"); }").0,
+        "`replace` takes 2 arguments, found 1"
+    );
+    assert_eq!(
+        hint("fn main() { \"a\".replace(\"a\"); }"),
+        "`Str.replace` is declared as `replace(Str, Str) -> Str`"
+    );
+    ok("fn main() { let mut xs = [3, 1]; xs.sort(); let p: Option<Int> = xs.pop(); let c: Bool = xs.contains(1); let mut ys = [\"b\"]; ys.sort(); }");
+    ok("struct P { x: Int } fn main() { let xs = [P { x: 1 }]; let c: Bool = xs.contains(P { x: 1 }); }");
+    assert_eq!(
+        reject("fn main() { [1].contains(\"a\"); }").0,
+        "expected Int, found Str"
+    );
+    let (msg, at) = reject("fn main() { let mut xs = [true]; xs.sort(); }");
+    assert_eq!((msg.as_str(), at.as_str()), ("cannot sort List<Bool>", "xs.sort()"));
+    assert_eq!(
+        hint("fn main() { let mut xs = [true]; xs.sort(); }"),
+        "sort works on List<Int> and List<Str>"
+    );
+    let src = "fn f() -> List<Int> { [1] } fn main() { f().sort(); }";
+    assert_eq!(reject(src).0, "cannot `sort` this expression");
+    assert_eq!(hint(src), "`sort` changes a list; call it on a `let mut` variable");
+    let src = "fn f() -> List<Int> { [1] } fn main() { f().pop(); }";
+    assert_eq!(reject(src).0, "cannot `pop` from this expression");
+    assert_eq!(hint(src), "`pop` changes a list; call it on a `let mut` variable");
+    let src = "fn main() { let xs = [1]; xs.pop(); }";
+    assert_eq!(reject(src).0, "cannot `pop` from `xs`, it is not `mut`");
+    assert_eq!(hint(src), "declare it with `let mut`");
+    assert_eq!(
+        reject("fn main() { let xs = [1]; xs.sort(); }").0,
+        "cannot `sort` `xs`, it is not `mut`"
+    );
+    assert_eq!(
+        reject("fn main() { let mut xs = [1]; xs.pop(1); }").0,
+        "`pop` takes 0 arguments, found 1"
+    );
+    assert_eq!(
+        hint("fn main() { let mut xs = [1]; xs.zzzzzz(); }"),
+        "List<Int> has: contains, len, pop, push, sort"
+    );
 }
 
 #[test]

@@ -706,10 +706,14 @@ impl Types<'_> {
                 args.iter().for_each(|a| self.expr(a));
                 None
             }
-            ExprKind::Mutate(p, _, args) => {
+            ExprKind::Mutate(p, m, args) => {
                 self.place(p);
                 args.iter().for_each(|a| self.expr(a));
-                Some(Ty::Unit)
+                Some(if *m == lang::ir::Mut::ListPop {
+                    e.ty.clone()
+                } else {
+                    Ty::Unit
+                })
             }
             ExprKind::List(items) => {
                 let Ty::List(t) = &e.ty else {

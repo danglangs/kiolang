@@ -373,6 +373,8 @@ impl<'a> Lowerer<'a> {
                 return ir::ExprKind::CapCall(self.lookup(cap), m as u32, self.exprs(args));
             }
             (T::List(_), "push") => Mut::ListPush,
+            (T::List(_), "sort") => Mut::ListSort,
+            (T::List(_), "pop") => Mut::ListPop,
             (T::Bytes, "push") => Mut::BytesPush,
             (T::Map(..), "insert") => Mut::MapInsert,
             (T::Map(..), "remove") => Mut::MapRemove,
@@ -387,6 +389,12 @@ impl<'a> Lowerer<'a> {
                     (T::Str, "contains") => Builtin::StrContains,
                     (T::Str, "starts_with") => Builtin::StrStartsWith,
                     (T::Str, "parse_int") => Builtin::StrParseInt,
+                    (T::Str, "ends_with") => Builtin::StrEndsWith,
+                    (T::Str, "strip_prefix") => Builtin::StrStripPrefix,
+                    (T::Str, "strip_suffix") => Builtin::StrStripSuffix,
+                    (T::Str, "find") => Builtin::StrFind,
+                    (T::Str, "replace") => Builtin::StrReplace,
+                    (T::List(_), "contains") => Builtin::ListContains,
                     (T::Bytes, "len") => Builtin::BytesLen,
                     (T::Bytes, "to_str") => Builtin::BytesToStr,
                     (T::List(_), "len") => Builtin::ListLen,

@@ -965,3 +965,156 @@ fn break_in_a_match_arm_outside_a_loop_is_rejected() {
     assert_eq!(d.msg, "`break` outside a loop");
     assert_eq!(d.hint.as_deref(), Some("use `return` to leave a function"));
 }
+
+fn some_int(n: i64) -> Value {
+    Value::Enum(EnumRef::Option, 1, vec![Value::Int(n)])
+}
+
+fn some_str(s: &str) -> Value {
+    Value::Enum(EnumRef::Option, 1, vec![Value::Str(s.into())])
+}
+
+fn none_val() -> Value {
+    Value::Enum(EnumRef::Option, 0, vec![])
+}
+
+#[test]
+fn str_ends_with() {
+    assert_eq!(
+        int("fn main() -> Bool { \"abc\".ends_with(\"bc\") }"),
+        Value::Bool(true)
+    );
+    assert_eq!(int("fn main() -> Bool { \"abc\".ends_with(\"\") }"), Value::Bool(true));
+    assert_eq!(int("fn main() -> Bool { \"\".ends_with(\"a\") }"), Value::Bool(false));
+    assert_eq!(
+        int("fn main() -> Bool { \"abc\".ends_with(\"abcd\") }"),
+        Value::Bool(false)
+    );
+}
+
+#[test]
+fn str_strip_prefix_and_suffix() {
+    assert_eq!(
+        int("fn main() -> Option<Str> { \"abc\".strip_prefix(\"ab\") }"),
+        some_str("c")
+    );
+    assert_eq!(
+        int("fn main() -> Option<Str> { \"abc\".strip_prefix(\"abc\") }"),
+        some_str("")
+    );
+    assert_eq!(
+        int("fn main() -> Option<Str> { \"abc\".strip_prefix(\"\") }"),
+        some_str("abc")
+    );
+    assert_eq!(
+        int("fn main() -> Option<Str> { \"abc\".strip_prefix(\"b\") }"),
+        none_val()
+    );
+    assert_eq!(int("fn main() -> Option<Str> { \"\".strip_prefix(\"a\") }"), none_val());
+    assert_eq!(
+        int("fn main() -> Option<Str> { \"abc\".strip_suffix(\"bc\") }"),
+        some_str("a")
+    );
+    assert_eq!(
+        int("fn main() -> Option<Str> { \"abc\".strip_suffix(\"\") }"),
+        some_str("abc")
+    );
+    assert_eq!(
+        int("fn main() -> Option<Str> { \"abc\".strip_suffix(\"b\") }"),
+        none_val()
+    );
+}
+
+#[test]
+fn str_find() {
+    assert_eq!(int("fn main() -> Option<Int> { \"abcb\".find(\"b\") }"), some_int(1));
+    assert_eq!(int("fn main() -> Option<Int> { \"abc\".find(\"\") }"), some_int(0));
+    assert_eq!(int("fn main() -> Option<Int> { \"\".find(\"\") }"), some_int(0));
+    assert_eq!(int("fn main() -> Option<Int> { \"abc\".find(\"z\") }"), none_val());
+    assert_eq!(int("fn main() -> Option<Int> { \"\".find(\"a\") }"), none_val());
+    // A byte offset, not a character index.
+    assert_eq!(int("fn main() -> Option<Int> { \"éa\".find(\"a\") }"), some_int(2));
+}
+
+#[test]
+fn str_replace() {
+    assert_eq!(
+        int("fn main() -> Str { \"abab\".replace(\"b\", \"xy\") }"),
+        Value::Str("axyaxy".into())
+    );
+    assert_eq!(
+        int("fn main() -> Str { \"aaa\".replace(\"aa\", \"b\") }"),
+        Value::Str("ba".into())
+    );
+    assert_eq!(
+        int("fn main() -> Str { \"abc\".replace(\"z\", \"y\") }"),
+        Value::Str("abc".into())
+    );
+    assert_eq!(
+        int("fn main() -> Str { \"abc\".replace(\"\", \"-\") }"),
+        Value::Str("-a-b-c-".into())
+    );
+    assert_eq!(
+        int("fn main() -> Str { \"\".replace(\"\", \"-\") }"),
+        Value::Str("-".into())
+    );
+    assert_eq!(
+        int("fn main() -> Str { \"abc\".replace(\"b\", \"\") }"),
+        Value::Str("ac".into())
+    );
+}
+
+#[test]
+fn list_contains() {
+    assert_eq!(int("fn main() -> Bool { [1, 2].contains(2) }"), Value::Bool(true));
+    assert_eq!(int("fn main() -> Bool { [1, 2].contains(3) }"), Value::Bool(false));
+    let empty = "fn main() -> Bool { let xs: List<Int> = []; xs.contains(1) }";
+    assert_eq!(int(empty), Value::Bool(false));
+    assert_eq!(int("fn main() -> Bool { [\"a\"].contains(\"a\") }"), Value::Bool(true));
+    let src = "struct P { x: Int } fn main() -> Bool { [P { x: 1 }].contains(P { x: 1 }) }";
+    assert_eq!(int(src), Value::Bool(true));
+}
+
+#[test]
+fn list_sort() {
+    let sorted = "fn main() -> List<Int> { let mut xs = [3, -1, 2, 2]; xs.sort(); xs }";
+    assert_eq!(
+        int(sorted),
+        Value::List(vec![Value::Int(-1), Value::Int(2), Value::Int(2), Value::Int(3)].into())
+    );
+    assert_eq!(
+        int("fn main() -> List<Str> { let mut xs = [\"b\", \"B\", \"a\", \"\", \"ab\"]; xs.sort(); xs }"),
+        strs(&["", "B", "a", "ab", "b"])
+    );
+    let empty = "fn main() -> List<Int> { let mut xs: List<Int> = []; xs.sort(); xs }";
+    assert_eq!(int(empty), Value::List(vec![].into()));
+    let nested = "struct S { v: List<Int> } fn main() -> List<Int> { let mut s = S { v: [2, 1] }; s.v.sort(); s.v }";
+    assert_eq!(int(nested), Value::List(vec![Value::Int(1), Value::Int(2)].into()));
+    // Bytes order: uppercase before lowercase, multibyte after ASCII.
+    assert_eq!(
+        int("fn main() -> List<Str> { let mut xs = [\"é\", \"z\"]; xs.sort(); xs }"),
+        strs(&["z", "é"])
+    );
+}
+
+#[test]
+fn list_sort_and_pop_copy() {
+    let src = "fn main() -> List<Int> { let a = [2, 1]; let mut b = a; b.sort(); a }";
+    assert_eq!(int(src), Value::List(vec![Value::Int(2), Value::Int(1)].into()));
+    let src = "fn main() -> Int { let a = [2, 1]; let mut b = a; b.sort(); b[0] }";
+    assert_eq!(int(src), Value::Int(1));
+    let src = "fn main() -> Int { let a = [1, 2]; let mut b = a; b.pop(); a.len() * 10 + b.len() }";
+    assert_eq!(int(src), Value::Int(21));
+}
+
+#[test]
+fn list_pop() {
+    let src = "fn main() -> Option<Int> { let mut xs = [1, 2]; xs.pop() }";
+    assert_eq!(int(src), some_int(2));
+    let src = "fn main() -> Int { let mut xs = [1, 2]; xs.pop(); xs.len() }";
+    assert_eq!(int(src), Value::Int(1));
+    let src = "fn main() -> Option<Int> { let mut xs: List<Int> = []; xs.pop() }";
+    assert_eq!(int(src), none_val());
+    let src = "struct S { v: List<Int> } fn main() -> Option<Int> { let mut s = S { v: [1, 5] }; s.v.pop() }";
+    assert_eq!(int(src), some_int(5));
+}

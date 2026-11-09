@@ -228,6 +228,12 @@ pub enum Builtin {
     StrContains,
     StrStartsWith,
     StrParseInt,
+    StrEndsWith,
+    StrStripPrefix,
+    StrStripSuffix,
+    StrFind,
+    StrReplace,
+    ListContains,
     BytesLen,
     BytesToStr,
     ListLen,
@@ -246,6 +252,8 @@ pub enum Builtin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mut {
     ListPush,
+    ListSort,
+    ListPop,
     BytesPush,
     MapInsert,
     MapRemove,

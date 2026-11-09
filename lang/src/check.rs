@@ -667,6 +667,9 @@ fn method(caps: &CapTable, recv: &Ty, name: &str) -> Option<(Vec<Ty>, Ty)> {
         (Ty::Int, "to_str") | (Ty::Bytes, "to_str") => Some((vec![], Ty::Str)),
         (Ty::Str, "len") | (Ty::Bytes, "len") | (Ty::List(_), "len") => Some((vec![], Ty::Int)),
         (Ty::List(t), "push") => Some((vec![(**t).clone()], Ty::Unit)),
+        (Ty::List(t), "contains") => Some((vec![(**t).clone()], Ty::Bool)),
+        (Ty::List(_), "sort") => Some((vec![], Ty::Unit)),
+        (Ty::List(t), "pop") => Some((vec![], Ty::Option(t.clone()))),
         (Ty::Bytes, "push") => Some((vec![Ty::Int], Ty::Unit)),
         (Ty::Option(t), "unwrap_or") | (Ty::Result(t, _), "unwrap_or") => Some((vec![(**t).clone()], (**t).clone())),
         (Ty::Option(_), "is_some" | "is_none") | (Ty::Result(..), "is_ok" | "is_err") => Some((vec![], Ty::Bool)),
@@ -679,7 +682,10 @@ fn method(caps: &CapTable, recv: &Ty, name: &str) -> Option<(Vec<Ty>, Ty)> {
         (Ty::Str, "split") => Some((vec![Ty::Str], Ty::List(Box::new(Ty::Str)))),
         (Ty::Str, "lines") => Some((vec![], Ty::List(Box::new(Ty::Str)))),
         (Ty::Str, "trim") => Some((vec![], Ty::Str)),
-        (Ty::Str, "contains") | (Ty::Str, "starts_with") => Some((vec![Ty::Str], Ty::Bool)),
+        (Ty::Str, "contains" | "starts_with" | "ends_with") => Some((vec![Ty::Str], Ty::Bool)),
+        (Ty::Str, "strip_prefix" | "strip_suffix") => Some((vec![Ty::Str], Ty::Option(Box::new(Ty::Str)))),
+        (Ty::Str, "find") => Some((vec![Ty::Str], Ty::Option(Box::new(Ty::Int)))),
+        (Ty::Str, "replace") => Some((vec![Ty::Str, Ty::Str], Ty::Str)),
         (Ty::Str, "parse_int") => Some((vec![], Ty::Option(Box::new(Ty::Int)))),
         _ => None,
     }
@@ -694,6 +700,8 @@ fn declared(recv: &Ty, name: &str, params: &[Ty], ret: &Ty) -> String {
 /// Every built-in method name, so hints can list the ones `method` accepts on a type.
 const METHODS: &[&str] = &[
     "contains",
+    "ends_with",
+    "find",
     "get",
     "insert",
     "is_err",
@@ -704,10 +712,15 @@ const METHODS: &[&str] = &[
     "len",
     "lines",
     "parse_int",
+    "pop",
     "push",
     "remove",
+    "replace",
+    "sort",
     "split",
     "starts_with",
+    "strip_prefix",
+    "strip_suffix",
     "to_bytes",
     "to_str",
     "trim",
@@ -1394,7 +1407,7 @@ impl Checker<'_> {
         let recv_ty = self.operand(recv, None)?;
         if matches!(
             (&recv_ty, name),
-            (Ty::List(_) | Ty::Bytes, "push") | (Ty::Map(..), "insert" | "remove")
+            (Ty::List(_), "push" | "sort" | "pop") | (Ty::Bytes, "push") | (Ty::Map(..), "insert" | "remove")
         ) {
             self.mutation_target(recv, name, &recv_ty)?;
         }
@@ -1410,6 +1423,12 @@ impl Checker<'_> {
         if args.len() != params.len() {
             let msg = format!("`{name}` takes {} arguments, found {}", params.len(), args.len());
             return Err(err(e.span, msg, Some(&declared(&recv_ty, name, &params, &ret))));
+        }
+        if let (Ty::List(t), "sort") = (&recv_ty, name) {
+            if !matches!(**t, Ty::Int | Ty::Str) {
+                let msg = format!("cannot sort {recv_ty}");
+                return Err(err(e.span, msg, Some("sort works on List<Int> and List<Str>")));
+            }
         }
         for (a, param) in args.iter().zip(&params) {
             let found = self.expr(a, Some(param))?;
@@ -1746,14 +1765,16 @@ impl Checker<'_> {
         Ok(ty)
     }
 
-    /// `push`, `insert` and `remove` change their receiver, so it must be a place rooted at a
+    /// `push`, `insert`, `remove`, `pop` and `sort` change their receiver, so it must be a place rooted at a
     /// `let mut` local.
     fn mutation_target(&mut self, recv: &Expr, method: &str, recv_ty: &Ty) -> Result<(), Diag> {
         let (noun, to) = match (recv_ty, method) {
-            (Ty::List(_), _) => ("list", "to"),
-            (Ty::Bytes, _) => ("bytes", "to"),
-            (_, "remove") => ("map", "from"),
-            _ => ("map", "to"),
+            (Ty::List(_), "sort") => ("list", ""),
+            (Ty::List(_), "pop") => ("list", " from"),
+            (Ty::List(_), _) => ("list", " to"),
+            (Ty::Bytes, _) => ("bytes", " to"),
+            (_, "remove") => ("map", " from"),
+            _ => ("map", " to"),
         };
         let mut root = recv;
         while let ExprKind::Field(base, _) | ExprKind::Index(base, _) = &root.kind {
@@ -1763,12 +1784,12 @@ impl Checker<'_> {
             let hint = format!("`{method}` changes a {noun}; call it on a `let mut` variable");
             return Err(err(
                 recv.span,
-                format!("cannot `{method}` {to} this expression"),
+                format!("cannot `{method}`{to} this expression"),
                 Some(&hint),
             ));
         };
         if !self.lookup(name).is_some_and(|l| l.mutable) {
-            let msg = format!("cannot `{method}` {to} `{name}`, it is not `mut`");
+            let msg = format!("cannot `{method}`{to} `{name}`, it is not `mut`");
             return Err(err(root.span, msg, Some("declare it with `let mut`")));
         }
         Ok(())

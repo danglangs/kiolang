@@ -318,7 +318,7 @@ impl<'a> Interp<'a> {
         Ok(slot)
     }
 
-    /// `push`, `insert` and `remove`: the place's indexes, then the arguments, then the change.
+    /// `push`, `insert`, `remove`, `pop` and `sort`: the place's indexes, then the arguments, then the change.
     #[inline(never)]
     fn mutate(&mut self, place: &'a Place, op: Mut, args: &'a [Expr], span: Span) -> Res {
         let start = self.path.len();
@@ -329,13 +329,27 @@ impl<'a> Interp<'a> {
 
     fn mutate_at(&mut self, start: usize, place: &'a Place, op: Mut, args: &'a [Expr], span: Span) -> Res {
         self.place_indexes(place)?;
-        let a = self.expr(&args[0])?;
+        let a = match args.first() {
+            Some(e) => self.expr(e)?,
+            None => Value::Unit,
+        };
         let b = match args.get(1) {
             Some(e) => Some(self.expr(e)?),
             None => None,
         };
         match (self.slot(place, start)?, op, a, b) {
             (Value::List(vals), Mut::ListPush, item, _) => Rc::make_mut(vals).push(item),
+            (Value::List(vals), Mut::ListSort, ..) => Rc::make_mut(vals).sort_by(|a, b| match (a, b) {
+                (Value::Int(a), Value::Int(b)) => a.cmp(b),
+                (Value::Str(a), Value::Str(b)) => a.cmp(b),
+                _ => unreachable!("checked sort"),
+            }),
+            (Value::List(vals), Mut::ListPop, ..) => {
+                return Ok(match Rc::make_mut(vals).pop() {
+                    Some(v) => some(v),
+                    None => none(),
+                })
+            }
             (Value::Bytes(b), Mut::BytesPush, Value::Int(n), _) => match u8::try_from(n) {
                 Ok(n) => Rc::make_mut(b).push(n),
                 Err(_) => return Err(fail(span, &format!("byte {n} out of range 0..=255"))),
@@ -523,22 +537,21 @@ impl<'a> Interp<'a> {
             return r;
         }
         let recv = self.expr(recv)?;
-        let arg = self.arg(args)?;
-        builtin(&recv, b, arg, span)
+        let args = self.arg(args)?;
+        builtin(&recv, b, args, span)
     }
 
     fn builtin_in_place(&mut self, start: usize, b: Builtin, recv: &'a Expr, args: &'a [Expr], span: Span) -> Res {
         let root = self.steps(recv, start)?;
-        let arg = self.arg(args)?;
-        builtin(&self.view(root, &self.path[start..]), b, arg, span)
+        let args = self.arg(args)?;
+        builtin(&self.view(root, &self.path[start..]), b, args, span)
     }
 
-    /// The one argument a built-in method may take.
-    fn arg(&mut self, args: &'a [Expr]) -> Result<Option<Value>, Box<Stop>> {
-        match args.first() {
-            Some(a) => Ok(Some(self.expr(a)?)),
-            None => Ok(None),
-        }
+    /// The arguments a built-in method may take: at most two.
+    fn arg(&mut self, args: &'a [Expr]) -> Result<Args, Box<Stop>> {
+        let first = args.first().map(|a| self.expr(a)).transpose()?;
+        let second = args.get(1).map(|a| self.expr(a)).transpose()?;
+        Ok((first, second))
     }
 
     /// A field or element: read in place when `e` is part of a local, else from its value.
@@ -742,6 +755,8 @@ fn returned(r: Res) -> Res {
     }
 }
 
+type Args = (Option<Value>, Option<Value>);
+
 fn some(v: Value) -> Value {
     Value::Enum(EnumRef::Option, 1, vec![v])
 }
@@ -758,7 +773,7 @@ fn str_arg(arg: Option<Value>) -> Rc<str> {
 }
 
 /// Built-in method `b` on `recv`, which may be part of a local, with its argument if it takes one.
-fn builtin(recv: &Value, b: Builtin, arg: Option<Value>, span: Span) -> Res {
+fn builtin(recv: &Value, b: Builtin, (arg, arg2): Args, span: Span) -> Res {
     use Builtin as B;
     Ok(match (b, recv) {
         (B::IntToStr, Value::Int(n)) => Value::Str(n.to_string().into()),
@@ -775,6 +790,21 @@ fn builtin(recv: &Value, b: Builtin, arg: Option<Value>, span: Span) -> Res {
         (B::StrTrim, Value::Str(s)) => Value::Str(s.trim().into()),
         (B::StrContains, Value::Str(s)) => Value::Bool(s.contains(&*str_arg(arg))),
         (B::StrStartsWith, Value::Str(s)) => Value::Bool(s.starts_with(&*str_arg(arg))),
+        (B::StrEndsWith, Value::Str(s)) => Value::Bool(s.ends_with(&*str_arg(arg))),
+        (B::StrStripPrefix, Value::Str(s)) => match s.strip_prefix(&*str_arg(arg)) {
+            Some(r) => some(Value::Str(r.into())),
+            None => none(),
+        },
+        (B::StrStripSuffix, Value::Str(s)) => match s.strip_suffix(&*str_arg(arg)) {
+            Some(r) => some(Value::Str(r.into())),
+            None => none(),
+        },
+        (B::StrFind, Value::Str(s)) => match s.find(&*str_arg(arg)) {
+            Some(i) => some(Value::Int(i as i64)),
+            None => none(),
+        },
+        (B::StrReplace, Value::Str(s)) => Value::Str(s.replace(&*str_arg(arg), &str_arg(arg2)).into()),
+        (B::ListContains, Value::List(v)) => Value::Bool(v.contains(&arg.expect("checked argument"))),
         (B::StrParseInt, Value::Str(s)) => match s.parse::<i64>() {
             Ok(n) => some(Value::Int(n)),
             Err(_) => none(),
