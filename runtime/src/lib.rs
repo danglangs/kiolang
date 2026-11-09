@@ -4,6 +4,7 @@
 //! - `desc`: type descriptors, the table codegen emits as data.
 //! - `display`: a value as `kio run` prints it.
 //! - `heap`: the allocator, size-class free lists over dlmalloc.
+//! - `json`: built-in JSON, parsed into and encoded from kio objects.
 //! - `obj`: object layout, allocation, `inc`, `dec`, `unique`; the safe-to-call Rust layer.
 //! - `abi`: the `extern "C"` functions generated code calls, over `u32` addresses (wasm32 only).
 //! - `entry`: the `compiled` world's `run` export, and the entry codegen fills (wasm32 only).
@@ -25,6 +26,7 @@ pub mod desc;
 pub mod display;
 pub mod float;
 pub mod heap;
+pub mod json;
 pub mod obj;
 pub mod text;
 
@@ -43,6 +45,8 @@ mod display_tests;
 mod float_tests;
 #[cfg(test)]
 mod heap_tests;
+#[cfg(test)]
+mod json_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

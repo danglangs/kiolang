@@ -117,6 +117,16 @@ fn the_runtime_exports_every_operation() {
         "rt_map_insert",
         "rt_map_remove",
         "rt_live",
+        "rt_json_parse",
+        "rt_json_encode",
+        "rt_json_get",
+        "rt_json_at",
+        "rt_json_as_str",
+        "rt_json_as_int",
+        "rt_json_as_float",
+        "rt_json_as_bool",
+        "rt_json_as_list",
+        "rt_json_as_map",
     ];
     let missing: Vec<_> = ops.iter().filter(|op| !rt.exports.contains_key(**op)).collect();
     assert!(missing.is_empty(), "{missing:?}");
@@ -332,4 +342,32 @@ fn main() -> Int { 0 }
     assert_eq!(of("size"), [true]);
     // The closure in `captured` reads its capture in place.
     assert_eq!(of("captured::{closure#0}"), [true, false]);
+}
+
+/// A program that names no `Json` type itself still has its descriptors: `parse_json`'s result
+/// type brings `Json`, `List<Json>` and `Map<Str, Json>` into the table, where the runtime
+/// finds them through it. Each JSON method's call validates against its runtime export.
+#[test]
+fn json_methods_compile() {
+    let m = module(
+        r#"fn main() -> Bool {
+    let j = "[1]".parse_json().ok().unwrap_or(Json::Null);
+    j.to_json().len() > 0 && j.get("a").is_none() && j.at(0).is_some() && j.as_str().is_none()
+        && j.as_int().is_none() && j.as_float().is_none() && j.as_bool().is_none()
+        && j.as_list().is_some() && j.as_map().is_none()
+}"#,
+    );
+    let wasm = compile(&m).unwrap();
+    wasmparser::Validator::new().validate_all(&wasm.component).unwrap();
+    let json = Ty::Enum(m.json());
+    let mut s = Statics::new(&m, 0, 0);
+    s.desc(&Ty::Result(Box::new(json.clone()), Box::new(Ty::Str)));
+    let fresh = s.desc(&Ty::List(Box::new(Ty::Bytes)));
+    for t in [
+        json.clone(),
+        Ty::List(Box::new(json.clone())),
+        Ty::Map(Box::new(Ty::Str), Box::new(json)),
+    ] {
+        assert!(s.desc(&t) < fresh, "{t:?} came with the result type");
+    }
 }

@@ -17,6 +17,8 @@ CARGO_TARGET_DIR="$BENCH/target" cargo build --release --manifest-path rust/Carg
 python3 gen_data.py
 rm -rf build
 mkdir -p build/kio build/hello
-cp kio/*.kio "$KIO_WEB/json.kio" build/kio/
+cp kio/*.kio build/kio/
+# `Json` is a built-in type now (L9); until kio-web moves to it, its json.kio's own enum is renamed.
+sed 's/Json/JsonKio/g' "$KIO_WEB/json.kio" > build/kio/json.kio
 cp -R "$KIO_WEB/examples/hello/app.kio" "$KIO_WEB/examples/hello/public" "$KIO_WEB/web.kio" build/hello/
 exec python3 run.py

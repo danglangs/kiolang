@@ -3,6 +3,7 @@ mod caps_gen;
 pub mod check;
 pub mod eval;
 pub mod ir;
+pub mod json;
 pub mod lex;
 pub mod lower;
 pub mod parse;

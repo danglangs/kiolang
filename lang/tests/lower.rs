@@ -705,7 +705,7 @@ fn capability_error_enums_come_first() {
     let m = lower(&p, &caps);
     let names: Vec<_> = m.enums.iter().map(|e| e.name.as_str()).collect();
     let mut want: Vec<_> = caps.enums.iter().map(|e| e.name.as_str()).collect();
-    want.push("A");
+    want.extend(["Json", "A"]);
     assert_eq!(names, want);
     let caps_names: Vec<_> = m.caps.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(
@@ -1001,12 +1001,12 @@ fn generic_types_are_monomorphized() {
             "Page [(\"items\", List(Str)), (\"next\", Option(Int))]",
         ]
     );
-    let enums: Vec<_> = (m.enums.iter())
+    let enums: Vec<_> = (m.enums.iter().skip(1)) // `Json` first
         .map(|e| format!("{} {:?}", e.name, e.variants))
         .collect();
     assert_eq!(
         enums,
-        ["Tree [(\"Leaf\", []), (\"Node\", [List(Enum(EnumId(0))), Int])]"]
+        ["Tree [(\"Leaf\", []), (\"Node\", [List(Enum(EnumId(1))), Int])]"]
     );
 }
 

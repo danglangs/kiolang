@@ -39,6 +39,7 @@ BENCHES = [
     ("closures", "`map`/`filter` with closures, 1 M", None),
     ("mandel", "Mandelbrot 400x400, 100 iterations", None),
     ("json", "JSON parse + encode, 1 MB (json.kio)", "data.json"),
+    ("json_builtin", "JSON parse + encode, 1 MB (built-in)", "data.json"),
 ]
 
 
@@ -65,11 +66,16 @@ def best(cmd, env=None, runs=RUNS):
     return min(times), out, len(times)
 
 
+# Benchmarks timed against another's Rust and Python versions.
+SHARED = {"json_builtin": "json"}
+
+
 def commands(name, data):
     kio_file = os.path.join(BUILD, "kio", ("jsonb" if name == "json" else name) + ".kio")
     kio_args = ["--dir", "data=" + DATA] if data else []
-    rust = [os.path.join(RUST, name)] + ([os.path.join(DATA, data)] if data else [])
-    py = [sys.executable, os.path.join(BENCH, "py", ("json_bench" if name == "json" else name) + ".py")]
+    other = SHARED.get(name, name)
+    rust = [os.path.join(RUST, other)] + ([os.path.join(DATA, data)] if data else [])
+    py = [sys.executable, os.path.join(BENCH, "py", ("json_bench" if other == "json" else other) + ".py")]
     py += [os.path.join(DATA, data)] if data else []
     return (
         [KIO, "run", kio_file] + kio_args + LIMITS,

@@ -275,15 +275,15 @@ fn private_items_stay_private() {
 
 #[test]
 fn modules_use_each_others_public_items() {
-    let json = "pub enum Json { Null, Num(Int) } pub fn null() -> Json { Json::Null }
-                pub fn num(n: Int) -> Json { Json::Num(n) }";
-    let web = "pub struct Reply { body: json::Json }
+    let json = "pub enum Doc { Null, Num(Int) } pub fn null() -> Doc { Doc::Null }
+                pub fn num(n: Int) -> Doc { Doc::Num(n) }";
+    let web = "pub struct Reply { body: json::Doc }
                pub fn reply(n: Int) -> Reply { web::Reply { body: json::num(n) } }
                pub fn code(r: Reply) -> Int {
-                 match r.body { json::Json::Num(n) => n, json::Json::Null => 0 }
+                 match r.body { json::Doc::Num(n) => n, json::Doc::Null => 0 }
                }
                fn local() -> Int { web::code(web::reply(1)) }
-               pub fn empty() -> json::Json { json::Json::Null }";
+               pub fn empty() -> json::Doc { json::Doc::Null }";
     let app = "mod web; mod json; fn main() -> Int { web::code(web::reply(7)) }";
     let files = [("app", app), ("web", web), ("json", json)];
     let p = check(&files).unwrap_or_else(|d| panic!("{d:?}"));
@@ -305,12 +305,12 @@ fn modules_may_call_each_other() {
 #[test]
 fn module_function_as_a_builtin_argument() {
     // kio-web's W9a case: `json::get(j, "title").and_then(json::as_str)`.
-    let json = "pub enum Json { Str(Str), Num(Int) }
-                pub fn get(j: List<Json>, i: Int) -> Option<Json> { if i < j.len() { Some(j[i]) } else { None } }
-                pub fn as_str(j: Json) -> Option<Str> { match j { Json::Str(s) => Some(s), _ => None } }";
+    let json = "pub enum Doc { Str(Str), Num(Int) }
+                pub fn get(j: List<Doc>, i: Int) -> Option<Doc> { if i < j.len() { Some(j[i]) } else { None } }
+                pub fn as_str(j: Doc) -> Option<Str> { match j { Doc::Str(s) => Some(s), _ => None } }";
     let app = "mod json;
                fn main() -> List<Option<Str>> {
-                 let j = [json::Json::Num(1), json::Json::Str(\"kio\")];
+                 let j = [json::Doc::Num(1), json::Doc::Str(\"kio\")];
                  [0, 1, 2].map(|i| json::get(j, i).and_then(json::as_str))
                }";
     let p = check(&[("app", app), ("json", json)]).unwrap_or_else(|d| panic!("{d:?}"));

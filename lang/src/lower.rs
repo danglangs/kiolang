@@ -24,7 +24,9 @@ pub fn lower(p: &Program, caps: &CapTable) -> Module {
     // So is a generic type: one struct or enum per instance, made when its type is lowered.
     let plain = |k: &&String| p.tparams[*k].is_empty();
     let structs = sorted(p.structs.keys().filter(plain).collect());
+    // The capability error enums, then `Json`, at fixed ids; then the program's.
     let mut enums: Vec<String> = caps.enums.iter().map(|e| e.name.clone()).collect();
+    enums.push("Json".to_string());
     enums.extend(sorted(
         p.enums.keys().filter(|k| !enums.contains(k) && plain(k)).collect(),
     ));
@@ -680,6 +682,16 @@ impl<'a> Lowerer<'a> {
                     (T::List(_), "filter") => Builtin::ListFilter,
                     (T::List(_), "any") => Builtin::ListAny,
                     (T::List(_), "all") => Builtin::ListAll,
+                    (T::Str, "parse_json") => Builtin::StrParseJson,
+                    (T::Enum(..), "to_json") => Builtin::JsonToJson,
+                    (T::Enum(..), "get") => Builtin::JsonGet,
+                    (T::Enum(..), "at") => Builtin::JsonAt,
+                    (T::Enum(..), "as_str") => Builtin::JsonAsStr,
+                    (T::Enum(..), "as_int") => Builtin::JsonAsInt,
+                    (T::Enum(..), "as_float") => Builtin::JsonAsFloat,
+                    (T::Enum(..), "as_bool") => Builtin::JsonAsBool,
+                    (T::Enum(..), "as_list") => Builtin::JsonAsList,
+                    (T::Enum(..), "as_map") => Builtin::JsonAsMap,
                     _ => unreachable!("checked method"),
                 };
                 return ir::ExprKind::Builtin(b, Box::new(self.expr(recv)), self.exprs(args));

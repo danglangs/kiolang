@@ -582,6 +582,15 @@ impl<'a> Interp<'a> {
             let f = self.expr(&args[0])?;
             return self.with_fn(b, recv, &f, span);
         }
+        if b == Builtin::StrParseJson {
+            let Value::Str(s) = self.expr(recv)? else {
+                unreachable!("checked Str");
+            };
+            return Ok(match crate::json::parse(&s, self.m.json()) {
+                Ok(j) => ok(j),
+                Err(e) => Value::Enum(EnumRef::Result, 1, vec![Value::Str(e.into())]),
+            });
+        }
         if in_place(recv) && args.iter().all(pure) {
             let start = self.path.len();
             let r = self.builtin_in_place(start, b, recv, args, span);
@@ -1024,6 +1033,44 @@ fn builtin(recv: &Value, b: Builtin, (arg, arg2): Args, span: Span) -> Res {
                 Value::Enum(EnumRef::Result, 0, vec![payload[0].clone()])
             } else {
                 Value::Enum(EnumRef::Result, 1, vec![arg.expect("checked argument")])
+            }
+        }
+        (B::JsonToJson, j) => Value::Str(crate::json::encode(j).into()),
+        (B::JsonGet, Value::Enum(_, i, p)) => match (*i, &p[..]) {
+            (crate::json::OBJ, [Value::Map(m)]) => match m.get(&Key::Str(str_arg(arg).to_string())) {
+                Some(v) => some(v.clone()),
+                None => none(),
+            },
+            _ => none(),
+        },
+        (B::JsonAt, Value::Enum(_, i, p)) => match (*i, &p[..], arg) {
+            (crate::json::ARR, [Value::List(xs)], Some(Value::Int(k))) => {
+                match usize::try_from(k).ok().and_then(|k| xs.get(k)) {
+                    Some(v) => some(v.clone()),
+                    None => none(),
+                }
+            }
+            _ => none(),
+        },
+        (B::JsonAsFloat, Value::Enum(_, crate::json::NUM, p)) => match p[..] {
+            [Value::Int(n)] => some(Value::Float(n as f64)),
+            _ => unreachable!("checked Json"),
+        },
+        (
+            B::JsonAsStr | B::JsonAsInt | B::JsonAsFloat | B::JsonAsBool | B::JsonAsList | B::JsonAsMap,
+            Value::Enum(_, i, p),
+        ) => {
+            let want = match b {
+                B::JsonAsStr => crate::json::STR,
+                B::JsonAsInt => crate::json::NUM,
+                B::JsonAsFloat => crate::json::FLOAT,
+                B::JsonAsBool => crate::json::BOOL,
+                B::JsonAsList => crate::json::ARR,
+                _ => crate::json::OBJ,
+            };
+            match *i == want {
+                true => some(p[0].clone()),
+                false => none(),
             }
         }
         _ => unreachable!("checked method"),

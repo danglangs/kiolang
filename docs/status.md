@@ -35,6 +35,7 @@ Compiled-only kio covers the whole language and every capability; the active str
 | C8b2 | last-use moves and borrowed local operands (no inc/dec), word-at-a-time `Str` compare, one descriptor lookup per free, inline `Bytes` paths; kiogen generates strings. Tree 284 to 244 ms, JSON 143 to 101; word count unchanged (83 ms) |
 | C8b3 | size-class free lists (8-64 bytes) over dlmalloc, handed back past 256 KB or when memory runs out. Tree 243 to 179 ms, JSON 100 to 82, word count 83 to 75, strings 7.9 to 5.2 |
 | C8b4 | borrowed parameters (a pointer parameter only read in place is passed without an inc; optimistic fixpoint, `fn`-value wrappers adapt) and `Str` map lookups without a key copy. Word count 74 to 70 ms, JSON 83 to 80, tree 179 to 185 (same count, code moved) |
+| L9, C12 | built-in JSON: a reserved `Json` enum, `Str.parse_json() -> Result<Json, Str>`, `Json.to_json()`, accessors (`get`, `at`, `as_*`), json.kio's rules and messages, depth 128; the interpreter (lang/src/json.rs) and the runtime (runtime/src/json.rs, building kio objects directly) agree on the harness, a generated-JSON fuzz test and byte mutations. 1 MB parse + encode 17 ms compiled (`serde_json` 7.8 ms, json.kio 82 ms). kio-web still declares its own `Json` and is refused until it moves to the built-in |
 
 ## Next
 
@@ -42,8 +43,7 @@ C8 (roadmap.md): word count's map (`BTreeMap` node search, `split`'s allocations
 
 ## Waiting on the maintainer
 
-| Question | Proposal | Blocks |
-|---|---|---|
+Nothing.
 
 ## Speed (C8b4, 2026-11-09, release, run time; all in [roadmap.md](roadmap.md))
 

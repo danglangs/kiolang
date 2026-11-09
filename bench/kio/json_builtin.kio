@@ -1,0 +1,12 @@
+// Parse and encode 1 MB of JSON (data/data.json) with the built-in `parse_json` and `to_json`;
+// jsonb.kio does the same with kio-web's json.kio.
+fn main(data: Dir) -> Int {
+    let text = match data.read("data.json") {
+        Ok(b) => b.to_str(),
+        Err(_) => return -1,
+    };
+    match text.parse_json() {
+        Ok(j) => j.to_json().len(),
+        Err(_) => -2,
+    }
+}

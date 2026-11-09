@@ -165,11 +165,11 @@ fn equality_on_instances_whose_arguments_allow_it() {
 
 #[test]
 fn json_style_enum_is_unchanged() {
-    let src = "enum Json { Null, Num(Int), Str(Str), Arr(List<Json>), Obj(Map<Str, Json>) }
-               fn size(j: Json) -> Int {
-                 match j { Json::Arr(xs) => { let mut n = 1; for x in xs { n += size(x); } n }, _ => 1 }
+    let src = "enum Doc { Null, Num(Int), Str(Str), Arr(List<Doc>), Obj(Map<Str, Doc>) }
+               fn size(j: Doc) -> Int {
+                 match j { Doc::Arr(xs) => { let mut n = 1; for x in xs { n += size(x); } n }, _ => 1 }
                }
-               fn main() -> Int { size(Json::Arr([Json::Null, Json::Num(1), Json::Arr([Json::Str(\"a\")])])) }";
+               fn main() -> Int { size(Doc::Arr([Doc::Null, Doc::Num(1), Doc::Arr([Doc::Str(\"a\")])])) }";
     assert_eq!(shown(src), "5");
 }
 

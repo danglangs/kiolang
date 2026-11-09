@@ -12,7 +12,7 @@
 use crate::desc::{RawTable, Table};
 use crate::entry::{rt_trap, trap3};
 use crate::obj::{self, Header};
-use crate::{coll, desc, float, text};
+use crate::{coll, desc, float, json, text};
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 static TABLE: AtomicU32 = AtomicU32::new(0);
@@ -403,6 +403,56 @@ pub unsafe extern "C" fn rt_result_is_err(r: u32) -> bool {
     // SAFETY: the group's contract.
     unsafe { variant(r) == 1 }
 }
+
+// Built-in JSON (runtime/src/json.rs).
+
+/// `s.parse_json()`: `desc` is `Result<Json, Str>`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_json_parse(desc: u32, s: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unsafe { addr(json::parse(&table(), desc, ptr(s))) }
+}
+
+/// `j.to_json()`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_json_encode(j: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unsafe { addr(json::encode(&table(), ptr(j))) }
+}
+
+/// `j.get(k)`: `desc` is `Option<Json>`, `none` its pinned `None`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_json_get(desc: u32, none: u32, j: u32, k: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unsafe { addr(json::get(&table(), desc, ptr(none), ptr(j), ptr(k))) }
+}
+
+/// `j.at(i)`: `desc` is `Option<Json>`, `none` its pinned `None`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_json_at(desc: u32, none: u32, j: u32, i: i64) -> u32 {
+    // SAFETY: the group's contract.
+    unsafe { addr(json::at(&table(), desc, ptr(none), ptr(j), i)) }
+}
+
+/// The `as_*` accessors: `desc` is `Option` of the payload type, `none` its pinned `None`.
+macro_rules! json_as {
+    ($($name:ident: $variant:ident),*) => {$(
+        #[no_mangle]
+        pub unsafe extern "C" fn $name(desc: u32, none: u32, j: u32) -> u32 {
+            // SAFETY: the group's contract.
+            unsafe { addr(json::as_variant(&table(), desc, ptr(none), ptr(j), json::$variant)) }
+        }
+    )*};
+}
+
+json_as!(
+    rt_json_as_str: STR,
+    rt_json_as_int: NUM,
+    rt_json_as_float: FLOAT,
+    rt_json_as_bool: BOOL,
+    rt_json_as_list: ARR,
+    rt_json_as_map: OBJ
+);
 
 // Mutating methods and place writes. The container is the place's own object, which the caller
 // has made unique (`rt_unique`) and stored back; it is changed in place. A value argument is

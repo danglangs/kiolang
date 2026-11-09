@@ -268,14 +268,14 @@ fn enum_values() {
     let v = s_main("fn main() -> S { S::Pair(3, \"x\") }");
     assert_eq!(
         v,
-        Value::Enum(EnumRef::User(EnumId(0)), 2, vec![Value::Int(3), Value::Str("x".into())])
+        Value::Enum(EnumRef::User(EnumId(1)), 2, vec![Value::Int(3), Value::Str("x".into())])
     );
     assert_eq!(
         s_main("fn main() -> S { S::Done }"),
-        Value::Enum(EnumRef::User(EnumId(0)), 0, vec![])
+        Value::Enum(EnumRef::User(EnumId(1)), 0, vec![])
     );
     let v = s_main("fn main() -> S { S::Due(1 + 1) }");
-    assert_eq!(v, Value::Enum(EnumRef::User(EnumId(0)), 1, vec![Value::Int(2)]));
+    assert_eq!(v, Value::Enum(EnumRef::User(EnumId(1)), 1, vec![Value::Int(2)]));
 }
 
 #[test]
@@ -795,14 +795,14 @@ fn option_unwrap_or() {
 }
 
 const JSON: &str = r#"
-enum Json { Null, Bool(Bool), Num(Int), Str(Str), Arr(List<Json>), Obj(Map<Str, Json>) }
-fn encode(j: Json) -> Str {
+enum Doc { Null, Bool(Bool), Num(Int), Str(Str), Arr(List<Doc>), Obj(Map<Str, Doc>) }
+fn encode(j: Doc) -> Str {
     match j {
-        Json::Null => "null",
-        Json::Bool(b) => if b { "true" } else { "false" },
-        Json::Num(n) => n.to_str(),
-        Json::Str(s) => "\"" + s + "\"",
-        Json::Arr(items) => {
+        Doc::Null => "null",
+        Doc::Bool(b) => if b { "true" } else { "false" },
+        Doc::Num(n) => n.to_str(),
+        Doc::Str(s) => "\"" + s + "\"",
+        Doc::Arr(items) => {
             let mut out = "[";
             let mut i = 0;
             while i < items.len() {
@@ -812,7 +812,7 @@ fn encode(j: Json) -> Str {
             }
             out + "]"
         }
-        Json::Obj(m) => {
+        Doc::Obj(m) => {
             let mut out = "{";
             let mut first = true;
             for k in m.keys() {
@@ -827,11 +827,11 @@ fn encode(j: Json) -> Str {
         }
     }
 }
-fn doc() -> Json {
-    let mut o: Map<Str, Json> = Map::new();
-    o.insert("a", Json::Arr([Json::Num(1), Json::Null, Json::Arr([Json::Bool(true)])]));
-    o.insert("b", Json::Str("x"));
-    Json::Obj(o)
+fn doc() -> Doc {
+    let mut o: Map<Str, Doc> = Map::new();
+    o.insert("a", Doc::Arr([Doc::Num(1), Doc::Null, Doc::Arr([Doc::Bool(true)])]));
+    o.insert("b", Doc::Str("x"));
+    Doc::Obj(o)
 }
 "#;
 
@@ -843,10 +843,11 @@ fn recursive_json_encoder() {
 
 #[test]
 fn recursive_value_displays() {
-    let src = format!("{JSON} fn main() -> Json {{ doc() }}");
+    let src = format!("{JSON} fn main() -> Doc {{ doc() }}");
     let p = check(&src, &CapTable::default()).unwrap();
     let v = run(&p, &mut NoCaps).unwrap();
-    let want = r#"Json::Obj({"a": Json::Arr([Json::Num(1), Json::Null, Json::Arr([Json::Bool(true)])]), "b": Json::Str("x")})"#;
+    let want =
+        r#"Doc::Obj({"a": Doc::Arr([Doc::Num(1), Doc::Null, Doc::Arr([Doc::Bool(true)])]), "b": Doc::Str("x")})"#;
     assert_eq!(p.display(&v), want);
 }
 

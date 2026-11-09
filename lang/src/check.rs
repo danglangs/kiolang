@@ -334,7 +334,7 @@ fn bare(key: &str) -> &str {
 
 /// Names that user types may not take: built-in types, capabilities and their error enums.
 fn reserved(caps: &CapTable, name: &str) -> bool {
-    matches!(name, "Option" | "Result" | "Map")
+    matches!(name, "Option" | "Result" | "Map" | "Json")
         || caps.enums.iter().any(|e| e.name == name)
         || caps.caps.iter().any(|c| c.name == name)
 }
@@ -1448,8 +1448,29 @@ fn method(caps: &CapTable, recv: &Ty, name: &str) -> Option<(Vec<Ty>, Ty)> {
         (Ty::Float, "is_nan" | "is_finite" | "is_infinite") => Some((vec![], Ty::Bool)),
         (Ty::Str, "slice") => Some((vec![Ty::Int, Ty::Int], Ty::Str)),
         (Ty::Bytes, "slice") => Some((vec![Ty::Int, Ty::Int], Ty::Bytes)),
+        (Ty::Str, "parse_json") => Some((vec![], Ty::Result(Box::new(json()), Box::new(Ty::Str)))),
+        (Ty::Enum(k, _), _) if k == "Json" => {
+            let opt = |t: Ty| Ty::Option(Box::new(t));
+            match name {
+                "to_json" => Some((vec![], Ty::Str)),
+                "get" => Some((vec![Ty::Str], opt(json()))),
+                "at" => Some((vec![Ty::Int], opt(json()))),
+                "as_str" => Some((vec![], opt(Ty::Str))),
+                "as_int" => Some((vec![], opt(Ty::Int))),
+                "as_float" => Some((vec![], opt(Ty::Float))),
+                "as_bool" => Some((vec![], opt(Ty::Bool))),
+                "as_list" => Some((vec![], opt(Ty::List(Box::new(json()))))),
+                "as_map" => Some((vec![], opt(Ty::Map(Box::new(Ty::Str), Box::new(json()))))),
+                _ => None,
+            }
+        }
         _ => None,
     }
+}
+
+/// The built-in `Json` enum's type.
+fn json() -> Ty {
+    Ty::Enum("Json".into(), Vec::new())
 }
 
 /// `Option.ok_or`, whose parameter type is the error type `E` of the result, so it is not in `method`.
@@ -1496,6 +1517,13 @@ const METHODS: &[&str] = &[
     "all",
     "and_then",
     "any",
+    "as_bool",
+    "as_float",
+    "as_int",
+    "as_list",
+    "as_map",
+    "as_str",
+    "at",
     "ceil",
     "contains",
     "ends_with",
@@ -1521,6 +1549,7 @@ const METHODS: &[&str] = &[
     "ok_or",
     "parse_float",
     "parse_int",
+    "parse_json",
     "pop",
     "push",
     "remove",
@@ -1536,6 +1565,7 @@ const METHODS: &[&str] = &[
     "to_bytes",
     "to_float",
     "to_int",
+    "to_json",
     "to_str",
     "trim",
     "unwrap_or",
@@ -1727,9 +1757,9 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
     let mut structs = HashMap::new();
     let mut enums = HashMap::new();
     let mut order = Vec::new();
-    for e in &caps.enums {
+    for e in caps.enums.iter().cloned().chain([crate::json::decl()]) {
         order.push(e.name.clone());
-        enums.insert(e.name.clone(), e.clone());
+        enums.insert(e.name.clone(), e);
     }
     for (i, items) in parsed.into_iter().enumerate() {
         let module = if i == 0 { "" } else { names[i] };

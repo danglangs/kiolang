@@ -16,8 +16,11 @@ C8b4, 2026-11-09: Apple M3 Max (16 cores, 64 GB), release builds, rustc 1.99.1 `
 | `map`/`filter` with closures, 1 M | 5.3 ms | 77 ms | 14 ms | 13 ms | 36 ms | 23 ms | 97 ms | 2.6x slower | 5.5x faster |
 | word count, 1 MB of text | 6.9 ms | 16 ms | 70 ms | 74 ms | 98 ms | 22 ms | 69 ms | 10x slower | 4.4x slower |
 | JSON parse + encode, 1 MB (json.kio) | 8.6 ms | 16 ms | 80 ms | 83 ms | 554 ms | 24 ms | 810 ms | 9.3x slower | 5.0x slower |
+| JSON parse + encode, 1 MB (built-in `parse_json`, `to_json`; C12, load 6.5) | 7.8 ms | 17 ms | 17 ms | | | 23 ms | 14 ms | 2.2x slower | 1.0x |
 | 100 k `s = s + i.to_str() + ","` | 4.5 ms | 6.3 ms | 5.2 ms | 5.3 ms | 1.37 s | 22 ms | 1.57 s | 1.2x slower | 1.2x faster |
 | HTTP `GET /hello/kio`, `ab -k -c 12` | 237,000 req/s (hyper) | 29,100 req/s (`http.server`) | 73,800 req/s (kio-web, `--listen`) | 73,500 | 72,000 | once at startup | | 3.2x fewer | 2.5x more |
+
+The built-in JSON (C12) is the runtime parsing and encoding kio objects directly: 4.8x json.kio. Its profile (100 rounds): parse 72%, encode 19%, freeing 9%; `BTreeMap` inserts with their node allocations about 39%, `dlmalloc` about 40% inclusive, float and integer formatting (`core::fmt`) 6%.
 
 C8b4 (borrowed parameters, borrowed `Str` map keys) moved word count (key copies gone from `get` and repeated `insert`: 6%) and JSON (`b: Bytes` lent to every `byte(b, i)`: 3%; ten times 820 to 799 ms). Tree is 1-2% slower (2^22 leaves 731-739 to 740-756 ms): `fold(k)` moved `k` into the call before and lends it now, the same reference count, so nothing is saved and the code moved.
 
@@ -72,7 +75,7 @@ Most-used Rust crates, and kio's answer to each:
 | HTTP server | axum, hyper, tokio | `--listen` plus kio-web | Done for buffered request/response, and WebSockets with a fresh sandbox per message (WS1). No streaming or HTTP/2; a WebSocket program cannot see the upgrade's headers. |
 | HTTP client | reqwest | `Http.get` | GET only: POST, headers and JSON bodies need `caps.wit` methods. |
 | Async | tokio | none: a sandbox per request | Fine per request. Concurrent upstream calls inside one handler need host-side async (web decision 4). |
-| Serialization | serde, serde_json | json.kio (W12), untyped tree | Typed decode into structs needs a derive or traits; generics alone do not give it. |
+| Serialization | serde, serde_json | built-in `Json` (L9, C12), an untyped tree, 2.2x `serde_json` | Typed decode into structs needs a derive or traits; generics alone do not give it. |
 | Database | sqlx, diesel, redis | `Kv` (K1): get/set/delete/keys/swap, in memory or an append-only file the host owns | No SQL. A `Sql` capability (`caps.wit`, owner decision): the host holds the connection pool, the program gets a capability scoped to one database. |
 | Time, randomness, UUIDs | chrono, rand, uuid | none, by design (deterministic) | A `Clock` and `Rng` capability: granted explicitly, logged, and replayable. |
 | Crypto, hashing | ring, sha2, jsonwebtoken | none | Pure functions, so built-ins in `lang` (no capability needed), or host functions for speed. |
@@ -80,7 +83,7 @@ Most-used Rust crates, and kio's answer to each:
 | Logging, metrics | tracing | the audit log covers host calls | A `Log` capability for application logs. |
 | Regex, text | regex | `split`, `lines`, `trim`, `find`, `replace`, `strip_prefix`, `contains`, `starts_with`, `slice` | No regex. |
 | CLI parsing | clap | none | Needs an `Args` capability; the operator grants argv. |
-| Floats | f64 | `Float` (f64, compiled at Rust's speed) | JSON numbers still need json.kio support. |
+| Floats | f64 | `Float` (f64, compiled at Rust's speed) | |
 | Abstraction | traits, generics, closures | function values (`fn(T) -> R`, L6a), closures (L6b) and built-ins taking them (`map`, `filter`, `any`, `all`, `and_then`, `map_err`; L6c), compiled (C9); generic functions (L7a) and generic structs and enums (L7b, L7d), monomorphized, with bounds `T: Eq`/`T: Ord` (L7c) | Bounds `T: Eq`/`Ord` (L7c) wait on the `<`-on-`Str` decision; no traits. |
 | Packages | cargo, crates.io | copy one file | A package manager, once there are a few libraries. |
 

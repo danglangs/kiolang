@@ -1612,6 +1612,16 @@ impl FuncGen<'_, '_> {
                     Builtin::ListLen => ("rt_list_len", Nothing, None),
                     Builtin::MapLen => ("rt_map_len", Nothing, None),
                     Builtin::MapKeys => ("rt_map_keys", Desc, None),
+                    Builtin::StrParseJson => ("rt_json_parse", Desc, None),
+                    Builtin::JsonToJson => ("rt_json_encode", Nothing, None),
+                    Builtin::JsonGet => ("rt_json_get", Opt, None),
+                    Builtin::JsonAt => ("rt_json_at", Opt, None),
+                    Builtin::JsonAsStr => ("rt_json_as_str", Opt, None),
+                    Builtin::JsonAsInt => ("rt_json_as_int", Opt, None),
+                    Builtin::JsonAsFloat => ("rt_json_as_float", Opt, None),
+                    Builtin::JsonAsBool => ("rt_json_as_bool", Opt, None),
+                    Builtin::JsonAsList => ("rt_json_as_list", Opt, None),
+                    Builtin::JsonAsMap => ("rt_json_as_map", Opt, None),
                     Builtin::OptionMap
                     | Builtin::OptionAndThen
                     | Builtin::ResultMap

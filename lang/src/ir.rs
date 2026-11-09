@@ -32,6 +32,14 @@ pub struct Module {
     pub main: FuncId,
 }
 
+impl Module {
+    /// The built-in `Json` enum, which every module has, after the capability error enums.
+    pub fn json(&self) -> EnumId {
+        let i = self.enums.iter().position(|e| e.name == "Json");
+        EnumId(i.expect("Json is always declared") as u32)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Func {
     /// The checker's key, such as `f` or `web::f`.
@@ -299,6 +307,17 @@ pub enum Builtin {
     ListFilter,
     ListAny,
     ListAll,
+    /// Built-in JSON (lang/src/json.rs). The `Json` methods' receiver is a `Json` value.
+    StrParseJson,
+    JsonToJson,
+    JsonGet,
+    JsonAt,
+    JsonAsStr,
+    JsonAsInt,
+    JsonAsFloat,
+    JsonAsBool,
+    JsonAsList,
+    JsonAsMap,
 }
 
 /// Every built-in method that changes its receiver.

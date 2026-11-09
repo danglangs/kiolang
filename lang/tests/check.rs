@@ -888,7 +888,7 @@ fn methods() {
     assert_eq!(hint("fn main() { \"a\".lenn(); }"), "did you mean `len`?");
     assert_eq!(
         hint("fn main() { \"a\".zzzzzz(); }"),
-        "Str has: contains, ends_with, find, len, lines, parse_float, parse_int, replace, slice, split, starts_with, strip_prefix, strip_suffix, to_bytes, trim"
+        "Str has: contains, ends_with, find, len, lines, parse_float, parse_int, parse_json, replace, slice, split, starts_with, strip_prefix, strip_suffix, to_bytes, trim"
     );
     ok("fn main() { let a: List<Str> = \"a\".split(\",\"); let b: List<Str> = \"a\".lines(); let c: Str = \"a\".trim(); let d: Bool = \"a\".contains(\"a\") && \"a\".starts_with(\"a\"); let e: Option<Int> = \"1\".parse_int(); }");
     assert_eq!(reject("fn main() { \"a\".split(1); }").0, "expected Str, found Int");
