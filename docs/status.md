@@ -41,7 +41,6 @@ C8 (roadmap.md): word count's map (`BTreeMap` node search, `split`'s allocations
 
 | Question | Proposal | Blocks |
 |---|---|---|
-| `<` on `Str` | whether to allow it; `Ord` is pinned as `Int` and `Str` only | L7c bounds `Eq`/`Ord` |
 
 ## Speed (C8b4, 2026-11-09, release, run time; all in [roadmap.md](roadmap.md))
 
