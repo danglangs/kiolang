@@ -26,6 +26,8 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 
 ## Waiting on the maintainer
 
+- **Function values, generics, floats:** [proposals/abstraction.md](proposals/abstraction.md), sent 2026-11-08 with recommendations.
+
 - open_questions #34: whether to add constants (proposed: check-time literals only). Not decided; nothing depends on it.
 
 ## Speed (2026-11-06, release, run time; details in [roadmap.md](roadmap.md))
