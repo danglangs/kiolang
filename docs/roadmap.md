@@ -35,7 +35,7 @@ Most-used Rust crates, and kio's answer to each:
 
 | Need | Rust | kio today | Gap |
 |---|---|---|---|
-| HTTP server | axum, hyper, tokio | `--listen` plus kio-web | Done for buffered request/response. No streaming, WebSockets (owner decision) or HTTP/2. |
+| HTTP server | axum, hyper, tokio | `--listen` plus kio-web | Done for buffered request/response, and WebSockets with a fresh sandbox per message (WS1). No streaming or HTTP/2. |
 | HTTP client | reqwest | `Http.get` | GET only: POST, headers and JSON bodies need `caps.wit` methods. |
 | Async | tokio | none: a sandbox per request | Fine per request. Concurrent upstream calls inside one handler need host-side async (web decision 4). |
 | Serialization | serde, serde_json | json.kio (W12), untyped tree | Typed decode into structs needs generics or derive. |

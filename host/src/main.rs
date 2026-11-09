@@ -168,10 +168,19 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     )
     .map(|p| p.main_params())
     .unwrap_or_default();
-    let serves = params.iter().any(|(_, ty)| ty == "Incoming" || ty == "Outgoing");
-    match (listen, serves) {
-        (None, true) => return fail("main takes Incoming/Outgoing but there is no address\n  hint: add `--listen 127.0.0.1:8080`".into()),
-        (Some(_), false) => return fail("--listen needs a `main` that takes Incoming and Outgoing\n  hint: add `req: Incoming, res: Outgoing` to main, or drop --listen".into()),
+    let takes = |ty: &str| params.iter().filter(|(_, t)| t == ty).count();
+    let http = takes("Incoming") + takes("Outgoing") > 0;
+    let ws = takes("WsMessage") + takes("WsSend") > 0;
+    if ws && http {
+        return fail("main takes both WebSocket and HTTP grants\n  hint: a WebSocket server answers through WsSend; drop the Incoming and Outgoing parameters".into());
+    }
+    if ws && (takes("WsMessage"), takes("WsSend")) != (1, 1) {
+        return fail("a WebSocket server's main takes one WsMessage and one WsSend\n  hint: write `fn main(msg: WsMessage, conn: WsSend, ..)`".into());
+    }
+    match (listen, http, ws) {
+        (None, true, _) => return fail("main takes Incoming/Outgoing but there is no address\n  hint: add `--listen 127.0.0.1:8080`".into()),
+        (None, _, true) => return fail("main takes WsMessage/WsSend but there is no address\n  hint: add `--listen 127.0.0.1:8080`".into()),
+        (Some(_), false, false) => return fail("--listen needs a `main` that takes Incoming and Outgoing, or WsMessage and WsSend\n  hint: add `req: Incoming, res: Outgoing` (HTTP) or `msg: WsMessage, conn: WsSend` (WebSocket) to main, or drop --listen".into()),
         _ => {}
     }
     let kvs = match kio_host::kv::open_all(&kv_specs, kv_mb) {

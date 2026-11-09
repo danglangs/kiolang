@@ -1,0 +1,9 @@
+// A WebSocket echo server: kio run examples/ws/echo.kio --listen 127.0.0.1:8080
+// Each event (open, a message, close) runs `main` in a fresh sandbox.
+fn main(msg: WsMessage, conn: WsSend) -> Result<(), WsErr> {
+  match msg.kind() {
+    "text" => conn.text(msg.data().to_str()),
+    "binary" => conn.binary(msg.data()),
+    _ => Ok(()),
+  }
+}

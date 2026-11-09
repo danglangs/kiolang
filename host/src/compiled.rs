@@ -13,7 +13,7 @@ mod bindings {
         path: "../caps.wit",
         imports: { default: trappable },
         // The capability interfaces are the guest world's, so `State` implements them once.
-        with: { "kio:caps/fs": crate::kio::caps::fs, "kio:caps/net": crate::kio::caps::net, "kio:caps/web": crate::kio::caps::web, "kio:caps/kv": crate::kio::caps::kv },
+        with: { "kio:caps/fs": crate::kio::caps::fs, "kio:caps/net": crate::kio::caps::net, "kio:caps/web": crate::kio::caps::web, "kio:caps/kv": crate::kio::caps::kv, "kio:caps/ws": crate::kio::caps::ws },
     });
 }
 use bindings::{Compiled as World, CompiledImports, Outcome};

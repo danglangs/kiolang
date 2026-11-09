@@ -47,7 +47,7 @@ fn main(input: Dir, out: Dir) -> Result<(), IoErr> {
 | User types | `struct`, and `enum` with payloads; a type may contain itself only through `List` or `Map` |
 | Control | `if`, `while`, `loop`, `for x in list`, `for i in 0..n`, `match`, `break`, `continue`, `return` |
 | Functions | free functions, recursion |
-| Capabilities | `Dir`, `Http`, `Kv`, generated from `caps.wit` |
+| Capabilities | `Dir`, `Http`, `Kv`, `WsMessage`, `WsSend`, generated from `caps.wit` |
 
 Everything else is rejected with a message that names the kio alternative, for example `&str` (use `Str`), `Vec` (use `List`), closures (use `for`), `impl`, traits, generics, `use`, `mod`, floats, tuples, globals, `unsafe`.
 
@@ -88,8 +88,12 @@ The checker's capability table is generated from [caps.wit](../caps.wit). Today:
 | `Dir` | `read(Str) -> Result<Bytes, IoErr>`, `create(Str, Bytes) -> Result<(), IoErr>` (new file only), `list(Str) -> Result<List<Str>, IoErr>` (`""` is the root; sorted names, a directory's ending in `/`), `write(Str, Bytes) -> Result<(), IoErr>` (create or replace atomically), `remove(Str) -> Result<(), IoErr>` (one regular file), `exists(Str) -> Result<Bool, IoErr>` |
 | `Http` | `get(Str) -> Result<Bytes, HttpErr>` |
 | `Kv` | `get(Str) -> Result<Option<Bytes>, KvErr>`, `set(Str, Bytes) -> Result<(), KvErr>`, `delete(Str) -> Result<(), KvErr>` (a missing key is fine), `keys(Str) -> Result<List<Str>, KvErr>` (keys with that prefix, sorted by bytes), `swap(Str, Option<Bytes>, Option<Bytes>) -> Result<Bool, KvErr>` |
+| `WsMessage` | `kind() -> Str` (`"open"`, `"text"`, `"binary"` or `"close"`), `conn() -> Int` (the connection's id, unique per server run), `data() -> Bytes` (empty for open and close) |
+| `WsSend` | `text(Str) -> Result<(), WsErr>`, `binary(Bytes) -> Result<(), WsErr>`, `close(Int) -> Result<(), WsErr>`; written to the connection, in order, after `main` returns |
 
-`IoErr` is `NotFound`, `Denied`, `TooLarge`, `InvalidPath` or `Exists` (`create` on an existing path). `HttpErr` is `Denied`, `Timeout`, `TooLarge` or `Status(Int)`. `KvErr` is `TooLarge` (a key outside 1 to 1,024 bytes, a value over 1 MB, `keys` matching over 10,000) or `Full` (the store would pass `--kv-mb`).
+`IoErr` is `NotFound`, `Denied`, `TooLarge`, `InvalidPath` or `Exists` (`create` on an existing path). `HttpErr` is `Denied`, `Timeout`, `TooLarge` or `Status(Int)`. `KvErr` is `TooLarge` (a key outside 1 to 1,024 bytes, a value over 1 MB, `keys` matching over 10,000) or `Full` (the store would pass `--kv-mb`). `WsErr` is `Closed` (after this run's `close`, on the close event, or once the connection closed), `TooLarge` (past 1 MB sent in one run) or `Invalid` (a close code other than 1000-1003, 1007-1013 or 3000-4999).
+
+A WebSocket server is `fn main(msg: WsMessage, conn: WsSend, ..)` under `--listen`: each event of a connection runs `main` in a fresh sandbox, one at a time and in order; state between events goes in a `Kv`. A failed run closes the connection with 1011.
 
 `swap(k, old, new)` sets `k` to `new` (`None` deletes it) only if its value is `old` (`None`: absent), atomically, and returns whether it did. Concurrent requests use it to count or claim ids without losing updates: read, compute, `swap`, retry on `false`.
 

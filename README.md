@@ -63,6 +63,16 @@ $ curl http://127.0.0.1:8080/hello/kio
 {"hello": "kio"}
 ```
 
+A WebSocket server takes `msg: WsMessage, conn: WsSend` instead, and gets one fresh sandbox per event (open, each message, close), run in order per connection; state between events goes in a `Kv`:
+
+```
+$ kio run examples/ws/echo.kio --listen 127.0.0.1:8080
+main : msg data kind, conn binary text
+$ websocat ws://127.0.0.1:8080/
+hi
+hi
+```
+
 ### More
 
 - `--kv store=data.kv` grants a key-value store (`store: Kv`) that outlives runs and is shared by every `--listen` request; `--kv store=:memory:` keeps it for the process only. `swap` updates a key atomically.

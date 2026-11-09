@@ -55,15 +55,33 @@ interface kv {
   }
 }
 
+interface ws {
+  // One WebSocket event under `--listen`: a connection opened, a message arrived, or it closed.
+  resource ws-message {
+    kind: func() -> string;     // "open", "text", "binary", "close"
+    conn: func() -> u64;        // connection id, unique per server run
+    data: func() -> list<u8>;   // empty for open and close
+  }
+  // Sends on that connection, written in order after the run ends.
+  resource ws-send {
+    text:   func(s: string) -> result<_, ws-err>;
+    binary: func(b: list<u8>) -> result<_, ws-err>;
+    close:  func(code: u16) -> result<_, ws-err>;
+  }
+  variant ws-err { closed, too-large, invalid }
+}
+
 world guest {
   import fs;
   import net;
   import web;
   import kv;
+  import ws;
   use fs.{dir};
   use net.{http};
   use web.{incoming, outgoing};
   use kv.{kv};
+  use ws.{ws-message, ws-send};
 
   // A source file: `name` is `web.kio` for `mod web;`; the root comes first.
   record file { name: string, source: string }
@@ -80,6 +98,8 @@ world guest {
   record incoming-grant { name: string, incoming: incoming }
   record outgoing-grant { name: string, outgoing: outgoing }
   record kv-grant { name: string, kv: kv }
+  record ws-message-grant { name: string, message: ws-message }
+  record ws-send-grant { name: string, sender: ws-send }
 
   // Parse and check. Needs no handles.
   export check: func(files: list<file>) -> result<report, list<diag>>;
@@ -89,7 +109,7 @@ world guest {
 
   // Check, then run `main` with each grant bound to its parameter by name; a missing or
   // mistyped grant is an error before any code runs.
-  export run: func(files: list<file>, dirs: list<dir-grant>, https: list<http-grant>, incomings: list<incoming-grant>, outgoings: list<outgoing-grant>, kvs: list<kv-grant>) -> result<outcome, list<diag>>;
+  export run: func(files: list<file>, dirs: list<dir-grant>, https: list<http-grant>, incomings: list<incoming-grant>, outgoings: list<outgoing-grant>, kvs: list<kv-grant>, messages: list<ws-message-grant>, senders: list<ws-send-grant>) -> result<outcome, list<diag>>;
 }
 
 // Compiled kio (docs/codegen.md): the runtime with the program appended, one core module.
@@ -98,13 +118,15 @@ world compiled {
   import net;
   import web;
   import kv;
+  import ws;
   use fs.{dir};
   use net.{http};
   use web.{incoming, outgoing};
   use kv.{kv};
+  use ws.{ws-message, ws-send};
 
   // One handle per capability parameter of `main`, in parameter order.
-  variant grant { dir(dir), http(http), incoming(incoming), outgoing(outgoing), kv(kv) }
+  variant grant { dir(dir), http(http), incoming(incoming), outgoing(outgoing), kv(kv), ws-message(ws-message), ws-send(ws-send) }
   // main's value printed, and whether main returned `Err`.
   record outcome { value: string, failed: bool }
 

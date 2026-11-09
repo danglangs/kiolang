@@ -1,5 +1,5 @@
-//! Runs the guest component under Wasmtime. `dir` is backed by cap-std; `http` is a ureq client fixed to one granted origin; `incoming` and `outgoing` hold one request and its first response; `kv` is a store shared across runs (kv.rs). Every import is counted and, if asked, written to an audit log.
-// The generated `call_run` takes a store, the files and five grant lists.
+//! Runs the guest component under Wasmtime. `dir` is backed by cap-std; `http` is a ureq client fixed to one granted origin; `incoming` and `outgoing` hold one request and its first response; `kv` is a store shared across runs (kv.rs); `ws-message` and `ws-send` hold one WebSocket event and its sends (ws.rs). Every import is counted and, if asked, written to an audit log.
+// The generated `call_run` takes a store, the files and seven grant lists.
 #![allow(clippy::too_many_arguments)]
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir as RealDir, OpenOptions, OpenOptionsExt};
@@ -25,6 +25,7 @@ pub mod kv;
 pub use compiled::Compiled;
 pub use config::MAX_STACK;
 pub mod listen;
+pub mod ws;
 
 /// The guest, compiled to native code by `build.rs` with `config::compile_config`.
 const GUEST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/guest.cwasm"));
@@ -965,9 +966,14 @@ pub struct Response {
 /// What `run` returns: the outcome, or the diagnostics.
 type RunResult = std::result::Result<Outcome, Vec<Diag>>;
 
-/// A named `Incoming` or `Outgoing` grant on its way to `run`.
-type IncomingGrantArg = (String, Resource<kio::caps::web::Incoming>);
-type OutgoingGrantArg = (String, Resource<kio::caps::web::Outgoing>);
+/// One request's or event's grants, already in the store's table, by `main` parameter name.
+#[derive(Default)]
+struct Handles {
+    incomings: Vec<(String, Resource<kio::caps::web::Incoming>)>,
+    outgoings: Vec<(String, Resource<kio::caps::web::Outgoing>)>,
+    messages: Vec<(String, Resource<kio::caps::ws::WsMessage>)>,
+    senders: Vec<(String, Resource<kio::caps::ws::WsSend>)>,
+}
 
 /// Where `outgoing.send` records the response; shared so the host can read it after the run.
 type Sent = Arc<Mutex<Option<Response>>>;
@@ -1419,7 +1425,7 @@ impl Kio {
         dirs: Vec<(String, RealDir)>,
         https: Vec<(String, Origin)>,
     ) -> Result<std::result::Result<Outcome, Vec<Diag>>> {
-        self.run_all(files, dirs, https, vec![], vec![])
+        self.run_all(files, dirs, https, Handles::default())
     }
 
     /// Run `main(req: Incoming, res: Outgoing, ..)` for one request, with `dirs` granted by name.
@@ -1430,20 +1436,43 @@ impl Kio {
         dirs: Vec<(String, RealDir)>,
         request: Request,
     ) -> Result<(RunResult, Option<Response>)> {
-        let (sent, incomings, outgoings) = self.web_grants(request)?;
-        let outcome = self.run_all(&[single(source)], dirs, vec![], incomings, outgoings)?;
+        let (sent, handles) = self.web_grants(request)?;
+        let outcome = self.run_all(&[single(source)], dirs, vec![], handles)?;
         let response = sent.lock().unwrap_or_else(PoisonError::into_inner).take();
         Ok((outcome, response))
     }
 
     /// The `req` and `res` grants for one request, and the slot `res.send` fills.
-    fn web_grants(&mut self, request: Request) -> Result<(Sent, Vec<IncomingGrantArg>, Vec<OutgoingGrantArg>)> {
+    fn web_grants(&mut self, request: Request) -> Result<(Sent, Handles)> {
         let sent = Sent::default();
         let req = self.store.data_mut().table.push(request)?;
         let res = self.store.data_mut().table.push(sent.clone())?;
-        let incomings = vec![("req".to_string(), Resource::new_own(req.rep()))];
-        let outgoings = vec![("res".to_string(), Resource::new_own(res.rep()))];
-        Ok((sent, incomings, outgoings))
+        let handles = Handles {
+            incomings: vec![("req".to_string(), Resource::new_own(req.rep()))],
+            outgoings: vec![("res".to_string(), Resource::new_own(res.rep()))],
+            ..Handles::default()
+        };
+        Ok((sent, handles))
+    }
+
+    /// The `WsMessage` and `WsSend` grants for one event, named `names`, and the outbox the
+    /// sends fill. `closed` makes every send `closed`.
+    fn ws_grants(
+        &mut self,
+        event: ws::WsEvent,
+        closed: bool,
+        names: &(String, String),
+    ) -> Result<(ws::Sends, Handles)> {
+        let sends = ws::Sends::default();
+        sends.lock().unwrap_or_else(PoisonError::into_inner).closed = closed;
+        let msg = self.store.data_mut().table.push(event)?;
+        let conn = self.store.data_mut().table.push(sends.clone())?;
+        let handles = Handles {
+            messages: vec![(names.0.clone(), Resource::new_own(msg.rep()))],
+            senders: vec![(names.1.clone(), Resource::new_own(conn.rep()))],
+            ..Handles::default()
+        };
+        Ok((sends, handles))
     }
 
     fn run_all(
@@ -1451,11 +1480,10 @@ impl Kio {
         files: &[(String, String)],
         dirs: Vec<(String, RealDir)>,
         https: Vec<(String, Origin)>,
-        incomings: Vec<IncomingGrantArg>,
-        outgoings: Vec<OutgoingGrantArg>,
+        handles: Handles,
     ) -> Result<std::result::Result<Outcome, Vec<Diag>>> {
         self.arm_report(files);
-        self.run_armed(files, dirs, https, incomings, outgoings)
+        self.run_armed(files, dirs, https, handles)
     }
 
     /// `run_all` with `State::allowed` already set.
@@ -1464,11 +1492,10 @@ impl Kio {
         files: &[(String, String)],
         dirs: Vec<(String, RealDir)>,
         https: Vec<(String, Origin)>,
-        incomings: Vec<IncomingGrantArg>,
-        outgoings: Vec<OutgoingGrantArg>,
+        handles: Handles,
     ) -> Result<std::result::Result<Outcome, Vec<Diag>>> {
-        self.start_audit(files, &dirs, &https, &incomings, &outgoings)?;
-        let result = self.run_granted(files, dirs, https, incomings, outgoings);
+        self.start_audit(files, &dirs, &https, &handles)?;
+        let result = self.run_granted(files, dirs, https, handles);
         self.end_audit(&result)?;
         result
     }
@@ -1491,8 +1518,7 @@ impl Kio {
         files: &[(String, String)],
         dirs: &[(String, RealDir)],
         https: &[(String, Origin)],
-        incomings: &[IncomingGrantArg],
-        outgoings: &[OutgoingGrantArg],
+        handles: &Handles,
     ) -> Result<()> {
         let Some((out, dir_paths)) = self.audit.take() else {
             return Ok(());
@@ -1509,11 +1535,8 @@ impl Kio {
         for (name, o) in https {
             grant(name, "Http", Some(o.target()));
         }
-        for (name, _) in incomings {
-            grant(name, "Incoming", None);
-        }
-        for (name, _) in outgoings {
-            grant(name, "Outgoing", None);
+        for (name, kind, _) in handles.each() {
+            grant(&name, kind, None);
         }
         for (name, store) in &self.kvs {
             grant(name, "Kv", Some(store.target().to_string()));
@@ -1559,8 +1582,7 @@ impl Kio {
         files: &[(String, String)],
         dirs: Vec<(String, RealDir)>,
         https: Vec<(String, Origin)>,
-        incomings: Vec<IncomingGrantArg>,
-        outgoings: Vec<OutgoingGrantArg>,
+        handles: Handles,
     ) -> Result<std::result::Result<Outcome, Vec<Diag>>> {
         let mut grants = Vec::new();
         for (name, dir) in dirs {
@@ -1580,12 +1602,15 @@ impl Kio {
                 http: Resource::new_own(h.rep()),
             });
         }
-        for (name, r) in &incomings {
-            self.name_handle(r.rep(), name, "Incoming");
+        for (name, kind, rep) in handles.each() {
+            self.name_handle(rep, &name, kind);
         }
-        for (name, r) in &outgoings {
-            self.name_handle(r.rep(), name, "Outgoing");
-        }
+        let Handles {
+            incomings,
+            outgoings,
+            messages,
+            senders,
+        } = handles;
         let incomings: Vec<_> = incomings
             .into_iter()
             .map(|(name, incoming)| IncomingGrant { name, incoming })
@@ -1593,6 +1618,14 @@ impl Kio {
         let outgoings: Vec<_> = outgoings
             .into_iter()
             .map(|(name, outgoing)| OutgoingGrant { name, outgoing })
+            .collect();
+        let messages: Vec<_> = messages
+            .into_iter()
+            .map(|(name, message)| WsMessageGrant { name, message })
+            .collect();
+        let senders: Vec<_> = senders
+            .into_iter()
+            .map(|(name, sender)| WsSendGrant { name, sender })
             .collect();
         let mut kv_grants = Vec::new();
         for (name, store) in std::mem::take(&mut self.kvs) {
@@ -1611,7 +1644,21 @@ impl Kio {
             &incomings,
             &outgoings,
             &kv_grants,
+            &messages,
+            &senders,
         )
+    }
+}
+
+impl Handles {
+    /// `(name, kind, rep)` of each handle.
+    fn each(&self) -> Vec<(String, &'static str, u32)> {
+        let mut out = Vec::new();
+        out.extend(self.incomings.iter().map(|(n, r)| (n.clone(), "Incoming", r.rep())));
+        out.extend(self.outgoings.iter().map(|(n, r)| (n.clone(), "Outgoing", r.rep())));
+        out.extend(self.messages.iter().map(|(n, r)| (n.clone(), "WsMessage", r.rep())));
+        out.extend(self.senders.iter().map(|(n, r)| (n.clone(), "WsSend", r.rep())));
+        out
     }
 }
 
@@ -1657,6 +1704,8 @@ pub struct Server {
     stop: Arc<AtomicBool>,
     /// Shared by every request.
     kvs: KvGrants,
+    /// `main`'s `WsMessage` and `WsSend` parameter names, for a WebSocket server.
+    ws: Option<(String, String)>,
 }
 
 impl Drop for Server {
@@ -1680,6 +1729,9 @@ impl Server {
         };
         let report = lang::report(&program);
         let allowed = main_calls(&report);
+        let params = program.main_params();
+        let param = |ty: &str| params.iter().find(|(_, t)| t == ty).map(|(n, _)| n.clone());
+        let ws = param("WsMessage").zip(param("WsSend"));
         let mut pool = PoolingAllocationConfig::new();
         pool.total_component_instances(POOL_INSTANCES)
             .total_core_instances(POOL_INSTANCES)
@@ -1703,6 +1755,7 @@ impl Server {
             limits,
             stop,
             kvs: vec![],
+            ws,
         }))
     }
 
@@ -1725,21 +1778,17 @@ impl Server {
     /// sends no response, or traps, gets a 500 with an empty body and the cause on stderr. `Err`
     /// means no instance could be made (for example the pool is full).
     pub fn handle(&self, request: Request, dirs: Vec<(String, RealDir)>) -> std::result::Result<Response, String> {
-        let mut kio = self.instance().map_err(|e| format!("cannot start instance: {e:#}"))?;
-        kio.store.data_mut().allowed = self.allowed.clone();
-        kio.kvs = self.kvs.clone();
-        let (sent, incomings, outgoings) = kio.web_grants(request).map_err(|e| e.to_string())?;
-        let result = kio.run_armed(&self.files, dirs, vec![], incomings, outgoings);
+        let mut sent = Sent::default();
+        let result = self.run_fresh(dirs, |kio| {
+            let (s, handles) = kio.web_grants(request)?;
+            sent = s;
+            Ok(handles)
+        })?;
         let response = sent.lock().unwrap_or_else(PoisonError::into_inner).take();
-        match (&result, response) {
-            (Ok(Ok(_)), Some(r)) => Ok(r),
-            (Err(e), _) => {
-                eprintln!("request failed: {}", kio.explain(e).unwrap_or_else(|| format!("{e:#}")));
-                Ok(Response::internal_error())
-            }
-            (Ok(Err(diags)), _) => {
-                let msgs: Vec<_> = diags.iter().map(|d| d.message.as_str()).collect();
-                eprintln!("request failed: {}", msgs.join("; "));
+        match (result, response) {
+            (Ok(_), Some(r)) => Ok(r),
+            (Err(why), _) => {
+                eprintln!("request failed: {why}");
                 Ok(Response::internal_error())
             }
             _ => {
@@ -1747,6 +1796,60 @@ impl Server {
                 Ok(Response::internal_error())
             }
         }
+    }
+
+    /// The names of `main`'s `WsMessage` and `WsSend` parameters, if it takes both: the program
+    /// is then a WebSocket server.
+    pub fn ws_params(&self) -> Option<&(String, String)> {
+        self.ws.as_ref()
+    }
+
+    /// Run `main` on one WebSocket event in a fresh instance, with `dirs` granted by name;
+    /// `closed` makes every send `closed`. The frames to write, in order, or `None` if the run
+    /// failed (a trap, a limit or `Err` from `main`; the cause goes to stderr). `Err` means no
+    /// instance could be made.
+    pub fn handle_ws(
+        &self,
+        event: ws::WsEvent,
+        closed: bool,
+        dirs: Vec<(String, RealDir)>,
+    ) -> std::result::Result<Option<Vec<ws::WsFrame>>, String> {
+        let names = self.ws.as_ref().ok_or("main takes no WsMessage")?;
+        let mut sends = ws::Sends::default();
+        let result = self.run_fresh(dirs, |kio| {
+            let (s, handles) = kio.ws_grants(event, closed, names)?;
+            sends = s;
+            Ok(handles)
+        })?;
+        let why = match result {
+            Ok(o) if !o.failed => {
+                return Ok(Some(std::mem::take(
+                    &mut sends.lock().unwrap_or_else(PoisonError::into_inner).frames,
+                )))
+            }
+            Ok(o) => format!("main returned Err: {}", o.value),
+            Err(why) => why,
+        };
+        eprintln!("websocket event failed: {why}");
+        Ok(None)
+    }
+
+    /// Run `main` once in a fresh instance with `dirs`, the shared `Kv` stores and the handles
+    /// `grant` adds. The outcome, or why the run failed; `Err` means no instance could be made.
+    fn run_fresh(
+        &self,
+        dirs: Vec<(String, RealDir)>,
+        grant: impl FnOnce(&mut Kio) -> Result<Handles>,
+    ) -> std::result::Result<std::result::Result<Outcome, String>, String> {
+        let mut kio = self.instance().map_err(|e| format!("cannot start instance: {e:#}"))?;
+        kio.store.data_mut().allowed = self.allowed.clone();
+        kio.kvs = self.kvs.clone();
+        let handles = grant(&mut kio).map_err(|e| e.to_string())?;
+        Ok(match kio.run_armed(&self.files, dirs, vec![], handles) {
+            Ok(Ok(o)) => Ok(o),
+            Err(e) => Err(kio.explain(&e).unwrap_or_else(|| format!("{e:#}"))),
+            Ok(Err(diags)) => Err(diags.iter().map(|d| d.message.as_str()).collect::<Vec<_>>().join("; ")),
+        })
     }
 
     /// A `Kio` with a fresh store and instance; it does not own the epoch ticker.

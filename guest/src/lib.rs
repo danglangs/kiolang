@@ -1,4 +1,4 @@
-// The generated `run` export lowers to twelve arguments: a string and five lists.
+// The generated `run` export lowers to sixteen arguments: a string and seven lists.
 #![allow(clippy::too_many_arguments)]
 wit_bindgen::generate!({ world: "guest", path: "../caps.wit" });
 
@@ -6,6 +6,7 @@ use kio::caps::fs::IoErr;
 use kio::caps::kv::KvErr;
 use kio::caps::net::HttpErr;
 use kio::caps::web::WebErr;
+use kio::caps::ws::WsErr;
 use lang::ir::{EnumId, EnumRef};
 use lang::{CapTable, Value};
 use std::cell::RefCell;
@@ -39,6 +40,8 @@ impl Guest for Component {
         incomings: Vec<IncomingGrant>,
         outgoings: Vec<OutgoingGrant>,
         kvs: Vec<KvGrant>,
+        messages: Vec<WsMessageGrant>,
+        senders: Vec<WsSendGrant>,
     ) -> Result<Outcome, Vec<Diag>> {
         let program = match CHECKED.take() {
             Some((checked, program)) if same_files(&checked, &files) => program,
@@ -53,7 +56,9 @@ impl Guest for Component {
             .chain(https.into_iter().map(|g| (g.name, Grant::Http(g.http))))
             .chain(incomings.into_iter().map(|g| (g.name, Grant::Incoming(g.incoming))))
             .chain(outgoings.into_iter().map(|g| (g.name, Grant::Outgoing(g.outgoing))))
-            .chain(kvs.into_iter().map(|g| (g.name, Grant::Kv(g.kv))));
+            .chain(kvs.into_iter().map(|g| (g.name, Grant::Kv(g.kv))))
+            .chain(messages.into_iter().map(|g| (g.name, Grant::WsMessage(g.message))))
+            .chain(senders.into_iter().map(|g| (g.name, Grant::WsSend(g.sender))));
         for (name, grant) in named {
             if !names.contains(&name) {
                 let hint = format!("grant only `main`'s parameters: {}", names.join(", "));
@@ -97,6 +102,8 @@ enum Grant {
     Incoming(Incoming),
     Outgoing(Outgoing),
     Kv(Kv),
+    WsMessage(WsMessage),
+    WsSend(WsSend),
 }
 
 /// The handles granted for one run, by `main` parameter name.
@@ -111,6 +118,8 @@ impl lang::Caps for Grants {
                 | (Some(Grant::Incoming(_)), "Incoming")
                 | (Some(Grant::Outgoing(_)), "Outgoing")
                 | (Some(Grant::Kv(_)), "Kv")
+                | (Some(Grant::WsMessage(_)), "WsMessage")
+                | (Some(Grant::WsSend(_)), "WsSend")
         )
     }
 
@@ -175,6 +184,21 @@ impl lang::Caps for Grants {
                         .map(Value::Bool)
                         .map_err(kv_err),
                 ))
+            }
+            (Grant::WsMessage(m), "kind", []) => Ok(Value::Str(m.kind().into())),
+            // Ids count up from 1, so they fit an `Int`.
+            (Grant::WsMessage(m), "conn", []) => Ok(Value::Int(m.conn() as i64)),
+            (Grant::WsMessage(m), "data", []) => Ok(Value::Bytes(m.data().into())),
+            (Grant::WsSend(w), "text", [Value::Str(s)]) => Ok(result(w.text(s).map(|()| Value::Unit).map_err(ws_err))),
+            (Grant::WsSend(w), "binary", [Value::Bytes(b)]) => {
+                Ok(result(w.binary(b).map(|()| Value::Unit).map_err(ws_err)))
+            }
+            (Grant::WsSend(w), "close", [Value::Int(code)]) => {
+                // A code that is not a `u16` cannot be valid, so it never reaches the host.
+                let Ok(code) = u16::try_from(*code) else {
+                    return Ok(result(Err(err_value("WsErr", "Invalid", vec![]))));
+                };
+                Ok(result(w.close(code).map(|()| Value::Unit).map_err(ws_err)))
             }
             _ => Err(format!(
                 "unsupported call `{cap}.{method}` with {} arguments",
@@ -274,6 +298,15 @@ fn kv_err(e: KvErr) -> Value {
     err_value("KvErr", case, vec![])
 }
 
+fn ws_err(e: WsErr) -> Value {
+    let case = match e {
+        WsErr::Closed => "Closed",
+        WsErr::TooLarge => "TooLarge",
+        WsErr::Invalid => "Invalid",
+    };
+    err_value("WsErr", case, vec![])
+}
+
 /// The flag that grants the parameter a "no grant for" error names.
 fn grant_hint(program: &lang::Program, msg: &str) -> Option<String> {
     let (name, ty) = program
@@ -284,6 +317,7 @@ fn grant_hint(program: &lang::Program, msg: &str) -> Option<String> {
         "Dir" => format!("grant it: `--dir {name}=path`"),
         "Http" => format!("grant it: `--http {name}=host`"),
         "Kv" => format!("grant it: `--kv {name}=path` or `--kv {name}=:memory:`"),
+        "WsMessage" | "WsSend" => "`--listen` grants WsMessage and WsSend".into(),
         _ => "`--listen` grants Incoming and Outgoing".into(),
     })
 }

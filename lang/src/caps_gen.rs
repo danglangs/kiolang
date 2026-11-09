@@ -129,6 +129,34 @@ pub fn v0() -> CapTable {
                     ),
                 ],
             },
+            CapType {
+                name: "WsMessage".into(),
+                methods: vec![
+                    method("kind", vec![], Ty::Str),
+                    method("conn", vec![], Ty::Int),
+                    method("data", vec![], Ty::Bytes),
+                ],
+            },
+            CapType {
+                name: "WsSend".into(),
+                methods: vec![
+                    method(
+                        "text",
+                        vec![Ty::Str],
+                        Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("WsErr".into()))),
+                    ),
+                    method(
+                        "binary",
+                        vec![Ty::Bytes],
+                        Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("WsErr".into()))),
+                    ),
+                    method(
+                        "close",
+                        vec![Ty::Int],
+                        Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("WsErr".into()))),
+                    ),
+                ],
+            },
         ],
         enums: vec![
             Enum {
@@ -163,6 +191,16 @@ pub fn v0() -> CapTable {
             Enum {
                 name: "KvErr".into(),
                 variants: vec![case("TooLarge", vec![]), case("Full", vec![])],
+                span: at,
+                public: true,
+            },
+            Enum {
+                name: "WsErr".into(),
+                variants: vec![
+                    case("Closed", vec![]),
+                    case("TooLarge", vec![]),
+                    case("Invalid", vec![]),
+                ],
                 span: at,
                 public: true,
             },
