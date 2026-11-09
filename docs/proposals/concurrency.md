@@ -134,6 +134,9 @@ Stage 1 is one method and no language change, and it covers the links app and mo
 
 ### Decisions
 
+Decided by the maintainer 2026-11-09: yes to all eight.
+
+
 1. Add `send_all` to caps.wit with H16, with `timeout_ms` per request, and no concurrency construct in the language for now. **Recommend yes.**
 2. Values independent of scheduling: results in list or spawn order; no `select` or first-wins ever. **Recommend yes.**
 3. Parallel tasks are separate instances; the runtime stays single-threaded and non-atomic; Wasm threads are ruled out. **Recommend yes.**
