@@ -22,11 +22,12 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 1. **C3d-e** (structs, enums, `Option`, `Result`, nested `match`, `?`; `main` returning anything), then C4 (capabilities), C5 (compiled by default), C7 (review), C8 (measure, refcount elision).
 2. H10 (HTTP grants bound by type), WS1 adversarial review.
 3. Compiler support for L4b's built-ins (`ends_with` .. `pop`), after C3d.
-4. Function values, floats, generics: waiting on the owner (proposals/abstraction.md).
+4. L6 function values (L6a-c), then L7 generics.
 
 ## Waiting on the maintainer
 
-- **Function values, generics, floats:** [proposals/abstraction.md](proposals/abstraction.md), sent 2026-11-08 with recommendations.
+- **Floats:** [proposals/abstraction.md](proposals/abstraction.md) 3 (function values and generics approved 2026-11-08: L6, L7).
+- **WebSocket upgrade headers:** a program cannot see the upgrade's path or headers; proposed `WsMessage.target()` and `header(name)` on the `open` event (caps.wit).
 
 - open_questions #34: whether to add constants (proposed: check-time literals only). Not decided; nothing depends on it.
 
