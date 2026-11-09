@@ -293,3 +293,144 @@ fn ws_upgrade_calls_are_logged_by_name() {
         }
     }
 }
+
+/// `--audit` checked against the other grants, through the `kio` binary.
+mod cli {
+    use std::path::Path;
+    use std::process::Command;
+
+    /// `kio run` with `args`, the cache under `cache`: exit code and stderr.
+    fn kio(cache: &Path, args: &[&str]) -> (i32, String) {
+        let out = Command::new(env!("CARGO_BIN_EXE_kio"))
+            .arg("run")
+            .args(args)
+            .env("XDG_CACHE_HOME", cache)
+            .output()
+            .unwrap();
+        (out.status.code().unwrap(), String::from_utf8(out.stderr).unwrap())
+    }
+
+    fn arg(name: &str, path: &Path) -> String {
+        format!("{name}={}", path.display())
+    }
+
+    const STORE: &str = r#"fn main(store: Kv) -> Result<(), KvErr> { store.set("a", "1".to_bytes()) }"#;
+
+    /// Writing the log into a store would corrupt it: the same path, a path that is not yet a
+    /// file, a hard link and the store's compaction file are all refused, the store untouched.
+    #[test]
+    fn an_audit_log_that_is_a_kv_store_is_refused() {
+        let t = tempfile::tempdir().unwrap();
+        let prog = t.path().join("store.kio");
+        std::fs::write(&prog, STORE).unwrap();
+        let prog = prog.to_str().unwrap();
+        let db = t.path().join("c.kv");
+        assert_eq!(kio(t.path(), &[prog, "--kv", &arg("store", &db)]).0, 0);
+        let before = std::fs::read(&db).unwrap();
+        let link = t.path().join("hard.log");
+        std::fs::hard_link(&db, &link).unwrap();
+        let tmp = t.path().join("c.kv.tmp");
+        let fresh = t.path().join("new.kv");
+        let refused = |log: &Path, store: &Path, spec: &str| {
+            let (code, err) = kio(
+                t.path(),
+                &[
+                    prog,
+                    "--kv",
+                    &format!("store={}{spec}", store.display()),
+                    "--audit",
+                    log.to_str().unwrap(),
+                ],
+            );
+            assert_eq!(code, 2, "{}: {err}", log.display());
+            assert_eq!(
+                err,
+                format!("kio: `--audit {}` is the same file as `--kv store`\n  hint: give the audit log its own file; writing it would corrupt the store\n", log.display())
+            );
+        };
+        refused(&db, &db, "");
+        refused(&t.path().join(".").join("c.kv"), &db, "");
+        refused(&link, &db, "");
+        refused(&tmp, &db, "");
+        refused(&fresh, &fresh, "");
+        assert_eq!(std::fs::read(&db).unwrap(), before);
+        assert!(!tmp.exists() && !fresh.exists());
+    }
+
+    /// A program granted the directory that holds its log could read or replace it.
+    #[test]
+    fn an_audit_log_inside_a_granted_dir_is_refused() {
+        let t = tempfile::tempdir().unwrap();
+        let prog = t.path().join("dir.kio");
+        std::fs::write(&prog, "fn main(d: Dir) -> Int { 1 }").unwrap();
+        let prog = prog.to_str().unwrap();
+        let data = t.path().join("data");
+        std::fs::create_dir_all(data.join("sub")).unwrap();
+        std::fs::write(data.join("old.log"), "").unwrap();
+        let outside = t.path().join("link.log");
+        std::os::unix::fs::symlink(data.join("old.log"), &outside).unwrap();
+        let dir = arg("d", &data);
+        for log in [
+            data.join("a.log"),
+            data.join("sub/a.log"),
+            data.join("sub/../a.log"),
+            outside,
+        ] {
+            let (code, err) = kio(t.path(), &[prog, "--dir", &dir, "--audit", log.to_str().unwrap()]);
+            assert_eq!(code, 2, "{err}");
+            assert_eq!(
+                err,
+                format!("kio: `--audit {}` is inside `--dir d`\n  hint: keep the audit log outside granted directories, where the program cannot read or replace it\n", log.display())
+            );
+        }
+        assert!(!data.join("a.log").exists() && !data.join("sub/a.log").exists());
+        // A dangling symlink is never followed into the directory.
+        let dangling = t.path().join("dangling.log");
+        std::os::unix::fs::symlink(data.join("new.log"), &dangling).unwrap();
+        let (code, err) = kio(t.path(), &[prog, "--dir", &dir, "--audit", dangling.to_str().unwrap()]);
+        assert_eq!(code, 2, "{err}");
+        assert!(
+            err.starts_with(&format!("kio: --audit {}: ", dangling.display())),
+            "{err}"
+        );
+        assert!(!data.join("new.log").exists());
+        let (code, err) = kio(
+            t.path(),
+            &[prog, "--dir", &dir, "--audit", t.path().join("a.log").to_str().unwrap()],
+        );
+        assert_eq!(code, 0, "{err}");
+    }
+
+    #[test]
+    fn an_audit_log_inside_the_compile_cache_is_refused() {
+        let t = tempfile::tempdir().unwrap();
+        let prog = t.path().join("one.kio");
+        std::fs::write(&prog, "fn main() -> Int { 1 }").unwrap();
+        let log = t.path().join("kio/a.log");
+        let (code, err) = kio(t.path(), &[prog.to_str().unwrap(), "--audit", log.to_str().unwrap()]);
+        assert_eq!(code, 2, "{err}");
+        assert_eq!(
+            err,
+            format!("kio: `--audit {}` is inside kio's compile cache\n  hint: keep the audit log outside `$XDG_CACHE_HOME/kio` (default `~/.cache/kio`)\n", log.display())
+        );
+    }
+
+    /// The log is opened to append: an existing file keeps what it held, and each run adds its
+    /// own header and trailer.
+    #[test]
+    fn an_existing_file_is_appended_to() {
+        let t = tempfile::tempdir().unwrap();
+        let prog = t.path().join("one.kio");
+        std::fs::write(&prog, "fn main() -> Int { 1 }").unwrap();
+        let log = t.path().join("a.log");
+        std::fs::write(&log, "keep\n").unwrap();
+        for _ in 0..2 {
+            let (code, err) = kio(t.path(), &[prog.to_str().unwrap(), "--audit", log.to_str().unwrap()]);
+            assert_eq!(code, 0, "{err}");
+        }
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(text.starts_with("keep\n{"), "{text}");
+        assert_eq!(text.matches(r#""event":"start""#).count(), 2);
+        assert_eq!(text.matches(r#""event":"end""#).count(), 2);
+    }
+}

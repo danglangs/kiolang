@@ -71,6 +71,13 @@ struct Program {
     sites: Vec<Site>,
 }
 
+/// A program checked and lowered to a component, not yet compiled for an engine.
+struct Lowered {
+    report: String,
+    params: grants::Params,
+    wasm: codegen::Wasm,
+}
+
 /// Check, lower and compile `files` (root first) for `engine`: the program, or the checker's
 /// diagnostics. Native code comes from `cache` when it is given. `edit` changes the lowered
 /// program before codegen (tests only).
@@ -81,6 +88,18 @@ fn compile(
     cache: Option<&PathBuf>,
     edit: impl FnOnce(&mut lang::ir::Module),
 ) -> Result<std::result::Result<Program, Vec<Diag>>> {
+    match lower(files, limits, edit)? {
+        Ok(lowered) => Ok(Ok(link(engine, files, lowered, cache)?)),
+        Err(diags) => Ok(Err(diags)),
+    }
+}
+
+/// Check and lower `files` to a component, or the checker's diagnostics.
+fn lower(
+    files: &[(String, String)],
+    limits: &Limits,
+    edit: impl FnOnce(&mut lang::ir::Module),
+) -> Result<std::result::Result<Lowered, Vec<Diag>>> {
     let pairs: Vec<(&str, &str)> = files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
     let caps = lang::CapTable::v0();
     let program = match lang::check_files(&pairs, &caps) {
@@ -101,20 +120,68 @@ fn compile(
         );
         return Err(wasmtime::Error::msg(Stopped(msg)));
     }
+    let params = grants::main_params(&module);
+    Ok(Ok(Lowered { report, params, wasm }))
+}
+
+/// Compile `lowered` for `engine`, from `cache` when it is given.
+fn link(engine: &Engine, files: &[(String, String)], lowered: Lowered, cache: Option<&PathBuf>) -> Result<Program> {
+    let Lowered { report, params, wasm } = lowered;
     let component = match cache {
         Some(dir) => crate::cache::component(engine, &wasm.component, dir)?,
         None => Component::new(engine, &wasm.component)?,
     };
     let mut linker = Linker::new(engine);
     World::add_to_linker::<State, HasSelf<State>>(&mut linker, |s| s)?;
-    Ok(Ok(Program {
+    Ok(Program {
         files: files.to_vec(),
         allowed: main_calls(&report),
         report,
-        params: grants::main_params(&module),
+        params,
         pre: linker.instantiate_pre(&component)?,
         sites: wasm.sites,
-    }))
+    })
+}
+
+/// What one instance of `component` takes from the pooling allocator: `(core instances, memories,
+/// tables)`, counted as Wasmtime counts them (every core module instantiated, and the memories
+/// and tables those modules define). Wasmtime refuses the component at compile time if the
+/// counts are short, so a wrong count fails startup, never a request.
+fn pool_needs(component: &[u8]) -> Result<(u32, u32, u32)> {
+    use wasmparser::{Instance, Parser, Payload};
+    let mut modules: Vec<(u32, u32)> = Vec::new();
+    let mut instances = Vec::new();
+    // Depth 0 is the component; 1 is one of its core modules.
+    let mut depth = 0;
+    for payload in Parser::new(0).parse_all(component) {
+        match payload? {
+            Payload::ModuleSection { .. } => {
+                modules.push((0, 0));
+                depth += 1;
+            }
+            Payload::ComponentSection { .. } => wasmtime::bail!("pool sizing: nested components are not counted"),
+            Payload::MemorySection(r) if depth == 1 => modules.last_mut().unwrap().0 += r.count(),
+            Payload::TableSection(r) if depth == 1 => modules.last_mut().unwrap().1 += r.count(),
+            Payload::InstanceSection(r) => {
+                for instance in r {
+                    if let Instance::Instantiate { module_index, .. } = instance? {
+                        instances.push(module_index);
+                    }
+                }
+            }
+            Payload::End(_) if depth > 0 => depth -= 1,
+            _ => {}
+        }
+    }
+    let (mut memories, mut tables) = (0, 0);
+    for i in &instances {
+        let Some((m, t)) = modules.get(*i as usize) else {
+            wasmtime::bail!("pool sizing: core module {i} is not defined in the component");
+        };
+        memories += m;
+        tables += t;
+    }
+    Ok((instances.len() as u32, memories, tables))
 }
 
 /// Codegen for `module`. IR that codegen does not handle yet panics there (`unimplemented!`);
@@ -500,19 +567,37 @@ pub struct Server {
     requests: AtomicU64,
 }
 
-/// Instances the pool holds at once; one more fails `handle` until another request ends.
-const POOL_INSTANCES: u32 = 64;
+/// Requests `--listen` runs at once by default (`ListenLimits::workers`): two per core.
+pub fn default_workers() -> usize {
+    2 * std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
+/// Component instances the pool holds at once, at least one per worker, so a request with a
+/// worker is never refused for want of an instance.
+fn pool_instances() -> u32 {
+    u32::try_from(default_workers()).unwrap_or(u32::MAX).max(64)
+}
 
 impl Server {
     /// Check and compile `files` (root first) once, or return the diagnostics. Every request
-    /// runs under `limits`; the pool reserves address space for `limits.memory` per instance,
+    /// runs under `limits`; the pool reserves address space for `limits.memory` per memory,
     /// but touches only what the program uses.
     pub fn new(files: Vec<(String, String)>, limits: Limits) -> Result<std::result::Result<Self, Vec<Diag>>> {
+        let lowered = match lower(&files, &limits, |_| {})? {
+            Ok(l) => l,
+            Err(diags) => return Ok(Err(diags)),
+        };
+        // Every pool limit is the component's own count times the instances the pool holds.
+        let (core, memories, tables) = pool_needs(&lowered.wasm.component)?;
+        let n = pool_instances();
         let mut pool = PoolingAllocationConfig::new();
-        pool.total_component_instances(POOL_INSTANCES)
-            .total_core_instances(POOL_INSTANCES)
-            .total_memories(POOL_INSTANCES)
-            .total_tables(POOL_INSTANCES)
+        pool.total_component_instances(n)
+            .max_core_instances_per_component(core)
+            .total_core_instances(core.saturating_mul(n))
+            .max_memories_per_component(memories)
+            .total_memories(memories.saturating_mul(n))
+            .max_tables_per_component(tables)
+            .total_tables(tables.saturating_mul(n))
             .max_memory_size(limits.memory);
         let mut config = config::compile_config();
         set_stack(&mut config, limits.stack);
@@ -521,10 +606,7 @@ impl Server {
         // server idles (W13d): 28 MB idle RSS against 48 MB, for startup in about 160 ms, not 30.
         config.parallel_compilation(false);
         let engine = Engine::new(&config)?;
-        let program = match compile(&engine, &files, &limits, None, |_| {})? {
-            Ok(p) => p,
-            Err(diags) => return Ok(Err(diags)),
-        };
+        let program = link(&engine, &files, lowered, None)?;
         let param = |ty: &str| {
             (program.params.iter())
                 .find(|(_, t, _)| t == ty)
@@ -568,8 +650,13 @@ impl Server {
         Ok(())
     }
 
-    /// Grant `kvs` by name to every request; all requests share each store.
+    /// Grant `kvs` by name to every request; all requests share each store. Panics after
+    /// `audit`, whose header would then miss the stores.
     pub fn grant_kvs(&mut self, kvs: KvGrants) {
+        assert!(
+            self.audit.is_none(),
+            "Server::grant_kvs after Server::audit: the audit header lists Kv grants"
+        );
         self.kvs = kvs;
     }
 

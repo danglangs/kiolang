@@ -82,7 +82,7 @@ pub struct ListenLimits {
 impl Default for ListenLimits {
     fn default() -> Self {
         ListenLimits {
-            workers: 2 * std::thread::available_parallelism().map_or(1, |n| n.get()),
+            workers: crate::compiled::default_workers(),
             queued: MAX_QUEUED,
             connections: MAX_CONNECTIONS,
             header_timeout: HEADER_TIMEOUT,

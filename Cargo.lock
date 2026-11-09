@@ -988,6 +988,7 @@ dependencies = [
  "tokio-tungstenite",
  "ureq",
  "url",
+ "wasmparser 0.261.0",
  "wasmtime",
 ]
 

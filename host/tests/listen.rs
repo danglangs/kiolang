@@ -93,6 +93,50 @@ fn hundred_concurrent_requests_succeed() {
     assert!(ok >= 90, "only {ok} of 100 succeeded");
 }
 
+/// Requests on one keep-alive connection, in turn; returns each status.
+fn send_keep_alive(port: u16, paths: &[String]) -> Vec<u16> {
+    let s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let mut r = BufReader::new(s.try_clone().unwrap());
+    let mut w = s;
+    let mut statuses = Vec::new();
+    for path in paths {
+        write!(w, "GET {path} HTTP/1.1\r\nhost: localhost\r\n\r\n").unwrap();
+        let (mut line, mut len) = (String::new(), 0);
+        r.read_line(&mut line).unwrap();
+        statuses.push(line.split(' ').nth(1).unwrap().parse().unwrap());
+        loop {
+            line.clear();
+            r.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                len = v.trim().parse().unwrap();
+            }
+        }
+        r.read_exact(&mut vec![0; len]).unwrap();
+    }
+    statuses
+}
+
+/// The pool holds an instance for every worker: 64 keep-alive clients at once are never told 503
+/// (a component instance takes three core instances; a pool sized by hand ran out at 22).
+#[test]
+fn sixty_four_keep_alive_clients_get_no_503() {
+    let public = tempfile::tempdir().unwrap();
+    let kio = start(public.path());
+    let port = kio.port;
+    let threads: Vec<_> = (0..64)
+        .map(|i| {
+            let paths: Vec<String> = (0..50).map(|j| format!("/hello/c{i}r{j}")).collect();
+            std::thread::spawn(move || send_keep_alive(port, &paths))
+        })
+        .collect();
+    for t in threads {
+        assert!(t.join().unwrap().iter().all(|&s| s == 200));
+    }
+}
+
 #[test]
 fn body_over_one_megabyte_is_413() {
     let public = tempfile::tempdir().unwrap();
@@ -316,6 +360,28 @@ fn request_past_the_queue_cap_is_503_at_once() {
     // The queued request gives up after the 1 s queue wait.
     assert_eq!(wait.join().unwrap().0, 503);
     assert_eq!(hold.join().unwrap().0, 500);
+}
+
+/// Every worker can hold an instance at once: all of them blocked on `pipe` until the deadline
+/// get 500, never 503 for want of an instance.
+#[cfg(unix)]
+#[test]
+fn every_worker_gets_an_instance() {
+    let public = tempfile::tempdir().unwrap();
+    let workers = ListenLimits::default().workers;
+    let port = limits::start(
+        public.path(),
+        ListenLimits {
+            workers,
+            ..Default::default()
+        },
+    );
+    let threads: Vec<_> = (0..workers)
+        .map(|_| std::thread::spawn(move || send(port, "GET", "/pipe", b"").0))
+        .collect();
+    for t in threads {
+        assert_eq!(t.join().unwrap(), 500);
+    }
 }
 
 #[test]

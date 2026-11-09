@@ -245,6 +245,11 @@ fn run(path: &str, flags: &[&str]) -> i32 {
             }
         }
     }
+    if let Some(path) = &audit {
+        if let Some(why) = audit_refusal(path, &kv_specs, &dir_paths, resolved.as_deref()) {
+            return fail(why);
+        }
+    }
     let kvs = match kio_host::kv::open_all(&kv_specs, kv_mb) {
         Ok(kvs) => kvs,
         Err(e) => return fail(e),
@@ -258,7 +263,7 @@ fn run(path: &str, flags: &[&str]) -> i32 {
         Err(e) => return fail(format!("{e:#}")),
     };
     if let Some(path) = audit {
-        match std::fs::File::create(&path) {
+        match open_audit(&path) {
             Ok(f) => kio.audit(f, dir_paths),
             Err(e) => return fail(format!("--audit {path}: {e}")),
         }
@@ -312,7 +317,7 @@ fn serve(
     };
     server.grant_kvs(kvs);
     if let Some((path, dir_paths)) = audit {
-        let opened = std::fs::File::create(&path).and_then(|f| server.audit(f, dir_paths));
+        let opened = open_audit(&path).and_then(|f| server.audit(f, dir_paths));
         if let Err(e) = opened {
             return fail(format!("--audit {path}: {e}"));
         }
@@ -321,6 +326,62 @@ fn serve(
         Ok(()) => 0,
         Err(e) => fail(e),
     }
+}
+
+/// Why `--audit path` is refused, if it is: the log must not be a `--kv` store (writing it would
+/// corrupt the store), lie inside a granted `--dir` (the program could read or replace its own
+/// log) or inside the compile cache. Checked before any of them is opened.
+fn audit_refusal(
+    path: &str,
+    kv_specs: &[(String, String)],
+    dir_paths: &[(String, String)],
+    cache: Option<&std::path::Path>,
+) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let Some(log) = kio_host::cache::resolve(path.as_ref()) else {
+        return Some(format!(
+            "`--audit {path}` has `.` or `..` past the directories that exist\n  hint: name the log by a plain path"
+        ));
+    };
+    let id = |p: &std::path::Path| std::fs::metadata(p).ok().map(|m| (m.dev(), m.ino()));
+    let log_id = id(path.as_ref());
+    // Path or file: two paths to one store, or a hard link to it, are the same file. A store's
+    // compaction writes `path.tmp` beside it, so that name is the store's too.
+    let same = |p: &str| {
+        log_id.is_some() && id(p.as_ref()) == log_id || kio_host::cache::resolve(p.as_ref()).is_some_and(|r| r == log)
+    };
+    for (name, spec) in kv_specs.iter().filter(|(_, s)| s != ":memory:") {
+        let store = kio_host::kv::split_spec(spec).0;
+        if same(store) || same(&format!("{store}.tmp")) {
+            return Some(format!(
+                "`--audit {path}` is the same file as `--kv {name}`\n  hint: give the audit log its own file; writing it would corrupt the store"
+            ));
+        }
+    }
+    if cache.is_some_and(|c| log.starts_with(c)) {
+        return Some(format!(
+            "`--audit {path}` is inside kio's compile cache\n  hint: keep the audit log outside `$XDG_CACHE_HOME/kio` (default `~/.cache/kio`)"
+        ));
+    }
+    for (d, dir) in dir_paths {
+        if std::fs::canonicalize(dir).is_ok_and(|root| log.starts_with(root)) {
+            return Some(format!(
+                "`--audit {path}` is inside `--dir {d}`\n  hint: keep the audit log outside granted directories, where the program cannot read or replace it"
+            ));
+        }
+    }
+    None
+}
+
+/// Open the audit log to append, creating it: an existing file is never truncated, and a
+/// symlink is never followed (it could lead past `audit_refusal`'s checks).
+fn open_audit(path: &str) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(path)
 }
 
 /// The file index and 1-based line of each diag. Any file number or offset maps to some line,
