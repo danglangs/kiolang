@@ -25,8 +25,12 @@ pub fn report(p: &Program) -> String {
             // A name that is not a capability parameter finds no entry in `uses` and is skipped.
             walk_block(&f.body, &mut |e| match &e.kind {
                 ExprKind::Method(recv, m, _) => {
-                    if let ExprKind::Name(d) = &recv.kind {
-                        found.push((d.clone(), m.clone()));
+                    // Only a method the capability has: a local shadowing the parameter
+                    // (`let d = 5; d.to_str()`) names no capability method.
+                    let Some(d) = recv_name(recv) else { return };
+                    let Some(ty) = cap_type(f, d) else { return };
+                    if p.cap_methods.contains_key(&(ty.to_string(), m.clone())) {
+                        found.push((d.to_string(), m.clone()));
                     }
                 }
                 ExprKind::Call(callee, args) => {
@@ -116,7 +120,12 @@ fn walk(e: &Expr, visit: &mut dyn FnMut(&Expr)) {
         // A closure's body is charged to the function it is written in. It can reach no
         // capability (the checker refuses a capture of one), so this only keeps the report an
         // upper bound should that rule ever fail.
-        ExprKind::Unary(_, a) | ExprKind::Try(a) | ExprKind::Field(a, _) | ExprKind::Closure(_, a) => walk(a, visit),
+        // `web::Row { b: d.read("a") }` is a module path around a struct literal: walk into it.
+        ExprKind::Unary(_, a)
+        | ExprKind::Try(a)
+        | ExprKind::Field(a, _)
+        | ExprKind::Closure(_, a)
+        | ExprKind::Module(_, a) => walk(a, visit),
         ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) => {
             walk(a, visit);
             walk(b, visit);
@@ -156,7 +165,22 @@ fn walk(e: &Expr, visit: &mut dyn FnMut(&Expr)) {
         | ExprKind::Bool(_)
         | ExprKind::Unit
         | ExprKind::Name(_)
-        | ExprKind::Path(..)
-        | ExprKind::Module(..) => {}
+        | ExprKind::Path(..) => {}
+    }
+}
+
+fn recv_name(e: &Expr) -> Option<&str> {
+    match &e.kind {
+        ExprKind::Name(d) => Some(d),
+        _ => None,
+    }
+}
+
+/// The capability type of `f`'s parameter `d`, if it is one.
+fn cap_type<'a>(f: &'a Fn, d: &str) -> Option<&'a str> {
+    let param = f.params.iter().find(|x| x.name == d)?;
+    match &param.ty.kind {
+        TypeKind::Named(n, a) if a.is_empty() => Some(n.as_str()),
+        _ => None,
     }
 }

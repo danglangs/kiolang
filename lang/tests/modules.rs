@@ -494,3 +494,17 @@ fn module_functions_as_values() {
         "pass the capability to a named function instead",
     );
 }
+
+#[test]
+fn report_charges_calls_inside_a_module_struct_literal() {
+    // `web::Row { .. }` is a module path around a struct literal; the report used to stop at the
+    // path and miss the capability calls in the field values, so the host stopped the run.
+    let web = "pub struct Row { b: Result<Bytes, IoErr>, n: Int }\npub fn count(d: Dir) -> Int { d.list(\"\").unwrap_or([]).len() }";
+    let app = "mod web; fn main(d: Dir) -> Int { let r = web::Row { b: d.read(\"a\"), n: web::count(d) }; r.n }";
+    let p = check(&[("app", app), ("web", web)]).unwrap();
+    let lines: Vec<_> = report(&p)
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect();
+    assert_eq!(lines, ["main : d list read", "web::count : d list"]);
+}

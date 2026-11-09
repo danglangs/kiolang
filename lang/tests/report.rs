@@ -119,3 +119,10 @@ fn main(input: Dir) -> Int {{ let n = 1; let f = |b: Bytes| b.len() + n; match l
     );
     assert_eq!(rep(&src), "load : d read\nmain : input read");
 }
+
+#[test]
+fn a_shadowed_capability_is_not_charged_with_other_methods() {
+    let src = "fn main(d: Dir) -> Str { let d = 5; let f = || d.to_str(); f() }";
+    let p = check(src, &lang::CapTable::v0()).unwrap();
+    assert_eq!(report(&p).trim(), "main : none");
+}
