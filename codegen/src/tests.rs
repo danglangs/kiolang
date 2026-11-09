@@ -290,3 +290,45 @@ fn main() -> Int {
     // SAFETY: a pinned static is never freed.
     assert_eq!(unsafe { (*at(a)).rc }, PINNED);
 }
+
+/// C8b4: a pointer parameter read only in place is borrowed; one read where a reference is
+/// taken (stored, returned, moved, captured, an owned argument) is owned, also through calls
+/// (`a` passes `s` to `b`, which passes it back and to `keep`, which stores it) and recursion.
+#[test]
+fn parameters_read_in_place_are_borrowed() {
+    let m = module(
+        r#"
+enum T { Leaf(Str), Node(List<T>) }
+struct P { name: Str }
+fn read(s: Str, xs: List<Int>, n: Int, p: P, f: fn(Int) -> Int, o: Option<Str>) -> Int {
+    let k = o.unwrap_or("");
+    let mut m = n;
+    for x in xs { m += x; }
+    s.len() + xs[0] + m + p.name.len() + f(1) + k.len() + if s == "a" { 1 } else { 0 }
+}
+fn opt(o: Option<Int>) -> Option<Int> { let x = o?; Some(x) }
+fn stored(s: Str) -> List<Str> { [s] }
+fn returned(s: Str) -> Str { s }
+fn moved(xs: List<Int>) -> List<Int> { let mut ys = xs; ys.push(1); ys }
+fn captured(s: Str) -> Int { let f = |x: Int| s.len() + x; f(1) }
+fn owned_arg(s: Str) -> Str { returned(s) }
+fn lent_arg(s: Str) -> Int { read(s, [1], 2, P { name: s + "" }, |x: Int| x, None) }
+fn size(t: T) -> Int { match t { T::Leaf(s) => s.len(), T::Node(ks) => { let mut n = 0; for k in ks { n += size(k); } n } } }
+fn a(s: Str, n: Int) -> Int { if n == 0 { keep(s) } else { b(s, n - 1) } }
+fn b(s: Str, n: Int) -> Int { a(s, n) }
+fn keep(s: Str) -> Int { stored(s).len() }
+fn main() -> Int { 0 }
+"#,
+    );
+    let lent = moves::borrowed(&m, is_ptr);
+    let of = |name: &str| lent[m.funcs.iter().position(|f| f.name == name).unwrap()].clone();
+    assert_eq!(of("read"), [true, true, false, true, true, true]);
+    assert_eq!(of("opt"), [true]);
+    for owned in ["stored", "returned", "moved", "captured", "owned_arg", "a", "b", "keep"] {
+        assert!(!of(owned)[0], "{owned}");
+    }
+    assert_eq!(of("lent_arg"), [true]);
+    assert_eq!(of("size"), [true]);
+    // The closure in `captured` reads its capture in place.
+    assert_eq!(of("captured::{closure#0}"), [true, false]);
+}

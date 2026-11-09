@@ -14,6 +14,7 @@ use crate::desc::{self, Desc, Table};
 use crate::obj::{self, bytes, elems, elems_mut, field, from_slot, to_slot, Header, Key, Map};
 use crate::text;
 use alloc::vec::Vec;
+use core::mem::ManuallyDrop;
 
 /// A program error. Codegen turns it into a `trap`: `index {index} out of bounds for length {len}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +54,18 @@ unsafe fn key_of(key: u32, v: u64) -> Key {
         // SAFETY: `v` is a live `Str`.
         desc::STR => Key::Str(unsafe { bytes(from_slot(v)) }.into()),
         k => panic!("descriptor {k} is not a key type"),
+    }
+}
+
+/// `key_of` without the copy: a probe borrowing a `Str`'s bytes, for a lookup only.
+///
+/// # Safety
+/// `v` is a live key of type `key` and outlives the probe.
+unsafe fn probe(key: u32, v: u64) -> ManuallyDrop<Key> {
+    match key {
+        // SAFETY: the caller's guarantee.
+        desc::STR => unsafe { Key::probe(bytes(from_slot(v))) },
+        _ => ManuallyDrop::new(unsafe { key_of(key, v) }),
     }
 }
 
@@ -183,7 +196,7 @@ pub unsafe fn map_get(t: &Table, p: *mut Header, k: u64, option_desc: u32, none:
     // SAFETY: the caller's guarantee.
     unsafe {
         let (key, value) = kv(t, p);
-        let v = map(p).get(&key_of(key, k)).map(|&v| share(t, value, v));
+        let v = map(p).get(&*probe(key, k)).map(|&v| share(t, value, v));
         obj::option(t, option_desc, none, v)
     }
 }
@@ -282,8 +295,12 @@ pub unsafe fn map_insert(t: &Table, p: *mut Header, k: u64, v: u64) {
     // SAFETY: the caller's guarantee.
     unsafe {
         let (key, value) = kv(t, p);
-        if let Some(old) = map(p).insert(key_of(key, k), v) {
-            release(t, value, old);
+        // A key already present is found without copying it, and kept.
+        match map(p).get_mut(&*probe(key, k)) {
+            Some(slot) => release(t, value, core::mem::replace(slot, v)),
+            None => {
+                map(p).insert(key_of(key, k), v);
+            }
         }
     }
 }
@@ -296,7 +313,7 @@ pub unsafe fn map_remove(t: &Table, p: *mut Header, k: u64) {
     // SAFETY: the caller's guarantee.
     unsafe {
         let (key, value) = kv(t, p);
-        if let Some(old) = map(p).remove(&key_of(key, k)) {
+        if let Some(old) = map(p).remove(&*probe(key, k)) {
             release(t, value, old);
         }
     }

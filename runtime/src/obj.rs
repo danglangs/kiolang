@@ -30,8 +30,8 @@ use alloc::alloc::{handle_alloc_error, Layout};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use core::mem::{align_of, size_of};
-use core::ptr;
+use core::mem::{align_of, size_of, ManuallyDrop};
+use core::ptr::{self, NonNull};
 
 pub const PINNED: u32 = u32::MAX;
 
@@ -47,7 +47,57 @@ pub struct Header {
 #[derive(Debug, Clone)]
 pub enum Key {
     Int(i64),
-    Str(Box<[u8]>),
+    Str(StrKey),
+}
+
+impl Key {
+    /// A key that borrows `b` for a lookup (C8b4), so a `get`, a `remove` or an `insert` of a
+    /// key already present copies nothing.
+    ///
+    /// # Safety
+    /// `b` outlives the probe, and the probe is only compared with, never put in a map: the
+    /// `ManuallyDrop` keeps it from freeing bytes it does not own.
+    pub unsafe fn probe(b: &[u8]) -> ManuallyDrop<Key> {
+        ManuallyDrop::new(Key::Str(StrKey(NonNull::from(b))))
+    }
+}
+
+/// A `Str` key's bytes: a `Box<[u8]>` held as a raw pointer and freed on drop, or, inside
+/// `Key::probe`'s `ManuallyDrop`, borrowed bytes. A raw pointer, not a `Box`, so a probe makes
+/// no claim of owning them.
+pub struct StrKey(NonNull<[u8]>);
+
+impl From<&[u8]> for StrKey {
+    fn from(b: &[u8]) -> StrKey {
+        StrKey(NonNull::from(Box::leak(Box::<[u8]>::from(b))))
+    }
+}
+
+impl core::ops::Deref for StrKey {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        // SAFETY: owned bytes live as long as `self`; a probe's outlive it (`Key::probe`).
+        unsafe { self.0.as_ref() }
+    }
+}
+
+impl Drop for StrKey {
+    fn drop(&mut self) {
+        // SAFETY: a `StrKey` that drops was made by `from`, from a `Box`; a probe never drops.
+        drop(unsafe { Box::from_raw(self.0.as_ptr()) });
+    }
+}
+
+impl Clone for StrKey {
+    fn clone(&self) -> StrKey {
+        StrKey::from(&**self)
+    }
+}
+
+impl core::fmt::Debug for StrKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        (**self).fmt(f)
+    }
 }
 
 impl Ord for Key {

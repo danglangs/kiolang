@@ -4,20 +4,22 @@ Where kio stands against its goal of a general-purpose systems language with nea
 
 ## Speed today
 
-C8b3, 2026-11-09: Apple M3 Max (16 cores, 64 GB), load average 2-9 (other builds running), release builds, rustc 1.99.1 `-O`, Python 3.13.2; best of 5, each column's startup subtracted (kio's cached start is 7 ms). Compile time is separate: a program's first `kio run` compiles the runtime and the program (about 20-25 ms), later runs load the cache. Runs pass a huge `--fuel` (the default is 10 G since C8a). Programs, method and rerunning: [bench/](../bench/README.md). The C8b2 column is the C8b2 binary run alternately with C8b3's, under the same load; HTTP was not rerun (C8b2's run); C8a is before C8b1. Rust, Python and the interpreter are C8b2's run.
+C8b4, 2026-11-09: Apple M3 Max (16 cores, 64 GB), release builds, rustc 1.99.1 `-O`, Python 3.13.2; best of 5, each column's startup subtracted (kio's cached start is 8 ms). Compile time is separate: a program's first `kio run` compiles the runtime and the program (about 20-25 ms), later runs load the cache. Runs pass a huge `--fuel` (the default is 10 G since C8a). Programs, method and rerunning: [bench/](../bench/README.md). The kio compiled and C8b3 columns are the two binaries run alternately, two rounds, load 1.4-2.7 (loop and Mandelbrot: the full `bench/run.sh` run, load 3-8.5); C8a is before C8b1. Rust, Python, the interpreter and HTTP are C8b4's full run.
 
-| Benchmark | Rust | Python | kio compiled | C8b2 | C8a | compile | kio interpreted | compiled vs Rust | vs Python |
+| Benchmark | Rust | Python | kio compiled | C8b3 | C8a | compile | kio interpreted | compiled vs Rust | vs Python |
 |---|---|---|---|---|---|---|---|---|---|
-| `fib(35)`, calls | 24 ms | 705 ms | 53 ms | 53 ms | 54 ms | 20 ms | 1.53 s | 2.2x slower | 13x faster |
-| 30 M-iteration integer loop | 98 ms | 931 ms | 108 ms | 104 ms | 110 ms | 24 ms | 1.26 s | 1.1x slower | 8.6x faster |
-| Mandelbrot 400x400, 100 iterations | 11 ms | 310 ms | 13 ms | 13 ms | 14 ms | 23 ms | 954 ms | 1.2x slower | 24x faster |
-| 1 M push, sort, index and `for` sums | 17 ms | 367 ms | 27 ms | 27 ms | 52 ms | 24 ms | 191 ms | 1.6x slower | 13x faster |
-| tree of 2^20 leaves built and folded | 33 ms | 2.87 s | 179 ms | 243 ms | 438 ms | 24 ms | 1.04 s | 5.4x slower | 16x faster |
-| `map`/`filter` with closures, 1 M | 2.8 ms | 77 ms | 13 ms | 13 ms | 36 ms | 23 ms | 95 ms | 4.6x slower | 6.0x faster |
-| word count, 1 MB of text | 7.4 ms | 16 ms | 75 ms | 83 ms | 98 ms | 23 ms | 66 ms | 10x slower | 4.7x slower |
-| JSON parse + encode, 1 MB (json.kio) | 8.7 ms | 17 ms | 82 ms | 100 ms | 554 ms | 23 ms | 813 ms | 9.4x slower | 4.8x slower |
-| 100 k `s = s + i.to_str() + ","` | 5.0 ms | 6.9 ms | 5.2 ms | 7.9 ms | 1.37 s | 23 ms | 1.57 s | 1.0x slower | 1.3x faster |
-| HTTP `GET /hello/kio`, `ab -k -c 12` | 236,000 req/s (hyper) | 28,900 req/s (`http.server`) | 73,500 req/s (kio-web, `--listen`) | 73,500 | 72,000 | once at startup | | 3.2x fewer | 2.5x more |
+| `fib(35)`, calls | 25 ms | 714 ms | 53 ms | 53 ms | 54 ms | 23 ms | 1.54 s | 2.1x slower | 13x faster |
+| 30 M-iteration integer loop | 97 ms | 934 ms | 111 ms | 108 ms | 110 ms | 23 ms | 1.27 s | 1.1x slower | 8.4x faster |
+| Mandelbrot 400x400, 100 iterations | 10 ms | 315 ms | 12 ms | 13 ms | 14 ms | 23 ms | 958 ms | 1.2x slower | 26x faster |
+| 1 M push, sort, index and `for` sums | 17 ms | 364 ms | 27 ms | 27 ms | 52 ms | 23 ms | 193 ms | 1.6x slower | 13x faster |
+| tree of 2^20 leaves built and folded | 33 ms | 2.86 s | 185 ms | 179 ms | 438 ms | 21 ms | 1.04 s | 5.6x slower | 15x faster |
+| `map`/`filter` with closures, 1 M | 5.3 ms | 77 ms | 14 ms | 13 ms | 36 ms | 23 ms | 97 ms | 2.6x slower | 5.5x faster |
+| word count, 1 MB of text | 6.9 ms | 16 ms | 70 ms | 74 ms | 98 ms | 22 ms | 69 ms | 10x slower | 4.4x slower |
+| JSON parse + encode, 1 MB (json.kio) | 8.6 ms | 16 ms | 80 ms | 83 ms | 554 ms | 24 ms | 810 ms | 9.3x slower | 5.0x slower |
+| 100 k `s = s + i.to_str() + ","` | 4.5 ms | 6.3 ms | 5.2 ms | 5.3 ms | 1.37 s | 22 ms | 1.57 s | 1.2x slower | 1.2x faster |
+| HTTP `GET /hello/kio`, `ab -k -c 12` | 237,000 req/s (hyper) | 29,100 req/s (`http.server`) | 73,800 req/s (kio-web, `--listen`) | 73,500 | 72,000 | once at startup | | 3.2x fewer | 2.5x more |
+
+C8b4 (borrowed parameters, borrowed `Str` map keys) moved word count (key copies gone from `get` and repeated `insert`: 6%) and JSON (`b: Bytes` lent to every `byte(b, i)`: 3%; ten times 820 to 799 ms). Tree is 1-2% slower (2^22 leaves 731-739 to 740-756 ms): `fold(k)` moved `k` into the call before and lends it now, the same reference count, so nothing is saved and the code moved.
 
 C8b3 (size-class free lists, `runtime/src/heap.rs`) moved tree, JSON, word count and strings. Before it, dlmalloc's `malloc`, `free` and `unlink_chunk`, zeroing and the allocation shim were about 41% of tree (2^22 leaves) and 24% of JSON (ten times); after, 23% (dlmalloc's fresh blocks while the tree is built, all of them alive) and 9%. Scaled runs, best of 5 alternating the two binaries: tree at 2^22 leaves 980 to 725 ms, JSON ten times 972 to 820 ms.
 
@@ -43,9 +45,9 @@ Rust and Python are idiomatic: Rust's string building appends in place (`push_st
 | 1 | Done (C8b1): in-place `Str` append when `s` is unique and dead after (`s = s + x` reuses `s`, capacity doubling); strings 1.37 s to 8.5 ms, JSON 554 to 144 ms | strings 100x+, JSON encode 5-10x | strings, json rows; strings' `fuel_used` (`--audit`) from 116 G to under 10 M |
 | 2 | Done (C8b1): no zero-fill of `Str`/`Bytes` data | up to 2x on concatenation now, ~5% after #1 | strings, json; `__bzero` gone from the profile |
 | 3 | Done (C8b1): `rt_inc`/`rt_dec`/`rt_unique` fast paths and list `len`/`get`/`push` inline; closures 36 to 13 ms, list 52 to 28, tree 438 to 284 | 1.5-2x on closures, list, tree; removes most of the fuel/epoch share | closures, list, tree rows; calls per run (profile) |
-| 4 | Done in part (C8b2): last-use moves and borrowed local operands (borrowed parameters remain); with inline `Bytes` paths and one descriptor lookup per free, tree 284 to 244 ms, JSON 143 to 101 | 1.3-2x on JSON parse, tree | json, tree rows; `rt_inc`/`rt_dec` share of the profile |
+| 4 | Done (C8b2, C8b4): last-use moves and borrowed local operands; C8b4 borrowed parameters (JSON 83 to 80, tree unchanged). With inline `Bytes` paths and one descriptor lookup per free, tree 284 to 244 ms, JSON 143 to 101 | 1.3-2x on JSON parse, tree | json, tree rows; `rt_inc`/`rt_dec` share of the profile |
 | 5 | Done in part (C8b3): a free list per size class (8-64 bytes) over dlmalloc; tree 243 to 179 ms, JSON 100 to 82, word count 83 to 75, strings 7.9 to 5.2. Not done: a list's buffer inline in its object; carving fresh small blocks from larger chunks (dlmalloc's `malloc` is still 17% of tree, while it is built) | 1.5x on tree, word count | tree, word count; `malloc`/`free` share |
-| 6 | Done (C8b2): word-at-a-time `Str` `==` and order; word count unchanged (85 to 83 ms): its words differ in the first byte, and the time is `BTreeMap`'s linear search within nodes, a key copy per lookup, `split`'s allocations | word count 1.3-2x | word count row; `memcmp` share |
+| 6 | Done (C8b2): word-at-a-time `Str` `==` and order; word count unchanged (85 to 83 ms): its words differ in the first byte, and the time is `BTreeMap`'s linear search within nodes, a key copy per lookup (gone in C8b4: 74 to 70 ms), `split`'s allocations | word count 1.3-2x | word count row; `memcmp` share |
 | 7 | Cheaper work limit: Wasmtime fuel off, codegen counting at loop heads and calls of the program only (an owner decision: it changes what `--fuel` counts) | 10-25% on runtime-heavy code, after #3 less | a scratch no-fuel build is the bound (bench/README.md) |
 
 ## The path to near-native

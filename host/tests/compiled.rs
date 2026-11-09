@@ -1619,3 +1619,150 @@ fn bytes_inline_paths() {
     let src = r#"fn main() -> Int { let mut b = "a".to_bytes(); b.push(1); b[2] }"#;
     assert_eq!(error(src), "index 2 out of bounds for length 2");
 }
+
+/// Parameters that take a reference stay owned (C8b4): stored in a list, returned, moved into
+/// a `let mut` and changed, captured, passed on to an owned parameter. The caller's `a` and `xs`
+/// are used afterwards, so a callee that kept or changed the caller's reference without its
+/// own count would free or change them.
+#[test]
+fn parameters_taking_a_reference_stay_owned() {
+    let src = r#"fn stored(s: Str) -> List<Str> { [s] }
+        fn returned(s: Str) -> Str { s }
+        fn moved(xs: List<Int>) -> List<Int> { let mut ys = xs; ys.push(9); ys }
+        fn captured(s: Str) -> fn(Int) -> Str { |n: Int| s + n.to_str() }
+        fn passed(s: Str) -> Str { returned(s) }
+        fn main() -> Str {
+            let a = 1.to_str() + "a";
+            let l = stored(a);
+            let b = returned(a);
+            let xs = [1, 2];
+            let ys = moved(xs);
+            let f = captured(a);
+            let c = passed(a);
+            let n = xs.len() * 10 + ys.len();
+            a + l[0] + b + n.to_str() + f(5) + c
+        }"#;
+    assert_eq!(value(src), "1a1a1a231a51a");
+}
+
+/// A borrowed parameter's argument whose local dies at the call (C8b4): the local's last use
+/// is lent, not moved, and the local is dropped and emptied after the call; a local passed
+/// twice is copied for the first (a later argument mentions it) and lent for the second.
+#[test]
+fn a_local_lent_at_its_last_use_dies_after_the_call() {
+    let src = r#"fn len2(s: Str, t: Str) -> Int { s.len() * 10 + t.len() }
+        fn main() -> Int {
+            let n = { let s = 1.to_str() + "abc"; len2(s, s) };
+            let a = 2.to_str() + "x";
+            let m = len2(a, "yz");
+            let k = if m > 0 { let b = 3.to_str(); len2(b, b + "q") } else { 0 };
+            let mut j = 0;
+            for i in 0..3 { let c = i.to_str() + "c"; j += len2(c, c); }
+            n * 1000000 + m * 10000 + k * 100 + j
+        }"#;
+    assert_eq!(value(src), "44221266");
+}
+
+/// Temporaries lent to a borrowing callee are dropped after the call (C8b4): results of calls,
+/// concatenations, list elements, fields, and a field read in place from a local.
+#[test]
+fn temporaries_lent_to_a_callee_are_dropped() {
+    let src = r#"struct P { name: Str, tags: List<Str> }
+        fn len2(s: Str, t: Str) -> Int { s.len() * 10 + t.len() }
+        fn count(xs: List<Str>) -> Int { xs.len() }
+        fn mk(n: Int) -> Str { n.to_str() + "m" }
+        fn main() -> Int {
+            let p = P { name: 1.to_str() + "p", tags: [2.to_str(), 3.to_str()] };
+            let a = len2(mk(1), mk(22) + "x");
+            let b = len2(p.name, p.tags[1]);
+            let c = count(p.tags) + count([mk(3), mk(4)]) + count(P { name: "", tags: [] }.tags);
+            let d = len2(p.name + p.name, p.name);
+            a * 1000000 + b * 10000 + c * 100 + d
+        }"#;
+    assert_eq!(value(src), "24210442");
+}
+
+/// Recursion with borrowed parameters (C8b4): a tree folded with a borrowed separator, mutual
+/// recursion passing a borrowed string down 300 calls, and a builder lending its tag.
+#[test]
+fn recursion_with_borrowed_parameters() {
+    let src = r#"enum T { Leaf(Str), Node(List<T>) }
+        fn build(d: Int, tag: Str) -> T {
+            if d == 0 { T::Leaf(tag + d.to_str()) }
+            else { T::Node([build(d - 1, tag), build(d - 1, tag + "r")]) }
+        }
+        fn size(t: T, sep: Str) -> Int {
+            match t {
+                T::Leaf(s) => s.len() + sep.len(),
+                T::Node(kids) => { let mut n = 0; for k in kids { n += size(k, sep); } n }
+            }
+        }
+        fn even(s: Str, n: Int) -> Bool { if n == 0 { s.len() > 0 } else { odd(s, n - 1) } }
+        fn odd(s: Str, n: Int) -> Bool { if n == 0 { s.len() == 0 } else { even(s, n - 1) } }
+        fn main() -> Int {
+            let t = build(6, "t");
+            let sep = ", " + "";
+            let e = if even(sep, 300) { 1 } else { 0 };
+            size(t, sep) * 10 + size(build(2, 1.to_str()), "") + e
+        }"#;
+    assert_eq!(value(src), "4493");
+}
+
+/// Functions with borrowed parameters called through values (C8b4): each table entry passes
+/// its arguments owned and drops those the function borrows after the call; a borrowed
+/// capture is passed without a new reference.
+#[test]
+fn borrowed_parameters_through_values() {
+    let src = r#"fn len2(s: Str, t: Str) -> Int { s.len() * 10 + t.len() }
+        fn main() -> Int {
+            let f = len2;
+            let a = 1.to_str() + "a";
+            let x = f(a, a + "b") + f(2.to_str(), a);
+            let k = 3.to_str() + "kk";
+            let g = |s: Str| s.len() + k.len();
+            let xs = [a, k, 4.to_str()];
+            let lens = xs.map(g);
+            let h = |n: Int| k.len() + n;
+            let y = h(1) + h(2) + g(a + a);
+            let any = xs.any(|s: Str| s == k);
+            x * 10000 + lens[0] * 1000 + lens[1] * 100 + y + if any { 1 } else { 0 }
+        }"#;
+    assert_eq!(value(src), "355617");
+}
+
+/// A local lent in place must not be changed by a later argument (C8b4): then it is evaluated
+/// as a copy before that argument runs, as the interpreter reads it.
+#[test]
+fn a_later_argument_cannot_change_a_lent_local() {
+    let src = r#"struct P { name: Str }
+        fn cat(a: Str, b: Str) -> Str { a + b }
+        fn main() -> Str {
+            let mut y = 1.to_str();
+            let r = cat(y, { y = 2.to_str(); y });
+            let mut p = P { name: 3.to_str() };
+            let q = cat(p.name, { p = P { name: 4.to_str() }; p.name });
+            r + y + q + p.name
+        }"#;
+    assert_eq!(value(src), "122344");
+}
+
+/// `for` over a borrowed parameter uses the caller's list (C8b4), also when the loop is left
+/// by `return` or `break`.
+#[test]
+fn for_over_a_borrowed_parameter() {
+    let src = r#"fn find(xs: List<Str>, w: Str) -> Int {
+            let mut i = 0;
+            for x in xs { if x == w { return i; } i += 1; }
+            0 - 1
+        }
+        fn upto(xs: List<Str>, w: Str) -> Int {
+            let mut n = 0;
+            for x in xs { if x == w { break; } n += x.len(); }
+            n
+        }
+        fn main() -> Int {
+            let xs = [1.to_str(), 22.to_str(), 333.to_str()];
+            find(xs, 22.to_str()) * 1000 + find(xs, "") * 100 + upto(xs, 333.to_str()) + xs.len()
+        }"#;
+    assert_eq!(value(src), "906");
+}

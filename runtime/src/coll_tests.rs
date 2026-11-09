@@ -360,6 +360,48 @@ fn map_with_int_values_and_str_keys() {
     assert_eq!(obj::live(), before);
 }
 
+/// `Str` keys are looked up borrowed (C8b4): `get`, `remove` and an `insert` of a key already
+/// present keep nothing of the key passed, which is freed (poisoned in tests) right after; the
+/// map's own copy, made by the first `insert`, is the one it keeps.
+#[test]
+fn str_keys_are_looked_up_borrowed() {
+    let _l = lock();
+    let before = obj::live();
+    let m = coll::map_new(MAP_STR_INT);
+    let with = |k: &str, f: &dyn Fn(u64)| {
+        let k = s(k);
+        f(k);
+        dec(from_slot(k));
+    };
+    let get = |k: u64| {
+        // SAFETY: `m` is a `Map<Str, Int>` and `k` a live `Str`.
+        unsafe {
+            let g = coll::map_get(&T, m, k, OPT_INT, core::ptr::null_mut());
+            let v = (*field_u32(g) == 1).then(|| *obj::slot(&T, g, 0) as i64);
+            dec(g);
+            v
+        }
+    };
+    // SAFETY: `m` is a unique `Map<Str, Int>`, each key a live `Str`.
+    unsafe {
+        with("a key longer than a word", &|k| coll::map_insert(&T, m, k, 1));
+        with("a key longer than a word", &|k| coll::map_insert(&T, m, k, 2));
+        with("a key longer than a wore", &|k| coll::map_insert(&T, m, k, 3));
+        with("b", &|k| coll::map_insert(&T, m, k, 4));
+        with("b", &|k| coll::map_remove(&T, m, k));
+        with("b", &|k| coll::map_remove(&T, m, k));
+        with("a key longer than a word", &|k| assert_eq!(get(k), Some(2)));
+        with("a key longer than a wore", &|k| assert_eq!(get(k), Some(3)));
+        with("b", &|k| assert_eq!(get(k), None));
+        let ks = coll::map_keys(&T, m, LIST_STR);
+        assert_eq!(str_at(ks, 0), b"a key longer than a word");
+        assert_eq!((coll::map_len(m), coll::list_len(ks)), (2, 2));
+        dec(ks);
+    }
+    dec(m);
+    assert_eq!(obj::live(), before);
+}
+
 #[test]
 fn map_copy_on_write_through_a_callee() {
     let _l = lock();

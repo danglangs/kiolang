@@ -60,14 +60,15 @@ pub fn compile(m: &Module) -> Result<Wasm> {
     let mut sites = Vec::new();
     let mut types: Vec<FuncSig> = Vec::new();
     let mut funcs = Vec::new();
-    for f in &m.funcs {
-        let (sig, body) = func(&rt, m, &mut statics, &mut types, f, &mut sites);
+    let lent = moves::borrowed(m, is_ptr);
+    for (i, f) in m.funcs.iter().enumerate() {
+        let (sig, body) = func(&rt, m, &mut statics, &mut types, f, &mut sites, (&lent, i));
         funcs.push((rt.types + type_index(&mut types, sig), body));
     }
     // A wrapper per function used as a value, after the program's functions, in table order.
     let mut elems = Vec::new();
     for &(f, captures) in statics.elems() {
-        let (sig, body) = wrapper(&rt, m, f, captures);
+        let (sig, body) = wrapper(&rt, m, f, captures, &lent[f.0 as usize]);
         elems.push(rt.funcs + funcs.len() as u32);
         funcs.push((rt.types + type_index(&mut types, sig), body));
     }
@@ -285,6 +286,15 @@ const SLOT: wasm_encoder::MemArg = wasm_encoder::MemArg {
 };
 
 /// `WsMessage` as `ws_message`: a capability's part of its wrappers' names.
+/// The local at the root of `e`, a local or a field of one (`FuncGen::in_place`).
+fn root(e: &ir::Expr) -> ir::LocalId {
+    match &e.kind {
+        ExprKind::Local(id) => *id,
+        ExprKind::Field(base, _) => root(base),
+        _ => unreachable!("in place"),
+    }
+}
+
 fn snake(name: &str) -> String {
     let mut s = String::new();
     for (i, c) in name.chars().enumerate() {
@@ -424,6 +434,7 @@ fn func<'m>(
     types: &mut Vec<FuncSig>,
     f: &'m ir::Func,
     sites: &mut Vec<Site>,
+    (lent, index): (&[Vec<bool>], usize),
 ) -> (FuncSig, Function) {
     // Each IR local with a value gets a Wasm local: parameters first, as Wasm numbers them,
     // then the others; `()` locals get none. Hidden locals follow.
@@ -440,9 +451,10 @@ fn func<'m>(
             None => {}
         }
     }
-    // The parameters are owned by the call, as if bound by `let` around the body.
+    // The owned parameters are the call's, as if bound by `let` around the body; the borrowed
+    // ones the caller's (C8b4).
     let owned = (0..f.params as usize)
-        .filter(|&i| is_ptr(&f.locals[i].ty))
+        .filter(|&i| is_ptr(&f.locals[i].ty) && !lent[index][i])
         .filter_map(|i| locals[i])
         .collect();
     let mut g = FuncGen {
@@ -463,6 +475,8 @@ fn func<'m>(
         list_scratch: None,
         owned,
         moves: moves::moves(f, is_ptr),
+        lent,
+        own_lent: &lent[index],
         depth: 0,
         loops: Vec::new(),
         code: Vec::new(),
@@ -511,6 +525,9 @@ struct FuncGen<'a, 'm> {
     /// The reads of pointer locals that are last uses (moves.rs): each hands over the local's
     /// reference and zeroes its slot, rather than adding a reference.
     moves: HashSet<*const ir::Expr>,
+    /// Each function's borrowed parameters (moves.rs `borrowed`), and this function's.
+    lent: &'a [Vec<bool>],
+    own_lent: &'a [bool],
     /// Open Wasm blocks, loops and ifs that can hold kio code.
     depth: u32,
     /// For each enclosing kio loop, innermost last: the depth of its `break` and `continue`
@@ -935,6 +952,21 @@ impl FuncGen<'_, '_> {
         self.locals[id.0 as usize]
     }
 
+    /// Whether local `id` is a borrowed parameter: it holds the caller's reference, so it is
+    /// never moved, assigned, changed in place or dropped here.
+    fn is_lent(&self, id: ir::LocalId) -> bool {
+        self.own_lent.get(id.0 as usize) == Some(&true)
+    }
+
+    /// Whether the read `e` of a local is a last use that moves its reference (moves.rs). A
+    /// borrowed parameter's reference is not this function's to move.
+    fn moves_out(&self, e: &ir::Expr) -> bool {
+        match e.kind {
+            ExprKind::Local(id) => self.moves.contains(&(e as *const ir::Expr)) && !self.is_lent(id),
+            _ => false,
+        }
+    }
+
     /// Opens a Wasm `block`, `loop` or `if` (which takes its condition from the stack); returns
     /// its depth, for `br`.
     fn open(&mut self, kind: Open, bt: BlockType) -> u32 {
@@ -999,6 +1031,7 @@ impl FuncGen<'_, '_> {
                 let Some(l) = self.local(place.root) else {
                     return self.expr(value);
                 };
+                debug_assert!(!self.is_lent(place.root), "a borrowed parameter assigned");
                 match op {
                     None => match appended(place.root, value) {
                         Some(parts) => self.append(place.root, l, parts),
@@ -1148,9 +1181,18 @@ impl FuncGen<'_, '_> {
         }
         let mark = self.owned.len();
         let list = self.temp(ValType::I32);
-        self.expr(xs);
-        self.sink().local_set(list);
-        self.owned.push(list);
+        match xs.kind {
+            // A borrowed parameter is never changed here and the caller holds it (C8b4).
+            ExprKind::Local(id) if self.is_lent(id) => {
+                let l = self.local(id).expect("a list");
+                self.sink().local_get(l).local_set(list);
+            }
+            _ => {
+                self.expr(xs);
+                self.sink().local_set(list);
+                self.owned.push(list);
+            }
+        }
         let ty = elem(&xs.ty);
         let x = self.local(x);
         let x_ptr = x.filter(|_| is_ptr(ty));
@@ -1324,6 +1366,7 @@ impl FuncGen<'_, '_> {
         k: &mut usize,
     ) -> (u32, Option<u32>) {
         let root = self.local(place.root).expect("a container local");
+        debug_assert!(!self.is_lent(place.root), "a borrowed parameter changed in place");
         self.sink().local_get(root);
         self.unique_top();
         self.sink().local_set(root);
@@ -1415,7 +1458,7 @@ impl FuncGen<'_, '_> {
             ExprKind::Unit => {}
             ExprKind::Local(id) => {
                 if let Some(l) = self.local(*id) {
-                    if is_ptr(&e.ty) && self.moves.contains(&(e as *const ir::Expr)) {
+                    if is_ptr(&e.ty) && self.moves_out(e) {
                         // The last use: the reference moves out, and the slot is left empty,
                         // so the scope's end and every exit drop nothing (`rt_dec(0)`).
                         self.sink().local_get(l).i32_const(0).local_set(l);
@@ -1494,17 +1537,7 @@ impl FuncGen<'_, '_> {
                 self.close();
             }
             ExprKind::Block(b) => self.block(b, val_type(&e.ty)),
-            ExprKind::Call(f, args) => {
-                // The callee takes the arguments.
-                let args: Vec<&ir::Expr> = args.iter().collect();
-                let (mark, temps) = self.operands(&args);
-                for (x, t) in args.iter().zip(temps) {
-                    self.get(x, t);
-                }
-                self.owned.truncate(mark);
-                let index = self.rt.funcs + f.0;
-                self.sink().call(index);
-            }
+            ExprKind::Call(f, args) => self.call(*f, args),
             ExprKind::FnRef(f) => {
                 let a = self.statics.pinned_fn(*f, None);
                 self.sink().i32_const(a as i32);
@@ -1657,6 +1690,59 @@ impl FuncGen<'_, '_> {
         }
         if e.ty == Ty::Never {
             self.sink().unreachable();
+        }
+    }
+
+    /// `f(args)`: the arguments in order, then a direct call. An owned parameter takes its
+    /// argument. A borrowed one (C8b4) is lent it, and the caller keeps its reference across
+    /// the call: a local, or a field of one, that no later argument mentions is passed in place
+    /// (nothing evaluated before the call can then change it, and the callee cannot reach the
+    /// caller's locals), and if it was the local's last use, the local is dropped and emptied
+    /// after the call rather than moved; any other argument is evaluated, held like an operand,
+    /// and dropped after the call.
+    fn call(&mut self, f: ir::FuncId, args: &[ir::Expr]) {
+        let all = self.lent;
+        let lent = all[f.0 as usize].as_slice();
+        let mark = self.owned.len();
+        let mut temps = Vec::new();
+        let mut in_place = Vec::new();
+        for (i, x) in args.iter().enumerate() {
+            let here = lent[i] && self.in_place(x) && !args[i + 1..].iter().any(|y| moves::mentions(y, root(x)));
+            in_place.push(here);
+            if here {
+                temps.push(None);
+                continue;
+            }
+            self.expr(x);
+            let t = val_type(&x.ty).map(|vt| self.temp(vt));
+            if let Some(t) = t {
+                self.sink().local_set(t);
+                if is_ptr(&x.ty) {
+                    self.owned.push(t);
+                }
+            }
+            temps.push(t);
+        }
+        for ((x, t), &here) in args.iter().zip(&temps).zip(&in_place) {
+            match here {
+                true => self.borrow(x),
+                false => self.get(x, *t),
+            }
+        }
+        self.owned.truncate(mark);
+        let index = self.rt.funcs + f.0;
+        self.sink().call(index);
+        // Only the call ran since the arguments: it returned (or trapped).
+        for (((x, t), &here), &lent) in args.iter().zip(&temps).zip(&in_place).zip(lent) {
+            match (here, *t) {
+                (true, _) if self.moves_out(x) => {
+                    let l = self.borrowed_local(x).expect("a pointer local");
+                    self.dec(l);
+                    self.sink().i32_const(0).local_set(l);
+                }
+                (false, Some(t)) if lent => self.dec(t),
+                _ => {}
+            }
         }
     }
 
@@ -2372,8 +2458,12 @@ fn entry_desc(statics: &mut Statics, ret: &Ty) -> Function {
 }
 
 /// The table entry of function `f` used as a value: takes the function object and `f`'s own
-/// parameters, and calls `f` with a new reference to each capture in the object first.
-fn wrapper(rt: &Runtime, m: &Module, f: ir::FuncId, captures: usize) -> (FuncSig, Function) {
+/// parameters, and calls `f` with each capture in the object first. A call through a value
+/// passes every argument owned and the object borrowed, so for `f`'s borrowed parameters
+/// (`lent`, C8b4) the wrapper adapts: a borrowed capture is passed without a new reference
+/// (the caller holds the object across the call), and a borrowed parameter's argument is
+/// dropped after the call.
+fn wrapper(rt: &Runtime, m: &Module, f: ir::FuncId, captures: usize, lent: &[bool]) -> (FuncSig, Function) {
     let func = &m.funcs[f.0 as usize];
     let (caps, params) = func.locals[..func.params as usize].split_at(captures);
     let params: Vec<Ty> = params.iter().map(|l| l.ty.clone()).collect();
@@ -2384,7 +2474,7 @@ fn wrapper(rt: &Runtime, m: &Module, f: ir::FuncId, captures: usize) -> (FuncSig
     let mut s = body.instructions();
     for (i, l) in caps.iter().enumerate() {
         let at = slot_at(ENUM_SLOTS + 8 * i as u64);
-        if is_ptr(&l.ty) {
+        if is_ptr(&l.ty) && !lent[i] {
             s.local_get(0).i64_load(at).i32_wrap_i64().local_set(p);
             inc(&mut s, rt, p, r);
         }
@@ -2396,7 +2486,21 @@ fn wrapper(rt: &Runtime, m: &Module, f: ir::FuncId, captures: usize) -> (FuncSig
     for i in 1..sig.0.len() as u32 {
         s.local_get(i);
     }
-    s.call(rt.funcs + f.0).end();
+    s.call(rt.funcs + f.0);
+    // The result stays on the stack under the drops.
+    let mut w = 0;
+    for (l, &lent) in func.locals[captures..func.params as usize]
+        .iter()
+        .zip(&lent[captures..])
+    {
+        if val_type(&l.ty).is_some() {
+            w += 1;
+            if lent {
+                dec(&mut s, rt, w, r);
+            }
+        }
+    }
+    s.end();
     (sig, body)
 }
 

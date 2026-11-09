@@ -378,3 +378,178 @@ fn each_local_block(b: &ir::Block, f: &mut impl FnMut(LocalId, bool)) {
         each_local(t, f);
     }
 }
+
+/// Borrowed parameters (C8b4): for each function, which of its parameters are borrowed. A
+/// borrowed parameter is passed without an `rt_inc`, the caller keeping its reference across
+/// the call, and the callee does not drop it.
+///
+/// A pointer parameter is borrowed when its function reads it only where codegen uses a local
+/// in place, without a reference of its own: an operand of a runtime operation, `==` or `+`, an
+/// index or field base, a `match` scrutinee, the operand of `?`, a called `fn` value, the
+/// receiver and function of a built-in taking one, a map key, the iterable of `for`, or an
+/// argument for another borrowed parameter. A read anywhere else (a `let`, a return or a
+/// block's value, an element, an owned argument, a capture) takes a reference, which an owned
+/// parameter can hand over (a move) and a borrowed one would have to add; and a parameter that
+/// is assigned or changed in place (a place write, a mutation, `+=`) stays owned, since that
+/// drops or replaces the reference. Arguments for borrowed parameters are borrowed reads, so
+/// this is a fixpoint: every pointer parameter starts borrowed and loses it when its function
+/// reads it elsewhere, until nothing changes.
+pub(crate) fn borrowed(m: &ir::Module, is_ptr: fn(&ir::Ty) -> bool) -> Vec<Vec<bool>> {
+    let mut b: Vec<Vec<bool>> = m
+        .funcs
+        .iter()
+        .map(|f| f.locals[..f.params as usize].iter().map(|l| is_ptr(&l.ty)).collect())
+        .collect();
+    loop {
+        let mut changed = false;
+        for (i, f) in m.funcs.iter().enumerate() {
+            let mut u = Uses {
+                borrowed: &b,
+                owned: Live::new(f.locals.len()),
+            };
+            u.block(&f.body);
+            let owned = u.owned;
+            for (p, lent) in b[i].iter_mut().enumerate() {
+                if *lent && owned.contains(LocalId(p as u32)) {
+                    *lent = false;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            return b;
+        }
+    }
+}
+
+/// The locals of a function that are read where a reference is taken, or assigned or changed
+/// in place.
+struct Uses<'b> {
+    borrowed: &'b [Vec<bool>],
+    owned: Live,
+}
+
+impl Uses<'_> {
+    /// `e` where its value is taken: a read of a local there takes a reference.
+    fn owned(&mut self, e: &Expr) {
+        match e.kind {
+            ExprKind::Local(id) => self.owned.insert(id),
+            _ => self.inner(e),
+        }
+    }
+
+    /// `e` where a read of a local is used in place.
+    fn borrowed(&mut self, e: &Expr) {
+        if !matches!(e.kind, ExprKind::Local(_)) {
+            self.inner(e);
+        }
+    }
+
+    fn inner(&mut self, e: &Expr) {
+        match &e.kind {
+            ExprKind::Local(id) => self.owned.insert(*id),
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Bool(_)
+            | ExprKind::Str(_)
+            | ExprKind::Unit
+            | ExprKind::FnRef(_)
+            | ExprKind::MapNew => {}
+            ExprKind::Unary(_, x) => self.owned(x),
+            ExprKind::Field(x, _) | ExprKind::Try(x) => self.borrowed(x),
+            // On pointers only `==`, `!=` and `+`, which borrow; the rest are on scalars.
+            ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) => {
+                self.borrowed(a);
+                self.borrowed(b);
+            }
+            ExprKind::If(cond, then, els) => {
+                self.owned(cond);
+                self.block(then);
+                if let Some(els) = els {
+                    self.owned(els);
+                }
+            }
+            ExprKind::Block(b) => self.block(b),
+            ExprKind::Call(f, args) => {
+                for (x, &lent) in args.iter().zip(&self.borrowed[f.0 as usize]) {
+                    match lent {
+                        true => self.borrowed(x),
+                        false => self.owned(x),
+                    }
+                }
+            }
+            ExprKind::List(args) | ExprKind::Variant(_, _, args) => args.iter().for_each(|x| self.owned(x)),
+            ExprKind::StructLit(_, inits) => inits.iter().for_each(|(_, x)| self.owned(x)),
+            ExprKind::CallValue(callee, args) => {
+                self.borrowed(callee);
+                args.iter().for_each(|x| self.owned(x));
+            }
+            ExprKind::Closure(_, captured) => captured.iter().for_each(|&id| self.owned.insert(id)),
+            ExprKind::CapCall(_, _, args) => args.iter().for_each(|x| self.borrowed(x)),
+            ExprKind::Builtin(_, recv, args) => {
+                self.borrowed(recv);
+                args.iter().for_each(|x| self.borrowed(x));
+            }
+            ExprKind::Mutate(place, op, args) => {
+                self.place(place);
+                let key = matches!(op, ir::Mut::MapInsert | ir::Mut::MapRemove);
+                for (i, x) in args.iter().enumerate() {
+                    match key && i == 0 {
+                        true => self.borrowed(x),
+                        false => self.owned(x),
+                    }
+                }
+            }
+            ExprKind::Match(scrut, arms) => {
+                self.borrowed(scrut);
+                arms.iter().for_each(|arm| self.owned(&arm.body));
+            }
+        }
+    }
+
+    /// A place written or changed: its root is replaced or made unique.
+    fn place(&mut self, place: &ir::Place) {
+        self.owned.insert(place.root);
+        for step in &place.steps {
+            if let PlaceStep::Index(i, _) = step {
+                self.owned(i);
+            }
+        }
+    }
+
+    fn block(&mut self, b: &ir::Block) {
+        for s in &b.stmts {
+            match &s.kind {
+                StmtKind::Let(_, init) => self.owned(init),
+                // `x += y` borrows `y`; a place's `+=` evaluates it as an operand.
+                StmtKind::Assign(place, op, value) => {
+                    self.place(place);
+                    match *op == Some(ir::BinOp::Concat) && place.steps.is_empty() {
+                        true => self.borrowed(value),
+                        false => self.owned(value),
+                    }
+                }
+                StmtKind::Return(value) => value.iter().for_each(|e| self.owned(e)),
+                StmtKind::While(cond, body) => {
+                    self.owned(cond);
+                    self.block(body);
+                }
+                StmtKind::Loop(body) => self.block(body),
+                StmtKind::ForList(_, xs, body) => {
+                    self.borrowed(xs);
+                    self.block(body);
+                }
+                StmtKind::ForRange(_, a, b, body) => {
+                    self.owned(a);
+                    self.owned(b);
+                    self.block(body);
+                }
+                StmtKind::Break | StmtKind::Continue => {}
+                StmtKind::Expr(e) => self.owned(e),
+            }
+        }
+        if let Some(t) = &b.tail {
+            self.owned(t);
+        }
+    }
+}
