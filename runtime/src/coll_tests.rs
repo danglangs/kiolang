@@ -147,8 +147,9 @@ fn list_basics() {
         coll::list_push(p, 3);
         assert_eq!(coll::list_len(p), 3);
         coll::list_set(&T, p, 0, 9).unwrap();
+        *coll::list_slot(p, 2).unwrap() += 1;
     }
-    assert_eq!(contents(p), [9, 2, 3]);
+    assert_eq!(contents(p), [9, 2, 4]);
     dec(p);
     assert_eq!(obj::live(), before);
 }
@@ -163,6 +164,7 @@ fn index_bounds() {
         unsafe {
             assert_eq!(coll::list_get(&T, p, i), Err(Error::Index { index: i, len: 2 }));
             assert_eq!(coll::list_set(&T, p, i, 0), Err(Error::Index { index: i, len: 2 }));
+            assert_eq!(coll::list_slot(p, i), Err(Error::Index { index: i, len: 2 }));
         }
     }
     assert_eq!(contents(p), [1, 2]);

@@ -410,3 +410,173 @@ fn bytes_push_copies_when_shared() {
     let src = r#"fn main() -> Int { let mut b = "ab".to_bytes(); b.push(1); let c = b; b.push(99); for i in 0..100 { b.push(i); } b.len() * 10 + c.len() }"#;
     assert_eq!(value(src), "1043");
 }
+
+// List and Map (C3c). As above, each ownership rule has a test that leaks, frees too early or
+// gives a wrong value without it.
+
+#[test]
+fn lists_and_maps_values_and_builtins() {
+    let src = "fn main() -> Int { let xs = [3, 4, 5]; xs[0] * 100 + xs[2] * 10 + xs.len() }";
+    assert_eq!(value(src), "353");
+    let src = "fn main() -> Bool { let e: List<Int> = []; [1, 2] == [1, 2] && [1] != [2] && e.len() == 0 && [[true]] == [[true]] }";
+    assert_eq!(value(src), "true");
+    let src = r#"fn main() -> Str {
+        let mut m: Map<Str, Int> = Map::new(); m.insert("b", 2); m.insert("a", 1); m.insert("c", 3); m.remove("c"); m.remove("zz");
+        let ks = m.keys();
+        let mut n: Map<Str, Int> = Map::new(); n.insert("a", 1); n.insert("b", 2);
+        let mut e: Map<Int, ()> = Map::new(); e.insert(1, ()); e.remove(1);
+        ks[0] + ks[1] + m.len().to_str() + if m == n { "T" } else { "F" } + e.len().to_str()
+    }"#;
+    assert_eq!(value(src), "ab2T0");
+    let src = r#"fn main() -> Str {
+        let parts = "a,b,,c".split(",");
+        let lines = "x\ny\n".lines();
+        let mut s = parts.len().to_str() + lines.len().to_str();
+        for p in parts { s += "[" + p + "]"; }
+        s + lines[1]
+    }"#;
+    assert_eq!(value(src), "42[a][b][][c]y");
+    let src = r#"fn main() -> Int { let mut xs = [1, 2]; xs[1] += 40; xs[0] -= 10; let mut ss = ["a"]; ss[0] += "bc"; xs[0] + xs[1] + ss[0].len() }"#;
+    assert_eq!(value(src), "36");
+    let src = r#"fn main() -> Int { let mut b = ["".to_bytes()]; b[0].push(7); b[0].push(9); let c = b[0]; c[0] + c[1] + c.len() }"#;
+    assert_eq!(value(src), "18");
+}
+
+#[test]
+fn list_errors_match() {
+    let index = "fn main() -> Int { let xs = [1, 2]; xs[2] }";
+    assert_eq!(
+        both(index).unwrap_err(),
+        ("index 2 out of bounds for length 2".to_string(), 36, 41)
+    );
+    assert_eq!(
+        error("fn main() -> Int { [1][0 - 1] }"),
+        "index -1 out of bounds for length 1"
+    );
+    // A place write evaluates the indexes, then the value, then checks bounds outward.
+    assert_eq!(
+        error("fn main() { let mut xs = [1]; xs[5] = 1 / 0; }"),
+        "division by zero"
+    );
+    let outer = "fn main() { let mut xs = [[1]]; xs[3][1 / 1] = 2; }";
+    assert_eq!(
+        both(outer).unwrap_err(),
+        ("index 3 out of bounds for length 1".to_string(), 32, 37)
+    );
+    let inner = "fn main() { let mut xs = [[1]]; xs[0][4] = 2; }";
+    assert_eq!(
+        both(inner).unwrap_err(),
+        ("index 4 out of bounds for length 1".to_string(), 32, 40)
+    );
+    // Bounds come before the overflow of `+=`, which reports the statement.
+    assert_eq!(
+        error("fn main() { let mut xs = [9223372036854775807]; xs[1] += 1; }"),
+        "index 1 out of bounds for length 1"
+    );
+    let add = "fn main() { let mut xs = [9223372036854775807]; xs[0] += 1; }";
+    assert_eq!(both(add).unwrap_err(), ("Int overflow".to_string(), 48, 59));
+    assert_eq!(
+        error("fn main() { let mut xs = [[1]]; xs[2].push(1 / 0); }"),
+        "division by zero"
+    );
+    assert_eq!(
+        error(r#"fn main() { let mut b = ["".to_bytes()]; b[0].push(300); }"#),
+        "byte 300 out of range 0..=255"
+    );
+    assert_eq!(
+        error(r#"fn main() -> Int { "a".split("").len() }"#),
+        "`split` needs a non-empty separator"
+    );
+}
+
+/// A list literal takes its elements: dropping them after the push frees them inside the list.
+#[test]
+fn list_literal_takes_its_elements() {
+    let src = r#"fn main() -> Str { let s = "s" + "t"; let xs = [s, 1.to_str() + "x", s]; xs[0] + xs[1] + xs[2] }"#;
+    assert_eq!(value(src), "st1xst");
+}
+
+/// `xs[i]` is a new reference (the runtime's inc) and its list is dropped after the read.
+#[test]
+fn an_element_read_is_owned() {
+    let src = r#"fn f() -> List<Str> { ["a" + "b", "c" + ""] }
+        fn main() -> Str { let xs = f(); let s = xs[0]; let t = f()[1]; s + xs[0] + t }"#;
+    assert_eq!(value(src), "ababc");
+}
+
+/// A place write copies a shared list first (`rt_unique`) and stores the copy back.
+#[test]
+fn element_write_copies_a_shared_list() {
+    let src = "fn main() -> Int { let mut a = [1, 2]; let mut b = a; b[0] = 9; a[1] += 5; a[0] * 1000 + a[1] * 100 + b[0] * 10 + b[1] }";
+    assert_eq!(value(src), "1792");
+    let src = r#"fn main() -> Str { let mut a = ["x" + "y"]; let b = a; a[0] += "z"; a[0] = a[0] + "!"; a[0] + b[0] }"#;
+    assert_eq!(value(src), "xyz!xy");
+}
+
+/// `xs[i][j] = v` makes each list on the path unique, and stores each back into its parent.
+#[test]
+fn nested_place_write() {
+    let src = "fn main() -> Int {
+        let mut xs = [[1, 2], [3, 4]];
+        let ys = xs;
+        let inner = xs[1];
+        xs[1][0] = 9;
+        xs[1][1] += 10;
+        xs[0][0] = xs[1][0];
+        xs[0][0] * 100000 + xs[1][0] * 10000 + xs[1][1] * 100 + ys[1][0] * 10 + inner[0]
+    }";
+    assert_eq!(value(src), "991433");
+}
+
+/// `push` copies a shared list, at the root or inside another list.
+#[test]
+fn push_through_a_shared_list() {
+    let src = "fn main() -> Int {
+        let mut a = [1]; let b = a; a.push(2);
+        let mut xs = [[1], [2]]; let inner = xs[0]; xs[0].push(5); xs[0].push(6);
+        let ys = xs; xs[1].push(7);
+        a.len() * 10000 + b.len() * 1000 + xs[0].len() * 100 + inner.len() * 10 + ys[1].len()
+    }";
+    assert_eq!(value(src), "21311");
+    // The pushed value becomes the list's.
+    let src = r#"fn main() -> Str { let mut ss = [1.to_str()]; let tt = ss; ss.push(ss[0] + "x"); ss.push(tt[0]); ss[0] + ss[1] + ss[2] + tt[0] }"#;
+    assert_eq!(value(src), "11x11");
+}
+
+/// `for x in xs` holds its own reference to the list, dropped on every way out of the loop,
+/// and drops each element after its pass.
+#[test]
+fn for_over_a_list_releases_on_every_exit() {
+    let src = r#"fn find(xs: List<Str>, w: Str) -> Int { let mut i = 0; for x in xs { if x == w { return i; } i += 1; } 0 - 1 }
+        fn upto(xs: List<Str>, w: Str) -> Str { let mut s = ""; for x in xs { if x == w { break; } if x == "-" { continue; } s += x; } s }
+        fn main() -> Str {
+            let xs = ["a" + "", "-" + "", "b" + "", "c" + ""];
+            let mut s = find(xs, "b").to_str() + find(xs, "z").to_str() + upto(xs, "c") + upto(xs, "q");
+            for y in ["p" + "", "q" + ""] { s += y; }
+            s
+        }"#;
+    assert_eq!(value(src), "2-1ababcpq");
+}
+
+/// A change to the list inside `for x in xs` copies it: the loop sees the list as it began.
+#[test]
+fn changing_the_list_inside_its_for() {
+    let src = "fn main() -> Int { let mut xs = [1, 2, 3]; let mut n = 0; for x in xs { xs[2] = 100; xs.push(x); n += x; } n * 1000 + xs.len() * 100 + xs[2] }";
+    assert_eq!(value(src), "6700");
+}
+
+/// `insert` takes the value and drops a value it replaces; `insert` and `remove` borrow the
+/// key; `remove` drops the value; `keys` gives a new list that is dropped after use.
+#[test]
+fn map_insert_remove_and_keys_ownership() {
+    let src = r#"fn main() -> Int {
+        let mut m: Map<Str, Str> = Map::new();
+        for i in 0..10 { m.insert(i.to_str() + "k", i.to_str() + "v"); m.insert(i.to_str() + "k", "v" + i.to_str()); }
+        for i in 0..5 { m.remove(i.to_str() + "k"); }
+        let mut n = 0;
+        for i in 0..3 { n += m.keys().len(); n += m.keys()[0].len(); }
+        let ms = [m]; let mut ms2 = ms; ms2[0].remove("9k");
+        n * 100 + m.len() * 10 + ms2[0].len()
+    }"#;
+    assert_eq!(value(src), "2154");
+}

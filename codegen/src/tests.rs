@@ -24,9 +24,9 @@ fn the_component_validates() {
 }
 
 #[test]
-#[should_panic(expected = "codegen: builtin StrSplit")]
+#[should_panic(expected = "codegen: builtin StrParseInt")]
 fn unsupported_ir_names_the_node() {
-    let _ = compile(&module("fn main() { \"a,b\".split(\",\"); }"));
+    let _ = compile(&module("fn main() { \"12\".parse_int(); }"));
 }
 
 #[test]

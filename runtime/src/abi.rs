@@ -284,6 +284,18 @@ pub unsafe extern "C" fn rt_list_set(l: u32, i: i64, v: i64, site: u32) {
     }
 }
 
+/// The address of `l[i]`'s `u64` slot, which generated code reads and writes: to make a
+/// container on a place's path unique and store it back, or for `l[i] += v`. Valid until `l`
+/// next changes. Error: out of bounds; `a` is `i`, `b` the length.
+#[no_mangle]
+pub unsafe extern "C" fn rt_list_at(l: u32, i: i64, site: u32) -> u32 {
+    // SAFETY: the group's contract.
+    match unsafe { coll::list_slot(ptr(l), i) } {
+        Ok(p) => p.expose_provenance() as u32,
+        Err(e) => index_trap(site, e),
+    }
+}
+
 /// `l.push(v)`.
 #[no_mangle]
 pub unsafe extern "C" fn rt_list_push(l: u32, v: i64) {

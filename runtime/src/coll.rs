@@ -109,6 +109,18 @@ pub unsafe fn list_get(t: &Table, p: *mut Header, i: i64) -> Result<u64, Error> 
     }
 }
 
+/// The slot of `xs[i]`, for a place write that descends through it or changes it in place.
+/// Valid until the list next changes or is freed.
+///
+/// # Safety
+/// `p` is a unique `List`.
+pub unsafe fn list_slot(p: *mut Header, i: i64) -> Result<*mut u64, Error> {
+    // SAFETY: the caller's guarantee.
+    let l = unsafe { list(p) };
+    let i = at(i, l.len())?;
+    Ok(&mut l[i])
+}
+
 /// `xs[i] = v` on a unique list. The slot takes `v` before the old element is dec'd, so a `v`
 /// that is (a reference to) the old element, which holds its own count, is never freed first.
 ///

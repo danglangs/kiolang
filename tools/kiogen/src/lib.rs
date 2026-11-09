@@ -6,7 +6,10 @@
 //! helper recurses only on its first parameter, which nothing assigns or shadows, as `n - 1`
 //! after returning when `n <= 0`, and which every outside call passes as `e % 6`. A helper calls
 //! only earlier helpers and itself, and calls and loops are generated only while an estimate of
-//! the work stays within `BUDGET`. Runtime errors (overflow, division by zero) are allowed.
+//! the work stays within `BUDGET`. A `for` over a list runs at most `MAX_LEN` passes (or the
+//! list's tracked bound, outside other loops), since a `push` is generated only while that
+//! bound stays within `MAX_LEN`. Runtime errors (overflow, division by zero, an index out of
+//! bounds) are allowed.
 
 /// What programs may contain. Int and Bool expressions with every operator, `let`, `let mut`,
 /// assignment, `+=`, `-=`, `if`/`else` and `return` are always on.
@@ -17,6 +20,9 @@ pub struct Features {
     pub calls: bool,
     /// Helpers that call themselves on a decreasing parameter.
     pub recursion: bool,
+    /// `List<Int>` locals: literals, copies, indexing (mostly in range), `len`, `push`,
+    /// element assignment and `+=`, `==`, and `for x in xs`.
+    pub lists: bool,
 }
 
 impl Default for Features {
@@ -26,6 +32,7 @@ impl Default for Features {
             loops: true,
             calls: true,
             recursion: true,
+            lists: true,
         }
     }
 }
@@ -65,6 +72,8 @@ const MAX_LOOPS: u32 = 2;
 const MAX_NEST: u32 = 3;
 /// Deepest expression tree.
 const MAX_DEPTH: u32 = 3;
+/// Longest a list can grow: a `push` is generated only while the list's bound stays within it.
+const MAX_LEN: u64 = 100;
 
 /// xorshift64*, seeded through splitmix64 so nearby seeds give unrelated streams.
 struct Rng(u64);
@@ -102,6 +111,8 @@ enum Ty {
     Int,
     Bool,
     Unit,
+    /// `List<Int>`; only locals have it.
+    List,
 }
 
 struct Var {
@@ -110,6 +121,10 @@ struct Var {
     mutable: bool,
     /// A loop counter or a recursion parameter: never assigned or shadowed.
     fixed: bool,
+    /// For a list: bounds on its length at any point of the function. Indexes below `min` are
+    /// in range; `max` bounds the passes of a `for` over it and grows with each `push`.
+    min: u64,
+    max: u64,
 }
 
 struct Func {
@@ -156,8 +171,16 @@ impl Gen<'_> {
             ty,
             mutable,
             fixed,
+            min: 0,
+            max: 0,
         };
         self.scopes.last_mut().unwrap().push(var);
+    }
+
+    /// The innermost binding of `name`.
+    fn var(&mut self, name: &str) -> &mut Var {
+        let mut vars = self.scopes.iter_mut().rev().flat_map(|s| s.iter_mut().rev());
+        vars.find(|v| v.name == name).unwrap()
     }
 
     /// The visible variables (innermost binding of each name) matching `keep`.
@@ -188,6 +211,7 @@ impl Gen<'_> {
             Ty::Int => "Int",
             Ty::Bool => "Bool",
             Ty::Unit => "()",
+            Ty::List => "List<Int>",
         }
     }
 
@@ -324,6 +348,11 @@ impl Gen<'_> {
         self.cost += self.mult;
         let pad = self.pad();
         let deep = self.nest >= MAX_NEST;
+        if self.features.lists && self.rng.chance(20) {
+            if let Some(s) = self.list_stmt() {
+                return s;
+            }
+        }
         loop {
             match self.rng.below(100) {
                 0..=29 => return self.let_stmt(),
@@ -370,6 +399,9 @@ impl Gen<'_> {
     }
 
     fn let_stmt(&mut self) -> String {
+        if self.features.lists && self.rng.chance(20) {
+            return self.let_list();
+        }
         let ty = self.ty();
         let init = self.expr(ty, MAX_DEPTH);
         let shadow = self.visible(|v| !v.fixed);
@@ -391,7 +423,7 @@ impl Gen<'_> {
     }
 
     fn assign(&mut self) -> Option<String> {
-        let names = self.visible(|v| v.mutable && !v.fixed);
+        let names = self.visible(|v| v.mutable && !v.fixed && v.ty != Ty::List);
         if names.is_empty() {
             return None;
         }
@@ -408,6 +440,117 @@ impl Gen<'_> {
     fn var_ty(&self, name: &str) -> Ty {
         let mut vars = self.scopes.iter().rev().flat_map(|s| s.iter().rev());
         vars.find(|v| v.name == name).unwrap().ty
+    }
+
+    /// A list value: a copy of a visible list or a literal of up to five elements (at least
+    /// one unless `empty`, since `[]` needs a type from its context). Returns it with the
+    /// bounds on its length.
+    fn list_expr(&mut self, empty: bool) -> (String, u64, u64) {
+        let lists = self.visible(|v| v.ty == Ty::List);
+        if !lists.is_empty() && self.rng.chance(30) {
+            let name = self.rng.pick(&lists).clone();
+            let v = self.var(&name);
+            let (min, max) = (v.min, v.max);
+            return (name, min, max);
+        }
+        let n = self.rng.below(6).max(u64::from(!empty));
+        let items: Vec<String> = (0..n).map(|_| self.expr(Ty::Int, 1)).collect();
+        (format!("[{}]", items.join(", ")), n, n)
+    }
+
+    fn let_list(&mut self) -> String {
+        let (init, min, max) = self.list_expr(true);
+        let name = self.name("xs");
+        let mutable = self.rng.chance(70);
+        let annot = if init == "[]" || self.rng.chance(30) {
+            ": List<Int>"
+        } else {
+            ""
+        };
+        let m = if mutable { "mut " } else { "" };
+        let s = format!("{}let {m}{name}{annot} = {init};\n", self.pad());
+        self.declare(name.clone(), Ty::List, mutable, false);
+        let v = self.var(&name);
+        (v.min, v.max) = (min, max);
+        s
+    }
+
+    /// An index into list `name`: mostly a literal known to be in range, else any `Int`.
+    fn index(&mut self, name: &str) -> String {
+        let min = self.var(name).min;
+        if min > 0 && self.rng.chance(85) {
+            self.rng.below(min).to_string()
+        } else {
+            format!("({} % 8)", self.expr(Ty::Int, 0))
+        }
+    }
+
+    /// `push`, an element's `=`, `+=` or `-=`, the whole list's `=`, or `for x in xs`.
+    fn list_stmt(&mut self) -> Option<String> {
+        let pad = self.pad();
+        let kind = self.rng.below(6);
+        if kind >= 4 {
+            return self.for_list();
+        }
+        let mult = self.mult;
+        let mutable: Vec<String> = self
+            .visible(|v| v.ty == Ty::List && v.mutable && !v.fixed)
+            .into_iter()
+            .filter(|n| kind > 1 || self.var(n).max + mult <= MAX_LEN)
+            .collect();
+        if mutable.is_empty() {
+            return None;
+        }
+        let name = self.rng.pick(&mutable).clone();
+        match kind {
+            0 | 1 => {
+                let e = self.expr(Ty::Int, 2);
+                self.var(&name).max += mult;
+                Some(format!("{pad}{name}.push({e});\n"))
+            }
+            2 => {
+                let i = self.index(&name);
+                let op = *self.rng.pick(&["=", "+=", "-="]);
+                let e = self.expr(Ty::Int, 2);
+                Some(format!("{pad}{name}[{i}] {op} {e};\n"))
+            }
+            _ => {
+                let (e, min, max) = self.list_expr(false);
+                let v = self.var(&name);
+                (v.min, v.max) = (v.min.min(min), v.max.max(max));
+                Some(format!("{pad}{name} = {e};\n"))
+            }
+        }
+    }
+
+    /// `for x in xs` over a visible list. Its passes are bounded by the list's `max`, or by
+    /// `MAX_LEN` inside another loop, whose later passes may have pushed more.
+    fn for_list(&mut self) -> Option<String> {
+        let lists = self.visible(|v| v.ty == Ty::List);
+        if lists.is_empty()
+            || !self.features.loops
+            || self.loops >= MAX_LOOPS
+            || self.nest >= MAX_NEST
+            || self.cost > BUDGET / 2
+        {
+            return None;
+        }
+        let name = self.rng.pick(&lists).clone();
+        let runs = match self.loops {
+            0 => self.var(&name).max.max(1),
+            _ => MAX_LEN,
+        };
+        let pad = self.pad();
+        let x = self.name("x");
+        self.mult *= runs;
+        self.loops += 1;
+        self.scopes.push(vec![]);
+        self.declare(x.clone(), Ty::Int, false, true);
+        let body = self.block(3, Ty::Unit);
+        self.scopes.pop();
+        self.loops -= 1;
+        self.mult /= runs;
+        Some(format!("{pad}for {x} in {name} {body}\n"))
     }
 
     fn loop_stmt(&mut self) -> Option<String> {
@@ -493,7 +636,22 @@ impl Gen<'_> {
             Ty::Int => self.int(depth),
             Ty::Bool => self.bool(depth),
             Ty::Unit => "()".into(),
+            Ty::List => unreachable!("lists come from list_expr"),
         }
+    }
+
+    /// `xs[i]` or `xs.len()` on a visible list, if there is one.
+    fn list_int(&mut self) -> Option<String> {
+        let lists = self.visible(|v| v.ty == Ty::List);
+        if lists.is_empty() {
+            return None;
+        }
+        let name = self.rng.pick(&lists).clone();
+        if self.rng.chance(30) {
+            return Some(format!("{name}.len()"));
+        }
+        let i = self.index(&name);
+        Some(format!("{name}[{i}]"))
     }
 
     fn leaf(&mut self, ty: Ty) -> String {
@@ -520,6 +678,11 @@ impl Gen<'_> {
     }
 
     fn int(&mut self, depth: u32) -> String {
+        if depth > 0 && self.features.lists && self.rng.chance(12) {
+            if let Some(e) = self.list_int() {
+                return e;
+            }
+        }
         if depth == 0 || self.rng.chance(25) {
             return self.leaf(Ty::Int);
         }
@@ -549,6 +712,13 @@ impl Gen<'_> {
     }
 
     fn bool(&mut self, depth: u32) -> String {
+        let lists = self.features.lists && !self.visible(|v| v.ty == Ty::List).is_empty();
+        if lists && self.rng.chance(6) {
+            let (a, _, _) = self.list_expr(false);
+            let (b, _, _) = self.list_expr(false);
+            let op = *self.rng.pick(&["==", "!="]);
+            return format!("({a} {op} {b})");
+        }
         if depth == 0 || self.rng.chance(25) {
             return self.leaf(Ty::Bool);
         }
