@@ -2,11 +2,13 @@
 //! includes this file by path. `core` and `alloc` only, no `unsafe`.
 //!
 //! Entries sit in a `Vec` in insertion order, which is the iteration order; a removed entry
-//! leaves a hole until holes are over half the entries, then the `Vec` is compacted. The index
-//! is a power-of-two table of buckets, never fewer than the entries (holes included). A bucket
-//! is a chain through the entries' `next` links, or, once a chain would pass `TREEIFY` entries,
-//! a `BTreeMap` from key to entry. The hash is fixed and unkeyed (kio has no randomness), so
-//! keys can be built to share a bucket; a sorted bucket keeps each operation O(log n) then.
+//! leaves a hole until holes are over half the entries, then the `Vec` is compacted and the
+//! index rebuilt for what is left (so a map that was large once costs what it holds now). The
+//! index is a power-of-two table of buckets, never fewer than the entries (holes included). A
+//! bucket is a chain through the entries' `next` links, or, once a chain would pass `TREEIFY`
+//! entries, a `BTreeMap` from key to entry. The hash is fixed and unkeyed (kio has no
+//! randomness), so keys can be built to share a bucket; a sorted bucket keeps each operation
+//! O(log n) then.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -203,7 +205,7 @@ impl<K: HashKey, V> HashMap<K, V> {
         self.len -= 1;
         if 2 * (self.entries.len() - self.len) > self.entries.len() {
             self.entries.retain(|e| e.kv.is_some());
-            self.rebuild(self.heads.len());
+            self.rebuild((2 * self.len).next_power_of_two().max(8));
         }
         Some(v)
     }
@@ -292,6 +294,11 @@ impl<K: HashKey, V> HashMap<K, V> {
     /// The number of sorted buckets, for tests.
     pub fn sorted_buckets(&self) -> usize {
         self.trees.len()
+    }
+
+    /// The number of buckets, for tests.
+    pub fn buckets(&self) -> usize {
+        self.heads.len()
     }
 }
 
@@ -411,6 +418,31 @@ mod tests {
             .flatten()
             .all(|p| p.iter().all(|b| (0x20..0x7f).contains(b))));
         assert_ne!(hash_bytes(b"a"), hash_bytes(b"b"));
+    }
+
+    /// The index follows the entries down: a map that held 5,000 entries and keeps 10 is
+    /// indexed for 10, so a remove's compaction (every `len / 2` removes) costs what the map
+    /// holds, not what it held. Before, the index never shrank and an insert/remove pair on
+    /// such a map rebuilt the old index every time: 17,000 fuel against a fresh map's 1,000.
+    #[test]
+    fn index_shrinks_with_the_map() {
+        let k = |x: u32| K(x, 1 << 20);
+        let mut m: HashMap<K, u32> = HashMap::new();
+        for x in 0..5000 {
+            m.insert(k(x), x);
+        }
+        assert!(m.buckets() >= 5000);
+        for x in 0..4990 {
+            m.remove(&k(x));
+        }
+        assert_eq!(m.len(), 10);
+        assert!(m.buckets() <= 64, "{} buckets for 10 entries", m.buckets());
+        for x in 10_000..15_000 {
+            m.insert(k(x), x);
+            m.remove(&k(x));
+            assert!(m.buckets() <= 64, "{} buckets for {} entries", m.buckets(), m.len());
+        }
+        assert!(m.iter().map(|(k, _)| k.0).eq(4990..5000));
     }
 
     /// Keys built to collide: every one in one sorted bucket, each operation still found.
