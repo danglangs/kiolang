@@ -354,7 +354,9 @@ impl Parser {
             let kind = if self.at_kw("let") {
                 self.let_stmt()?
             } else if self.at_kw("return") {
-                self.return_stmt()?
+                let k = self.return_stmt()?;
+                self.expect(";")?;
+                k
             } else if self.at_kw("while") {
                 self.while_stmt()?
             } else if self.at_kw("loop") {
@@ -362,7 +364,9 @@ impl Parser {
             } else if self.at_kw("for") {
                 self.for_stmt()?
             } else if self.at_kw("break") || self.at_kw("continue") {
-                self.jump_stmt()?
+                let k = self.jump_stmt()?;
+                self.expect(";")?;
+                k
             } else {
                 let block_like = self.at_kw("if") || self.at_kw("match") || self.at("{");
                 let e = if block_like { self.primary()? } else { self.expr()? };
@@ -416,10 +420,11 @@ impl Parser {
         })
     }
 
+    /// `return` and an optional value, up to its `;`, or `,` or `}` as a match arm.
     fn return_stmt(&mut self) -> Result<StmtKind, Diag> {
         self.pos += 1;
-        let value = if self.at(";") { None } else { Some(self.expr()?) };
-        self.expect(";")?;
+        let end = self.at(";") || self.at(",") || self.at("}");
+        let value = if end { None } else { Some(self.expr()?) };
         Ok(StmtKind::Return(value))
     }
 
@@ -460,11 +465,11 @@ impl Parser {
             StmtKind::Continue
         };
         self.pos += 1;
-        if matches!(kind, StmtKind::Break) && !self.at(";") && !self.at("}") && self.peek().is_some() {
+        let end = self.at(";") || self.at(",") || self.at("}") || self.peek().is_none();
+        if matches!(kind, StmtKind::Break) && !end {
             let span = self.span();
             return Err(err(span, "`break` with a value", Some("use a `let mut` and `break`")));
         }
-        self.expect(";")?;
         Ok(kind)
     }
 
@@ -716,7 +721,13 @@ impl Parser {
             }
             self.expect("=>")?;
             let block_body = self.at("{");
-            let body = if block_body { self.primary()? } else { self.expr()? };
+            let body = if block_body {
+                self.primary()?
+            } else if self.at_kw("return") || self.at_kw("break") || self.at_kw("continue") {
+                self.arm_jump()?
+            } else {
+                self.expr()?
+            };
             arms.push(Arm {
                 pat,
                 body,
@@ -732,6 +743,25 @@ impl Parser {
         Ok(Expr {
             kind: ExprKind::Match(Box::new(scrutinee), arms),
             span: self.since(start),
+        })
+    }
+
+    /// `return`, `break` or `continue` as an arm body, ended by `,` or `}`: the block `{ stmt; }`.
+    fn arm_jump(&mut self) -> Result<Expr, Diag> {
+        let start = self.span().start;
+        let kind = if self.at_kw("return") {
+            self.return_stmt()?
+        } else {
+            self.jump_stmt()?
+        };
+        let span = self.since(start);
+        Ok(Expr {
+            kind: ExprKind::Block(Block {
+                stmts: vec![Stmt { kind, span }],
+                tail: None,
+                span,
+            }),
+            span,
         })
     }
 

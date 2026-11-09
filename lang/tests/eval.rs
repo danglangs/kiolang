@@ -939,3 +939,29 @@ fn loop_break_continue() {
         Value::Int(4)
     );
 }
+
+#[test]
+fn return_break_continue_as_match_arms() {
+    let src = "fn find(xs: List<Int>) -> Int {
+          let mut s = 0;
+          for x in xs {
+            match x { 0 => continue, 100 => break, _ => { s += x; } }
+          }
+          s
+        }
+        fn first(o: Option<Int>) -> Int { match o { Some(n) => return n, None => return -1 } }
+        fn unit(o: Option<Int>) { match o { Some(_) => return, None => {} } }
+        fn main() -> Int {
+          unit(Some(1));
+          find([1, 0, 2, 100, 5]) * 100 + first(Some(4)) * 10 - first(None)
+        }";
+    assert_eq!(int(src), Value::Int(300 + 40 + 1));
+}
+
+#[test]
+fn break_in_a_match_arm_outside_a_loop_is_rejected() {
+    let src = "fn main() { match Some(1) { Some(_) => break, None => {} } }";
+    let d = check(src, &CapTable::default()).unwrap_err().remove(0);
+    assert_eq!(d.msg, "`break` outside a loop");
+    assert_eq!(d.hint.as_deref(), Some("use `return` to leave a function"));
+}

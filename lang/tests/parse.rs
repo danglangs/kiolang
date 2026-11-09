@@ -676,3 +676,16 @@ fn loop_statement() {
         Some("use a `let mut` and `break`"),
     );
 }
+
+#[test]
+fn jumps_as_match_arms_equal_their_block_form() {
+    let arms = body("match x { A(_) => return f(a, b), B => break, C => continue, D => return, E => return 1 }");
+    let blocks = body("match x { A(_) => { return f(a, b); } B => { break; } C => { continue; } D => { return; } E => { return 1; } }");
+    assert_eq!(arms, blocks);
+    assert_eq!(
+        body("match x { A => return 1 }"),
+        body("match x { A => { return 1; } }")
+    );
+    let d = fail("fn f() { match x { A => break 1, } }");
+    assert_eq!(d.hint.as_deref(), Some("use a `let mut` and `break`"));
+}

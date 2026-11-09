@@ -59,7 +59,7 @@ Everything else is rejected with a message that names the kio alternative, for e
 - **Types are explicit where they cannot be read off the value.** `[]`, `Map::new()` and `None` need a declared or expected type: `let mut rows: List<Row> = [];`.
 - **Operators.** `+ - * / %` on `Int`, `+` on `Str`, `== !=` on two values of one type, structurally (structs, enums, `Option`, `Result`, `List`, `Map` included; capabilities have no equality), `< <= > >=` on `Int`, `&& || !` on `Bool`. `/` and `%` truncate toward zero, as in Rust.
 - **Runtime errors stop the run:** `Int` overflow, division by zero, an out-of-bounds index, invalid UTF-8 in `to_str`. Deep recursion stops the run: the interpreter allows calls 1_000 deep ("evaluation is too deep"), and `--stack` sets the limit for the stack they use ("stack overflow"). Nothing wraps or panics silently.
-- **`match` is exhaustive.** Patterns are one level deep: a variant with bindings, a literal, a name or `_`.
+- **`match` is exhaustive.** Patterns are one level deep: a variant with bindings, a literal, a name or `_`. An arm may be `return`, `break` or `continue` (`None => break,`); it has type `Never`.
 - **`Str` is UTF-8.** `len()` counts bytes, in constant time. Literal escapes: `\n \r \t \0 \" \\`.
 - **Deterministic.** No clock or randomness. `Map` iterates in key order.
 - **Comments:** `//` only.
