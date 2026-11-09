@@ -10,9 +10,9 @@
 //! error and codegen emits no check. Each such function has one kind of error.
 
 use crate::desc::{RawTable, Table};
-use crate::entry::rt_trap;
+use crate::entry::{rt_trap, trap3};
 use crate::obj::{self, Header};
-use crate::{coll, desc, text};
+use crate::{coll, desc, float, text};
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 static TABLE: AtomicU32 = AtomicU32::new(0);
@@ -200,6 +200,62 @@ pub unsafe extern "C" fn rt_str_find(desc: u32, none: u32, s: u32, sub: u32) -> 
 pub unsafe extern "C" fn rt_str_replace(s: u32, from: u32, to: u32) -> u32 {
     // SAFETY: the group's contract.
     unsafe { addr(text::replace(ptr(s), ptr(from), ptr(to))) }
+}
+
+/// `desc` is `Option<Float>`; `none` is its pinned `None`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_str_parse_float(desc: u32, none: u32, s: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unsafe { addr(text::parse_float(&table(), desc, ptr(none), ptr(s))) }
+}
+
+/// `s.slice(a, b)`. Errors: out of bounds at `site`, with `a`, `b` and the length as the
+/// message's third value (`trap3`); not on a character boundary at `boundary`, with `a`, `b`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_str_slice(s: u32, a: i64, b: i64, site: u32, boundary: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unsafe {
+        match text::slice(ptr(s), a, b) {
+            Ok(p) => addr(p),
+            Err(text::Err::CharBoundary) => rt_trap(boundary, a, b),
+            Err(_) => trap3(site, a, b, text::len(ptr(s))),
+        }
+    }
+}
+
+/// `v.slice(a, b)`. Error: out of bounds, with `a`, `b` and the length as the message's third
+/// value (`trap3`).
+#[no_mangle]
+pub unsafe extern "C" fn rt_bytes_slice(v: u32, a: i64, b: i64, site: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unsafe {
+        match text::bytes_slice(ptr(v), a, b) {
+            Ok(p) => addr(p),
+            Err(_) => trap3(site, a, b, text::len(ptr(v))),
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_float_to_str(x: f64) -> u32 {
+    addr(text::float_to_str(x))
+}
+
+/// `desc` is `Option<Int>`; `none` is its pinned `None`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_float_to_int(desc: u32, none: u32, x: f64) -> u32 {
+    // SAFETY: the group's contract.
+    unsafe { addr(float::to_int(&table(), desc, ptr(none), x)) }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_float_rem(a: f64, b: f64) -> f64 {
+    float::rem(a, b)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_float_round(x: f64) -> f64 {
+    float::round(x)
 }
 
 #[no_mangle]

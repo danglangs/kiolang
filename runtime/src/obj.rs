@@ -352,7 +352,7 @@ unsafe fn size(t: &Table, p: *mut Header) -> usize {
                 let (off, slots) = record(t, p);
                 off + 8 * slots.len()
             }
-            d @ (Desc::Unit | Desc::Int | Desc::Bool) => panic!("{d:?} is not an object"),
+            d @ (Desc::Unit | Desc::Int | Desc::Bool | Desc::Float) => panic!("{d:?} is not an object"),
         }
     }
 }

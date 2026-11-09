@@ -324,6 +324,8 @@ pub struct State {
     /// Grant name and kind of each handle.
     handles: HashMap<u32, (String, &'static str)>,
     audit_msg: String,
+    /// Compiled code: the third value of the next runtime error's message (compiled.rs).
+    trap_c: i64,
     wasi: WasiCtx,
     table: ResourceTable,
 }
@@ -378,6 +380,7 @@ impl State {
             allowed: HashSet::new(),
             handles: HashMap::new(),
             audit_msg: String::new(),
+            trap_c: 0,
             wasi,
             table: ResourceTable::new(),
         }

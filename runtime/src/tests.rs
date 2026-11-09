@@ -6,18 +6,19 @@ use std::sync::{Mutex, MutexGuard};
 
 // struct Inner { name: Str, n: Int }   struct Outer { items: List<Inner> }
 // enum Chain { End, Link(Chain) }      Map<Str, Inner>
-const LIST_INNER: u32 = 5;
-const INNER: u32 = 6;
-const OUTER: u32 = 7;
-const CHAIN: u32 = 8;
-const MAP: u32 = 9;
+const LIST_INNER: u32 = 6;
+const INNER: u32 = 7;
+const OUTER: u32 = 8;
+const CHAIN: u32 = 9;
+const MAP: u32 = 10;
 
-const DESCS: [Desc; 10] = [
+const DESCS: [Desc; 11] = [
     Desc::Unit,
     Desc::Int,
     Desc::Bool,
     Desc::Str,
     Desc::Bytes,
+    Desc::Float,
     Desc::List { elem: INNER },
     Desc::Record {
         name: Name { off: 0, len: 5 },

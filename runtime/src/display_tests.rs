@@ -9,20 +9,21 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use lang::{check_files, run, CapTable, Caps, Value};
 
-const LIST_STR: u32 = 5;
-const MAP_STR_INT: u32 = 6;
-const MAP_INT_STR: u32 = 7;
-const PT: u32 = 8; // web::Pt { x: Int, y: Str }
-const EMPTY: u32 = 9; // struct E {}
-const SHAPE: u32 = 10; // Unit | Circle(Int) | Pair(Int, Str)
-const OPT_INT: u32 = 11;
-const RES: u32 = 12; // Result<Option<Int>, Str>
-const LIST_PT: u32 = 13;
-const CHAIN: u32 = 14; // End | Link(Chain)
-const LIST_BYTES: u32 = 15;
-const LIST_INT: u32 = 16;
-const LIST_LIST: u32 = 17;
-const DEEP: u32 = 18; // List<DEEP>
+const LIST_STR: u32 = 6;
+const MAP_STR_INT: u32 = 7;
+const MAP_INT_STR: u32 = 8;
+const PT: u32 = 9; // web::Pt { x: Int, y: Str }
+const EMPTY: u32 = 10; // struct E {}
+const SHAPE: u32 = 11; // Unit | Circle(Int) | Pair(Int, Str)
+const OPT_INT: u32 = 12;
+const RES: u32 = 13; // Result<Option<Int>, Str>
+const LIST_PT: u32 = 14;
+const CHAIN: u32 = 15; // End | Link(Chain)
+const LIST_BYTES: u32 = 16;
+const LIST_INT: u32 = 17;
+const LIST_LIST: u32 = 18;
+const DEEP: u32 = 19; // List<DEEP>
+const LIST_FLOAT: u32 = 20;
 
 /// Where `s` is in `NAMES`.
 const fn name(s: &str) -> Name {
@@ -54,12 +55,13 @@ const fn variant(n: &str, start: u32, len: u32) -> Variant {
     }
 }
 
-const DESCS: [Desc; 19] = [
+const DESCS: [Desc; 21] = [
     Desc::Unit,
     Desc::Int,
     Desc::Bool,
     Desc::Str,
     Desc::Bytes,
+    Desc::Float,
     Desc::List { elem: desc::STR },
     Desc::Map {
         key: desc::STR,
@@ -98,6 +100,7 @@ const DESCS: [Desc; 19] = [
     Desc::List { elem: desc::INT },
     Desc::List { elem: LIST_INT },
     Desc::List { elem: DEEP },
+    Desc::List { elem: desc::FLOAT },
 ];
 const SLOTS: [u32; 9] = [
     desc::INT,
@@ -147,6 +150,7 @@ fn build(d: u32, v: &Value) -> u64 {
         (Desc::Unit, Value::Unit) => 0,
         (Desc::Int, Value::Int(n)) => *n as u64,
         (Desc::Bool, Value::Bool(b)) => *b as u64,
+        (Desc::Float, Value::Float(x)) => x.to_bits(),
         (Desc::Str, Value::Str(s)) => to_slot(obj::new_bytes(desc::STR, s.as_bytes())),
         (Desc::Bytes, Value::Bytes(b)) => to_slot(obj::new_bytes(desc::BYTES, b)),
         (Desc::List { elem }, Value::List(vs)) => {
@@ -225,6 +229,29 @@ fn scalars() {
     assert_eq!(check(&[("app", "fn main() {}")], desc::UNIT), "()");
     assert_eq!(case("Bytes", "\"abc\".to_bytes()", desc::BYTES), "<3 bytes>");
     assert_eq!(case("Bytes", "\"\".to_bytes()", desc::BYTES), "<0 bytes>");
+}
+
+#[test]
+fn floats_as_rust_prints_them() {
+    let tiny = alloc::format!("0.{}5", "0".repeat(323));
+    let cases = [
+        ("1.0", "1"),
+        ("0.1 + 0.2", "0.30000000000000004"),
+        ("0.0 / 0.0", "NaN"),
+        ("1.0 / 0.0", "inf"),
+        ("-1.0 / 0.0", "-inf"),
+        ("-0.0", "-0"),
+        ("1e21", "1000000000000000000000"),
+        ("1e-7", "0.0000001"),
+        ("5e-324", &tiny),
+    ];
+    for (src, want) in cases {
+        assert_eq!(case("Float", src, desc::FLOAT), *want);
+        assert_eq!(
+            case("List<Float>", &alloc::format!("[{src}, 2.5]"), LIST_FLOAT),
+            alloc::format!("[{want}, 2.5]")
+        );
+    }
 }
 
 #[test]

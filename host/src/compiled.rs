@@ -22,12 +22,17 @@ use bindings::{Compiled as World, CompiledImports, Outcome};
 /// (runtime/src/entry.rs `LEAKED`).
 const LEAKED: u32 = u32::MAX - 1;
 
+/// The runtime's site whose `trap` returns, passing the next error message's third value as
+/// `a` (runtime/src/entry.rs `EXTRA`): `trap` has room for two.
+const EXTRA: u32 = u32::MAX - 2;
+
 /// A `trap` call: the run stops with the error at `site`.
 #[derive(Debug)]
 struct Trapped {
     site: u32,
     a: i64,
     b: i64,
+    c: i64,
 }
 
 impl std::fmt::Display for Trapped {
@@ -40,7 +45,12 @@ impl std::error::Error for Trapped {}
 
 impl CompiledImports for State {
     fn trap(&mut self, site: u32, a: i64, b: i64) -> Result<()> {
-        Err(wasmtime::Error::new(Trapped { site, a, b }))
+        if site == EXTRA {
+            self.trap_c = a;
+            return Ok(());
+        }
+        let c = self.trap_c;
+        Err(wasmtime::Error::new(Trapped { site, a, b, c }))
     }
 }
 
@@ -79,7 +89,7 @@ impl Compiled {
                     Err(e.context(msg))
                 }
                 Some(t) => match wasm.sites.get(t.site as usize) {
-                    Some(site) => Ok(Err(vec![runtime_err(site, t.a, t.b)])),
+                    Some(site) => Ok(Err(vec![runtime_err(site, t.a, t.b, t.c)])),
                     None => Err(e.context("compiled program trapped at an unknown error site")),
                 },
                 // A limit, such as deep recursion past `--stack`, reads as it does for `Kio`.
@@ -92,11 +102,12 @@ impl Compiled {
     }
 }
 
-/// The interpreter's error for `trap(s, a, b)`, as the diagnostic `Kio::run` gives.
-fn runtime_err(s: &Site, a: i64, b: i64) -> Diag {
+/// The interpreter's error for `trap(s, a, b)` (and `c` from `EXTRA`), as the diagnostic
+/// `Kio::run` gives.
+fn runtime_err(s: &Site, a: i64, b: i64, c: i64) -> Diag {
     Diag {
         span: s.span,
-        msg: s.message(a, b),
+        msg: s.message(a, b, c),
         hint: None,
     }
 }

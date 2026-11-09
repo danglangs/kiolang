@@ -6,8 +6,9 @@
 //! `Slice`s into the table's flat arrays.
 //!
 //! Invariants, which codegen establishes and nothing re-checks beyond Rust's bounds checks:
-//! - `descs[0..5]` are `Unit`, `Int`, `Bool`, `Str`, `Bytes`, at the indices below, so the
-//!   runtime can make strings without being told their descriptor.
+//! - `descs[0..6]` are `Unit`, `Int`, `Bool`, `Str`, `Bytes`, `Float`, at the indices below
+//!   (each scalar's index is also its tag), so the runtime can make strings without being told
+//!   their descriptor.
 //! - Every index and `Slice` is in range of its array; a `Name` is UTF-8; `fields` is as long as `slots`.
 //! - Display names: a struct's or enum's is its module-qualified key (`web::Point`); a variant's
 //!   is bare. The enums named `Option` and `Result` (reserved, so no user type has them) print
@@ -23,6 +24,7 @@ pub const INT: u32 = 1;
 pub const BOOL: u32 = 2;
 pub const STR: u32 = 3;
 pub const BYTES: u32 = 4;
+pub const FLOAT: u32 = 5;
 
 /// One type. `repr(C, u32)`: a `u32` tag (declaration order) then the fields, padded to 20
 /// bytes, 4-aligned.
@@ -34,6 +36,8 @@ pub enum Desc {
     Bool,
     Str,
     Bytes,
+    /// An `f64`, held in a slot as its bits.
+    Float,
     List {
         elem: u32,
     },
@@ -99,7 +103,7 @@ impl<'t> Table<'t> {
 
     /// Whether a value of descriptor `i` is a pointer to a heap object.
     pub fn is_ptr(&self, i: u32) -> bool {
-        !matches!(self.desc(i), Desc::Unit | Desc::Int | Desc::Bool)
+        !matches!(self.desc(i), Desc::Unit | Desc::Int | Desc::Bool | Desc::Float)
     }
 
     pub fn slots(&self, s: Slice) -> &'t [u32] {

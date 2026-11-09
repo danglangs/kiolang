@@ -3,26 +3,28 @@ use crate::desc::{self, Desc, Name, Slice, Table, Variant};
 use crate::obj::{self, from_slot, to_slot, Header};
 use alloc::vec;
 
-const LIST_INT: u32 = 5;
-const LIST_STR: u32 = 6;
-const MAP_STR_INT: u32 = 7;
-const MAP_INT_STR: u32 = 8;
-const OPT_INT: u32 = 9;
-const OPT_STR: u32 = 10;
-const LIST_LIST: u32 = 11;
-const CHAIN: u32 = 12;
-const PAIR: u32 = 13;
-const MAP_STR_LIST: u32 = 14;
-const DEEP: u32 = 15; // List<DEEP>
-const RES_STR: u32 = 16; // Result<Str, Str>
+const LIST_INT: u32 = 6;
+const LIST_STR: u32 = 7;
+const MAP_STR_INT: u32 = 8;
+const MAP_INT_STR: u32 = 9;
+const OPT_INT: u32 = 10;
+const OPT_STR: u32 = 11;
+const LIST_LIST: u32 = 12;
+const CHAIN: u32 = 13;
+const PAIR: u32 = 14;
+const MAP_STR_LIST: u32 = 15;
+const DEEP: u32 = 16; // List<DEEP>
+const RES_STR: u32 = 17; // Result<Str, Str>
+const LIST_FLOAT: u32 = 18;
 
 const NAME: Name = Name { off: 0, len: 0 };
-const DESCS: [Desc; 17] = [
+const DESCS: [Desc; 19] = [
     Desc::Unit,
     Desc::Int,
     Desc::Bool,
     Desc::Str,
     Desc::Bytes,
+    Desc::Float,
     Desc::List { elem: desc::INT },
     Desc::List { elem: desc::STR },
     Desc::Map {
@@ -59,6 +61,7 @@ const DESCS: [Desc; 17] = [
         name: NAME,
         variants: Slice { start: 6, len: 2 },
     },
+    Desc::List { elem: desc::FLOAT },
 ];
 const SLOTS: [u32; 6] = [desc::INT, desc::STR, CHAIN, desc::STR, LIST_INT, LIST_INT];
 const FIELDS: [Name; 6] = [Name { off: 0, len: 0 }; 6];
@@ -456,6 +459,25 @@ fn equality() {
         dec(p);
     }
     others.into_iter().for_each(dec);
+    assert_eq!(obj::live(), before);
+}
+
+#[test]
+fn float_equality_is_ieee() {
+    let _l = lock();
+    let before = obj::live();
+    let floats = |xs: &[f64]| coll::list_new(LIST_FLOAT, xs.iter().map(|x| x.to_bits()).collect());
+    let (nan, z, nz, one) = (floats(&[f64::NAN]), floats(&[0.0]), floats(&[-0.0]), floats(&[1.0]));
+    // The same object holding a NaN is not equal to itself, as in the interpreter.
+    assert!(!eq(LIST_FLOAT, nan, nan) && eq(LIST_FLOAT, z, nz) && eq(LIST_FLOAT, one, one));
+    assert!(!eq(LIST_FLOAT, z, one));
+    // SAFETY: scalars.
+    unsafe {
+        let f = |a: f64, b: f64| coll::eq(&T, desc::FLOAT, a.to_bits(), b.to_bits());
+        assert!(!f(f64::NAN, f64::NAN) && f(0.0, -0.0) && f(1.5, 1.5) && !f(1.0, 2.0));
+        assert!(coll::list_contains(&T, z, (-0.0f64).to_bits()) && !coll::list_contains(&T, nan, f64::NAN.to_bits()));
+    }
+    [nan, z, nz, one].into_iter().for_each(dec);
     assert_eq!(obj::live(), before);
 }
 

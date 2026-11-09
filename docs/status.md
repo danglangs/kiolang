@@ -16,13 +16,14 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 | D1, K1 | `Dir` `list`/`write`/`remove`/`exists`; `Kv` (`--kv name=:memory:` or a file). Both adversarially reviewed, fixes merged |
 | WS1 | WebSockets under `--listen`, a fresh sandbox per event; 7,800 echo events/s on one connection. Adversarially reviewed, fixes in (Origin check and `--ws-origin`; `close` always follows `open`) |
 | kio-web | `api.kio`; notes on Dir and on Kv, 22 checks each |
+| C10, C11 | `Float` and `slice` compiled; harness 267 ran both ways, 0 mismatches (left: `fn` values, C9, and capabilities, C4); kiogen generates floats; float loops compiled run at Rust's speed past ~20 ms of compiling (10 M multiply-adds 39 ms vs 1.49 s interpreted, Rust 20 ms) |
 | L6a | `fn(T) -> R` types and function items as values, called as `f(x)` or `(e)(x)`; no capability inside a `fn` type; interpreter only |
 | L6b | closures, capturing by copy, lifted to functions in lowering; a closure cannot capture a capability; interpreter only |
 
 ## Next
 
-1. **C4** (capabilities), C5 (compiled only), C7 (review), C8 (measure, refcount elision); C9-C11 (function values, `Float`, slices compiled).
-2. L6c built-ins taking functions, then L7 generics; the closures adversarial review.
+1. **C4** (capabilities), C5 (compiled only), C7 (review: include the `trap` site `EXTRA` that returns), C8 (measure, refcount elision); C9 (function values compiled).
+2. L6c built-ins taking functions, then L7 generics.
 
 ## Waiting on the maintainer
 

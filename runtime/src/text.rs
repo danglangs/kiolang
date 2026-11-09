@@ -25,6 +25,10 @@ pub enum Err {
     OutOfBounds,
     /// A `push` of an `Int` outside `0..=255`.
     ByteRange,
+    /// A `slice(a, b)` unless `0 <= a <= b <= len`.
+    SliceBounds,
+    /// A `Str.slice(a, b)` in bounds whose `a` or `b` is inside a character.
+    CharBoundary,
 }
 
 /// A `Str` holding a copy of `s`.
@@ -104,6 +108,50 @@ pub unsafe fn to_str(b: *mut Header) -> Result<*mut Header, Err> {
 /// `Int.to_str()`.
 pub fn int_to_str(n: i64) -> *mut Header {
     new_str(&n.to_string())
+}
+
+/// `Float.to_str()`: Rust's `{}`, as the interpreter's `to_string`.
+pub fn float_to_str(x: f64) -> *mut Header {
+    new_str(&x.to_string())
+}
+
+/// `Str.parse_float()`: an `Option<Float>` with descriptor `opt` (the payload as its bits), as
+/// Rust's `f64::from_str`. `none` as `obj::option`'s.
+///
+/// # Safety
+/// The module's contract; `none` is null or a `None` of `opt`.
+pub unsafe fn parse_float(t: &Table, opt: u32, none: *mut Header, s: *mut Header) -> *mut Header {
+    // SAFETY: the caller's guarantee.
+    unsafe { obj::option(t, opt, none, str_of(s).parse::<f64>().ok().map(f64::to_bits)) }
+}
+
+/// Offsets `a..b` as a range within `len`; `SliceBounds` unless `0 <= a <= b <= len`.
+fn range(a: i64, b: i64, len: usize) -> Result<core::ops::Range<usize>, Err> {
+    match (usize::try_from(a), usize::try_from(b)) {
+        (Ok(x), Ok(y)) if x <= y && y <= len => Ok(x..y),
+        _ => Err(Err::SliceBounds),
+    }
+}
+
+/// `Str.slice(a, b)`: bytes `a..b` as a new `Str`; `SliceBounds`, then `CharBoundary` if either
+/// end splits a character.
+///
+/// # Safety
+/// The module's contract.
+pub unsafe fn slice(s: *mut Header, a: i64, b: i64) -> Result<*mut Header, Err> {
+    // SAFETY: the caller's guarantee.
+    let s = unsafe { str_of(s) };
+    s.get(range(a, b, s.len())?).map(new_str).ok_or(Err::CharBoundary)
+}
+
+/// `Bytes.slice(a, b)`: bytes `a..b` as a new `Bytes`; `SliceBounds`.
+///
+/// # Safety
+/// The module's contract.
+pub unsafe fn bytes_slice(p: *mut Header, a: i64, b: i64) -> Result<*mut Header, Err> {
+    // SAFETY: the caller's guarantee.
+    let v = unsafe { obj::bytes(p) };
+    Ok(new_bytes(&v[range(a, b, v.len())?]))
 }
 
 /// A `List` (descriptor `list`, of `Str`) of new `Str`s.

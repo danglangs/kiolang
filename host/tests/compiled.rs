@@ -930,3 +930,200 @@ fn sort_copies_a_shared_list() {
         }"#;
     assert_eq!(value(src), "-9223372036854775808 -1 0 2 3 .B.a.ab.b.é.3b15");
 }
+
+/// Floats the operator and method tests combine: signed zeros, NaN, infinities, the smallest
+/// subnormal, the largest float, halves, and values around 2^63.
+const FLOATS: &str = "[0.0, -0.0, 0.0 / 0.0, 1.0 / 0.0, -1.0 / 0.0, 5e-324, 1.7976931348623157e308, 0.1, 0.2,
+    7.5, -2.0, 2.5, -2.5, 0.5, -0.5, 0.49999999999999994, 4503599627370495.5, 9223372036854775807.0,
+    -9223372036854775808.0, 9223372036854774784.0, -9223372036854777856.0, 1e21, 1e-7, 2.7, -2.7]";
+
+/// `to_str` is Rust's `{}`, at top level and nested; `main` may return a `Float`.
+#[test]
+fn float_to_str_matches_the_interpreter() {
+    let tiny = format!("0.{}5", "0".repeat(323));
+    for (e, want) in [
+        ("1.0", "1"),
+        ("0.1 + 0.2", "0.30000000000000004"),
+        ("0.0 / 0.0", "NaN"),
+        ("1.0 / 0.0", "inf"),
+        ("-1.0 / 0.0", "-inf"),
+        ("-0.0", "-0"),
+        ("1e21", "1000000000000000000000"),
+        ("1e-7", "0.0000001"),
+        ("5e-324", &tiny),
+    ] {
+        assert_eq!(value(&format!("fn main() -> Str {{ ({e}).to_str() }}")), want);
+        assert_eq!(value(&format!("fn main() -> Float {{ {e} }}")), want);
+    }
+    value(&format!("fn main() -> List<Float> {{ {FLOATS} }}"));
+    let src = "struct P { x: Float }
+               fn main() -> Map<Int, List<P>> {
+                   let mut m: Map<Int, List<P>> = Map::new();
+                   m.insert(1, [P { x: 0.1 + 0.2 }, P { x: -0.0 }]);
+                   m
+               }";
+    assert_eq!(value(src), "{1: [P { x: 0.30000000000000004 }, P { x: -0 }]}");
+    assert_eq!(value("fn main() -> Option<Float> { Some(-1.0 / 0.0) }"), "Some(-inf)");
+}
+
+/// Every operator on every pair: IEEE, as the interpreter's `f64`, including `%`.
+#[test]
+fn float_operators_on_every_pair() {
+    let src = format!(
+        "fn main() -> Str {{
+            let xs = {FLOATS};
+            let mut out = \"\";
+            for a in xs {{
+                for b in xs {{
+                    out += (a + b).to_str() + \" \" + (a - b).to_str() + \" \" + (a * b).to_str() + \" \";
+                    out += (a / b).to_str() + \" \" + (a % b).to_str() + \" \" + (-a).to_str() + \" \";
+                    if a < b {{ out += \"<\"; }}
+                    if a <= b {{ out += \"<=\"; }}
+                    if a > b {{ out += \">\"; }}
+                    if a >= b {{ out += \">=\"; }}
+                    if a == b {{ out += \"==\"; }}
+                    if a != b {{ out += \"!=\"; }}
+                    out += \"\\n\";
+                }}
+            }}
+            out
+        }}"
+    );
+    let out = value(&src);
+    assert_eq!(out.lines().count(), 625);
+    assert!(out.starts_with("0 0 0 NaN NaN -0 <=>===\n"), "{}", &out[..40]);
+}
+
+/// The methods on every float: `round` halves away from zero (0.49999999999999994 is 0),
+/// `to_int` is `None` past `Int` or for NaN and infinities.
+#[test]
+fn float_methods_match_the_interpreter() {
+    let src = format!(
+        "fn main() -> Str {{
+            let mut out = \"\";
+            for x in {FLOATS} {{
+                out += x.to_str() + \": \" + x.abs().to_str() + \" \" + x.floor().to_str() + \" \" + x.ceil().to_str() + \" \";
+                out += x.round().to_str() + \" \" + x.sqrt().to_str() + \" \";
+                out += x.to_int().unwrap_or(7).to_str() + \" \";
+                if x.to_int().is_some() {{ out += \"some \"; }}
+                if x.is_nan() {{ out += \"nan \"; }}
+                if x.is_finite() {{ out += \"finite \"; }}
+                if x.is_infinite() {{ out += \"infinite \"; }}
+                out += x.to_str().parse_float().unwrap_or(1.5).to_str() + \"\\n\";
+            }}
+            out
+        }}"
+    );
+    let out = value(&src);
+    assert!(
+        out.contains("\n0.49999999999999994: 0.49999999999999994 0 1 0 "),
+        "{out}"
+    );
+    assert!(out.contains("\n2.5: 2.5 2 3 3 "), "{out}");
+    assert!(out.contains("\n-2.5: 2.5 -3 -2 -3 "), "{out}");
+    let ints = "fn main() -> List<Float> {
+                    [0.to_float(), (-7).to_float(), 9007199254740993.to_float(),
+                     9223372036854775807.to_float(), (-9223372036854775807 - 1).to_float()]
+                }";
+    assert_eq!(
+        value(ints),
+        "[0, -7, 9007199254740992, 9223372036854776000, -9223372036854776000]"
+    );
+    let src = r#"fn main() -> List<Option<Float>> {
+            let mut out: List<Option<Float>> = [];
+            for s in ["1.5", "-2", "+3", "1e3", ".5", "5.", "inf", "-infinity", "NaN", "1e400", "-0", "", " 1", "1,5", "0x1", "e3"] {
+                out.push(s.parse_float());
+            }
+            out
+        }"#;
+    assert_eq!(
+        value(src),
+        "[Some(1.5), Some(-2), Some(3), Some(1000), Some(0.5), Some(5), Some(inf), Some(-inf), Some(NaN), Some(inf), Some(-0), None, None, None, None, None]"
+    );
+}
+
+/// `==` on floats is IEEE, also inside containers (`rt_eq`), and a value holding a NaN is not
+/// equal to itself.
+#[test]
+fn float_equality_is_ieee_in_containers() {
+    for (e, want) in [
+        ("nan == nan", "false"),
+        ("nan != nan", "true"),
+        ("0.0 == -0.0", "true"),
+        ("[nan] == [nan]", "false"),
+        ("[0.0] == [-0.0]", "true"),
+        ("Some(nan) == Some(nan)", "false"),
+        ("[nan].contains(nan)", "false"),
+        ("[-0.0].contains(0.0)", "true"),
+        ("{ let xs = [nan]; xs == xs }", "false"),
+        ("{ let o = Some(1.5); o == o }", "true"),
+    ] {
+        assert_eq!(
+            value(&format!("fn main() -> Bool {{ let nan = 0.0 / 0.0; {e} }}")),
+            want,
+            "{e}"
+        );
+    }
+}
+
+/// `+=` and `-=` on a `Float` local, element and field; a `Float` payload bound by `match`.
+#[test]
+fn float_places_and_patterns() {
+    let src = "struct P { x: Float }
+               enum E { A(Float), B }
+               fn half(x: Float) -> Option<Float> { if x > 0.0 { Some(x / 2.0) } else { None } }
+               fn main() -> Str {
+                   let mut x = 1.0;
+                   x += 0.5;
+                   x -= 2.0;
+                   let mut ps = [P { x: 1.0 }];
+                   ps[0].x += 2.0;
+                   let mut xs = [1.0, 2.0];
+                   xs[1] -= 0.25;
+                   let mut p = P { x: 0.1 };
+                   p.x += 0.2;
+                   let e = E::A(-0.0);
+                   let y = match e { E::A(v) => v, E::B => 1.0 };
+                   let z = match half(3.0) { Some(h) => h, None => 0.0 };
+                   x.to_str() + \" \" + ps[0].x.to_str() + \" \" + xs[1].to_str() + \" \" + p.x.to_str() + \" \" + y.to_str() + \" \" + z.to_str() + \" \" + half(-1.0).unwrap_or(9.0).to_str()
+               }";
+    assert_eq!(value(src), "-0.5 3 1.75 0.30000000000000004 -0 1.5 9");
+}
+
+/// `slice` on `Str` and `Bytes`, and both of its errors with the interpreter's messages and
+/// spans; the out-of-bounds message's length comes through the runtime's `EXTRA` site.
+#[test]
+fn slices_and_their_errors() {
+    let src = r#"fn main() -> Str { "hello".slice(1, 3) + "|" + "aé".slice(1, 3) + "|" + "".slice(0, 0) + "|" + "hello".slice(5, 5) }"#;
+    assert_eq!(value(src), "el|é||");
+    let src = r#"fn main() -> Bool { "abc".to_bytes().slice(1, 3) == "bc".to_bytes() && "abc".to_bytes().slice(3, 3).len() == 0 }"#;
+    assert_eq!(value(src), "true");
+    for (call, msg) in [
+        (r#""abc".slice(2, 4)"#, "slice 2..4 out of bounds for length 3"),
+        (r#""abc".slice(3, 1)"#, "slice 3..1 out of bounds for length 3"),
+        (r#""abc".slice(-1, 2)"#, "slice -1..2 out of bounds for length 3"),
+        (
+            r#""abc".slice(-9223372036854775807 - 1, 9223372036854775807)"#,
+            "slice -9223372036854775808..9223372036854775807 out of bounds for length 3",
+        ),
+        (
+            r#""abc".slice(0, 4294967296)"#,
+            "slice 0..4294967296 out of bounds for length 3",
+        ),
+        (r#""aé".slice(0, 2)"#, "slice 0..2 is not on a character boundary"),
+        (r#""aé".slice(2, 3)"#, "slice 2..3 is not on a character boundary"),
+        (r#""é".slice(1, 3)"#, "slice 1..3 out of bounds for length 2"),
+        (
+            r#""abc".to_bytes().slice(1, 9)"#,
+            "slice 1..9 out of bounds for length 3",
+        ),
+        (
+            r#""abc".to_bytes().slice(2, 1)"#,
+            "slice 2..1 out of bounds for length 3",
+        ),
+    ] {
+        let src = format!("fn main() -> Int {{ {call}.len() }}");
+        let (m, start, end) = both(&src).unwrap_err();
+        assert_eq!((m.as_str(), &src[start..end]), (msg, call));
+    }
+}

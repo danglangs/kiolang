@@ -32,6 +32,10 @@ pub struct Features {
     /// reads and writes, `==`, `unwrap_or`, `is_some`, `match` with nested patterns and a
     /// catch-all, `if let`, and helpers returning `Option<Int>` that use `?`.
     pub adts: bool,
+    /// `Float` locals, parameters and results: literals (NaN, infinities, `-0.0`, the
+    /// extremes, halves), every operator, `+=` and `-=`, comparisons, `to_str`, `to_int`,
+    /// `to_float`, `parse_float`, `abs`, `floor`, `ceil`, `round`, `sqrt` and the `is_` tests.
+    pub floats: bool,
 }
 
 impl Default for Features {
@@ -43,6 +47,7 @@ impl Default for Features {
             recursion: true,
             lists: true,
             adts: true,
+            floats: true,
         }
     }
 }
@@ -126,6 +131,7 @@ enum Ty {
     Unit,
     /// `List<Int>`; only locals have it.
     List,
+    Float,
     /// The struct `S`, the enum `K` and `Option<Int>`; locals, and `Opt` as a return type.
     S,
     K,
@@ -216,7 +222,9 @@ impl Gen<'_> {
     }
 
     fn ty(&mut self) -> Ty {
-        if self.rng.chance(65) {
+        if self.features.floats && self.rng.chance(20) {
+            Ty::Float
+        } else if self.rng.chance(65) {
             Ty::Int
         } else {
             Ty::Bool
@@ -229,6 +237,7 @@ impl Gen<'_> {
             Ty::Bool => "Bool",
             Ty::Unit => "()",
             Ty::List => "List<Int>",
+            Ty::Float => "Float",
             Ty::S => "S",
             Ty::K => "K",
             Ty::Opt => "Option<Int>",
@@ -239,6 +248,8 @@ impl Gen<'_> {
         let mut ret = *self.rng.pick(&[Ty::Int, Ty::Int, Ty::Bool, Ty::Unit]);
         if self.features.adts && self.rng.chance(30) {
             ret = Ty::Opt;
+        } else if self.features.floats && self.rng.chance(20) {
+            ret = Ty::Float;
         }
         let recursive = self.features.recursion && matches!(ret, Ty::Int | Ty::Bool) && self.rng.chance(35);
         let mut params: Vec<Ty> = (0..self.rng.below(4)).map(|_| self.ty()).collect();
@@ -286,6 +297,8 @@ impl Gen<'_> {
         let mut ret = *self.rng.pick(&[Ty::Int, Ty::Int, Ty::Int, Ty::Bool, Ty::Unit]);
         if self.features.adts && self.rng.chance(10) {
             ret = *self.rng.pick(&[Ty::S, Ty::K, Ty::Opt]);
+        } else if self.features.floats && self.rng.chance(15) {
+            ret = Ty::Float;
         }
         self.start(ret);
         let arrow = match ret {
@@ -464,7 +477,7 @@ impl Gen<'_> {
         let name = self.rng.pick(&names).clone();
         let ty = self.var_ty(&name);
         let op = match ty {
-            Ty::Int => *self.rng.pick(&["=", "+=", "-="]),
+            Ty::Int | Ty::Float => *self.rng.pick(&["=", "+=", "-="]),
             _ => "=",
         };
         // The checker does not type a bare `None` from the assigned local.
@@ -681,6 +694,7 @@ impl Gen<'_> {
         match ty {
             Ty::Int => self.int(depth),
             Ty::Bool => self.bool(depth),
+            Ty::Float => self.float(depth),
             Ty::Unit => "()".into(),
             Ty::List => unreachable!("lists come from list_expr"),
             Ty::S | Ty::K | Ty::Opt => self.adt(ty, depth),
@@ -708,6 +722,7 @@ impl Gen<'_> {
         }
         match ty {
             Ty::Bool => self.rng.pick(&["true", "false"]).to_string(),
+            Ty::Float => self.float_literal(),
             _ => self.literal(),
         }
     }
@@ -732,6 +747,13 @@ impl Gen<'_> {
         }
         if depth > 0 && self.features.adts && self.rng.chance(15) {
             return self.adt_int(depth - 1);
+        }
+        if depth > 0 && self.features.floats && self.rng.chance(8) {
+            let x = self.float(depth - 1);
+            return match self.rng.below(2) {
+                0 => format!("({x}).to_int().unwrap_or({})", self.int(depth - 1)),
+                _ => format!("({x}).to_str().len()"),
+            };
         }
         if depth == 0 || self.rng.chance(25) {
             return self.leaf(Ty::Int);
@@ -777,6 +799,15 @@ impl Gen<'_> {
         if depth > 0 && self.features.adts && self.rng.chance(10) {
             return self.adt_bool(depth - 1);
         }
+        if depth > 0 && self.features.floats && self.rng.chance(10) {
+            let d = depth - 1;
+            if self.rng.chance(30) {
+                let m = *self.rng.pick(&["is_nan", "is_finite", "is_infinite"]);
+                return format!("({}).{m}()", self.float(d));
+            }
+            let op = *self.rng.pick(&["<", "<=", ">", ">=", "==", "!="]);
+            return format!("({} {op} {})", self.float(d), self.float(d));
+        }
         if depth == 0 || self.rng.chance(25) {
             return self.leaf(Ty::Bool);
         }
@@ -795,6 +826,63 @@ impl Gen<'_> {
                 7 => return self.if_expr(Ty::Bool, d),
                 _ => {
                     if let Some(c) = self.call(Ty::Bool) {
+                        return c;
+                    }
+                }
+            }
+        }
+    }
+
+    /// A literal, mostly a plain one, else one whose result or printing is easy to get wrong.
+    fn float_literal(&mut self) -> String {
+        let plain = ["0.0", "1.0", "1.5", "2.5", "0.1", "3.0", "10.0", "0.5"];
+        let tricky = [
+            "(-0.0)",
+            "(0.0 / 0.0)",
+            "(1.0 / 0.0)",
+            "(-1.0 / 0.0)",
+            "0.49999999999999994",
+            "(-2.5)",
+            "4503599627370495.5",
+            "1e308",
+            "1.7976931348623157e308",
+            "5e-324",
+            "1e21",
+            "1e-7",
+            "9223372036854775807.0",
+            "(-9223372036854775808.0)",
+            "9223372036854774784.0",
+        ];
+        match self.rng.chance(70) {
+            true => self.rng.pick(&plain).to_string(),
+            false => self.rng.pick(&tricky).to_string(),
+        }
+    }
+
+    fn float(&mut self, depth: u32) -> String {
+        if depth == 0 || self.rng.chance(25) {
+            return self.leaf(Ty::Float);
+        }
+        let d = depth - 1;
+        loop {
+            match self.rng.below(12) {
+                0..=4 => {
+                    let op = *self.rng.pick(&["+", "-", "*", "/", "%"]);
+                    return format!("({} {op} {})", self.float(d), self.float(d));
+                }
+                5 => return format!("(-{})", self.float(d)),
+                6 => {
+                    let m = *self.rng.pick(&["abs", "floor", "ceil", "round", "sqrt"]);
+                    return format!("({}).{m}()", self.float(d));
+                }
+                7 => return format!("({}).to_float()", self.int(d)),
+                8 => {
+                    let (x, y) = (self.float(d), self.float(d));
+                    return format!("({x}).to_str().parse_float().unwrap_or({y})");
+                }
+                9 => return self.if_expr(Ty::Float, d),
+                _ => {
+                    if let Some(c) = self.call(Ty::Float) {
                         return c;
                     }
                 }
@@ -1008,6 +1096,23 @@ impl Gen<'_> {
 
 #[cfg(test)]
 mod tests {
+    /// Floats appear in a run of the default size, with their methods and tricky literals.
+    #[test]
+    fn floats_are_generated() {
+        let all: String = (0..250).map(|s| super::program(s, &Default::default())).collect();
+        for m in [
+            ": Float",
+            ".round()",
+            ".to_int()",
+            ".parse_float()",
+            "0.49999999999999994",
+            " % ",
+            "-> Float",
+        ] {
+            assert!(all.matches(m).count() > 10, "{m}: {}", all.matches(m).count());
+        }
+    }
+
     /// The list methods appear in a run of the default size.
     #[test]
     fn list_methods_are_generated() {

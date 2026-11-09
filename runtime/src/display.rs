@@ -85,6 +85,7 @@ unsafe fn expand<'a>(t: &Table<'a>, d: u32, v: u64, out: &mut Vec<u8>, work: &mu
             Desc::Unit => write(format_args!("()")),
             Desc::Int => write(format_args!("{}", v as i64)),
             Desc::Bool => write(format_args!("{}", v != 0)),
+            Desc::Float => write(format_args!("{}", f64::from_bits(v))),
             Desc::Str => quote(obj::bytes(p), out),
             Desc::Bytes => write(format_args!("<{} bytes>", obj::bytes(p).len())),
             Desc::List { elem } => {

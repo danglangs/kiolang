@@ -6,16 +6,18 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 // List<Str>, Option<Int> = None | Some(Int), Option<Str>
-const LIST_STR: u32 = 5;
-const OPT: u32 = 6;
-const OPT_STR: u32 = 7;
+const LIST_STR: u32 = 6;
+pub(crate) const OPT: u32 = 7;
+const OPT_STR: u32 = 8;
+pub(crate) const OPT_FLOAT: u32 = 9;
 
-const DESCS: [Desc; 8] = [
+const DESCS: [Desc; 10] = [
     Desc::Unit,
     Desc::Int,
     Desc::Bool,
     Desc::Str,
     Desc::Bytes,
+    Desc::Float,
     Desc::List { elem: desc::STR },
     Desc::Enum {
         name: Name { off: 0, len: 6 },
@@ -25,10 +27,14 @@ const DESCS: [Desc; 8] = [
         name: Name { off: 0, len: 6 },
         variants: Slice { start: 2, len: 2 },
     },
+    Desc::Enum {
+        name: Name { off: 0, len: 6 },
+        variants: Slice { start: 4, len: 2 },
+    },
 ];
-const SLOTS: [u32; 2] = [desc::INT, desc::STR];
-const FIELDS: [Name; 2] = [Name { off: 0, len: 0 }; 2];
-const VARIANTS: [Variant; 4] = [
+const SLOTS: [u32; 3] = [desc::INT, desc::STR, desc::FLOAT];
+const FIELDS: [Name; 3] = [Name { off: 0, len: 0 }; 3];
+const VARIANTS: [Variant; 6] = [
     Variant {
         name: Name { off: 6, len: 4 },
         slots: Slice { start: 0, len: 0 },
@@ -45,8 +51,16 @@ const VARIANTS: [Variant; 4] = [
         name: Name { off: 10, len: 4 },
         slots: Slice { start: 1, len: 1 },
     },
+    Variant {
+        name: Name { off: 6, len: 4 },
+        slots: Slice { start: 0, len: 0 },
+    },
+    Variant {
+        name: Name { off: 10, len: 4 },
+        slots: Slice { start: 2, len: 1 },
+    },
 ];
-const T: Table = Table {
+pub(crate) const T: Table = Table {
     descs: &DESCS,
     slots: &SLOTS,
     fields: &FIELDS,
@@ -415,5 +429,119 @@ fn replace_cases() {
     assert_eq!(r("abc", "b", ""), "ac");
     assert_eq!(r("héé", "é", "e"), "hee");
     assert_eq!(r("", "a", "b"), "");
+    assert_eq!(obj::live(), base);
+}
+
+/// `Some(bits)` or `None` from an `Option` of `Int` or `Float`, then frees it.
+pub(crate) fn take_option(p: *mut Header) -> Option<u64> {
+    // SAFETY: `p` is a live `Option` with a scalar payload.
+    let r = unsafe {
+        match *obj::field::<u32>(p, 8) {
+            0 => None,
+            _ => Some(*obj::slot(&T, p, 0)),
+        }
+    };
+    dec(p);
+    r
+}
+
+#[test]
+fn parse_float_and_to_str_cases() {
+    let _g = lock();
+    let base = obj::live();
+    let parse = |x: &str| {
+        let a = s(x);
+        // SAFETY: a live `Str`; null for a new `None`.
+        let p = unsafe { text::parse_float(&T, OPT_FLOAT, core::ptr::null_mut(), a) };
+        dec(a);
+        take_option(p).map(f64::from_bits)
+    };
+    // As Rust's `f64::from_str`, which the interpreter calls.
+    for x in [
+        "1",
+        "-0",
+        "1e21",
+        "inf",
+        "-infinity",
+        "NaN",
+        "1e400",
+        ".5",
+        "5.",
+        "0x10",
+        " 1",
+        "",
+        "+",
+        "1_0",
+        "e5",
+    ] {
+        let want = x.parse::<f64>().ok();
+        let got = parse(x);
+        assert_eq!(got.map(f64::to_bits), want.map(f64::to_bits), "{x:?}");
+    }
+    for x in [
+        1.0,
+        0.1 + 0.2,
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        -0.0,
+        1e21,
+        1e-7,
+        5e-324,
+        f64::MAX,
+    ] {
+        assert_eq!(take(text::float_to_str(x)), alloc::string::ToString::to_string(&x));
+    }
+    assert_eq!(obj::live(), base);
+}
+
+#[test]
+fn slice_cases() {
+    let _g = lock();
+    let base = obj::live();
+    let str_slice = |x: &str, a: i64, b: i64| {
+        let p = s(x);
+        // SAFETY: a live `Str`.
+        let r = unsafe { text::slice(p, a, b) }.map(take);
+        dec(p);
+        r
+    };
+    assert_eq!(str_slice("hello", 1, 3), Ok("el".into()));
+    assert_eq!(str_slice("hello", 0, 5), Ok("hello".into()));
+    assert_eq!(str_slice("hello", 5, 5), Ok("".into()));
+    assert_eq!(str_slice("", 0, 0), Ok("".into()));
+    assert_eq!(str_slice("héllo", 1, 3), Ok("é".into()));
+    for (a, b) in [
+        (3, 2),
+        (-1, 2),
+        (0, 6),
+        (6, 6),
+        (0, -1),
+        (i64::MIN, i64::MAX),
+        (0, 1 << 40),
+    ] {
+        assert_eq!(str_slice("hello", a, b), Err(Err::SliceBounds), "{a}..{b}");
+    }
+    assert_eq!(str_slice("héllo", 1, 2), Err(Err::CharBoundary));
+    assert_eq!(str_slice("héllo", 2, 4), Err(Err::CharBoundary));
+    // Bounds come first, as in the interpreter.
+    assert_eq!(str_slice("é", 1, 3), Err(Err::SliceBounds));
+
+    let bytes_slice = |x: &[u8], a: i64, b: i64| {
+        let p = text::new_bytes(x);
+        // SAFETY: a live `Bytes`.
+        let r = unsafe { text::bytes_slice(p, a, b) }.map(|q| {
+            // SAFETY: a fresh `Bytes`.
+            let v = unsafe { obj::bytes(q) }.to_vec();
+            dec(q);
+            v
+        });
+        dec(p);
+        r
+    };
+    assert_eq!(bytes_slice(&[0xc3, 0xa9, 1], 1, 3), Ok(alloc::vec![0xa9, 1]));
+    assert_eq!(bytes_slice(&[], 0, 0), Ok(alloc::vec![]));
+    assert_eq!(bytes_slice(&[1, 2], 2, 1), Err(Err::SliceBounds));
+    assert_eq!(bytes_slice(&[1, 2], 0, 3), Err(Err::SliceBounds));
     assert_eq!(obj::live(), base);
 }

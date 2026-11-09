@@ -40,7 +40,7 @@ fn a_site_formats_its_template() {
         span,
         template: "index {a} out of bounds for length {b}",
     };
-    assert_eq!(s.message(-1, 3), "index -1 out of bounds for length 3");
+    assert_eq!(s.message(-1, 3, 0), "index -1 out of bounds for length 3");
 }
 
 #[test]
@@ -141,11 +141,11 @@ fn main() -> Int {
     let t = unsafe { RawTable::read(base, table) };
 
     assert_eq!(
-        t.descs[..5],
-        [Desc::Unit, Desc::Int, Desc::Bool, Desc::Str, Desc::Bytes]
+        t.descs[..6],
+        [Desc::Unit, Desc::Int, Desc::Bool, Desc::Str, Desc::Bytes, Desc::Float]
     );
     // The program's six other types, all added from the module: the lookups above added none.
-    assert_eq!(t.descs.len(), 11);
+    assert_eq!(t.descs.len(), 12);
     let Desc::Record { name, slots } = t.desc(tree) else {
         panic!("{:?}", t.desc(tree))
     };

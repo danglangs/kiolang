@@ -324,25 +324,29 @@ pub unsafe fn eq(t: &Table, d: u32, a: u64, b: u64) -> bool {
 
 /// Compares one pair, pushing the pairs its equality also needs.
 unsafe fn eq_one(t: &Table, work: &mut Vec<(u32, u64, u64)>, d: u32, a: u64, b: u64) -> bool {
-    if a == b {
-        return true; // equal bits, or the same object
-    }
     let desc = t.desc(d);
+    // Equal bits are equal values except for a `Float` (`NaN != NaN`; `-0.0 == 0.0`) and for one
+    // object compared with itself, which may hold a NaN, as the interpreter's `Rc` does not
+    // assume.
+    if desc == Desc::Float {
+        return f64::from_bits(a) == f64::from_bits(b);
+    }
     // SAFETY: `a` and `b` are live objects of `desc`, or scalars.
     unsafe {
         let (a, b) = (from_slot(a), from_slot(b));
         match desc {
-            Desc::Unit | Desc::Int | Desc::Bool => false,
-            Desc::Str | Desc::Bytes => bytes(a) == bytes(b),
+            Desc::Unit | Desc::Int | Desc::Bool | Desc::Float => a == b,
+            Desc::Str | Desc::Bytes => a == b || bytes(a) == bytes(b),
+            // Shared references: `a` and `b` may be one object.
             Desc::List { elem } => {
-                let (x, y) = (list(a), list(b));
+                let (x, y) = (&*field::<List>(a, BODY), &*field::<List>(b, BODY));
                 x.len() == y.len() && {
                     work.extend(x.iter().zip(y.iter()).map(|(&x, &y)| (elem, x, y)));
                     true
                 }
             }
             Desc::Map { value, .. } => {
-                let (x, y) = (map(a), map(b));
+                let (x, y) = (&*field::<Map>(a, BODY), &*field::<Map>(b, BODY));
                 x.len() == y.len()
                     && x.iter().zip(y.iter()).all(|((kx, vx), (ky, vy))| {
                         work.push((value, *vx, *vy));

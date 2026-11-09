@@ -42,6 +42,17 @@ pub const INTERNAL: u32 = u32::MAX;
 /// `a`. The host reports it (host/src/compiled.rs); the differential tests rely on it.
 pub const LEAKED: u32 = u32::MAX - 1;
 
+/// The error site whose `trap` returns: the host keeps `a` as the third value (`{c}`) of the
+/// message of the `trap` that follows (host/src/compiled.rs).
+pub const EXTRA: u32 = u32::MAX - 2;
+
+/// A runtime error at `site` whose message needs a third value `c`: `trap` has two, so `c`
+/// goes first through a `trap` at `EXTRA`, which returns.
+pub fn trap3(site: u32, a: i64, b: i64, c: i64) -> ! {
+    trap(EXTRA, c, 0);
+    rt_trap(site, a, b)
+}
+
 /// A runtime error at `site`: the host formats the message with `a` and `b`. Generated code
 /// calls this, not the import, and the call keeps the import in the module, so codegen never
 /// adds one (which would shift every function index).

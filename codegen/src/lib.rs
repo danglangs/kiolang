@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use wasm_encoder::reencode::{self, Reencode};
 use wasm_encoder::{
-    BlockType, CodeSection, ConstExpr, DataSection, Encode, Function, Instruction, InstructionSink, MemorySection,
-    TypeSection, ValType,
+    BlockType, CodeSection, ConstExpr, DataSection, Encode, Function, Ieee64, Instruction, InstructionSink,
+    MemorySection, TypeSection, ValType,
 };
 use wasmparser::{Parser, Payload};
 
@@ -34,16 +34,18 @@ pub struct Wasm {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Site {
     pub span: Span,
-    /// The message; the host replaces `{a}` and `{b}` with `trap`'s arguments.
+    /// The message; the host replaces `{a}` and `{b}` with `trap`'s arguments, and `{c}` with
+    /// the value a `trap` at the runtime's `EXTRA` site passed before it.
     pub template: &'static str,
 }
 
 impl Site {
-    /// The message for a `trap(site, a, b)` here.
-    pub fn message(&self, a: i64, b: i64) -> String {
+    /// The message for a `trap(site, a, b)` here, after `trap(EXTRA, c, _)`.
+    pub fn message(&self, a: i64, b: i64, c: i64) -> String {
         self.template
             .replace("{a}", &a.to_string())
             .replace("{b}", &b.to_string())
+            .replace("{c}", &c.to_string())
     }
 }
 
@@ -147,6 +149,7 @@ fn val_type(t: &Ty) -> Option<ValType> {
     match t {
         Ty::Int => Some(ValType::I64),
         Ty::Bool => Some(ValType::I32),
+        Ty::Float => Some(ValType::F64),
         Ty::Str | Ty::Bytes | Ty::List(_) | Ty::Map(..) => Some(ValType::I32),
         Ty::Struct(_) | Ty::Enum(_) | Ty::Option(_) | Ty::Result(..) => Some(ValType::I32),
         Ty::Unit | Ty::Never => None,
@@ -160,6 +163,21 @@ fn is_ptr(t: &Ty) -> bool {
     matches!(
         t,
         Ty::Str | Ty::Bytes | Ty::List(_) | Ty::Map(..) | Ty::Struct(_) | Ty::Enum(_) | Ty::Option(_) | Ty::Result(..)
+    )
+}
+
+/// Whether built-in `b` is a Wasm instruction or two on a scalar receiver (`scalar_builtin`).
+fn inline_builtin(b: Builtin) -> bool {
+    matches!(
+        b,
+        Builtin::IntToFloat
+            | Builtin::FloatAbs
+            | Builtin::FloatFloor
+            | Builtin::FloatCeil
+            | Builtin::FloatSqrt
+            | Builtin::FloatIsNan
+            | Builtin::FloatIsFinite
+            | Builtin::FloatIsInfinite
     )
 }
 
@@ -316,6 +334,8 @@ const DIV_ZERO: &str = "division by zero";
 /// The `Str` descriptor's index (runtime/src/desc.rs).
 const STR_DESC: u32 = 3;
 const OUT_OF_BOUNDS: &str = "index {a} out of bounds for length {b}";
+/// `{c}` is the length, which the runtime passes through its `EXTRA` site.
+const SLICE_BOUNDS: &str = "slice {a}..{b} out of bounds for length {c}";
 
 impl FuncGen<'_, '_> {
     fn sink(&mut self) -> InstructionSink<'_> {
@@ -400,7 +420,7 @@ impl FuncGen<'_, '_> {
 
     /// Calls runtime export `name` on `xs`, which it borrows, with `site` last if it can fail.
     fn rt_op(&mut self, name: &str, xs: &[&ir::Expr], site: Option<u32>) {
-        self.rt_op_slots(name, &[], xs, site, false)
+        self.rt_op_slots(name, &[], xs, site.as_slice(), false)
     }
 
     /// The constants a runtime operation with result type `t` takes first.
@@ -414,8 +434,8 @@ impl FuncGen<'_, '_> {
 
     /// `rt_op` with constants `pre` first (the result's descriptor, its pinned `None`), and the
     /// operands after the first as slots if `slots`: a map key, a list element, the default of
-    /// `unwrap_or`, the error of `ok_or`.
-    fn rt_op_slots(&mut self, name: &str, pre: &[u32], xs: &[&ir::Expr], site: Option<u32>, slots: bool) {
+    /// `unwrap_or`, the error of `ok_or`. An operation with two kinds of error takes two sites.
+    fn rt_op_slots(&mut self, name: &str, pre: &[u32], xs: &[&ir::Expr], sites: &[u32], slots: bool) {
         self.borrowing(xs, |g, temps| {
             for &c in pre {
                 g.sink().i32_const(c as i32);
@@ -426,18 +446,21 @@ impl FuncGen<'_, '_> {
                     g.slot_in(&x.ty);
                 }
             }
-            if let Some(s) = site {
+            for &s in sites {
                 g.sink().i32_const(s as i32);
             }
             g.call_rt(name);
         });
     }
 
-    /// Turns a value of type `t` on the stack into a slot (`i64`): `Int` as is, `Bool` and
-    /// pointers zero-extended, `()` as 0.
+    /// Turns a value of type `t` on the stack into a slot (`i64`): `Int` as is, `Float` as its
+    /// bits, `Bool` and pointers zero-extended, `()` as 0.
     fn slot_in(&mut self, t: &Ty) {
         match val_type(t) {
             Some(ValType::I64) => {}
+            Some(ValType::F64) => {
+                self.sink().i64_reinterpret_f64();
+            }
             Some(_) => {
                 self.sink().i64_extend_i32_u();
             }
@@ -451,6 +474,9 @@ impl FuncGen<'_, '_> {
     fn slot_out(&mut self, t: &Ty) {
         match val_type(t) {
             Some(ValType::I64) => {}
+            Some(ValType::F64) => {
+                self.sink().f64_reinterpret_i64();
+            }
             Some(_) => {
                 self.sink().i32_wrap_i64();
             }
@@ -556,6 +582,12 @@ impl FuncGen<'_, '_> {
                         self.call_rt("rt_concat");
                         self.dec(v);
                         self.dec(l);
+                    }
+                    Some(op @ (BinOp::FAdd | BinOp::FSub)) => {
+                        let v = self.temp(ValType::F64);
+                        self.expr(value);
+                        self.sink().local_set(v).local_get(l).local_get(v);
+                        self.float_op(*op);
                     }
                     Some(op) => {
                         // The value comes first, as in the interpreter, then the local's value.
@@ -727,6 +759,10 @@ impl FuncGen<'_, '_> {
                     self.sink().i64_extend_i32_u().i64_store(SLOT);
                     self.dec(v);
                     self.dec(old);
+                } else if matches!(op, BinOp::FAdd | BinOp::FSub) {
+                    self.sink().f64_reinterpret_i64().local_get(v);
+                    self.float_op(op);
+                    self.sink().i64_reinterpret_f64().i64_store(SLOT);
                 } else {
                     self.sink().local_get(v);
                     self.int_op(op, span);
@@ -883,6 +919,13 @@ impl FuncGen<'_, '_> {
             ExprKind::Bool(b) => {
                 self.sink().i32_const(*b as i32);
             }
+            ExprKind::Float(x) => {
+                self.sink().f64_const(Ieee64::new(x.to_bits()));
+            }
+            ExprKind::Unary(UnOp::FNeg, x) => {
+                self.expr(x);
+                self.sink().f64_neg();
+            }
             ExprKind::Str(s) => {
                 let a = self.statics.str(s);
                 self.sink().i32_const(a as i32);
@@ -942,6 +985,7 @@ impl FuncGen<'_, '_> {
                 self.expr(b);
                 let i = match (op, &a.ty) {
                     (_, Ty::Int) => return self.int_op(*op, e.span),
+                    (_, Ty::Float) => return self.float_op(*op),
                     (BinOp::Eq, Ty::Bool) => Instruction::I32Eq,
                     (BinOp::Ne, Ty::Bool) => Instruction::I32Ne,
                     // `()` has no value: equal always.
@@ -974,24 +1018,27 @@ impl FuncGen<'_, '_> {
                 let index = self.rt.funcs + f.0;
                 self.sink().call(index);
             }
+            ExprKind::Builtin(b, recv, _) if inline_builtin(*b) => {
+                self.expr(recv);
+                self.scalar_builtin(*b);
+            }
             ExprKind::Builtin(b, recv, args) => {
                 use Pre::{Desc, Nothing, Opt};
                 let (name, pre, error) = match b {
-                    // L8 floats (C10) and L5b slices (C11).
                     Builtin::IntToFloat
-                    | Builtin::StrParseFloat
-                    | Builtin::FloatToStr
-                    | Builtin::FloatToInt
                     | Builtin::FloatAbs
                     | Builtin::FloatFloor
                     | Builtin::FloatCeil
-                    | Builtin::FloatRound
                     | Builtin::FloatSqrt
                     | Builtin::FloatIsNan
                     | Builtin::FloatIsFinite
-                    | Builtin::FloatIsInfinite
-                    | Builtin::StrSlice
-                    | Builtin::BytesSlice => unimplemented!("codegen: builtin {b:?}"),
+                    | Builtin::FloatIsInfinite => unreachable!("inline"),
+                    Builtin::StrParseFloat => ("rt_str_parse_float", Opt, None),
+                    Builtin::FloatToStr => ("rt_float_to_str", Nothing, None),
+                    Builtin::FloatToInt => ("rt_float_to_int", Opt, None),
+                    Builtin::FloatRound => ("rt_float_round", Nothing, None),
+                    Builtin::StrSlice => ("rt_str_slice", Nothing, Some(SLICE_BOUNDS)),
+                    Builtin::BytesSlice => ("rt_bytes_slice", Nothing, Some(SLICE_BOUNDS)),
                     Builtin::StrParseInt => ("rt_str_parse_int", Opt, None),
                     Builtin::MapGet => ("rt_map_get", Opt, None),
                     Builtin::OptionUnwrapOr => ("rt_option_unwrap_or", Nothing, None),
@@ -1024,12 +1071,15 @@ impl FuncGen<'_, '_> {
                     Builtin::MapKeys => ("rt_map_keys", Desc, None),
                 };
                 let pre = self.pre(pre, &e.ty);
-                let site = error.map(|t| self.site(e.span, t));
+                let mut sites: Vec<u32> = error.map(|t| self.site(e.span, t)).into_iter().collect();
+                if *b == Builtin::StrSlice {
+                    sites.push(self.site(e.span, "slice {a}..{b} is not on a character boundary"));
+                }
                 let xs: Vec<&ir::Expr> = std::iter::once(&**recv).chain(args).collect();
                 // These take their argument as a slot; `unwrap_or` gives a slot.
                 let unwrap = matches!(b, Builtin::OptionUnwrapOr | Builtin::ResultUnwrapOr);
                 let slots = unwrap || matches!(b, Builtin::MapGet | Builtin::ListContains | Builtin::OptionOkOr);
-                self.rt_op_slots(name, &pre, &xs, site, slots);
+                self.rt_op_slots(name, &pre, &xs, &sites, slots);
                 if unwrap {
                     self.slot_out(&e.ty);
                 }
@@ -1340,6 +1390,47 @@ impl FuncGen<'_, '_> {
         self.dec(s);
     }
 
+    /// `a op b` on two `Float` from the stack: IEEE, as Rust's `f64`, so nothing traps. Wasm
+    /// has no remainder on floats; the runtime's is Rust's `%`.
+    fn float_op(&mut self, op: BinOp) {
+        let i = match op {
+            BinOp::FAdd => Instruction::F64Add,
+            BinOp::FSub => Instruction::F64Sub,
+            BinOp::FMul => Instruction::F64Mul,
+            BinOp::FDiv => Instruction::F64Div,
+            BinOp::FRem => return self.call_rt("rt_float_rem"),
+            BinOp::FLt => Instruction::F64Lt,
+            BinOp::FLe => Instruction::F64Le,
+            BinOp::FGt => Instruction::F64Gt,
+            BinOp::FGe => Instruction::F64Ge,
+            BinOp::Eq => Instruction::F64Eq,
+            BinOp::Ne => Instruction::F64Ne,
+            op => unreachable!("{op:?} on Float"),
+        };
+        i.encode(&mut self.code);
+    }
+
+    /// A built-in on the scalar on the stack that is one Wasm instruction or two (`inline_builtin`).
+    fn scalar_builtin(&mut self, b: Builtin) {
+        let mut s = self.sink();
+        match b {
+            Builtin::IntToFloat => s.f64_convert_i64_s(),
+            Builtin::FloatAbs => s.f64_abs(),
+            Builtin::FloatFloor => s.f64_floor(),
+            Builtin::FloatCeil => s.f64_ceil(),
+            Builtin::FloatSqrt => s.f64_sqrt(),
+            // Only NaN differs from itself.
+            Builtin::FloatIsNan => {
+                let x = self.temp(ValType::F64);
+                self.sink().local_tee(x).local_get(x).f64_ne()
+            }
+            // `|x| < inf` is false for NaN, as `is_finite`; `|x| == inf` as `is_infinite`.
+            Builtin::FloatIsFinite => s.f64_abs().f64_const(Ieee64::new(f64::INFINITY.to_bits())).f64_lt(),
+            Builtin::FloatIsInfinite => s.f64_abs().f64_const(Ieee64::new(f64::INFINITY.to_bits())).f64_eq(),
+            b => unreachable!("{b:?} is not inline"),
+        };
+    }
+
     /// `a op b` on two `Int` from the stack, with the interpreter's errors at `span`.
     fn int_op(&mut self, op: BinOp, span: Span) {
         let compare = match op {
@@ -1443,6 +1534,9 @@ fn entry(rt_init: u32, table: u32, main: u32, ret: &Ty) -> Function {
     f.instructions().i32_const(table as i32).call(rt_init).call(main);
     match val_type(ret) {
         Some(ValType::I64) => {}
+        Some(ValType::F64) => {
+            f.instructions().i64_reinterpret_f64();
+        }
         Some(_) => {
             f.instructions().i64_extend_i32_u();
         }

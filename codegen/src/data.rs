@@ -18,12 +18,14 @@
 use lang::ir::{Block, Expr, ExprKind, Module, Pat, PlaceStep, StmtKind, Ty};
 use std::collections::HashMap;
 
-// `Desc` tags, in declaration order; the first five are also the scalar descriptors' indexes.
+// `Desc` tags, in declaration order; the first six (`Unit` to `Float`) are also the scalar
+// descriptors' indexes.
 const STR: u32 = 3;
-const LIST: u32 = 5;
-const MAP: u32 = 6;
-const RECORD: u32 = 7;
-const ENUM: u32 = 8;
+const SCALARS: u32 = 6;
+const LIST: u32 = 6;
+const MAP: u32 = 7;
+const RECORD: u32 = 8;
+const ENUM: u32 = 9;
 
 pub struct Statics<'m> {
     m: &'m Module,
@@ -52,7 +54,7 @@ impl<'m> Statics<'m> {
             strs: HashMap::new(),
             pins: HashMap::new(),
             tys: Vec::new(),
-            descs: (0..5).map(|tag| [tag, 0, 0, 0, 0]).collect(),
+            descs: (0..SCALARS).map(|tag| [tag, 0, 0, 0, 0]).collect(),
             slots: Vec::new(),
             fields: Vec::new(),
             variants: Vec::new(),
@@ -75,7 +77,7 @@ impl<'m> Statics<'m> {
             Ty::Unit => return 0,
             Ty::Int => return 1,
             Ty::Bool => return 2,
-            Ty::Float => unimplemented!("codegen: type {}", crate::node(t)),
+            Ty::Float => return 5,
             Ty::Str => return STR,
             Ty::Bytes => return 4,
             Ty::Cap(_) | Ty::Never => unreachable!("{t:?} has no descriptor"),
@@ -270,11 +272,15 @@ impl<'m> Statics<'m> {
             ExprKind::Str(s) => {
                 self.str(s);
             }
-            ExprKind::Int(_) | ExprKind::Bool(_) | ExprKind::Unit | ExprKind::Local(_) | ExprKind::MapNew => {}
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Bool(_)
+            | ExprKind::Unit
+            | ExprKind::Local(_)
+            | ExprKind::MapNew => {}
             ExprKind::FnRef(_) | ExprKind::CallValue(..) | ExprKind::Closure(..) => {
                 unimplemented!("codegen: expression {}", crate::node(&e.kind))
             }
-            ExprKind::Float(_) => unimplemented!("codegen: expression {}", crate::node(&e.kind)),
             ExprKind::Unary(_, x) | ExprKind::Field(x, _) | ExprKind::Try(x) => self.expr(x),
             ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) => {
                 self.expr(a);

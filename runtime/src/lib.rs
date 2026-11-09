@@ -20,6 +20,7 @@ extern crate std;
 pub mod coll;
 pub mod desc;
 pub mod display;
+pub mod float;
 pub mod obj;
 pub mod text;
 
@@ -32,6 +33,8 @@ mod entry;
 mod coll_tests;
 #[cfg(test)]
 mod display_tests;
+#[cfg(test)]
+mod float_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
