@@ -1,7 +1,7 @@
 //! `heap::Heap` over the system allocator, counting and limiting what reaches it (Miri runs
 //! these too: every block is handed back by the end).
 
-use crate::heap::{Heap, CHUNK, HELD, SMALL};
+use crate::heap::{Heap, CHUNK, HELD, LISTED, SMALL};
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::Cell;
 use std::alloc::System;
@@ -61,13 +61,39 @@ fn a_freed_block_is_reused_by_its_class_only() {
     }
 }
 
+/// The larger classes (C8b6): 65 to 128 bytes share a block, 129 is the next class, 512 is
+/// listed and 513 goes to the inner allocator.
+#[test]
+fn larger_classes_step_by_64_up_to_listed() {
+    let h = heap(usize::MAX);
+    unsafe {
+        let a = h.alloc(l(65));
+        h.dealloc(a, l(65));
+        assert_eq!(h.alloc(l(128)), a);
+        let b = h.alloc(l(129));
+        assert_ne!(a, b);
+        let c = h.alloc(l(LISTED));
+        h.dealloc(c, l(LISTED));
+        assert_eq!(h.alloc(l(LISTED - 63)), c);
+        assert_eq!(inner_live(&h), 3, "a chunk per class");
+        let d = h.alloc(l(LISTED + 1));
+        assert_eq!(inner_live(&h), 4);
+        h.dealloc(d, l(LISTED + 1));
+        for (p, n) in [(a, 128), (b, 129), (c, LISTED)] {
+            h.dealloc(p, l(n));
+        }
+        h.flush();
+        assert_eq!(inner_live(&h), 0);
+    }
+}
+
 #[test]
 fn blocks_keep_their_contents_while_others_are_recycled() {
     let h = heap(usize::MAX);
     unsafe {
         let mut blocks = std::vec::Vec::new();
         for i in 0..200usize {
-            let size = 1 + i % (SMALL + 16); // small and large
+            let size = 1 + i % (LISTED + 16); // small and large
             let p = h.alloc(Layout::from_size_align(size, 1).unwrap());
             core::ptr::write_bytes(p, i as u8, size);
             blocks.push((p, size, i as u8));
@@ -82,7 +108,7 @@ fn blocks_keep_their_contents_while_others_are_recycled() {
             }
         }
         for i in 0..100usize {
-            let size = 1 + (2 * i) % (SMALL + 16);
+            let size = 1 + (2 * i) % (LISTED + 16);
             let p = h.alloc(Layout::from_size_align(size, 1).unwrap());
             core::ptr::write_bytes(p, 0xee, size);
             kept.push((p, size, 0xee));
@@ -142,7 +168,7 @@ fn realloc_keeps_contents_across_classes() {
 fn large_and_overaligned_blocks_bypass_the_lists() {
     let h = heap(usize::MAX);
     unsafe {
-        for layout in [l(SMALL + 1), Layout::from_size_align(16, 16).unwrap()] {
+        for layout in [l(LISTED + 1), Layout::from_size_align(16, 16).unwrap()] {
             let p = h.alloc(layout);
             assert_eq!(p as usize % layout.align(), 0);
             h.dealloc(p, layout);
@@ -244,9 +270,9 @@ fn freeing_over_held_hands_free_chunks_back_before_the_inner_allocator_is_called
         let a = h.alloc(l(SMALL));
         assert_eq!(inner_live(&h), chunks + 1, "taken from the list, no inner call");
         h.dealloc(a, l(SMALL));
-        let big = h.alloc(l(SMALL + 1));
+        let big = h.alloc(l(LISTED + 1));
         assert_eq!(inner_live(&h), 2, "over HELD freed: every free chunk handed back first");
-        h.dealloc(big, l(SMALL + 1));
+        h.dealloc(big, l(LISTED + 1));
         h.dealloc(keep, l(8));
         h.flush();
         assert_eq!(inner_live(&h), 0);
@@ -269,7 +295,7 @@ fn a_hand_back_that_keeps_much_waits_for_as_much_to_be_freed() {
         for &(_, p) in &freed {
             h.dealloc(p, l(SMALL));
         }
-        let big = h.alloc(l(SMALL + 1)); // freed > HELD: a hand-back, which keeps everything
+        let big = h.alloc(l(LISTED + 1)); // freed > HELD: a hand-back, which keeps everything
         assert_eq!(inner_live(&h), chunks + 1);
         let kept = freed.len() * SMALL;
         assert!(kept > HELD);
@@ -279,14 +305,14 @@ fn a_hand_back_that_keeps_much_waits_for_as_much_to_be_freed() {
         for &p in &small {
             h.dealloc(p, l(8));
         }
-        let big2 = h.alloc(l(SMALL + 1));
+        let big2 = h.alloc(l(LISTED + 1));
         assert_eq!(
             inner_live(&h),
             held + 1,
             "no hand-back: the 8-byte chunks are still held"
         );
         for p in [big, big2] {
-            h.dealloc(p, l(SMALL + 1));
+            h.dealloc(p, l(LISTED + 1));
         }
         for (_, p) in live {
             h.dealloc(p, l(SMALL));

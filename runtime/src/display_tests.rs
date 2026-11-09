@@ -169,7 +169,7 @@ fn build(d: u32, v: &Value) -> u64 {
         (Desc::Map { key, value }, Value::Map(m)) => {
             let mut out = Map::new();
             for (k, v) in m.iter() {
-                out.insert(map_key(key, k), build(value, v));
+                out.insert(map_key(key, k), core::cell::Cell::new(build(value, v)));
             }
             to_slot(obj::new_map(d, out))
         }

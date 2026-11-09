@@ -200,7 +200,27 @@ pub unsafe fn to_str(b: *mut Header) -> Result<*mut Header, Err> {
 
 /// `Int.to_str()`.
 pub fn int_to_str(n: i64) -> *mut Header {
-    new_str(&n.to_string())
+    obj::new_bytes(desc::STR, int_text(n, &mut [0; 20]))
+}
+
+/// `n` in decimal, as `{}` writes it, in the end of `buf`, without `core::fmt` (C8b6). 20 bytes
+/// hold `i64::MIN`: a sign and 19 digits.
+pub fn int_text(n: i64, buf: &mut [u8; 20]) -> &[u8] {
+    let mut i = buf.len();
+    let mut m = n.unsigned_abs();
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (m % 10) as u8;
+        m /= 10;
+        if m == 0 {
+            break;
+        }
+    }
+    if n < 0 {
+        i -= 1;
+        buf[i] = b'-';
+    }
+    &buf[i..]
 }
 
 /// `Float.to_str()`: Rust's `{}`, as the interpreter's `to_string`.
@@ -263,7 +283,50 @@ pub unsafe fn split(list: u32, s: *mut Header, sep: *mut Header) -> Result<*mut 
         if sep.is_empty() {
             return Err(Err::EmptySeparator);
         }
-        Ok(strs(list, str_of(s).split(sep)))
+        let s = str_of(s);
+        Ok(match *sep.as_bytes() {
+            [c] => split_byte(list, s.as_bytes(), c),
+            _ => strs(list, s.split(sep)),
+        })
+    }
+}
+
+/// `split` at the one-byte separator `c` (C8b6): the list sized once by counting `c` first,
+/// and `c` found 8 bytes at a time. `c` is ASCII (a one-byte `Str`), and an ASCII byte in UTF-8
+/// is always a whole character, so these are `str::split`'s parts, and each is UTF-8.
+fn split_byte(list: u32, s: &[u8], c: u8) -> *mut Header {
+    let mut n = 1;
+    each_byte(s, c, |_| n += 1);
+    let mut parts = List::with_capacity(n);
+    let mut start = 0;
+    each_byte(s, c, |i| {
+        parts.push(to_slot(obj::new_bytes(desc::STR, &s[start..i])));
+        start = i + 1;
+    });
+    parts.push(to_slot(obj::new_bytes(desc::STR, &s[start..])));
+    obj::new_list(list, parts)
+}
+
+/// Calls `f` with the offset of each byte of `s` equal to `c`, in order: 8 bytes at a time
+/// while 8 are left, then one at a time.
+fn each_byte(s: &[u8], c: u8, mut f: impl FnMut(usize)) {
+    const LOW7: u64 = 0x7f7f_7f7f_7f7f_7f7f;
+    let mut i = 0;
+    while i + 8 <= s.len() {
+        // The high bit of each byte that is 0 in `x`, exactly: `(x & LOW7) + LOW7` sets it in
+        // each byte whose low 7 bits are not all 0, without carrying into the next byte.
+        let x = word(s, i) ^ (u64::from(c) * 0x0101_0101_0101_0101);
+        let mut m = !(((x & LOW7) + LOW7) | x | LOW7);
+        while m != 0 {
+            f(i + (m.trailing_zeros() / 8) as usize);
+            m &= m - 1;
+        }
+        i += 8;
+    }
+    for (k, &b) in s[i..].iter().enumerate() {
+        if b == c {
+            f(i + k);
+        }
     }
 }
 

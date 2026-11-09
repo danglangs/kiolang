@@ -12,10 +12,12 @@
 //! name says.
 
 use crate::desc::{self, Desc, Table};
-use crate::obj::{self, bytes, elems, elems_mut, field, from_slot, to_slot, HashMap, Header, Key, Map};
+use crate::obj::{self, bytes, elems, elems_mut, field, from_slot, to_slot, HashMap, Header, Key, Map, MapBody};
 use crate::text;
 use alloc::vec::Vec;
+use core::cell::Cell;
 use core::mem::ManuallyDrop;
+use core::ptr::NonNull;
 
 /// A program error. Codegen turns it into a `trap`: `index {index} out of bounds for length {len}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +29,11 @@ const BODY: usize = 8;
 
 unsafe fn map<'a>(p: *mut Header) -> &'a mut Map {
     // SAFETY: a `Map` object holds its `Map` at BODY.
+    unsafe { &mut *field(p, BODY) }
+}
+
+unsafe fn map_body<'a>(p: *mut Header) -> &'a mut MapBody {
+    // SAFETY: a `Map` object holds its `MapBody` at BODY.
     unsafe { &mut *field(p, BODY) }
 }
 
@@ -216,10 +223,16 @@ pub unsafe fn map_get(t: &Table, p: *mut Header, k: u64, option_desc: u32, none:
         let (key, value, hashed) = kv(t, p);
         let k = probe(key, k);
         let v = match hashed {
-            true => hash_map(p).get(&k),
-            false => map(p).get(&k),
+            true => hash_map(p).get(&k).copied(),
+            false => {
+                // Remember the entry for an `insert` of the same key (`MapBody::last`).
+                let b = map_body(p);
+                let e = b.map.get_key_value(&*k);
+                b.last = e.map(|(k, v)| (NonNull::from(k), NonNull::from(v)));
+                e.map(|(_, v)| v.get())
+            }
         };
-        obj::option(t, option_desc, none, v.map(|&v| share(t, value, v)))
+        obj::option(t, option_desc, none, v.map(|v| share(t, value, v)))
     }
 }
 
@@ -318,18 +331,28 @@ pub unsafe fn map_insert(t: &Table, p: *mut Header, k: u64, v: u64) {
     unsafe {
         let (key, value, hashed) = kv(t, p);
         // A key already present is found without copying it, and kept.
-        let found = match hashed {
-            true => hash_map(p).get_mut(&probe(key, k)),
-            false => map(p).get_mut(&probe(key, k)),
-        };
-        match (found, hashed) {
-            (Some(slot), _) => release(t, value, core::mem::replace(slot, v)),
-            (None, true) => {
-                hash_map(p).insert(key_of(key, k), v);
+        let probe = probe(key, k);
+        if hashed {
+            match hash_map(p).get_mut(&probe) {
+                Some(slot) => release(t, value, core::mem::replace(slot, v)),
+                None => drop(hash_map(p).insert(key_of(key, k), v)),
             }
-            (None, false) => {
-                map(p).insert(key_of(key, k), v);
+            return;
+        }
+        let b = map_body(p);
+        // The entry the last `get` found, if it is this key: `last` is set only while it points
+        // into `b.map`, and replacing a value through its `Cell` changes nothing else, so it
+        // stays set.
+        if let Some((lk, lv)) = b.last {
+            if *lk.as_ref() == *probe {
+                release(t, value, lv.as_ref().replace(v));
+                return;
             }
+        }
+        b.last = None;
+        match b.map.get(&probe) {
+            Some(slot) => release(t, value, slot.replace(v)),
+            None => drop(b.map.insert(key_of(key, k), Cell::new(v))),
         }
     }
 }
@@ -344,7 +367,11 @@ pub unsafe fn map_remove(t: &Table, p: *mut Header, k: u64) {
         let (key, value, hashed) = kv(t, p);
         let old = match hashed {
             true => hash_map(p).remove(&probe(key, k)),
-            false => map(p).remove(&probe(key, k)),
+            false => {
+                let b = map_body(p);
+                b.last = None;
+                b.map.remove(&probe(key, k)).map(Cell::into_inner)
+            }
         };
         if let Some(old) = old {
             release(t, value, old);
@@ -399,7 +426,7 @@ unsafe fn eq_one(t: &Table, work: &mut Vec<(u32, u64, u64)>, d: u32, a: u64, b: 
                 let (x, y) = (&*field::<Map>(a, BODY), &*field::<Map>(b, BODY));
                 x.len() == y.len()
                     && x.iter().zip(y.iter()).all(|((kx, vx), (ky, vy))| {
-                        work.push((value, *vx, *vy));
+                        work.push((value, vx.get(), vy.get()));
                         kx == ky
                     })
             }

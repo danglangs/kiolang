@@ -38,10 +38,11 @@ Compiled-only kio covers the whole language and every capability; the active str
 | L9, C12 | built-in JSON: a reserved `Json` enum, `Str.parse_json() -> Result<Json, Str>`, `Json.to_json()`, accessors (`get`, `at`, `as_*`), json.kio's rules and messages, depth 128; the interpreter (lang/src/json.rs) and the runtime (runtime/src/json.rs, building kio objects directly) agree on the harness, a generated-JSON fuzz test and byte mutations. 1 MB parse + encode 17 ms compiled (`serde_json` 7.8 ms, json.kio 82 ms). kio-web still declares its own `Json` and is refused until it moves to the built-in |
 | C8b5 | less work per operation (fuel stays): generated code pops the size-class free lists, fresh blocks carved 32 at a time from 64 KB chunks, freeing without descriptor copies, `Str` map keys compared by an 8-byte prefix. Tree 185 to 98 ms (fuel 3.78 to 2.21 G), word count 70 to 45, JSON 81 to 66 |
 | L10, C13 | `HashMap<K, V>` (owner-approved): `Map`'s keys and methods, insertion-ordered iteration, order-insensitive `==`, a fixed hash with buckets sorted past 8 entries (100,000 colliding keys in under a second either way; with chains only, out of fuel). One table source (lang/src/hmap.rs) for the interpreter and the runtime; codegen reuses `Map`'s calls. Word count 45 ms on `Map`, 32 on `HashMap` (Rust 5.7); kiogen generates maps; harness 440 ran both ways, 0 mismatches |
+| C8b6 | word count and JSON (fuel stays): one `Map` search for `insert(k, get(k)..)` (the object remembers the entry `get` found), `split` at a one-byte separator sized once, words freed in place, size classes up to 512 bytes. Word count 45.7 to 29.3 ms (fuel 0.68 to 0.43 G), on `HashMap` 31.8 to 25.0, built-in JSON 15.3 to 12.8; tree 97 to 101 (same fuel, #117) |
 
 ## Next
 
-C8 (roadmap.md): freeing (54% of tree); word count's double search for `insert(k, get(k) + 1)` (open_questions #110, #115; on `HashMap` too) and `split`'s allocations; borrowed match bindings of a borrowed scrutinee (tree).
+C8 (roadmap.md): freeing (54% of tree); tree's 4-5% from the larger size classes (#117); `HashMap`'s double search for `insert(k, get(k) + 1)` (needs `get_key_value` in hmap.rs, #116); borrowed match bindings of a borrowed scrutinee (tree).
 
 ## Waiting on the maintainer
 
@@ -52,6 +53,6 @@ Nothing.
 | | fib(35) | 30 M loop | tree | JSON 1 MB | 100 k concatenations |
 |---|---|---|---|---|---|
 | Rust | 23 ms | 97 ms | 33 ms | 8.0 ms | 4.6 ms |
-| kio compiled (plus 20-25 ms compile, cached) | 53-57 ms | 106 ms | 98 ms | 66 ms | 5.2 ms |
+| kio compiled (plus 20-25 ms compile, cached) | 53-57 ms | 106 ms | 98 ms (C8b6: 101) | 66 ms (built-in JSON, C8b6: 13 ms) | 5.2 ms (C8b6: 4.8) |
 | Python 3.13 | 704 ms | 933 ms | 2.87 s | 17 ms | 7.2 ms |
 | kio interpreter (the test oracle) | 1.54 s | 1.27 s | 1.03 s | 812 ms | 1.57 s |

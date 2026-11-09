@@ -852,3 +852,103 @@ fn hash_map_frees_what_it_holds() {
     dec(m);
     assert_eq!(obj::live(), before);
 }
+
+/// `m.insert(k, ..)` after `m.get(k)` reuses the entry `get` found (C8b6), and only then:
+/// random gets, inserts, removes and copies on `Map<Str, Int>` against a model, half of them on
+/// the key last got. 40 keys besides the odd ones (`""`, longer than a word, equal 8-byte
+/// prefixes), so inserts and removes split and merge nodes. Miri checks that every remembered
+/// entry used is still valid.
+#[test]
+fn map_insert_after_get_matches_a_model() {
+    let _l = lock();
+    let before = obj::live();
+    let mut names: alloc::vec::Vec<alloc::string::String> =
+        ["a", "", "a key longer than a word", "a key longer than a wore", "b\0"]
+            .map(alloc::string::String::from)
+            .to_vec();
+    names.extend((0..40).map(|i| alloc::format!("k{i}")));
+    let n = if cfg!(miri) { 1_500 } else { 50_000 };
+    let m = coll::map_new(&T, MAP_STR_INT);
+    let mut model = alloc::collections::BTreeMap::new();
+    let mut x = 3u64;
+    let mut next = |k: usize| {
+        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (x >> 33) as usize % k
+    };
+    let with = |k: &str, f: &dyn Fn(u64)| {
+        let k = s(k);
+        f(k);
+        dec(from_slot(k));
+    };
+    // SAFETY: `m` is a `Map<Str, Int>`, unique when changed; each key is a live `Str`.
+    unsafe {
+        let get = |m: *mut Header, k: &str| {
+            let k = s(k);
+            let g = coll::map_get(&T, m, k, OPT_INT, core::ptr::null_mut());
+            let v = (*field_u32(g) == 1).then(|| *obj::slot(&T, g, 0) as i64);
+            dec(g);
+            dec(from_slot(k));
+            v
+        };
+        let mut got = names[0].as_str();
+        for i in 0..n {
+            let k = if next(2) == 0 {
+                got
+            } else {
+                names[next(names.len())].as_str()
+            };
+            match next(8) {
+                0..=2 => {
+                    assert_eq!(get(m, k), model.get(k).copied(), "step {i}");
+                    got = k;
+                }
+                3..=5 => {
+                    with(k, &|q| coll::map_insert(&T, m, q, i as u64));
+                    model.insert(k, i as i64);
+                }
+                6 => {
+                    with(k, &|q| coll::map_remove(&T, m, q));
+                    model.remove(k);
+                }
+                _ => {
+                    // A copy remembers nothing, and the original keeps what it remembered.
+                    obj::inc(m);
+                    let c = obj::unique(&T, m);
+                    assert_eq!(get(c, k), model.get(k).copied(), "step {i}");
+                    with(k, &|q| coll::map_insert(&T, c, q, 0));
+                    with(got, &|q| coll::map_insert(&T, m, q, i as u64));
+                    model.insert(got, i as i64);
+                    dec(c);
+                }
+            }
+            assert_eq!(coll::map_len(&T, m), model.len() as i64);
+        }
+        for k in &names {
+            assert_eq!(get(m, k), model.get(k.as_str()).copied());
+        }
+    }
+    dec(m);
+    assert_eq!(obj::live(), before);
+}
+
+/// An insert that reuses the entry `get` found releases the value it replaces.
+#[test]
+fn map_insert_after_get_releases_the_old_value() {
+    let _l = lock();
+    let before = obj::live();
+    let m = coll::map_new(&T, MAP_INT_STR);
+    let (a, b) = (from_slot(s("a")), from_slot(s("b")));
+    // SAFETY: `m` is a unique `Map<Int, Str>`.
+    unsafe {
+        obj::inc(a);
+        coll::map_insert(&T, m, 7, to_slot(a));
+        let g = coll::map_get(&T, m, 7, OPT_STR, core::ptr::null_mut());
+        assert_eq!(rc(a), 3);
+        dec(g);
+        coll::map_insert(&T, m, 7, to_slot(b));
+        assert_eq!((rc(a), rc(b)), (1, 1));
+    }
+    dec(a);
+    dec(m);
+    assert_eq!(obj::live(), before);
+}

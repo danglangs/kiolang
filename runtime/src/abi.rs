@@ -432,7 +432,7 @@ pub unsafe extern "C" fn rt_json_parse(desc: u32, s: u32) -> u32 {
 #[no_mangle]
 pub unsafe extern "C" fn rt_json_encode(j: u32) -> u32 {
     // SAFETY: the group's contract.
-    unsafe { addr(json::encode(&table(), ptr(j))) }
+    unsafe { addr(json::encode(ptr(j))) }
 }
 
 /// `j.get(k)`: `desc` is `Option<Json>`, `none` its pinned `None`.
@@ -564,7 +564,7 @@ unsafe fn unwrap_or(p: u32, success: u32, d: i64) -> i64 {
     // SAFETY: the caller's guarantee; variant `success` has one slot.
     unsafe {
         let v = if variant(p) == success {
-            *obj::slot(&t, ptr(p), 0)
+            obj::payload(ptr(p))
         } else {
             d as u64
         };

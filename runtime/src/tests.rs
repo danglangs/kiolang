@@ -111,8 +111,14 @@ fn map_values_are_freed() {
     let _l = lock();
     let before = obj::live();
     let mut m = Map::new();
-    m.insert(Key::Str(b"a".as_slice().into()), to_slot(inner("a", 1)));
-    m.insert(Key::Str(b"b".as_slice().into()), to_slot(inner("b", 2)));
+    m.insert(
+        Key::Str(b"a".as_slice().into()),
+        core::cell::Cell::new(to_slot(inner("a", 1))),
+    );
+    m.insert(
+        Key::Str(b"b".as_slice().into()),
+        core::cell::Cell::new(to_slot(inner("b", 2))),
+    );
     let p = obj::new_map(MAP, m);
     // SAFETY: `p` is live.
     unsafe { obj::dec(&T, p) };

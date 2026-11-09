@@ -294,7 +294,7 @@ const VARIANT: wasm_encoder::MemArg = wasm_encoder::MemArg {
     memory_index: 0,
 };
 
-/// The largest block the runtime's free lists hold (runtime/src/heap.rs `SMALL`): classes of
+/// The largest block generated code pops (runtime/src/heap.rs `SMALL`): classes of
 /// 8, 16, .., 64 bytes, class `(size - 1) / 8`.
 const HEAP_SMALL: u64 = 64;
 

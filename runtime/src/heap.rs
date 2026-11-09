@@ -1,10 +1,11 @@
 //! The allocator: size-class free lists over dlmalloc (C8b3), fresh blocks carved from chunks
 //! (C8b5).
 //!
-//! A block of at most 64 bytes and alignment at most 8 is rounded up to a class of 8, 16, ..,
-//! 64 bytes. A freed block goes on its class's list, linked through its first word, and the
-//! next allocation of that class takes it back with no call into dlmalloc. Anything larger,
-//! or more aligned, goes to dlmalloc directly.
+//! A block of at most 512 bytes and alignment at most 8 is rounded up to a class of 8, 16, ..,
+//! 64 bytes, or above that of 128, 192, .., 512 (C8b6: `BTreeMap` nodes, lines, list buffers).
+//! A freed block goes on its class's list, linked through its first word, and the next
+//! allocation of that class takes it back with no call into dlmalloc. Anything larger, or more
+//! aligned, goes to dlmalloc directly.
 //!
 //! When its list is empty a class carves a fresh block from its current chunk: `CHUNK` bytes,
 //! `CHUNK`-aligned, from dlmalloc, holding blocks of that class only, after a `Chunk` header.
@@ -31,9 +32,15 @@ use core::cell::Cell;
 use core::ptr;
 
 const STEP: usize = 8;
+/// The classes generated code pops (8 to 64 bytes).
 pub const CLASSES: usize = 8;
-/// The largest block a free list holds.
+/// The largest block of those classes.
 pub const SMALL: usize = STEP * CLASSES;
+/// Larger classes, which only the runtime uses (C8b6): 128 to 512 bytes in steps of 64.
+const BIG_STEP: usize = 64;
+const ALL: usize = CLASSES + 7;
+/// The largest block a free list holds.
+pub const LISTED: usize = SMALL + BIG_STEP * (ALL - CLASSES);
 /// The bytes freed onto the lists before a dlmalloc call hands them back.
 pub const HELD: usize = 256 * 1024;
 /// A chunk's alignment, and its size with dlmalloc's 8-byte chunk header: dlmalloc places
@@ -61,10 +68,10 @@ struct Chunk {
 pub struct Heap<A> {
     /// Each class's most recently freed block; its first word holds the next one. At offset 0:
     /// generated code reads and writes it.
-    free: [Cell<*mut u8>; CLASSES],
+    free: [Cell<*mut u8>; ALL],
     /// Each class's chunk to carve from (null: none), and the offset of its first uncarved byte.
-    cur: [Cell<*mut Chunk>; CLASSES],
-    top: [Cell<usize>; CLASSES],
+    cur: [Cell<*mut Chunk>; ALL],
+    top: [Cell<usize>; ALL],
     /// Bytes freed onto the lists since the last hand-back.
     freed: Cell<usize>,
     /// Bytes the lists kept at the last hand-back.
@@ -86,9 +93,9 @@ unsafe impl<A: Sync> Sync for Heap<A> {}
 impl<A> Heap<A> {
     pub const fn new(inner: A) -> Heap<A> {
         Heap {
-            free: [const { Cell::new(ptr::null_mut()) }; CLASSES],
-            cur: [const { Cell::new(ptr::null_mut()) }; CLASSES],
-            top: [const { Cell::new(0) }; CLASSES],
+            free: [const { Cell::new(ptr::null_mut()) }; ALL],
+            cur: [const { Cell::new(ptr::null_mut()) }; ALL],
+            top: [const { Cell::new(0) }; ALL],
             freed: Cell::new(0),
             kept: Cell::new(0),
             inner,
@@ -101,17 +108,37 @@ impl<A> Heap<A> {
     }
 }
 
-/// The class of `l` if it is small: blocks of `STEP * (class + 1)` bytes.
+/// The class of `l` if it is listed: blocks of `block(class)` bytes. The small classes are
+/// tested first, as before the larger ones were added.
+#[inline(always)]
 fn class(l: Layout) -> Option<usize> {
     if l.size() <= SMALL && l.align() <= STEP {
         Some(l.size().saturating_sub(1) / STEP)
+    } else if l.size() <= LISTED && l.align() <= STEP {
+        Some(CLASSES + (l.size() - SMALL - 1) / BIG_STEP)
     } else {
         None
     }
 }
 
+/// Each class's block size.
+const BLOCK: [usize; ALL] = {
+    let mut b = [0; ALL];
+    let mut c = 0;
+    while c < ALL {
+        b[c] = if c < CLASSES {
+            STEP * (c + 1)
+        } else {
+            SMALL + BIG_STEP * (c - CLASSES + 1)
+        };
+        c += 1;
+    }
+    b
+};
+
+#[inline(always)]
 fn block(c: usize) -> usize {
-    STEP * (c + 1)
+    BLOCK[c]
 }
 
 fn chunk_layout() -> Layout {

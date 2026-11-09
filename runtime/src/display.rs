@@ -95,8 +95,18 @@ unsafe fn expand<'a>(t: &Table<'a>, d: u32, v: u64, out: &mut Vec<u8>, work: &mu
                 separated(work, items.rev(), |work, (d, e)| work.push(Item::Val(d, e)));
                 work.push(Item::Text(b"["));
             }
-            Desc::Map { key, value } => entries(work, key, value, (*field::<Map>(p, HEADER)).iter().rev()),
-            Desc::HashMap { key, value } => entries(work, key, value, (*field::<HashMap>(p, HEADER)).iter().rev()),
+            Desc::Map { key, value } => entries(
+                work,
+                key,
+                value,
+                (*field::<Map>(p, HEADER)).iter().rev().map(|(k, v)| (k, v.get())),
+            ),
+            Desc::HashMap { key, value } => entries(
+                work,
+                key,
+                value,
+                (*field::<HashMap>(p, HEADER)).iter().rev().map(|(k, &v)| (k, v)),
+            ),
             Desc::Record { name, slots } => {
                 let (off, ds) = obj::record(t, p);
                 if !ds.is_empty() {
@@ -140,9 +150,9 @@ unsafe fn expand<'a>(t: &Table<'a>, d: u32, v: u64, out: &mut Vec<u8>, work: &mu
 }
 
 /// Pushes a map's `{k: v, ..}`, its entries given last first.
-fn entries<'a>(work: &mut Vec<Item<'a>>, key: u32, value: u32, items: impl Iterator<Item = (&'a Key, &'a u64)>) {
+fn entries<'a>(work: &mut Vec<Item<'a>>, key: u32, value: u32, items: impl Iterator<Item = (&'a Key, u64)>) {
     work.push(Item::Text(b"}"));
-    separated(work, items, |work, (k, &e)| {
+    separated(work, items, |work, (k, e)| {
         work.push(Item::Val(value, e));
         work.push(Item::Text(b": "));
         work.push(match k {

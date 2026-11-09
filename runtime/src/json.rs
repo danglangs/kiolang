@@ -17,6 +17,7 @@
 use crate::desc::{self, Desc, Table};
 use crate::obj::{self, from_slot, to_slot, Header, Key, Map, StrKey};
 use alloc::vec::Vec;
+use core::cell::Cell;
 use core::fmt::Write;
 
 /// Containers may nest this deep; one more is an error.
@@ -64,10 +65,8 @@ pub unsafe fn parse(t: &Table, result: u32, s: *mut Header) -> *mut Header {
             (1, to_slot(obj::new_bytes(desc::STR, e.as_bytes())))
         }
     };
-    let r = obj::alloc(t, result, v);
-    // SAFETY: each variant of a `Result` has one slot; the result owns `slot`.
-    unsafe { *obj::slot(t, r, 0) = slot };
-    r
+    // Each variant of a `Result` has one slot; the result owns `slot`.
+    obj::variant1(t, result, v, slot)
 }
 
 struct Parser<'a, 't> {
@@ -106,9 +105,9 @@ struct Fields<'a, 't> {
 
 impl Drop for Fields<'_, '_> {
     fn drop(&mut self) {
-        for &x in self.m.values() {
+        for x in self.m.values() {
             // SAFETY: each is an owned `Json`.
-            unsafe { obj::dec(self.t, from_slot(x)) };
+            unsafe { obj::dec(self.t, from_slot(x.get())) };
         }
     }
 }
@@ -142,12 +141,11 @@ impl Parser<'_, '_> {
 
     /// A new `Json` of variant `v`, owning `payload` if it has one.
     fn make(&self, v: u32, payload: Option<u64>) -> u64 {
-        let p = obj::alloc(self.t, self.json, v);
-        if let Some(x) = payload {
-            // SAFETY: every variant but `Null` has one slot.
-            unsafe { *obj::slot(self.t, p, 0) = x };
-        }
-        to_slot(p)
+        // Every variant but `Null` has one slot.
+        to_slot(match payload {
+            Some(x) => obj::variant1(self.t, self.json, v, x),
+            None => obj::alloc(self.t, self.json, v),
+        })
     }
 
     /// The value at `i`, inside `depth` containers, and the offset after it.
@@ -200,7 +198,11 @@ impl Parser<'_, '_> {
             j += 1;
         } else {
             while let Some(c @ b'0'..=b'9') = self.byte(j) {
-                mag = mag.and_then(|m| m.checked_mul(10)?.checked_add(u64::from(c - b'0')));
+                // `m * 10 + d` unless it passes `u64::MAX` (`checked_mul` is a 128-bit multiply
+                // on wasm32).
+                let d = u64::from(c - b'0');
+                mag = mag.filter(|&m| m < u64::MAX / 10 || (m == u64::MAX / 10 && d <= u64::MAX % 10));
+                mag = mag.map(|m| m * 10 + d);
                 j += 1;
             }
         }
@@ -357,9 +359,9 @@ impl Parser<'_, '_> {
                     return Err(("expected ':'", j));
                 }
                 let (v, after) = self.value(self.ws(j + 1), depth)?;
-                if let Some(old) = fields.m.insert(key, v) {
+                if let Some(old) = fields.m.insert(key, Cell::new(v)) {
                     // SAFETY: the replaced value was owned here.
-                    unsafe { obj::dec(self.t, from_slot(old)) };
+                    unsafe { obj::dec(self.t, from_slot(old.get())) };
                 }
                 j = self.ws(after);
                 match self.byte(j) {
@@ -402,11 +404,12 @@ fn plain(b: &[u8], mut i: usize) -> usize {
 }
 
 /// The variant and payload slot of `Json` `j`; the payload is 0 for `Null`.
-unsafe fn parts(t: &Table, j: *mut Header) -> (u32, u64) {
-    // SAFETY: the caller's guarantee; an enum has its variant at HEADER.
+unsafe fn parts(j: *mut Header) -> (u32, u64) {
+    // SAFETY: the caller's guarantee; an enum has its variant at HEADER, and every `Json`
+    // variant but `Null` has one slot.
     unsafe {
         let v = *obj::field::<u32>(j, obj::HEADER);
-        (v, if v == NULL { 0 } else { *obj::slot(t, j, 0) })
+        (v, if v == NULL { 0 } else { obj::payload(j) })
     }
 }
 
@@ -423,14 +426,14 @@ impl Write for Out {
 /// An array or object being encoded: the items left, and whether one was written.
 enum Frame<'m> {
     Arr(core::slice::Iter<'m, u64>, bool),
-    Obj(alloc::collections::btree_map::Iter<'m, Key, u64>, bool),
+    Obj(alloc::collections::btree_map::Iter<'m, Key, Cell<u64>>, bool),
 }
 
 /// `j.to_json()` as a new `Str`: compact, object keys in `Map` order.
 ///
 /// # Safety
 /// The module's contract.
-pub unsafe fn encode(t: &Table, j: *mut Header) -> *mut Header {
+pub unsafe fn encode(j: *mut Header) -> *mut Header {
     let mut out = Out(Vec::new());
     let mut stack: Vec<Frame> = Vec::new();
     let mut next = Some(j);
@@ -438,13 +441,11 @@ pub unsafe fn encode(t: &Table, j: *mut Header) -> *mut Header {
         if let Some(p) = next.take() {
             // SAFETY: `p` is `j` or a `Json` inside it, which outlives this call unchanged.
             unsafe {
-                let (v, x) = parts(t, p);
+                let (v, x) = parts(p);
                 match v {
                     NULL => out.0.extend_from_slice(b"null"),
                     BOOL => out.0.extend_from_slice(if x != 0 { b"true" } else { b"false" }),
-                    NUM => {
-                        let _ = write!(out, "{}", x as i64);
-                    }
+                    NUM => out.0.extend_from_slice(crate::text::int_text(x as i64, &mut [0; 20])),
                     FLOAT => float(&mut out, f64::from_bits(x)),
                     STR => quote(&mut out.0, obj::bytes(from_slot(x))),
                     ARR => {
@@ -475,13 +476,13 @@ pub unsafe fn encode(t: &Table, j: *mut Header) -> *mut Header {
                 }
             },
             Some(Frame::Obj(items, written)) => match items.next() {
-                Some((Key::Str(k), &x)) => {
+                Some((Key::Str(k), x)) => {
                     if core::mem::replace(written, true) {
                         out.0.push(b',');
                     }
                     quote(&mut out.0, k);
                     out.0.push(b':');
-                    next = Some(from_slot(x));
+                    next = Some(from_slot(x.get()));
                 }
                 Some((Key::Int(_), _)) => panic!("an Int key in a Json object"),
                 None => {
@@ -542,11 +543,11 @@ fn quote(out: &mut Vec<u8>, s: &[u8]) {
 pub unsafe fn get(t: &Table, opt: u32, none: *mut Header, j: *mut Header, k: *mut Header) -> *mut Header {
     // SAFETY: the caller's guarantee; `k` outlives the probe.
     unsafe {
-        let (v, x) = parts(t, j);
+        let (v, x) = parts(j);
         let found = match v {
             OBJ => (*obj::field::<Map>(from_slot(x), obj::HEADER))
                 .get(&*Key::probe(obj::bytes(k)))
-                .copied(),
+                .map(Cell::get),
             _ => None,
         };
         found.inspect(|&f| obj::inc(from_slot(f)));
@@ -561,7 +562,7 @@ pub unsafe fn get(t: &Table, opt: u32, none: *mut Header, j: *mut Header, k: *mu
 pub unsafe fn at(t: &Table, opt: u32, none: *mut Header, j: *mut Header, i: i64) -> *mut Header {
     // SAFETY: the caller's guarantee.
     unsafe {
-        let (v, x) = parts(t, j);
+        let (v, x) = parts(j);
         let found = match v {
             ARR => usize::try_from(i)
                 .ok()
@@ -584,7 +585,7 @@ pub unsafe fn at(t: &Table, opt: u32, none: *mut Header, j: *mut Header, i: i64)
 pub unsafe fn as_variant(t: &Table, opt: u32, none: *mut Header, j: *mut Header, want: u32) -> *mut Header {
     // SAFETY: the caller's guarantee.
     unsafe {
-        let (v, x) = parts(t, j);
+        let (v, x) = parts(j);
         let found = match v {
             _ if v == want => {
                 if matches!(v, STR | ARR | OBJ) {

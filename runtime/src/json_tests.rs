@@ -141,7 +141,7 @@ fn runtime(s: &str) -> Result<String, String> {
     let (v, x) = unsafe { (*obj::field::<u32>(r, obj::HEADER), from_slot(*obj::slot(&T, r, 0))) };
     let out = match v {
         // SAFETY: `x` is a `Json`.
-        0 => Ok(take(unsafe { json::encode(&T, x) })),
+        0 => Ok(take(unsafe { json::encode(x) })),
         _ => Err(text(x)),
     };
     dec(r);
@@ -186,6 +186,11 @@ fn agrees_with_the_interpreter() {
         "9223372036854775808",
         "-9223372036854775809",
         "18446744073709551616",
+        "18446744073709551615",
+        "18446744073709551619",
+        "-18446744073709551626",
+        "184467440737095516150",
+        "36893488147419103242",
         "1.5",
         "2e3",
         "-",
@@ -322,7 +327,7 @@ fn encodes_what_parse_cannot_make() {
     items.push(to_slot(make(json::STR, Some(to_slot(s)))));
     let arr = make(json::ARR, Some(to_slot(obj::new_list(LIST_JSON, items))));
     // SAFETY: `arr` is a `Json`.
-    let got = take(unsafe { json::encode(&T, arr) });
+    let got = take(unsafe { json::encode(arr) });
     assert_eq!(
         got,
         "[null,null,-0.0,1.0,1000000000000000000000.0,0.1,\"q\\\"b\\\\n\\nt\\tc\\u0001\\u001f\"]"
@@ -334,7 +339,7 @@ fn encodes_what_parse_cannot_make() {
         j = make(json::ARR, Some(to_slot(obj::new_list(LIST_JSON, vec![to_slot(j)]))));
     }
     // SAFETY: `j` is a `Json`.
-    let got = take(unsafe { json::encode(&T, j) });
+    let got = take(unsafe { json::encode(j) });
     assert_eq!(got.len(), 20_004);
     dec(j);
     assert_eq!(obj::live(), before);

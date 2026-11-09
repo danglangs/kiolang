@@ -137,6 +137,30 @@ fn split_cases() {
     assert_eq!(obj::live(), base);
 }
 
+/// The one-byte separator path (C8b6) against `str::split`: every separator position in and
+/// around the 8-byte words, runs of separators, bytes that differ from the separator only in
+/// the high bit or by a borrow (`!` and `\0` around ` `, 0xa0 inside `é`), and the tail.
+#[test]
+fn split_one_byte_matches_str_split() {
+    let _g = lock();
+    let base = obj::live();
+    let alphabet = [" ", "a", "!", "\0", "\u{1f}", "é", "  ", "\u{a0}"];
+    let mut x = 7u64;
+    let n = if cfg!(miri) { 40 } else { 2000 };
+    for len in 0..n {
+        let mut a = String::new();
+        for _ in 0..len % 40 {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            a.push_str(alphabet[(x >> 33) as usize % alphabet.len()]);
+        }
+        for sep in [" ", "\0", "a"] {
+            let want: Vec<String> = a.split(sep).map(String::from).collect();
+            assert_eq!(split(&a, sep), Ok(want), "{a:?} at {sep:?}");
+        }
+    }
+    assert_eq!(obj::live(), base);
+}
+
 #[test]
 fn lines_trim_contains() {
     let _g = lock();
@@ -247,6 +271,17 @@ fn concat_eq_int_to_str() {
         (i64::MIN, "-9223372036854775808"),
     ] {
         assert_eq!(take(text::int_to_str(n)), w);
+    }
+    // `int_text` (C8b6) against `{}` around every power of ten and at the ends.
+    let mut ns = alloc::vec![0, 1, -1, i64::MAX, i64::MIN, i64::MIN + 1];
+    let mut p = 1i64;
+    while let Some(q) = p.checked_mul(10) {
+        ns.extend([p - 1, p, p + 1, -p + 1, -p, -p - 1]);
+        p = q;
+    }
+    ns.extend([p - 1, p, -p]);
+    for n in ns {
+        assert_eq!(text::int_text(n, &mut [0; 20]), alloc::format!("{n}").as_bytes());
     }
     dec(a);
     dec(b);

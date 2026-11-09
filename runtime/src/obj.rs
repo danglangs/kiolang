@@ -32,6 +32,7 @@ use alloc::alloc::{handle_alloc_error, Layout};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use core::cell::Cell;
 use core::mem::{align_of, size_of, ManuallyDrop};
 use core::ptr::{self, NonNull};
 
@@ -164,7 +165,9 @@ impl HashKey for Key {
 }
 
 pub type List = Vec<u64>;
-pub type Map = BTreeMap<Key, u64>;
+/// Values are `Cell`s so that a value `coll::map_get` found may be replaced later through a
+/// pointer taken from a shared search (`MapBody::last`).
+pub type Map = BTreeMap<Key, Cell<u64>>;
 pub type HashMap = hmap::HashMap<Key, u64>;
 
 /// How a `List` object holds its elements: the parts of a `Vec<u64>`, in a layout fixed here
@@ -185,12 +188,24 @@ const _: () = assert!(
         && HEADER + core::mem::offset_of!(ListBody, cap) == 16
 );
 
+/// A `Map` object's body: the map, then the entry `coll::map_get` last found in it (C8b6), so
+/// `m.insert(k, m.get(k)..)` searches once. The map is first, so `field::<Map>(p, HEADER)` reads
+/// it.
+#[repr(C)]
+pub struct MapBody {
+    pub map: Map,
+    /// The key and value of an entry of `map`, or `None`. Set only by `map_get`; cleared before
+    /// anything else that may change `map` other than through a value's `Cell` (an insert that
+    /// does not hit it, a remove), so while set both point into `map`'s live nodes.
+    pub last: Option<(NonNull<Key>, NonNull<Cell<u64>>)>,
+}
+
 pub(crate) const HEADER: usize = 8;
 const ENUM_SLOTS: usize = 16;
 pub(crate) const BYTES_DATA: usize = 16;
 const _: () = assert!(
     HEADER.is_multiple_of(align_of::<ListBody>())
-        && HEADER.is_multiple_of(align_of::<Map>())
+        && HEADER.is_multiple_of(align_of::<MapBody>())
         && HEADER.is_multiple_of(align_of::<HashMap>())
 );
 
@@ -360,6 +375,32 @@ pub fn alloc(t: &Table, desc: u32, variant: u32) -> *mut Header {
     p
 }
 
+/// Variant `variant` of enum `desc`, which has one slot, holding `v` (the object owns it): as
+/// `alloc` then `slot(.., 0)`, without the zeroing and the second descriptor lookup (C8b6).
+pub fn variant1(t: &Table, desc: u32, variant: u32, v: u64) -> *mut Header {
+    let Desc::Enum { variants, .. } = t.desc(desc) else {
+        panic!("variant1 of {:?}", t.desc(desc))
+    };
+    assert!(t.variant(variants, variant).slots.len == 1);
+    let p = new(ENUM_SLOTS + 8, desc);
+    // SAFETY: `p` has room for the variant, the padding word and one slot.
+    unsafe {
+        field::<u32>(p, HEADER).write(variant);
+        field::<u32>(p, HEADER + 4).write(0);
+        field::<u64>(p, ENUM_SLOTS).write(v);
+    }
+    p
+}
+
+/// Slot 0 of an enum object whose variant has a slot.
+///
+/// # Safety
+/// `p` is an enum whose variant has a slot.
+pub unsafe fn payload(p: *mut Header) -> u64 {
+    // SAFETY: the caller's guarantee.
+    unsafe { *field::<u64>(p, ENUM_SLOTS) }
+}
+
 /// An `Option` of descriptor `opt` (variant 0 `None`, 1 `Some` with one slot): `Some(v)`
 /// taking `v`'s reference, or `none`, a pinned `None` of `opt` (no allocation), or a new `None`
 /// if `none` is null.
@@ -368,12 +409,7 @@ pub fn alloc(t: &Table, desc: u32, variant: u32) -> *mut Header {
 /// `none` is null or a `None` of `opt`; `v` is a slot value of `Some`'s payload type.
 pub unsafe fn option(t: &Table, opt: u32, none: *mut Header, v: Option<u64>) -> *mut Header {
     match v {
-        Some(v) => {
-            let p = alloc(t, opt, 1);
-            // SAFETY: `p` is a fresh `Some`, with one slot.
-            unsafe { *slot(t, p, 0) = v };
-            p
-        }
+        Some(v) => variant1(t, opt, 1, v),
         None if none.is_null() => alloc(t, opt, 0),
         None => {
             // SAFETY: the caller's guarantee.
@@ -472,9 +508,9 @@ pub fn new_list(desc: u32, v: List) -> *mut Header {
 
 /// A `Map` with descriptor `desc`, owning its values' references.
 pub fn new_map(desc: u32, m: Map) -> *mut Header {
-    let p = new(HEADER + size_of::<Map>(), desc);
-    // SAFETY: room for a `Map` at HEADER, aligned (asserted above).
-    unsafe { field::<Map>(p, HEADER).write(m) };
+    let p = new(HEADER + size_of::<MapBody>(), desc);
+    // SAFETY: room for a `MapBody` at HEADER, aligned (asserted above).
+    unsafe { field::<MapBody>(p, HEADER).write(MapBody { map: m, last: None }) };
     p
 }
 
@@ -578,7 +614,16 @@ unsafe fn free(t: &Table, mut p: *mut Header) {
                 Desc::Fn { slots: s, .. } => slots(ENUM_SLOTS, t.slots(*s)),
                 Desc::Str | Desc::Bytes => BYTES_DATA + *field::<u32>(p, 12) as usize,
                 Desc::List { elem } => {
-                    if t.is_ptr(*elem) {
+                    if let Desc::Str | Desc::Bytes = t.descs[*elem as usize] {
+                        // Dying elements that hold nothing are freed here rather than queued
+                        // in `work` (C8b6: a list of words grew `work` every few words).
+                        for &v in elems(p) {
+                            let c = from_slot(v);
+                            if release(c) {
+                                free_memory(c, BYTES_DATA + *field::<u32>(c, 12) as usize);
+                            }
+                        }
+                    } else if t.is_ptr(*elem) {
                         elems(p).iter().for_each(|&v| child(from_slot(v)));
                     }
                     // The `Vec`'s buffer, freed as `Vec` would, without the call through
@@ -591,10 +636,12 @@ unsafe fn free(t: &Table, mut p: *mut Header) {
                 }
                 Desc::Map { value, .. } => {
                     if t.is_ptr(*value) {
-                        (*field::<Map>(p, HEADER)).values().for_each(|&v| child(from_slot(v)));
+                        (*field::<Map>(p, HEADER))
+                            .values()
+                            .for_each(|v| child(from_slot(v.get())));
                     }
-                    ptr::drop_in_place(field::<Map>(p, HEADER));
-                    HEADER + size_of::<Map>()
+                    ptr::drop_in_place(field::<MapBody>(p, HEADER));
+                    HEADER + size_of::<MapBody>()
                 }
                 Desc::HashMap { value, .. } => {
                     if t.is_ptr(*value) {
@@ -652,7 +699,10 @@ unsafe fn copy(t: &Table, p: *mut Header) -> *mut Header {
         let q = new(size, desc);
         match t.desc(desc) {
             Desc::List { .. } => body(q).write(ListBody::of(elems(p).to_vec())),
-            Desc::Map { .. } => field::<Map>(q, HEADER).write((*field::<Map>(p, HEADER)).clone()),
+            Desc::Map { .. } => field::<MapBody>(q, HEADER).write(MapBody {
+                map: (*field::<Map>(p, HEADER)).clone(),
+                last: None,
+            }),
             Desc::HashMap { .. } => field::<HashMap>(q, HEADER).write((*field::<HashMap>(p, HEADER)).clone()),
             _ => ptr::copy_nonoverlapping(field::<u8>(p, HEADER), field(q, HEADER), size - HEADER),
         }
@@ -668,7 +718,7 @@ unsafe fn ptrs(t: &Table, p: *mut Header, mut f: impl FnMut(*mut Header)) {
         match t.desc((*p).desc) {
             Desc::List { elem } if t.is_ptr(elem) => elems(p).iter().for_each(|&v| f(from_slot(v))),
             Desc::Map { value, .. } if t.is_ptr(value) => {
-                (*field::<Map>(p, HEADER)).values().for_each(|&v| f(from_slot(v)))
+                (*field::<Map>(p, HEADER)).values().for_each(|v| f(from_slot(v.get())))
             }
             Desc::HashMap { value, .. } if t.is_ptr(value) => {
                 (*field::<HashMap>(p, HEADER)).values().for_each(|&v| f(from_slot(v)))
@@ -712,7 +762,7 @@ unsafe fn size(t: &Table, p: *mut Header) -> usize {
         match t.desc((*p).desc) {
             Desc::Str | Desc::Bytes => BYTES_DATA + *field::<u32>(p, 12) as usize,
             Desc::List { .. } => HEADER + size_of::<ListBody>(),
-            Desc::Map { .. } => HEADER + size_of::<Map>(),
+            Desc::Map { .. } => HEADER + size_of::<MapBody>(),
             Desc::HashMap { .. } => HEADER + size_of::<HashMap>(),
             Desc::Record { .. } | Desc::Enum { .. } | Desc::Fn { .. } => {
                 let (off, slots) = record(t, p);
