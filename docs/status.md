@@ -51,7 +51,7 @@ Compiled-only kio covers the whole language and every capability; the active str
 
 ## Next
 
-C8 (roadmap.md): freeing (54% of tree); tree's 4-5% from the larger size classes (#117); borrowed match bindings of a borrowed scrutinee (tree). The links target app (kio-web examples/links) gave L11, L12, H12, W14 (done); the maintainer then approved K2, H13-H15 and L13-L16: all done (K2's and H13-H15's independent security reviews pending).
+C8 (roadmap.md): freeing (54% of tree); tree's 4-5% from the larger size classes (#117); borrowed match bindings of a borrowed scrutinee (tree). The links target app (kio-web examples/links) gave L11, L12, H12, W14 (done); the maintainer then approved K2, H13-H15 and L13-L16: all done, with independent security reviews (fixes merged). Low priority after C8: the models-writing-kio eval (roadmap.md).
 
 ## Waiting on the maintainer
 
