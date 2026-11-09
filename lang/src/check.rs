@@ -77,6 +77,7 @@ impl Program {
         let list = |vs: &[Value]| vs.iter().map(|v| self.nested(v)).collect::<Vec<_>>().join(", ");
         match v {
             Value::Int(n) => n.to_string(),
+            Value::Float(x) => x.to_string(),
             Value::Bool(b) => b.to_string(),
             Value::Str(s) => format!("{s:?}"),
             Value::Bytes(b) => format!("<{} bytes>", b.len()),
@@ -128,6 +129,7 @@ impl Program {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ty {
     Int,
+    Float,
     Bool,
     Str,
     Bytes,
@@ -150,6 +152,7 @@ impl fmt::Display for Ty {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Ty::Int => f.write_str("Int"),
+            Ty::Float => f.write_str("Float"),
             Ty::Bool => f.write_str("Bool"),
             Ty::Str => f.write_str("Str"),
             Ty::Bytes => f.write_str("Bytes"),
@@ -526,12 +529,33 @@ fn sorted_names<'a, V>(m: &'a HashMap<String, V>, module: &str) -> Vec<&'a str> 
 /// What an operator accepts, for the hint on `cannot be applied to`.
 fn op_hint(op: &str) -> String {
     let accepts = match op {
-        "+" => "two Int or two Str",
-        "-" | "*" | "/" | "%" | "<" | "<=" | ">" | ">=" => "two Int",
+        "+" => "two Int, two Float or two Str",
+        "-" | "*" | "/" | "%" | "<" | "<=" | ">" | ">=" => "two Int or two Float",
         "&&" | "||" => "two Bool",
         _ => "two values of one type that holds no capability",
     };
     format!("`{op}` works on {accepts}")
+}
+
+/// The error for `l op r` that `binary_ty` refused, at `span`; `written` is `op` or `op=`.
+fn binary_err(op: &str, written: &str, l: &Ty, r: &Ty, span: Span) -> Diag {
+    if matches!((l, r), (Ty::Int, Ty::Float) | (Ty::Float, Ty::Int)) && op != "&&" && op != "||" {
+        let verb = match op {
+            "+" => "add",
+            "-" => "subtract",
+            "*" => "multiply",
+            "/" => "divide",
+            "%" => "take the remainder of",
+            _ => "compare",
+        };
+        let hint = Some("convert with `.to_float()` or `.to_int()`");
+        return err(span, format!("cannot {verb} {l} and {r}"), hint);
+    }
+    err(
+        span,
+        format!("`{written}` cannot be applied to {l} and {r}"),
+        Some(&op_hint(op)),
+    )
 }
 
 /// The result type of `l op r`, or `None` if the operator does not apply.
@@ -541,6 +565,8 @@ fn binary_ty(op: &str, l: &Ty, r: &Ty) -> Option<Ty> {
         ("+", Str, Str) => Some(Str),
         ("+" | "-" | "*" | "/" | "%", Int, Int) => Some(Int),
         ("<" | "<=" | ">" | ">=", Int, Int) => Some(Bool),
+        ("+" | "-" | "*" | "/" | "%", Float, Float) => Some(Float),
+        ("<" | "<=" | ">" | ">=", Float, Float) => Some(Bool),
         ("&&" | "||", Bool, Bool) => Some(Bool),
         ("==" | "!=", a, b) if a == b && *a != Never && cap_in(a).is_none() => Some(Bool),
         _ => None,
@@ -611,6 +637,7 @@ fn resolve(
                 Err(err(t.span, msg, Some(hint)))
             }
             ("Int", []) => Ok(Ty::Int),
+            ("Float", []) => Ok(Ty::Float),
             ("Bool", []) => Ok(Ty::Bool),
             ("Str", []) => Ok(Ty::Str),
             ("Bytes", []) => Ok(Ty::Bytes),
@@ -644,9 +671,10 @@ fn unknown_type(t: &Type) -> Diag {
         "Vec" => "use `List<T>`".to_string(),
         "HashMap" | "BTreeMap" => "use `Map<K, V>`".to_string(),
         "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" => "use `Int`".to_string(),
-        "f32" | "f64" => "kio has no floats; use `Int`, e.g. cents".to_string(),
+        "f32" | "f64" => "use `Float`".to_string(),
         "bool" => "use `Bool`".to_string(),
-        _ => "types are Int, Bool, Str, Bytes, (), Option, Result, List, Map and your structs and enums".to_string(),
+        _ => "types are Int, Float, Bool, Str, Bytes, (), Option, Result, List, Map and your structs and enums"
+            .to_string(),
     };
     err(t.span, format!("unknown type `{name}`"), Some(&hint))
 }
@@ -880,6 +908,12 @@ fn method(caps: &CapTable, recv: &Ty, name: &str) -> Option<(Vec<Ty>, Ty)> {
         (Ty::Str, "find") => Some((vec![Ty::Str], Ty::Option(Box::new(Ty::Int)))),
         (Ty::Str, "replace") => Some((vec![Ty::Str, Ty::Str], Ty::Str)),
         (Ty::Str, "parse_int") => Some((vec![], Ty::Option(Box::new(Ty::Int)))),
+        (Ty::Str, "parse_float") => Some((vec![], Ty::Option(Box::new(Ty::Float)))),
+        (Ty::Int, "to_float") => Some((vec![], Ty::Float)),
+        (Ty::Float, "to_str") => Some((vec![], Ty::Str)),
+        (Ty::Float, "to_int") => Some((vec![], Ty::Option(Box::new(Ty::Int)))),
+        (Ty::Float, "abs" | "floor" | "ceil" | "round" | "sqrt") => Some((vec![], Ty::Float)),
+        (Ty::Float, "is_nan") => Some((vec![], Ty::Bool)),
         _ => None,
     }
 }
@@ -897,13 +931,17 @@ fn declared(recv: &Ty, name: &str, params: &[Ty], ret: &Ty) -> String {
 
 /// Every built-in method name, so hints can list the ones `method` accepts on a type.
 const METHODS: &[&str] = &[
+    "abs",
+    "ceil",
     "contains",
     "ends_with",
     "err",
     "find",
+    "floor",
     "get",
     "insert",
     "is_err",
+    "is_nan",
     "is_none",
     "is_ok",
     "is_some",
@@ -912,17 +950,22 @@ const METHODS: &[&str] = &[
     "lines",
     "ok",
     "ok_or",
+    "parse_float",
     "parse_int",
     "pop",
     "push",
     "remove",
     "replace",
+    "round",
     "sort",
     "split",
+    "sqrt",
     "starts_with",
     "strip_prefix",
     "strip_suffix",
     "to_bytes",
+    "to_float",
+    "to_int",
     "to_str",
     "trim",
     "unwrap_or",
@@ -1401,8 +1444,7 @@ impl<'a> Checker<'a> {
                 if *op == "=" {
                     want_expr(value, &found, &ty)?;
                 } else if binary_ty(&op[..1], &ty, &found) != Some(ty.clone()) {
-                    let msg = format!("`{op}` cannot be applied to {ty} and {found}");
-                    return Err(err(s.span, msg, Some(&op_hint(&op[..1]))));
+                    return Err(binary_err(&op[..1], op, &ty, &found, s.span));
                 }
                 Ok(Ty::Unit)
             }
@@ -1489,6 +1531,7 @@ impl<'a> Checker<'a> {
     fn expr_kind(&mut self, e: &Expr, expected: Option<&Ty>) -> Result<Ty, Diag> {
         match &e.kind {
             ExprKind::Int(_) => Ok(Ty::Int),
+            ExprKind::Float(_) => Ok(Ty::Float),
             ExprKind::Str(_) => Ok(Ty::Str),
             ExprKind::Bool(_) => Ok(Ty::Bool),
             ExprKind::Unit => Ok(Ty::Unit),
@@ -1512,8 +1555,12 @@ impl<'a> Checker<'a> {
                 }
             },
             ExprKind::Unary(op, x) => {
+                let found = self.expr(x, None)?;
+                if *op == "-" && found == Ty::Float {
+                    return Ok(Ty::Float);
+                }
                 let want_ty = if *op == "-" { Ty::Int } else { Ty::Bool };
-                want_expr(x, &self.expr(x, None)?, &want_ty)?;
+                want_expr(x, &found, &want_ty)?;
                 Ok(want_ty)
             }
             ExprKind::Binary(op, a, b) => {
@@ -1535,10 +1582,7 @@ impl<'a> Checker<'a> {
                 if matches!(*op, "==" | "!=") && l == r && self.has_fn(&l) {
                     return Err(no_fn_equality(e.span, &l));
                 }
-                binary_ty(op, &l, &r).ok_or_else(|| {
-                    let msg = format!("`{op}` cannot be applied to {l} and {r}");
-                    err(e.span, msg, Some(&op_hint(op)))
-                })
+                binary_ty(op, &l, &r).ok_or_else(|| binary_err(op, op, &l, &r, e.span))
             }
             ExprKind::If(cond, then, els) => {
                 want_expr(cond, &self.expr(cond, None)?, &Ty::Bool)?;
@@ -1853,6 +1897,10 @@ impl<'a> Checker<'a> {
     /// The type of a `match` or `if let` scrutinee, which must be one patterns can match.
     fn scrutinee(&mut self, scrut: &Expr) -> Result<Ty, Diag> {
         let st = self.expr(scrut, None)?;
+        if st == Ty::Float {
+            let hint = Some("compare with `<` or `==`");
+            return Err(err(scrut.span, "cannot match on Float".to_string(), hint));
+        }
         if !matches!(
             st,
             Ty::Int | Ty::Bool | Ty::Str | Ty::Enum(_) | Ty::Option(_) | Ty::Result(..)

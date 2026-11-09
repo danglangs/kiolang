@@ -20,9 +20,11 @@ pub trait Caps {
     fn call(&mut self, cap: &str, method: &str, args: Vec<Value>) -> Result<Value, String>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `==` is structural, and IEEE on floats (`NaN != NaN`), as Rust's derived `PartialEq`.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Int(i64),
+    Float(f64),
     Bool(bool),
     Str(Rc<str>),
     Bytes(Rc<Vec<u8>>),
@@ -387,6 +389,7 @@ impl<'a> Interp<'a> {
     fn expr(&mut self, e: &'a Expr) -> Res {
         match &e.kind {
             ExprKind::Int(n) => Ok(Value::Int(*n)),
+            ExprKind::Float(x) => Ok(Value::Float(*x)),
             ExprKind::Bool(b) => Ok(Value::Bool(*b)),
             ExprKind::Str(s) => Ok(Value::Str(s.clone())),
             ExprKind::Unit => Ok(Value::Unit),
@@ -512,7 +515,8 @@ impl<'a> Interp<'a> {
     /// Whether `v` is a value of type `ty`; used to refuse malformed results from the host.
     fn fits(&self, v: &Value, ty: &Ty) -> bool {
         match (v, ty) {
-            (Value::Int(_), Ty::Int) | (Value::Bool(_), Ty::Bool) | (Value::Unit, Ty::Unit) => true,
+            (Value::Int(_), Ty::Int) | (Value::Float(_), Ty::Float) => true,
+            (Value::Bool(_), Ty::Bool) | (Value::Unit, Ty::Unit) => true,
             (Value::Str(_), Ty::Str) | (Value::Bytes(_), Ty::Bytes) => true,
             (Value::List(vals), Ty::List(t)) => vals.iter().all(|v| self.fits(v, t)),
             (Value::Map(m), Ty::Map(k, t)) => m
@@ -748,7 +752,7 @@ fn in_place(e: &Expr) -> bool {
 /// and mutating methods do. Calls cannot: a callee has its own locals.
 fn pure(e: &Expr) -> bool {
     match &e.kind {
-        ExprKind::Int(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Unit => true,
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Unit => true,
         ExprKind::Local(_) | ExprKind::MapNew | ExprKind::FnRef(_) => true,
         ExprKind::CallValue(f, xs) => pure(f) && xs.iter().all(pure),
         ExprKind::Block(_) | ExprKind::If(..) | ExprKind::Match(..) | ExprKind::Mutate(..) => false,
@@ -864,6 +868,27 @@ fn builtin(recv: &Value, b: Builtin, (arg, arg2): Args, span: Span) -> Res {
                 none()
             }
         }
+        (B::IntToFloat, Value::Int(n)) => Value::Float(*n as f64),
+        (B::StrParseFloat, Value::Str(s)) => match s.parse::<f64>() {
+            Ok(x) => some(Value::Float(x)),
+            Err(_) => none(),
+        },
+        (B::FloatToStr, Value::Float(x)) => Value::Str(x.to_string().into()),
+        (B::FloatToInt, Value::Float(x)) => {
+            // `i64::MIN` is exactly -2^63; 2^63 is the first value above `i64::MAX`.
+            let t = x.trunc();
+            if (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&t) {
+                some(Value::Int(t as i64))
+            } else {
+                none()
+            }
+        }
+        (B::FloatAbs, Value::Float(x)) => Value::Float(x.abs()),
+        (B::FloatFloor, Value::Float(x)) => Value::Float(x.floor()),
+        (B::FloatCeil, Value::Float(x)) => Value::Float(x.ceil()),
+        (B::FloatRound, Value::Float(x)) => Value::Float(x.round()),
+        (B::FloatSqrt, Value::Float(x)) => Value::Float(x.sqrt()),
+        (B::FloatIsNan, Value::Float(x)) => Value::Bool(x.is_nan()),
         (B::OptionOkOr, Value::Enum(_, i, payload)) => {
             if *i == 1 {
                 Value::Enum(EnumRef::Result, 0, vec![payload[0].clone()])
@@ -882,6 +907,7 @@ fn unary(op: UnOp, v: Value, span: Span) -> Res {
             .map(Value::Int)
             .ok_or_else(|| fail(span, "Int overflow")),
         (UnOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
+        (UnOp::FNeg, Value::Float(x)) => Ok(Value::Float(-x)),
         _ => unreachable!("checked operand"),
     }
 }
@@ -902,8 +928,22 @@ fn binary(op: BinOp, l: Value, r: Value, span: Span) -> Res {
             BinOp::Ge => Ok(Value::Bool(a >= b)),
             BinOp::Eq => Ok(Value::Bool(a == b)),
             BinOp::Ne => Ok(Value::Bool(a != b)),
-            BinOp::And | BinOp::Or | BinOp::Concat => unreachable!("checked operator"),
+            _ => unreachable!("checked operator"),
         },
+        (Value::Float(a), Value::Float(b)) => Ok(match op {
+            BinOp::FAdd => Value::Float(a + b),
+            BinOp::FSub => Value::Float(a - b),
+            BinOp::FMul => Value::Float(a * b),
+            BinOp::FDiv => Value::Float(a / b),
+            BinOp::FRem => Value::Float(a % b),
+            BinOp::FLt => Value::Bool(a < b),
+            BinOp::FLe => Value::Bool(a <= b),
+            BinOp::FGt => Value::Bool(a > b),
+            BinOp::FGe => Value::Bool(a >= b),
+            BinOp::Eq => Value::Bool(a == b),
+            BinOp::Ne => Value::Bool(a != b),
+            _ => unreachable!("checked operator"),
+        }),
         (Value::Str(a), Value::Str(b)) if op == BinOp::Concat => Ok(Value::Str([&*a, &*b].concat().into())),
         (a, b) => Ok(Value::Bool((a == b) == (op == BinOp::Eq))),
     }

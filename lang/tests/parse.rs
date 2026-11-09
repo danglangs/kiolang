@@ -6,6 +6,7 @@ fn show(e: &Expr) -> String {
     let list = |args: &[Expr]| args.iter().fold(String::new(), |s, a| s + " " + &show(a));
     match &e.kind {
         ExprKind::Int(n) => n.to_string(),
+        ExprKind::Float(x) => format!("{:?}", f64::from_bits(*x)),
         ExprKind::Str(s) => format!("{s:?}"),
         ExprKind::Bool(b) => b.to_string(),
         ExprKind::Unit => "()".into(),

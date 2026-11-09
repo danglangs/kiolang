@@ -150,19 +150,64 @@ fn range_is_int_dotdot_ident() {
     assert_eq!(kinds("0..n"), [Kind::Int(0), Kind::Sym(".."), ident("n")]);
 }
 
+fn float(x: f64) -> Kind {
+    Kind::Float(x.to_bits())
+}
+
 #[test]
-fn float_is_error() {
-    let d = lex("1.5").unwrap_err();
+fn float_literals() {
+    assert_eq!(kinds("1.5 2.0 0.25"), [float(1.5), float(2.0), float(0.25)]);
     assert_eq!(
-        d.span,
-        Span {
-            start: 0,
-            end: 2,
-            file: 0
-        }
+        kinds("1e9 1.5e-3 2E+4 7e0"),
+        [float(1e9), float(1.5e-3), float(2e4), float(7.0)]
     );
-    assert_eq!(d.msg, "kio has no floats");
-    assert_eq!(d.hint.as_deref(), Some("use `Int`"));
+    assert_eq!(kinds("1e-400"), [float(0.0)]);
+    assert_eq!(kinds("-1.5"), [Kind::Sym("-"), float(1.5)]);
+    // Not floats: a range, a method on an `Int`, a field after a name, an `e` that is a name.
+    assert_eq!(kinds("1..2"), [Kind::Int(1), Kind::Sym(".."), Kind::Int(2)]);
+    assert_eq!(
+        kinds("1.to_float()")[..3],
+        [Kind::Int(1), Kind::Sym("."), ident("to_float")]
+    );
+    assert_eq!(kinds("x.5"), [ident("x"), Kind::Sym("."), Kind::Int(5)]);
+    assert_eq!(kinds("xs.0"), [ident("xs"), Kind::Sym("."), Kind::Int(0)]);
+    assert_eq!(kinds("1e"), [Kind::Int(1), ident("e")]);
+    assert_eq!(kinds("1.5.to_str"), [float(1.5), Kind::Sym("."), ident("to_str")]);
+}
+
+#[test]
+fn float_literal_errors() {
+    let cases = [
+        ("1.", 0, 2, "a `Float` literal needs a digit after `.`", "write `1.0`"),
+        (
+            "f(12.)",
+            2,
+            5,
+            "a `Float` literal needs a digit after `.`",
+            "write `12.0`",
+        ),
+        (".5", 0, 2, "a `Float` literal needs a digit before `.`", "write `0.5`"),
+        (
+            "x = .25;",
+            4,
+            7,
+            "a `Float` literal needs a digit before `.`",
+            "write `0.25`",
+        ),
+        (
+            "1e309",
+            0,
+            5,
+            "float literal does not fit in `Float` (f64)",
+            "Float is f64: at most about 1.8e308",
+        ),
+    ];
+    for (src, start, end, msg, hint) in cases {
+        let d = lex(src).unwrap_err();
+        assert_eq!((d.span.start, d.span.end), (start, end), "{src}");
+        assert_eq!(d.msg, msg, "{src}");
+        assert_eq!(d.hint.as_deref(), Some(hint), "{src}");
+    }
 }
 
 #[test]

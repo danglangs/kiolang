@@ -133,6 +133,8 @@ pub struct Expr {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExprKind {
     Int(i64),
+    /// The bits of an `f64`, so that the AST stays `Eq`.
+    Float(u64),
     Str(String),
     Bool(bool),
     Unit,

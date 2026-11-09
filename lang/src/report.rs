@@ -148,6 +148,7 @@ fn walk(e: &Expr, visit: &mut dyn FnMut(&Expr)) {
             arms.iter().for_each(|a| walk(&a.body, visit));
         }
         ExprKind::Int(_)
+        | ExprKind::Float(_)
         | ExprKind::Str(_)
         | ExprKind::Bool(_)
         | ExprKind::Unit

@@ -75,6 +75,7 @@ impl<'m> Statics<'m> {
             Ty::Unit => return 0,
             Ty::Int => return 1,
             Ty::Bool => return 2,
+            Ty::Float => unimplemented!("codegen: type {}", crate::node(t)),
             Ty::Str => return STR,
             Ty::Bytes => return 4,
             Ty::Cap(_) | Ty::Never => unreachable!("{t:?} has no descriptor"),
@@ -273,6 +274,7 @@ impl<'m> Statics<'m> {
             ExprKind::FnRef(_) | ExprKind::CallValue(..) => {
                 unimplemented!("codegen: expression {}", crate::node(&e.kind))
             }
+            ExprKind::Float(_) => unimplemented!("codegen: expression {}", crate::node(&e.kind)),
             ExprKind::Unary(_, x) | ExprKind::Field(x, _) | ExprKind::Try(x) => self.expr(x),
             ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) => {
                 self.expr(a);

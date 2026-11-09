@@ -46,11 +46,11 @@ Most-used Rust crates, and kio's answer to each:
 | Logging, metrics | tracing | the audit log covers host calls | A `Log` capability for application logs. |
 | Regex, text | regex | `split`, `contains`, `starts_with` | Built-ins. |
 | CLI parsing | clap | none | Needs an `Args` capability; the operator grants argv. |
-| Floats | f64 | none | Needed for most numeric work and for JSON numbers. |
-| Abstraction | traits, generics, closures | function values (`fn(T) -> R`, L6a) | The largest language gap. Without generics, every container helper is written once per type. Closures (L6b) follow function values. |
+| Floats | f64 | `Float` (f64; interpreter only so far) | JSON numbers still need json.kio support. |
+| Abstraction | traits, generics, closures | function values (`fn(T) -> R`, L6a) | The largest language gap. Without generics, every container helper is written once per type. Closures (L6b) follow, then generics (L7). |
 | Packages | cargo, crates.io | copy one file | A package manager, once there are a few libraries. |
 
-Non-starters today, in order of what blocks a real backend first: a database capability, generics and closures, floats, and an HTTP client beyond GET.
+Non-starters today, in order of what blocks a real backend first: a database capability, generics and closures, and an HTTP client beyond GET.
 
 ## A target app
 

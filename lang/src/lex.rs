@@ -7,6 +7,8 @@ pub enum Kind {
     /// A Rust keyword kio does not use; the parser rejects it by name.
     Reserved(String),
     Int(i64),
+    /// The bits of an `f64`, so that tokens stay `Eq`.
+    Float(u64),
     Str(String),
     Sym(&'static str),
 }
@@ -41,6 +43,24 @@ fn err(start: usize, end: usize, msg: &str, hint: Option<&str>) -> Diag {
         span: Span { start, end, file: 0 },
         msg: msg.to_string(),
         hint: hint.map(str::to_string),
+    }
+}
+
+/// The index after the run of digits at `i`.
+fn digits(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    i
+}
+
+/// Whether `t` can end an operand, so that a `.` after it is a field access, as in `x.0`.
+fn ends_operand(t: &Token) -> bool {
+    match &t.kind {
+        Kind::Ident(_) | Kind::Int(_) | Kind::Float(_) | Kind::Str(_) => true,
+        Kind::Keyword(k) => k == "true" || k == "false",
+        Kind::Sym(s) => matches!(*s, ")" | "]" | "}" | "?"),
+        Kind::Reserved(_) => false,
     }
 }
 
@@ -79,18 +99,55 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diag> {
             b'\'' => {
                 return Err(err(i, i + 1, "kio has no chars or lifetimes", Some("use `Str`")));
             }
+            b'.' if bytes.get(i + 1).is_some_and(u8::is_ascii_digit) && !tokens.last().is_some_and(ends_operand) => {
+                let end = digits(bytes, i + 1);
+                let hint = format!("write `0{}`", &src[start..end]);
+                return Err(err(
+                    start,
+                    end,
+                    "a `Float` literal needs a digit before `.`",
+                    Some(&hint),
+                ));
+            }
             b'0'..=b'9' => {
-                while i < bytes.len() && bytes[i].is_ascii_digit() {
-                    i += 1;
+                i = digits(bytes, i);
+                let mut float = false;
+                if bytes.get(i) == Some(&b'.') {
+                    match bytes.get(i + 1) {
+                        Some(c) if c.is_ascii_digit() => {
+                            i = digits(bytes, i + 1);
+                            float = true;
+                        }
+                        // `0..n` is a range, `1.to_float()` a method call.
+                        Some(c) if *c == b'.' || *c == b'_' || c.is_ascii_alphabetic() => {}
+                        _ => {
+                            let hint = format!("write `{}.0`", &src[start..i]);
+                            let msg = "a `Float` literal needs a digit after `.`";
+                            return Err(err(start, i + 1, msg, Some(&hint)));
+                        }
+                    }
                 }
-                if bytes.get(i) == Some(&b'.') && bytes.get(i + 1).is_some_and(u8::is_ascii_digit) {
-                    return Err(err(start, i + 1, "kio has no floats", Some("use `Int`")));
+                if let Some(b'e' | b'E') = bytes.get(i) {
+                    let sign = usize::from(matches!(bytes.get(i + 1), Some(b'+' | b'-')));
+                    if bytes.get(i + 1 + sign).is_some_and(u8::is_ascii_digit) {
+                        i = digits(bytes, i + 1 + sign);
+                        float = true;
+                    }
                 }
-                match src[start..i].parse::<i64>() {
-                    Ok(n) => Kind::Int(n),
-                    Err(_) => {
-                        let hint = "Int is 64-bit: at most 9223372036854775807";
-                        return Err(err(start, i, "integer literal does not fit in `Int` (i64)", Some(hint)));
+                if float {
+                    let x: f64 = src[start..i].parse().expect("a float literal");
+                    if !x.is_finite() {
+                        let hint = "Float is f64: at most about 1.8e308";
+                        return Err(err(start, i, "float literal does not fit in `Float` (f64)", Some(hint)));
+                    }
+                    Kind::Float(x.to_bits())
+                } else {
+                    match src[start..i].parse::<i64>() {
+                        Ok(n) => Kind::Int(n),
+                        Err(_) => {
+                            let hint = "Int is 64-bit: at most 9223372036854775807";
+                            return Err(err(start, i, "integer literal does not fit in `Int` (i64)", Some(hint)));
+                        }
                     }
                 }
             }

@@ -191,6 +191,7 @@ impl Printer<'_> {
     fn expr(&self, out: &mut String, e: &Expr, depth: usize) {
         match &e.kind {
             ExprKind::Int(n) => *out += &n.to_string(),
+            ExprKind::Float(x) => *out += &format!("{x:?}"),
             ExprKind::Bool(b) => *out += &b.to_string(),
             ExprKind::Str(s) => *out += &format!("{s:?}"),
             ExprKind::Unit => *out += "()",
@@ -738,6 +739,7 @@ impl Types<'_> {
     fn expr(&self, e: &Expr) {
         let want = match &e.kind {
             ExprKind::Int(_) => Some(Ty::Int),
+            ExprKind::Float(_) => Some(Ty::Float),
             ExprKind::Bool(_) => Some(Ty::Bool),
             ExprKind::Str(_) => Some(Ty::Str),
             ExprKind::Unit => Some(Ty::Unit),
@@ -752,6 +754,7 @@ impl Types<'_> {
                 match op {
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => Some(Ty::Int),
                     BinOp::Concat => Some(Ty::Str),
+                    BinOp::FAdd | BinOp::FSub | BinOp::FMul | BinOp::FDiv | BinOp::FRem => Some(Ty::Float),
                     _ => Some(Ty::Bool),
                 }
             }

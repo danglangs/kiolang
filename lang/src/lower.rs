@@ -73,6 +73,7 @@ impl Ids {
         let inner = |t| Box::new(self.held(t));
         match t {
             check::Ty::Int => Ty::Int,
+            check::Ty::Float => Ty::Float,
             check::Ty::Bool => Ty::Bool,
             check::Ty::Str => Ty::Str,
             check::Ty::Bytes => Ty::Bytes,
@@ -184,9 +185,13 @@ impl<'a> Lowerer<'a> {
                 let place = self.place(target);
                 let op = match *op {
                     "=" => None,
-                    "-=" => Some(BinOp::Sub),
-                    _ if *self.checked(target.span) == check::Ty::Str => Some(BinOp::Concat),
-                    _ => Some(BinOp::Add),
+                    _ => Some(match (*op, self.checked(target.span)) {
+                        ("-=", check::Ty::Float) => BinOp::FSub,
+                        ("-=", _) => BinOp::Sub,
+                        (_, check::Ty::Str) => BinOp::Concat,
+                        (_, check::Ty::Float) => BinOp::FAdd,
+                        _ => BinOp::Add,
+                    }),
                 };
                 ir::StmtKind::Assign(place, op, self.expr(value))
             }
@@ -273,6 +278,7 @@ impl<'a> Lowerer<'a> {
         let ty = self.checked(e.span);
         let kind = match &e.kind {
             ExprKind::Int(n) => ir::ExprKind::Int(*n),
+            ExprKind::Float(x) => ir::ExprKind::Float(f64::from_bits(*x)),
             ExprKind::Str(s) => ir::ExprKind::Str(s.as_str().into()),
             ExprKind::Bool(b) => ir::ExprKind::Bool(*b),
             ExprKind::Unit => ir::ExprKind::Unit,
@@ -282,11 +288,25 @@ impl<'a> Lowerer<'a> {
                 None => ir::ExprKind::FnRef(self.func(&key(self.module, name))),
             },
             ExprKind::Unary(op, x) => {
-                let op = if *op == "-" { UnOp::Neg } else { UnOp::Not };
+                let op = match *op {
+                    "-" if *ty == check::Ty::Float => UnOp::FNeg,
+                    "-" => UnOp::Neg,
+                    _ => UnOp::Not,
+                };
                 ir::ExprKind::Unary(op, Box::new(self.expr(x)))
             }
             ExprKind::Binary(op, a, b) => {
+                let float = *self.checked(a.span) == check::Ty::Float;
                 let op = match *op {
+                    "+" if float => BinOp::FAdd,
+                    "-" if float => BinOp::FSub,
+                    "*" if float => BinOp::FMul,
+                    "/" if float => BinOp::FDiv,
+                    "%" if float => BinOp::FRem,
+                    "<" if float => BinOp::FLt,
+                    "<=" if float => BinOp::FLe,
+                    ">" if float => BinOp::FGt,
+                    ">=" if float => BinOp::FGe,
                     "+" if *ty == check::Ty::Str => BinOp::Concat,
                     "+" => BinOp::Add,
                     "-" => BinOp::Sub,
@@ -450,6 +470,16 @@ impl<'a> Lowerer<'a> {
                     (T::Result(..), "ok") => Builtin::ResultOk,
                     (T::Result(..), "err") => Builtin::ResultErr,
                     (T::Option(_), "ok_or") => Builtin::OptionOkOr,
+                    (T::Int, "to_float") => Builtin::IntToFloat,
+                    (T::Str, "parse_float") => Builtin::StrParseFloat,
+                    (T::Float, "to_str") => Builtin::FloatToStr,
+                    (T::Float, "to_int") => Builtin::FloatToInt,
+                    (T::Float, "abs") => Builtin::FloatAbs,
+                    (T::Float, "floor") => Builtin::FloatFloor,
+                    (T::Float, "ceil") => Builtin::FloatCeil,
+                    (T::Float, "round") => Builtin::FloatRound,
+                    (T::Float, "sqrt") => Builtin::FloatSqrt,
+                    (T::Float, "is_nan") => Builtin::FloatIsNan,
                     _ => unreachable!("checked method"),
                 };
                 return ir::ExprKind::Builtin(b, Box::new(self.expr(recv)), self.exprs(args));

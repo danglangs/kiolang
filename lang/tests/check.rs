@@ -644,8 +644,14 @@ fn hints_for_calls_and_operators() {
     assert_eq!(hint(&format!("{s}fn main() {{ S::Done(1); }}")), "`S::Done` holds ()");
     let pat = "fn main() { match S::Done { Pair(a) => 1, _ => 2 }; }";
     assert_eq!(hint(&format!("{s}{pat}")), "`S::Pair` holds (Int, Str)");
-    assert_eq!(hint("fn main() -> Int { 1 + true }"), "`+` works on two Int or two Str");
-    assert_eq!(hint("fn main() -> Int { 1 - \"a\" }"), "`-` works on two Int");
+    assert_eq!(
+        hint("fn main() -> Int { 1 + true }"),
+        "`+` works on two Int, two Float or two Str"
+    );
+    assert_eq!(
+        hint("fn main() -> Int { 1 - \"a\" }"),
+        "`-` works on two Int or two Float"
+    );
     assert_eq!(hint("fn main() -> Bool { 1 && 2 }"), "`&&` works on two Bool");
     assert_eq!(
         hint("fn main() -> Bool { 1 == true }"),
@@ -653,7 +659,7 @@ fn hints_for_calls_and_operators() {
     );
     assert_eq!(
         hint("fn main() { let mut x = true; x += 1; }"),
-        "`+` works on two Int or two Str"
+        "`+` works on two Int, two Float or two Str"
     );
     assert_eq!(
         hint("fn main() { 1(2); }"),
@@ -820,11 +826,11 @@ fn methods() {
     assert_eq!(hint("fn main() { \"a\".lenn(); }"), "did you mean `len`?");
     assert_eq!(
         hint("fn main() { \"a\".zzzzzz(); }"),
-        "Str has: contains, ends_with, find, len, lines, parse_int, replace, split, starts_with, strip_prefix, strip_suffix, to_bytes, trim"
+        "Str has: contains, ends_with, find, len, lines, parse_float, parse_int, replace, split, starts_with, strip_prefix, strip_suffix, to_bytes, trim"
     );
     ok("fn main() { let a: List<Str> = \"a\".split(\",\"); let b: List<Str> = \"a\".lines(); let c: Str = \"a\".trim(); let d: Bool = \"a\".contains(\"a\") && \"a\".starts_with(\"a\"); let e: Option<Int> = \"1\".parse_int(); }");
     assert_eq!(reject("fn main() { \"a\".split(1); }").0, "expected Str, found Int");
-    assert_eq!(hint("fn main() { 1.zzzzzz(); }"), "Int has: to_str");
+    assert_eq!(hint("fn main() { 1.zzzzzz(); }"), "Int has: to_float, to_str");
     assert_eq!(hint("fn main() { true.len(); }"), "Bool has no methods");
     let src = "fn main() { \"a\".len(1); }";
     assert_eq!(reject(src).0, "`len` takes 0 arguments, found 1");
@@ -1366,11 +1372,7 @@ fn rust_isms_are_rejected_with_the_kio_way() {
             "use `Map<K, V>`",
         ),
         ("fn f(n: i32) {} fn main() {}", "unknown type `i32`", "use `Int`"),
-        (
-            "fn main() { let x: f64 = 1; }",
-            "unknown type `f64`",
-            "kio has no floats; use `Int`, e.g. cents",
-        ),
+        ("fn main() { let x: f64 = 1; }", "unknown type `f64`", "use `Float`"),
         (
             "fn main() { let ys = [1].iter().map(|x| x + 1); }",
             "kio has no closures",
@@ -1655,4 +1657,101 @@ fn calls_through_values_check_against_the_fn_type() {
     let src = "struct R { h: fn(Int) -> Int } fn f(r: R) -> Int { r.h(1) } fn main() {}";
     assert_eq!(reject(src).0, "no method `h` on R");
     assert_eq!(hint(src), "`h` is a field; call it as `(r.h)(..)`");
+#[test]
+fn floats_typecheck() {
+    ok("fn main() -> Bool {
+            let x: Float = -1.5 * 2.0 / 3.0 % 1.0 + 0.5 - 1e3;
+            let n: Option<Int> = x.to_int();
+            let s: Str = x.abs().floor().ceil().round().sqrt().to_str();
+            let f: Option<Float> = s.parse_float();
+            x < 1.0 && x <= 1.0 && x > 0.0 && x >= 0.0 && x == x && x != 1.0 && !x.is_nan() && 1.to_float() == 1.0
+        }");
+}
+
+#[test]
+fn int_and_float_never_mix() {
+    let convert = "convert with `.to_float()` or `.to_int()`";
+    for (src, msg, at) in [
+        ("fn main() -> Float { 1 + 2.0 }", "cannot add Int and Float", "1 + 2.0"),
+        (
+            "fn main() -> Float { 1.0 - 2 }",
+            "cannot subtract Float and Int",
+            "1.0 - 2",
+        ),
+        (
+            "fn main() -> Float { 1.0 * 2 }",
+            "cannot multiply Float and Int",
+            "1.0 * 2",
+        ),
+        (
+            "fn main() -> Float { 1 / 2.0 }",
+            "cannot divide Int and Float",
+            "1 / 2.0",
+        ),
+        (
+            "fn main() -> Float { 1 % 2.0 }",
+            "cannot take the remainder of Int and Float",
+            "1 % 2.0",
+        ),
+        (
+            "fn main() -> Bool { 1 < 2.0 }",
+            "cannot compare Int and Float",
+            "1 < 2.0",
+        ),
+        (
+            "fn main() -> Bool { 1.0 == 1 }",
+            "cannot compare Float and Int",
+            "1.0 == 1",
+        ),
+        (
+            "fn main() { let mut x = 1.0; x += 1; }",
+            "cannot add Float and Int",
+            "x += 1;",
+        ),
+        (
+            "fn main() { let mut n = 1; n -= 1.0; }",
+            "cannot subtract Int and Float",
+            "n -= 1.0;",
+        ),
+    ] {
+        assert_eq!(reject(src), (msg.to_string(), at.to_string()), "{src}");
+        assert_eq!(hint(src), convert, "{src}");
+    }
+    assert_eq!(
+        reject("fn main() -> Float { let x: Float = 1; x }").0,
+        "expected Float, found Int"
+    );
+    assert_eq!(hint("fn main() -> Bool { 1.0 && true }"), "`&&` works on two Bool");
+    assert_eq!(
+        hint("fn main() -> Float { 1.0 + \"a\" }"),
+        "`+` works on two Int, two Float or two Str"
+    );
+}
+
+#[test]
+fn floats_cannot_be_matched_or_keys() {
+    let compare = "compare with `<` or `==`";
+    let src = "fn main() -> Int { let x = 1.5; match x { _ => 1 } }";
+    assert_eq!(reject(src), ("cannot match on Float".to_string(), "x".to_string()));
+    assert_eq!(hint(src), compare);
+    let src = "fn main() { if let _ = 1.5 { } }";
+    assert_eq!(reject(src).0, "cannot match on Float");
+    let src = "fn main() -> Int { match Some(1.5) { Some(1.5) => 1, _ => 2 } }";
+    assert_eq!(
+        reject(src),
+        ("a `Float` cannot be a pattern".to_string(), "1.5".to_string())
+    );
+    assert_eq!(hint(src), compare);
+    let src = "fn main() -> Int { match 1 { -1.5 => 1, _ => 2 } }";
+    assert_eq!(reject(src).0, "a `Float` cannot be a pattern");
+    // Matching an `Option<Float>` by its variants is fine.
+    ok("fn main() -> Float { match Some(1.5) { Some(x) => x, None => 0.0 } }");
+    let src = "fn main() { let m: Map<Float, Int> = Map::new(); }";
+    assert_eq!(reject(src).0, "`Float` cannot be a Map key");
+    assert_eq!(hint(src), "Map keys must be Int or Str");
+    assert_eq!(
+        hint("fn main() { let mut xs = [1.0]; xs.sort(); }"),
+        "sort works on List<Int> and List<Str>"
+    );
+    assert_eq!(reject("fn main() -> Float { -true }").0, "expected Int, found Bool");
 }

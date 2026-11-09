@@ -77,6 +77,7 @@ pub struct CapDef {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ty {
     Int,
+    Float,
     Bool,
     Str,
     Bytes,
@@ -122,7 +123,7 @@ pub struct Stmt {
 #[derive(Debug, Clone, PartialEq)]
 pub enum StmtKind {
     Let(LocalId, Expr),
-    /// `=` when the operator is `None`; `+=` is `Add` or `Concat`, `-=` is `Sub`. An overflow
+    /// `=` when the operator is `None`; `+=` is `Add`, `FAdd` or `Concat`, `-=` is `Sub` or `FSub`. An overflow
     /// reports the statement's span.
     Assign(Place, Option<BinOp>, Expr),
     Return(Option<Expr>),
@@ -163,6 +164,7 @@ pub struct Expr {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind {
     Int(i64),
+    Float(f64),
     Bool(bool),
     Str(Rc<str>),
     Unit,
@@ -200,6 +202,8 @@ pub enum ExprKind {
 pub enum UnOp {
     Neg,
     Not,
+    /// `-` on a `Float`.
+    FNeg,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,6 +224,16 @@ pub enum BinOp {
     Or,
     /// `+` on two `Str`.
     Concat,
+    /// Arithmetic and order on two `Float`, as Rust's `f64`; `==` on floats is `Eq`.
+    FAdd,
+    FSub,
+    FMul,
+    FDiv,
+    FRem,
+    FLt,
+    FLe,
+    FGt,
+    FGe,
 }
 
 /// Every built-in method that leaves its receiver unchanged, so evaluation never matches on a
@@ -256,6 +270,16 @@ pub enum Builtin {
     ResultOk,
     ResultErr,
     OptionOkOr,
+    IntToFloat,
+    StrParseFloat,
+    FloatToStr,
+    FloatToInt,
+    FloatAbs,
+    FloatFloor,
+    FloatCeil,
+    FloatRound,
+    FloatSqrt,
+    FloatIsNan,
 }
 
 /// Every built-in method that changes its receiver.

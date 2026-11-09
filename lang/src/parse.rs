@@ -595,6 +595,7 @@ impl Parser {
         }
         let kind = match self.peek() {
             Some(Kind::Int(n)) => ExprKind::Int(*n),
+            Some(Kind::Float(x)) => ExprKind::Float(*x),
             Some(Kind::Str(s)) => ExprKind::Str(s.clone()),
             Some(Kind::Ident(_))
                 if !self.no_struct && self.toks.get(self.pos + 1).is_some_and(|t| t.kind == Kind::Sym("{")) =>
@@ -807,6 +808,10 @@ impl Parser {
                 let n = if neg { -*n } else { *n };
                 self.pos += 1;
                 PatKind::Int(n)
+            }
+            Some(Kind::Float(_)) => {
+                let hint = Some("compare with `<` or `==`");
+                return Err(err(self.span(), "a `Float` cannot be a pattern", hint));
             }
             _ if neg => return Err(self.unexpected("an integer")),
             Some(Kind::Str(s)) => {

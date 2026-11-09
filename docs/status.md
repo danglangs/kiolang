@@ -22,7 +22,7 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 
 1. **C3e, C3f** (`main` returning anything; built-ins added after C3 began), then C4 (capabilities), C5 (compiled only), C7 (review), C8 (measure, refcount elision).
 2. The checker rejects `o = None;` for an `Option` local ("cannot tell the type of `None`"; open_questions #61).
-3. L6b closures, L6c built-ins taking functions, L8 `Float`, then L7 generics; compiler support for `fn` values (C9).
+3. L6b closures, L6c built-ins taking functions, then L7 generics; compiler support for `fn` values (C9) and `Float` (C10).
 
 ## Waiting on the maintainer
 

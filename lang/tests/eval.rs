@@ -1269,4 +1269,179 @@ fn function_values_display() {
     let p = check(src, &CapTable::default()).unwrap();
     let v = run(&p, &mut NoCaps).unwrap();
     assert_eq!(p.display(&v), "[<fn double>]");
+/// `main`'s value as `kio run` prints it.
+fn shown(src: &str) -> String {
+    let p = check(src, &CapTable::default()).unwrap_or_else(|d| panic!("{d:?}"));
+    let v = run(&p, &mut NoCaps).unwrap();
+    p.display(&v)
+}
+
+/// `e`, a `Float` expression, printed by `to_str`.
+fn float(e: &str) -> String {
+    shown(&format!("fn main() -> Str {{ ({e}).to_str() }}"))
+}
+
+#[test]
+fn float_literals_and_arithmetic() {
+    assert_eq!(int("fn main() -> Float { 1.5 }"), Value::Float(1.5));
+    assert_eq!(
+        int("fn main() -> Float { 1.5e-3 + 2E+4 + 1e9 }"),
+        Value::Float(1.5e-3 + 2e4 + 1e9)
+    );
+    assert_eq!(float("0.1 + 0.2"), "0.30000000000000004");
+    assert_eq!(float("7.5 - 10.0"), "-2.5");
+    assert_eq!(float("1.5 * 4.0"), "6");
+    assert_eq!(float("1.0 / 3.0"), format!("{}", 1.0f64 / 3.0));
+    assert_eq!(float("7.5 % 2.0"), "1.5");
+    assert_eq!(float("-7.5 % 2.0"), "-1.5");
+    assert_eq!(float("-(2.5)"), "-2.5");
+    let src = "fn main() -> Float { let mut x = 1.0; x += 0.5; x -= 2.0; x }";
+    assert_eq!(int(src), Value::Float(-0.5));
+    let src = "struct P { x: Float } fn main() -> Float { let mut ps = [P { x: 1.0 }]; ps[0].x += 2.0; ps[0].x }";
+    assert_eq!(int(src), Value::Float(3.0));
+}
+
+#[test]
+fn float_ieee_results() {
+    // No runtime errors: division by zero, overflow and NaN give IEEE values.
+    assert_eq!(float("1.0 / 0.0"), "inf");
+    assert_eq!(float("-1.0 / 0.0"), "-inf");
+    assert_eq!(float("0.0 / 0.0"), "NaN");
+    assert_eq!(float("1.0 % 0.0"), "NaN");
+    assert_eq!(float("1e308 * 10.0"), "inf");
+    assert_eq!(float("-0.0"), "-0");
+    assert_eq!(float("0.0 * -1.0"), "-0");
+    assert_eq!(float("1.0 / -0.0"), "-inf");
+    assert_eq!(float("(1.0 / 0.0) - (1.0 / 0.0)"), "NaN");
+}
+
+#[test]
+fn float_comparison_is_ieee() {
+    let nan = "let nan = 0.0 / 0.0;";
+    for (e, want) in [
+        ("nan == nan", false),
+        ("nan != nan", true),
+        ("nan < 1.0 || nan >= 1.0", false),
+        ("0.0 == -0.0", true),
+        ("-0.0 < 0.0", false),
+        ("1.0 < 2.0 && 2.0 <= 2.0 && 3.0 > 2.0 && 2.0 >= 2.0", true),
+        ("1.0 / 0.0 > 1e308", true),
+        ("[nan] == [nan]", false),
+        ("[nan] != [nan]", true),
+        ("[0.0] == [-0.0]", true),
+        ("Some(nan) == Some(nan)", false),
+        ("[nan].contains(nan)", false),
+    ] {
+        let src = format!("fn main() -> Bool {{ {nan} {e} }}");
+        assert_eq!(int(&src), Value::Bool(want), "{e}");
+    }
+    let src = "struct P { x: Float, n: Int } enum E { A(Float) }
+               fn main() -> Bool {
+                   let nan = 0.0 / 0.0;
+                   let p = P { x: nan, n: 1 };
+                   let q = P { x: 1.0, n: 1 };
+                   p != p && !(p == p) && q == q && E::A(nan) != E::A(nan) && E::A(-0.0) == E::A(0.0)
+               }";
+    assert_eq!(int(src), Value::Bool(true));
+    // As Rust's derived `PartialEq`.
+    assert_ne!(vec![f64::NAN], vec![f64::NAN]);
+    let nans = || Value::List(vec![Value::Float(f64::NAN)].into());
+    assert_ne!(nans(), nans());
+}
+
+#[test]
+fn float_to_str_matches_rust() {
+    for (e, x) in [
+        ("1.0", 1.0f64),
+        ("0.5", 0.5),
+        ("100.0", 100.0),
+        ("1e21", 1e21),
+        ("1e-7", 1e-7),
+        ("123456789.125", 123456789.125),
+        ("2.5e-308", 2.5e-308),
+        ("1.7976931348623157e308", f64::MAX),
+    ] {
+        assert_eq!(float(e), format!("{x}"), "{e}");
+    }
+}
+
+#[test]
+fn float_to_int() {
+    let to_int = |e: &str| int(&format!("fn main() -> Option<Int> {{ ({e}).to_int() }}"));
+    assert_eq!(to_int("2.9"), some(Value::Int(2)));
+    assert_eq!(to_int("-2.9"), some(Value::Int(-2)));
+    assert_eq!(to_int("-0.0"), some(Value::Int(0)));
+    assert_eq!(to_int("-9223372036854775808.0"), some(Value::Int(i64::MIN)));
+    // 2^63 is the first float above `i64::MAX`.
+    assert_eq!(to_int("9223372036854775808.0"), none());
+    assert_eq!(to_int("9223372036854774784.0"), some(Value::Int(9223372036854774784)));
+    assert_eq!(to_int("-9223372036854777856.0"), none());
+    assert_eq!(to_int("0.0 / 0.0"), none());
+    assert_eq!(to_int("1.0 / 0.0"), none());
+    assert_eq!(to_int("-1.0 / 0.0"), none());
+}
+
+#[test]
+fn float_methods() {
+    assert_eq!(float("(-2.5).abs()"), "2.5");
+    assert_eq!(float("(-0.0).abs()"), "0");
+    assert_eq!(float("2.7.floor()"), "2");
+    assert_eq!(float("(-2.2).floor()"), "-3");
+    assert_eq!(float("2.2.ceil()"), "3");
+    assert_eq!(float("(-0.5).ceil()"), "-0");
+    // Half away from zero, as Rust's `round`.
+    assert_eq!(float("2.5.round()"), "3");
+    assert_eq!(float("(-2.5).round()"), "-3");
+    assert_eq!(float("0.49999999999999994.round()"), "0");
+    assert_eq!(float("9.0.sqrt()"), "3");
+    assert_eq!(float("(-1.0).sqrt()"), "NaN");
+    assert_eq!(float("(1.0 / 0.0).floor()"), "inf");
+    assert_eq!(
+        int("fn main() -> Bool { (0.0 / 0.0).is_nan() && !1.0.is_nan() }"),
+        Value::Bool(true)
+    );
+    assert_eq!(int("fn main() -> Float { 3.to_float() }"), Value::Float(3.0));
+    assert_eq!(float("(-7).to_float()"), "-7");
+    // Rounds to nearest, as Rust's `as f64`.
+    assert_eq!(float("9223372036854775807.to_float()"), format!("{}", i64::MAX as f64));
+}
+
+#[test]
+fn str_parse_float() {
+    let parse = |s: &str| shown(&format!("fn main() -> Option<Float> {{ \"{s}\".parse_float() }}"));
+    for (s, want) in [
+        ("1.5", "Some(1.5)"),
+        ("-2", "Some(-2)"),
+        ("+3", "Some(3)"),
+        ("1e3", "Some(1000)"),
+        (".5", "Some(0.5)"),
+        ("5.", "Some(5)"),
+        ("inf", "Some(inf)"),
+        ("-infinity", "Some(-inf)"),
+        ("NaN", "Some(NaN)"),
+        ("1e400", "Some(inf)"),
+        ("-0", "Some(-0)"),
+        ("", "None"),
+        (" 1", "None"),
+        ("1,5", "None"),
+        ("0x1", "None"),
+        ("e3", "None"),
+    ] {
+        assert_eq!(parse(s), want, "{s:?}");
+    }
+}
+
+#[test]
+fn floats_display_nested() {
+    assert_eq!(shown("fn main() -> Float { 1.0 }"), "1");
+    let src = "struct P { x: Float }
+               fn main() -> List<P> { [P { x: 0.1 + 0.2 }, P { x: -0.0 }] }";
+    assert_eq!(shown(src), "[P { x: 0.30000000000000004 }, P { x: -0 }]");
+    let src = "fn main() -> Map<Str, List<Float>> {
+                   let mut m: Map<Str, List<Float>> = Map::new();
+                   m.insert(\"a\", [1.0 / 0.0, 0.0 / 0.0, 2.5]);
+                   m
+               }";
+    assert_eq!(shown(src), "{\"a\": [inf, NaN, 2.5]}");
+    assert_eq!(shown("fn main() -> Option<Float> { Some(-1.0 / 0.0) }"), "Some(-inf)");
 }
