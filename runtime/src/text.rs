@@ -13,7 +13,6 @@
 use crate::desc::{self, Table};
 use crate::obj::{self, slot, to_slot, Header, List};
 use alloc::string::ToString;
-use alloc::vec::Vec;
 
 /// Why an operation failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,12 +69,14 @@ pub unsafe fn eq(a: *mut Header, b: *mut Header) -> bool {
 /// # Safety
 /// The module's contract.
 pub unsafe fn concat(a: *mut Header, b: *mut Header) -> *mut Header {
-    // SAFETY: the caller's guarantee; the temporary copy ends before `new_bytes` returns.
+    // SAFETY: the caller's guarantee; `p` has room for both, `a`'s bytes then `len`.
     unsafe {
-        let mut v = Vec::with_capacity(obj::bytes(a).len() + obj::bytes(b).len());
-        v.extend_from_slice(obj::bytes(a));
-        v.extend_from_slice(obj::bytes(b));
-        obj::new_bytes(desc::STR, &v)
+        let (a, b) = (obj::bytes(a), obj::bytes(b));
+        let len = a.len() + b.len();
+        let p = obj::new_bytes_cap(desc::STR, a, len);
+        core::ptr::copy_nonoverlapping(b.as_ptr(), obj::field(p, obj::BYTES_DATA + a.len()), b.len());
+        *obj::field::<u32>(p, 8) = u32::try_from(len).expect("over 4 GiB");
+        p
     }
 }
 

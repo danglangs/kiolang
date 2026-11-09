@@ -16,8 +16,14 @@ impl Guest for Runtime {
         let p = display_main(slot);
         // SAFETY: `display` made `p`, a live `Str`.
         let value = unsafe { core::str::from_utf8(obj::bytes(p)).expect("a Str is UTF-8").into() };
-        // SAFETY: `p` is ours and live.
-        unsafe { abi::rt_dec(abi::addr(p)) };
+        let t = abi::table();
+        // SAFETY: `p` is ours and live, and so is main's value if it is a pointer.
+        unsafe {
+            abi::rt_dec(abi::addr(p));
+            if t.is_ptr(kio_main_desc()) {
+                obj::dec(&t, obj::from_slot(slot));
+            }
+        }
         let live = abi::rt_live();
         if live != 0 {
             rt_trap(LEAKED, i64::from(live), 0);

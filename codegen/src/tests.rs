@@ -24,9 +24,9 @@ fn the_component_validates() {
 }
 
 #[test]
-#[should_panic(expected = "codegen: expression Builtin")]
+#[should_panic(expected = "codegen: builtin StrSplit")]
 fn unsupported_ir_names_the_node() {
-    let _ = compile(&module("fn main() -> Int { \"ab\".len() }"));
+    let _ = compile(&module("fn main() { \"a,b\".split(\",\"); }"));
 }
 
 #[test]

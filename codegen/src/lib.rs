@@ -10,7 +10,7 @@ mod data;
 
 use anyhow::{anyhow, Context, Result};
 use data::Statics;
-use lang::ir::{self, BinOp, ExprKind, Module, StmtKind, Ty, UnOp};
+use lang::ir::{self, BinOp, Builtin, ExprKind, Module, Mut, StmtKind, Ty, UnOp};
 use lang::Span;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -51,12 +51,12 @@ impl Site {
 pub fn compile(m: &Module) -> Result<Wasm> {
     let rt = Runtime::scan(RUNTIME)?;
     let data_addr = rt.pages * PAGE;
-    let statics = Statics::new(m, data_addr);
+    let mut statics = Statics::new(m, data_addr);
     let mut sites = Vec::new();
     let mut types: Vec<FuncSig> = Vec::new();
     let mut funcs = Vec::new();
     for f in &m.funcs {
-        let (sig, body) = func(&rt, f, &mut sites);
+        let (sig, body) = func(&rt, &mut statics, f, &mut sites);
         let ty = match types.iter().position(|t| *t == sig) {
             Some(i) => i,
             None => {
@@ -146,9 +146,16 @@ fn val_type(t: &Ty) -> Option<ValType> {
     match t {
         Ty::Int => Some(ValType::I64),
         Ty::Bool => Some(ValType::I32),
+        Ty::Str | Ty::Bytes => Some(ValType::I32),
         Ty::Unit | Ty::Never => None,
         t => unimplemented!("codegen: type {}", node(t)),
     }
+}
+
+/// Whether a value of `t` is a pointer to a counted object, which every expression yields
+/// owned (docs/codegen.md, "Ownership").
+fn is_ptr(t: &Ty) -> bool {
+    matches!(t, Ty::Str | Ty::Bytes)
 }
 
 /// The variant name of an IR node, for `unimplemented`.
@@ -157,7 +164,7 @@ fn node(n: &impl Debug) -> String {
     s.split(['(', ' ', '{']).next().unwrap_or_default().to_string()
 }
 
-fn func(rt: &Runtime, f: &ir::Func, sites: &mut Vec<Site>) -> (FuncSig, Function) {
+fn func(rt: &Runtime, statics: &mut Statics, f: &ir::Func, sites: &mut Vec<Site>) -> (FuncSig, Function) {
     // Each IR local with a value gets a Wasm local: parameters first, as Wasm numbers them,
     // then the others; `()` locals get none. Hidden locals follow.
     let mut params = Vec::new();
@@ -173,27 +180,36 @@ fn func(rt: &Runtime, f: &ir::Func, sites: &mut Vec<Site>) -> (FuncSig, Function
             None => {}
         }
     }
+    // The parameters are owned by the call, as if bound by `let` around the body.
+    let owned = (0..f.params as usize)
+        .filter(|&i| is_ptr(&f.locals[i].ty))
+        .filter_map(|i| locals[i])
+        .collect();
     let mut g = FuncGen {
         rt,
+        statics,
         sites,
         locals,
         first_decl: params.len() as u32,
         decls,
         scratch: None,
+        owned,
         depth: 0,
         loops: Vec::new(),
         code: Vec::new(),
     };
     let ret = val_type(&f.ret);
     g.block(&f.body, ret);
+    g.release(0);
     g.sink().end();
     let mut body = Function::new_with_locals_types(g.decls);
     body.raw(g.code);
     ((params, ret.into_iter().collect()), body)
 }
 
-struct FuncGen<'a> {
+struct FuncGen<'a, 'm> {
     rt: &'a Runtime,
+    statics: &'a mut Statics<'m>,
     sites: &'a mut Vec<Site>,
     /// The Wasm local of each IR local, `None` for those without a value.
     locals: Vec<Option<u32>>,
@@ -202,11 +218,16 @@ struct FuncGen<'a> {
     first_decl: u32,
     /// Three `i64` locals an integer check uses, after its operands are on the stack.
     scratch: Option<[u32; 3]>,
+    /// The Wasm locals that hold an owned pointer at this point of the code, outermost scope
+    /// first: parameters, then each `let` once it has run, and hidden locals holding the
+    /// operands evaluated so far. A scope's end releases its part; an exit releases the part
+    /// of every scope it leaves.
+    owned: Vec<u32>,
     /// Open Wasm blocks, loops and ifs that can hold kio code.
     depth: u32,
     /// For each enclosing kio loop, innermost last: the depth of its `break` and `continue`
-    /// targets.
-    loops: Vec<(u32, u32)>,
+    /// targets, and the length of `owned` outside it.
+    loops: Vec<(u32, u32, usize)>,
     code: Vec<u8>,
 }
 
@@ -220,10 +241,100 @@ enum Open {
 /// An error message template; `{a}` and `{b}` are `trap`'s arguments.
 const OVERFLOW: &str = "Int overflow";
 const DIV_ZERO: &str = "division by zero";
+const OUT_OF_BOUNDS: &str = "index {a} out of bounds for length {b}";
 
-impl FuncGen<'_> {
+impl FuncGen<'_, '_> {
     fn sink(&mut self) -> InstructionSink<'_> {
         InstructionSink::new(&mut self.code)
+    }
+
+    /// Calls runtime export `name`.
+    fn call_rt(&mut self, name: &str) {
+        let f = self.rt.export(name);
+        self.sink().call(f);
+    }
+
+    /// Drops the reference in local `l`.
+    fn dec(&mut self, l: u32) {
+        self.sink().local_get(l);
+        self.call_rt("rt_dec");
+    }
+
+    /// Drops the references in `owned[mark..]`, for an exit that leaves those scopes. Code
+    /// generation goes on in them, so they stay in `owned`.
+    fn release(&mut self, mark: usize) {
+        for i in (mark..self.owned.len()).rev() {
+            self.dec(self.owned[i]);
+        }
+    }
+
+    /// Ends the scopes holding `owned[mark..]`: drops their references and zeroes their locals.
+    fn end_scope(&mut self, mark: usize) {
+        for l in self.owned.split_off(mark).into_iter().rev() {
+            self.dec(l);
+            self.sink().i32_const(0).local_set(l);
+        }
+    }
+
+    /// Evaluates `xs` in order, each into a new hidden local, and returns them (`None` for
+    /// `()` and `!`). An owned pointer among them is in `owned` from the returned mark on, so
+    /// that an exit while a later one runs releases it; the caller truncates `owned` to the
+    /// mark once it has used them.
+    fn operands(&mut self, xs: &[&ir::Expr]) -> (usize, Vec<Option<u32>>) {
+        let mark = self.owned.len();
+        let mut temps = Vec::new();
+        for x in xs {
+            self.expr(x);
+            let t = val_type(&x.ty).map(|vt| self.temp(vt));
+            if let Some(t) = t {
+                self.sink().local_set(t);
+                if is_ptr(&x.ty) {
+                    self.owned.push(t);
+                }
+            }
+            temps.push(t);
+        }
+        (mark, temps)
+    }
+
+    /// Pushes operand `x` from its hidden local `t`. An operand of type `!` has none, and
+    /// the code after it is unreachable: `unreachable` keeps the stack's types valid.
+    fn get(&mut self, x: &ir::Expr, t: Option<u32>) {
+        match t {
+            Some(t) => {
+                self.sink().local_get(t);
+            }
+            None if x.ty == Ty::Never => {
+                self.sink().unreachable();
+            }
+            None => {}
+        }
+    }
+
+    /// Evaluates `xs`, then runs `f` to use them from their hidden locals without taking
+    /// them, then drops the pointers among them: a runtime operation borrows its arguments.
+    fn borrowing(&mut self, xs: &[&ir::Expr], f: impl FnOnce(&mut Self, &[Option<u32>])) {
+        let (mark, temps) = self.operands(xs);
+        f(self, &temps);
+        for (x, t) in xs.iter().zip(&temps) {
+            if let (true, Some(t)) = (is_ptr(&x.ty), t) {
+                self.dec(*t);
+            }
+        }
+        self.owned.truncate(mark);
+    }
+
+    /// Calls runtime export `name` on `xs`, which it borrows, with `site` last if it can fail.
+    fn rt_op(&mut self, name: &str, xs: &[&ir::Expr], site: Option<u32>) {
+        self.borrowing(xs, |g, temps| {
+            for (x, t) in xs.iter().zip(temps) {
+                g.get(x, *t);
+            }
+            if let Some(s) = site {
+                g.sink().i32_const(s as i32);
+            }
+            g.call_rt(name);
+        });
     }
 
     fn temp(&mut self, t: ValType) -> u32 {
@@ -274,15 +385,16 @@ impl FuncGen<'_> {
     /// `b`'s statements and tail, leaving a value of type `want` on the stack. A block without
     /// a tail where a value is wanted diverges.
     fn block(&mut self, b: &ir::Block, want: Option<ValType>) {
+        let mark = self.owned.len();
         for s in &b.stmts {
             self.stmt(s);
         }
-        match &b.tail {
-            Some(e) => self.expr(e),
-            None if want.is_some() => {
-                self.sink().unreachable();
-            }
-            None => {}
+        if let Some(e) = &b.tail {
+            self.expr(e);
+        }
+        self.end_scope(mark);
+        if b.tail.is_none() && want.is_some() {
+            self.sink().unreachable();
         }
     }
 
@@ -292,21 +404,43 @@ impl FuncGen<'_> {
                 self.expr(init);
                 if let Some(l) = self.local(*id) {
                     self.sink().local_set(l);
+                    if is_ptr(&init.ty) {
+                        self.owned.push(l);
+                    }
                 }
             }
             StmtKind::Assign(place, op, value) => {
                 if let Some(step) = place.steps.first() {
                     unimplemented!("codegen: assignment to {}", node(step));
                 }
-                self.expr(value);
                 let Some(l) = self.local(place.root) else {
-                    return;
+                    return self.expr(value);
                 };
-                if let Some(op) = op {
-                    // The value comes first, as in the interpreter, then the local's value.
-                    let v = self.scratch()[0];
-                    self.sink().local_set(v).local_get(l).local_get(v);
-                    self.int_op(*op, s.span);
+                match op {
+                    // The value first, then the old one dropped.
+                    None => {
+                        self.expr(value);
+                        if is_ptr(&value.ty) {
+                            self.dec(l);
+                        }
+                    }
+                    Some(BinOp::Concat) => {
+                        // `x + value`, borrowing both, as the runtime does; then the old `x`
+                        // and the value are dropped.
+                        let v = self.temp(ValType::I32);
+                        self.expr(value);
+                        self.sink().local_set(v).local_get(l).local_get(v);
+                        self.call_rt("rt_concat");
+                        self.dec(v);
+                        self.dec(l);
+                    }
+                    Some(op) => {
+                        // The value comes first, as in the interpreter, then the local's value.
+                        self.expr(value);
+                        let v = self.scratch()[0];
+                        self.sink().local_set(v).local_get(l).local_get(v);
+                        self.int_op(*op, s.span);
+                    }
                 }
                 self.sink().local_set(l);
             }
@@ -314,6 +448,7 @@ impl FuncGen<'_> {
                 if let Some(e) = value {
                     self.expr(e);
                 }
+                self.release(0);
                 self.sink().return_();
             }
             StmtKind::While(cond, body) => {
@@ -341,7 +476,7 @@ impl FuncGen<'_> {
                 self.sink().local_get(i).local_get(end).i64_ge_s();
                 self.br_if(brk);
                 let cont = self.open(Open::Block, BlockType::Empty);
-                self.loops.push((brk, cont));
+                self.loops.push((brk, cont, self.owned.len()));
                 self.block(body, None);
                 self.loops.pop();
                 self.close();
@@ -352,16 +487,20 @@ impl FuncGen<'_> {
                 self.close();
             }
             StmtKind::Break => {
-                let (brk, _) = *self.loops.last().expect("checked loop");
+                let (brk, _, mark) = *self.loops.last().expect("checked loop");
+                self.release(mark);
                 self.br(brk);
             }
             StmtKind::Continue => {
-                let (_, cont) = *self.loops.last().expect("checked loop");
+                let (_, cont, mark) = *self.loops.last().expect("checked loop");
+                self.release(mark);
                 self.br(cont);
             }
             StmtKind::Expr(e) => {
                 self.expr(e);
-                if val_type(&e.ty).is_some() {
+                if is_ptr(&e.ty) {
+                    self.call_rt("rt_dec");
+                } else if val_type(&e.ty).is_some() {
                     self.sink().drop();
                 }
             }
@@ -376,7 +515,7 @@ impl FuncGen<'_> {
 
     /// The body of a `while` or `loop` whose `block` and `loop` are open; closes both.
     fn loop_body(&mut self, body: &ir::Block, brk: u32, cont: u32) {
-        self.loops.push((brk, cont));
+        self.loops.push((brk, cont, self.owned.len()));
         self.block(body, None);
         self.loops.pop();
         self.br(cont);
@@ -394,10 +533,19 @@ impl FuncGen<'_> {
             ExprKind::Bool(b) => {
                 self.sink().i32_const(*b as i32);
             }
+            ExprKind::Str(s) => {
+                let a = self.statics.str(s);
+                self.sink().i32_const(a as i32);
+            }
             ExprKind::Unit => {}
             ExprKind::Local(id) => {
                 if let Some(l) = self.local(*id) {
                     self.sink().local_get(l);
+                    if is_ptr(&e.ty) {
+                        // A copy: the local keeps its own reference.
+                        self.call_rt("rt_inc");
+                        self.sink().local_get(l);
+                    }
                 }
             }
             ExprKind::Unary(UnOp::Not, x) => {
@@ -423,6 +571,21 @@ impl FuncGen<'_> {
                     self.expr(b);
                 }
                 self.close();
+            }
+            ExprKind::Binary(BinOp::Concat, a, b) => self.rt_op("rt_concat", &[&**a, &**b], None),
+            ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), a, b) if is_ptr(&a.ty) => {
+                let desc = self.statics.desc(&a.ty);
+                self.borrowing(&[&**a, &**b], |g, temps| {
+                    g.sink().i32_const(desc as i32);
+                    for (x, t) in [a, b].into_iter().zip(temps) {
+                        g.get(x, *t);
+                        g.sink().i64_extend_i32_u();
+                    }
+                    g.call_rt("rt_eq");
+                    if *op == BinOp::Ne {
+                        g.sink().i32_eqz();
+                    }
+                });
             }
             ExprKind::Binary(op, a, b) => {
                 self.expr(a);
@@ -451,11 +614,55 @@ impl FuncGen<'_> {
             }
             ExprKind::Block(b) => self.block(b, val_type(&e.ty)),
             ExprKind::Call(f, args) => {
-                for a in args {
-                    self.expr(a);
+                // The callee takes the arguments.
+                let args: Vec<&ir::Expr> = args.iter().collect();
+                let (mark, temps) = self.operands(&args);
+                for (x, t) in args.iter().zip(temps) {
+                    self.get(x, t);
                 }
+                self.owned.truncate(mark);
                 let index = self.rt.funcs + f.0;
                 self.sink().call(index);
+            }
+            ExprKind::Builtin(b, recv, args) => {
+                let (name, error) = match b {
+                    Builtin::IntToStr => ("rt_int_to_str", None),
+                    Builtin::StrLen => ("rt_str_len", None),
+                    Builtin::StrToBytes => ("rt_str_to_bytes", None),
+                    Builtin::StrTrim => ("rt_str_trim", None),
+                    Builtin::StrContains => ("rt_str_contains", None),
+                    Builtin::StrStartsWith => ("rt_str_starts_with", None),
+                    Builtin::BytesLen => ("rt_bytes_len", None),
+                    Builtin::BytesToStr => ("rt_bytes_to_str", Some("invalid UTF-8")),
+                    b => unimplemented!("codegen: builtin {b:?}"),
+                };
+                let site = error.map(|t| self.site(e.span, t));
+                let xs: Vec<&ir::Expr> = std::iter::once(&**recv).chain(args).collect();
+                self.rt_op(name, &xs, site);
+            }
+            ExprKind::Index(base, i) if base.ty == Ty::Bytes => {
+                let site = self.site(e.span, OUT_OF_BOUNDS);
+                self.rt_op("rt_bytes_get", &[&**base, &**i], Some(site));
+            }
+            ExprKind::Mutate(place, Mut::BytesPush, args) => {
+                if let Some(step) = place.steps.first() {
+                    unimplemented!("codegen: mutation through {}", node(step));
+                }
+                // The byte, then the local made unique and stored back, then the push, whose
+                // result (the same object or a larger one) is stored back too.
+                let l = self.local(place.root).expect("a Bytes local");
+                let site = self.site(e.span, "byte {a} out of range 0..=255");
+                let n = self.temp(ValType::I64);
+                self.expr(&args[0]);
+                self.sink().local_set(n).local_get(l);
+                self.call_rt("rt_unique");
+                self.sink()
+                    .local_set(l)
+                    .local_get(l)
+                    .local_get(n)
+                    .i32_const(site as i32);
+                self.call_rt("rt_bytes_push");
+                self.sink().local_set(l);
             }
             k => unimplemented!("codegen: expression {}", node(k)),
         }
@@ -567,7 +774,7 @@ fn entry(rt_init: u32, table: u32, main: u32, ret: &Ty) -> Function {
     f.instructions().i32_const(table as i32).call(rt_init).call(main);
     match ret {
         Ty::Int => {}
-        Ty::Bool => {
+        Ty::Bool | Ty::Str | Ty::Bytes => {
             f.instructions().i64_extend_i32_u();
         }
         Ty::Unit => {
@@ -585,6 +792,8 @@ fn entry_desc(ret: &Ty) -> Function {
         Ty::Unit => 0,
         Ty::Int => 1,
         Ty::Bool => 2,
+        Ty::Str => 3,
+        Ty::Bytes => 4,
         t => unimplemented!("codegen: main returning {}", node(t)),
     };
     let mut f = Function::new([]);

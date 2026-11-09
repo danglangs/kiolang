@@ -263,3 +263,150 @@ fn overflow_matches_the_interpreter() {
     let src = "fn main() -> Int { 9223372036854775807 + 1 }";
     assert_eq!(both(src).unwrap_err(), ("Int overflow".to_string(), 19, 42));
 }
+
+// Str and Bytes (C3b). Each ownership rule (docs/codegen.md, "Ownership") has a test whose
+// program leaks ("compiled program leaked N objects") or reads freed memory without it.
+
+#[test]
+fn strings_and_bytes_values_and_builtins() {
+    assert_eq!(value(r#"fn main() -> Str { "hi" }"#), "hi");
+    assert_eq!(value(r#"fn main() -> Bytes { "hi!".to_bytes() }"#), "<3 bytes>");
+    assert_eq!(value(r#"fn main() -> Str { "a" + 12.to_str() + "b" }"#), "a12b");
+    let src = r#"fn main() -> Int {
+        let s = "  héllo  ".trim();
+        let mut n = s.len() * 1000 + s.to_bytes().len() * 100;
+        if s.contains("ll") { n += 10; }
+        if s.starts_with("hé") && !s.starts_with("e") { n += 1; }
+        n
+    }"#;
+    assert_eq!(value(src), "6611");
+    let src = r#"fn main() -> Bool { "ab" == "a" + "b" && "ab" != "ba" && "x".to_bytes() == "x".to_bytes() }"#;
+    assert_eq!(value(src), "true");
+    let src = r#"fn main() -> Str { let mut b = "".to_bytes(); for i in 0..40 { b.push(65 + i % 26); } b.to_str() }"#;
+    assert_eq!(value(src), "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMN");
+    assert_eq!(
+        value(r#"fn main() -> Int { let b = "AZ".to_bytes(); b[0] * 1000 + b[1] }"#),
+        "65090"
+    );
+}
+
+#[test]
+fn string_and_bytes_errors_match() {
+    let src = r#"fn main() -> Int { let b = "ab".to_bytes(); b[2] }"#;
+    assert_eq!(both(src).unwrap_err().0, "index 2 out of bounds for length 2");
+    assert_eq!(
+        error(r#"fn main() -> Int { "ab".to_bytes()[0 - 1] }"#),
+        "index -1 out of bounds for length 2"
+    );
+    assert_eq!(
+        error(r#"fn main() { let mut b = "".to_bytes(); b.push(256); }"#),
+        "byte 256 out of range 0..=255"
+    );
+    assert_eq!(
+        error(r#"fn main() -> Str { let mut b = "".to_bytes(); b.push(255); b.to_str() }"#),
+        "invalid UTF-8"
+    );
+}
+
+/// Reading a local is a copy (`rt_inc`): without it the first use frees the string.
+#[test]
+fn reading_a_local_twice() {
+    let src = r#"fn main() -> Str { let s = 1.to_str() + "x"; let t = s + s; s + t + s }"#;
+    assert_eq!(value(src), "1x1x1x1x");
+}
+
+/// An argument is the callee's, which drops its parameters when it returns.
+#[test]
+fn an_argument_is_the_callees() {
+    let src = r#"fn f(s: Str, t: Str) -> Int { s.len() + t.len() }
+        fn main() -> Int { let mut n = 0; let k = "ab"; for i in 0..10 { n += f(i.to_str() + "ab", k); } n + f(k, k) }"#;
+    assert_eq!(value(src), "54");
+}
+
+/// Assignment drops the old value after evaluating the new one, which may read it.
+#[test]
+fn reassignment_in_a_loop() {
+    let src = r#"fn main() -> Str { let mut s = ""; let mut t = "x"; for i in 0..30 { s = s + i.to_str(); t += s; t = "y"; } s + t }"#;
+    assert_eq!(value(src), "01234567891011121314151617181920212223242526272829y");
+}
+
+/// A `let` in a loop body is dropped at the body's end, each pass.
+#[test]
+fn a_local_going_out_of_scope_in_a_loop() {
+    let src = r#"fn main() -> Int { let mut n = 0; for i in 0..20 { let t = i.to_str(); let u = t + "-"; n += u.len(); } n }"#;
+    assert_eq!(value(src), "50");
+}
+
+/// An expression statement's value, and the operands of `==` and of a builtin, are dropped.
+#[test]
+fn unused_values_are_dropped() {
+    let src = r#"fn main() -> Int { let mut n = 0; for i in 0..20 { i.to_str(); if i.to_str() == "7" { n += 1; } n += i.to_str().to_bytes().len(); } n }"#;
+    assert_eq!(value(src), "31");
+}
+
+/// `return` drops the locals of every scope it leaves, and the parameters.
+#[test]
+fn return_from_nested_blocks() {
+    let src = r#"fn f(p: Str, n: Int) -> Int {
+            let a = n.to_str();
+            if n > 0 {
+                let b = a + "x";
+                while true { let c = b + p; if n > 1 { return c.len(); } return 0 - 1; }
+            }
+            a.len()
+        }
+        fn main() -> Int { f("p", 5) * 100 + f("p", 1) * 10 + f("p", 0) }"#;
+    assert_eq!(value(src), "291");
+}
+
+/// `break` and `continue` drop the loop body's locals that are alive at that point.
+#[test]
+fn break_and_continue_out_of_a_loop() {
+    let src = r#"fn main() -> Int {
+        let mut n = 0; let mut i = 0; let keep = "k";
+        loop {
+            let s = i.to_str() + keep;
+            i += 1;
+            if i % 2 == 0 { continue; }
+            let t = s + "t";
+            if i > 9 { break; }
+            n += t.len();
+            while true { let u = t + "u"; if n > 0 { break; } }
+        }
+        n
+    }"#;
+    assert_eq!(value(src), "15");
+}
+
+/// An owned temporary (the left of `+`, a call's earlier argument, a builtin's receiver, an
+/// indexed `Bytes`) is held in a hidden local that a `return` in a later operand drops.
+#[test]
+fn temporaries_survive_an_early_return() {
+    let src = r#"fn g(a: Str, b: Int) -> Int { a.len() + b }
+        fn cat(n: Int) -> Str { n.to_str() + if n > 5 { return "big"; } else { "!" } }
+        fn call(n: Int) -> Int { g(n.to_str(), if n > 5 { return 0 - 1; } else { 1 }) }
+        fn recv(n: Int) -> Bool { n.to_str().contains(if n > 5 { return false; } else { "1" }) }
+        fn index(n: Int) -> Int { "ab".to_bytes()[if n > 5 { return 0 - 1; } else { 1 }] }
+        fn main() -> Str {
+            let mut s = "";
+            for n in 0..10 {
+                s = s + cat(n) + call(n).to_str();
+                if recv(n) { s += "T"; }
+                s += index(n).to_str();
+                s += ",";
+            }
+            s
+        }"#;
+    assert_eq!(
+        value(src),
+        "0!298,1!2T98,2!298,3!298,4!298,5!298,big-1-1,big-1-1,big-1-1,big-1-1,"
+    );
+}
+
+/// `push` copies a shared `Bytes` first (`c` has spare capacity, so the push would not copy
+/// otherwise), and stores back the object it returns.
+#[test]
+fn bytes_push_copies_when_shared() {
+    let src = r#"fn main() -> Int { let mut b = "ab".to_bytes(); b.push(1); let c = b; b.push(99); for i in 0..100 { b.push(i); } b.len() * 10 + c.len() }"#;
+    assert_eq!(value(src), "1043");
+}
