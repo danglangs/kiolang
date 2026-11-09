@@ -68,6 +68,7 @@ const T: Table = Table {
     fields: &FIELDS,
     variants: &VARIANTS,
     names: b"InnerOuterChainEndLink<closure>",
+    plans: &[],
 };
 
 /// The live count is global, so tests that check it run one at a time.

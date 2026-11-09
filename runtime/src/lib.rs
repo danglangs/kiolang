@@ -56,6 +56,8 @@ mod heap_tests;
 #[cfg(test)]
 mod json_tests;
 #[cfg(test)]
+mod plan_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod text_tests;

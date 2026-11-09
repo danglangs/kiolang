@@ -25,7 +25,7 @@
 //!
 //! Each `unsafe fn` here has the one contract: its pointers keep these invariants for `t`.
 
-use crate::desc::{self, Desc, Table};
+use crate::desc::{self, Desc, Kind, Plan, Slice, Table};
 use crate::heap;
 use crate::hmap::{self, HashKey};
 use alloc::alloc::{handle_alloc_error, Layout};
@@ -547,9 +547,20 @@ pub unsafe fn inc(p: *mut Header) {
 pub unsafe fn dec(t: &Table, p: *mut Header) {
     // SAFETY: the caller's guarantee.
     unsafe {
-        if release(p) {
-            free(t, p);
+        if !release(p) {
+            return;
         }
+        // An object holding no pointers (a `Str`, an `Option<Int>`, a struct of numbers) is
+        // freed here, without `free`'s work list (C8b7).
+        if !t.plans.is_empty() {
+            let pl = plan(t.plans, p);
+            match pl.kind {
+                Kind::Record | Kind::Variant if pl.mask == 0 => return free_memory(p, pl.size as usize),
+                Kind::Bytes => return free_memory(p, BYTES_DATA + *field::<u32>(p, 12) as usize),
+                _ => {}
+            }
+        }
+        free(t, p);
     }
 }
 
@@ -573,11 +584,87 @@ unsafe fn release(p: *mut Header) -> bool {
     }
 }
 
+/// The plan of each descriptor, then of each enum variant in `t.variants` order: what
+/// `Table::plans` holds (C8b7).
+pub fn plans(t: &Table) -> Vec<Plan> {
+    let n = t.descs.len() as u32;
+    let descs = t.descs.iter().map(|&d| match d {
+        Desc::Enum { variants, .. } => Plan {
+            mask: u64::from(variants.len),
+            size: n + variants.start,
+            kind: Kind::Enum,
+        },
+        d => desc_plan(t, d),
+    });
+    let variants = t.variants.iter().map(|v| slots_plan(t, Kind::Variant, v.slots));
+    descs.chain(variants).collect()
+}
+
+/// The plan of an object of descriptor `d` other than an enum.
+fn desc_plan(t: &Table, d: Desc) -> Plan {
+    let kind = match d {
+        Desc::Record { slots, .. } => return slots_plan(t, Kind::Record, slots),
+        Desc::Fn { slots, .. } => return slots_plan(t, Kind::Variant, slots),
+        Desc::Enum { .. } => unreachable!("an enum's plan is its variant's"),
+        Desc::Str | Desc::Bytes => Kind::Bytes,
+        Desc::List { elem } => match t.desc(elem) {
+            Desc::Str | Desc::Bytes => Kind::ListOfBytes,
+            _ if t.is_ptr(elem) => Kind::ListOfPtrs,
+            _ => Kind::List,
+        },
+        Desc::Map { value, .. } if t.is_ptr(value) => Kind::MapOfPtrs,
+        Desc::Map { .. } => Kind::Map,
+        Desc::HashMap { value, .. } if t.is_ptr(value) => Kind::HashMapOfPtrs,
+        Desc::HashMap { .. } => Kind::HashMap,
+        Desc::Unit | Desc::Int | Desc::Bool | Desc::Float => Kind::Scalar,
+    };
+    Plan { mask: 0, size: 0, kind }
+}
+
+/// The plan of a struct (`Record`), or a variant or closure (`Variant`), whose slots have the
+/// descriptors `s`.
+fn slots_plan(t: &Table, kind: Kind, s: Slice) -> Plan {
+    let ds = t.slots(s);
+    let off = if kind == Kind::Record { HEADER } else { ENUM_SLOTS };
+    let size = (off + 8 * ds.len()) as u32;
+    if ds.len() > 64 {
+        return Plan {
+            mask: 0,
+            size,
+            kind: Kind::Wide,
+        };
+    }
+    let mask = ds
+        .iter()
+        .enumerate()
+        .filter(|&(_, &d)| t.is_ptr(d))
+        .fold(0, |m, (i, _)| m | 1 << i);
+    Plan { mask, size, kind }
+}
+
+/// Object `p`'s plan, its variant's if it is an enum.
+///
+/// # Safety
+/// `p` is live, and `plans` are its table's.
+#[inline]
+unsafe fn plan(plans: &[Plan], p: *mut Header) -> Plan {
+    // SAFETY: `p` is live; an enum has its variant at HEADER.
+    unsafe {
+        let pl = plans[(*p).desc as usize];
+        if pl.kind != Kind::Enum {
+            return pl;
+        }
+        let v: u32 = *field(p, HEADER);
+        assert!(u64::from(v) < pl.mask);
+        plans[(pl.size + v) as usize]
+    }
+}
+
 /// Frees `p`, whose count `release` took to 0, and every object only it kept alive. A
 /// worklist, not recursion, so a deep value costs heap, not stack.
 ///
-/// One descriptor lookup per object (C8b2), read in place, and a record's slots found without
-/// `record_of`'s copy (C8b5): this loop is most of freeing a large value.
+/// One plan per object (C8b7): a record's pointer slots are the set bits of its mask, and its
+/// size is the plan's, so this loop, most of freeing a large value, reads no descriptors.
 ///
 /// # Safety
 /// The module's contract, and `p` has no references left.
@@ -585,6 +672,14 @@ unsafe fn free(t: &Table, mut p: *mut Header) {
     // The first child that dies is freed next; the others wait in `work`, which allocates only
     // if an object has two.
     let mut work = Vec::new();
+    // Native test tables have no plans: work them out for this call.
+    let made;
+    let plans = if t.plans.is_empty() {
+        made = plans(t);
+        &made[..]
+    } else {
+        t.plans
+    };
     loop {
         let mut next: *mut Header = ptr::null_mut();
         // SAFETY: `p` is unreferenced, so its children and memory are ours to release.
@@ -598,23 +693,29 @@ unsafe fn free(t: &Table, mut p: *mut Header) {
                     }
                 }
             };
-            let mut slots = |off: usize, ds: &[u32]| {
-                for (i, &d) in ds.iter().enumerate() {
-                    if t.is_ptr(d) {
-                        child(from_slot(*field::<u64>(p, off + 8 * i)));
+            let pl = plan(plans, p);
+            let size = match pl.kind {
+                Kind::Record | Kind::Variant => {
+                    let off = if pl.kind == Kind::Record { HEADER } else { ENUM_SLOTS };
+                    let mut m = pl.mask;
+                    while m != 0 {
+                        child(from_slot(*field::<u64>(p, off + 8 * m.trailing_zeros() as usize)));
+                        m &= m - 1;
                     }
+                    pl.size as usize
                 }
-                off + 8 * ds.len()
-            };
-            let size = match &t.descs[(*p).desc as usize] {
-                Desc::Record { slots: s, .. } => slots(HEADER, t.slots(*s)),
-                Desc::Enum { variants, .. } => {
-                    slots(ENUM_SLOTS, t.slots(t.variant(*variants, *field(p, HEADER)).slots))
+                Kind::Wide => {
+                    let (off, slots) = record(t, p);
+                    for (i, &d) in slots.iter().enumerate() {
+                        if t.is_ptr(d) {
+                            child(from_slot(*field::<u64>(p, off + 8 * i)));
+                        }
+                    }
+                    pl.size as usize
                 }
-                Desc::Fn { slots: s, .. } => slots(ENUM_SLOTS, t.slots(*s)),
-                Desc::Str | Desc::Bytes => BYTES_DATA + *field::<u32>(p, 12) as usize,
-                Desc::List { elem } => {
-                    if let Desc::Str | Desc::Bytes = t.descs[*elem as usize] {
+                Kind::Bytes => BYTES_DATA + *field::<u32>(p, 12) as usize,
+                Kind::List | Kind::ListOfBytes | Kind::ListOfPtrs => {
+                    if pl.kind == Kind::ListOfBytes {
                         // Dying elements that hold nothing are freed here rather than queued
                         // in `work` (C8b6: a list of words grew `work` every few words).
                         for &v in elems(p) {
@@ -623,7 +724,7 @@ unsafe fn free(t: &Table, mut p: *mut Header) {
                                 free_memory(c, BYTES_DATA + *field::<u32>(c, 12) as usize);
                             }
                         }
-                    } else if t.is_ptr(*elem) {
+                    } else if pl.kind == Kind::ListOfPtrs {
                         elems(p).iter().for_each(|&v| child(from_slot(v)));
                     }
                     // The `Vec`'s buffer, freed as `Vec` would, without the call through
@@ -634,8 +735,8 @@ unsafe fn free(t: &Table, mut p: *mut Header) {
                     }
                     HEADER + size_of::<ListBody>()
                 }
-                Desc::Map { value, .. } => {
-                    if t.is_ptr(*value) {
+                Kind::Map | Kind::MapOfPtrs => {
+                    if pl.kind == Kind::MapOfPtrs {
                         (*field::<Map>(p, HEADER))
                             .values()
                             .for_each(|v| child(from_slot(v.get())));
@@ -643,8 +744,8 @@ unsafe fn free(t: &Table, mut p: *mut Header) {
                     ptr::drop_in_place(field::<MapBody>(p, HEADER));
                     HEADER + size_of::<MapBody>()
                 }
-                Desc::HashMap { value, .. } => {
-                    if t.is_ptr(*value) {
+                Kind::HashMap | Kind::HashMapOfPtrs => {
+                    if pl.kind == Kind::HashMapOfPtrs {
                         (*field::<HashMap>(p, HEADER))
                             .values()
                             .for_each(|&v| child(from_slot(v)));
@@ -652,7 +753,7 @@ unsafe fn free(t: &Table, mut p: *mut Header) {
                     ptr::drop_in_place(field::<HashMap>(p, HEADER));
                     HEADER + size_of::<HashMap>()
                 }
-                d @ (Desc::Unit | Desc::Int | Desc::Bool | Desc::Float) => panic!("{d:?} is not an object"),
+                Kind::Enum | Kind::Scalar => panic!("{pl:?} is not an object's plan"),
             };
             free_memory(p, size);
         }

@@ -102,6 +102,7 @@ const T: Table = Table {
     fields: &FIELDS,
     variants: &VARIANTS,
     names: b"",
+    plans: &[],
 };
 
 use crate::tests::lock;

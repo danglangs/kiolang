@@ -106,6 +106,47 @@ pub struct Table<'t> {
     pub fields: &'t [Name],
     pub variants: &'t [Variant],
     pub names: &'t [u8],
+    /// `obj::plans(self)`, made once per run (C8b7), or empty: then `obj::plan` works an
+    /// object's plan out each time.
+    pub plans: &'t [Plan],
+}
+
+/// How `obj::free` takes apart an object of one descriptor, or of one enum variant (C8b7):
+/// worked out from the table once, so freeing does not walk the descriptors per object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Plan {
+    /// `Record`, `Variant`: bit `i` is set iff slot `i` holds a pointer. `Enum`: the number of
+    /// variants.
+    pub mask: u64,
+    /// `Record`, `Variant`, `Wide`: the object's size in bytes. `Enum`: the index in
+    /// `Table::plans` of its first variant's plan; the others follow.
+    pub size: u32,
+    pub kind: Kind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// A struct of at most 64 slots.
+    Record,
+    /// An enum variant or a closure of at most 64 slots (the first at byte 16).
+    Variant,
+    /// A struct, variant or closure with more slots: `obj::free` reads their descriptors.
+    Wide,
+    /// An enum: only in `Table::plans`; `obj::plan` gives its variant's.
+    Enum,
+    Bytes,
+    /// A `List` whose elements are not pointers, are `Str` or `Bytes` (objects holding
+    /// nothing), or are other pointers.
+    List,
+    ListOfBytes,
+    ListOfPtrs,
+    /// A `Map` or `HashMap`, its values pointers or not.
+    Map,
+    MapOfPtrs,
+    HashMap,
+    HashMapOfPtrs,
+    /// `Unit`, `Int`, `Bool`, `Float`: not an object.
+    Scalar,
 }
 
 impl<'t> Table<'t> {
@@ -169,6 +210,7 @@ impl RawTable {
                 fields: array(base, raw.fields),
                 variants: array(base, raw.variants),
                 names: array(base, raw.names),
+                plans: &[],
             }
         }
     }

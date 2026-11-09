@@ -30,14 +30,14 @@ impl Guest for Runtime {
         let slot = kio_main();
         let t = abi::table();
         // SAFETY: codegen's entry returns a value of `kio_main_desc` and has called `rt_init`.
-        let (p, failed) = unsafe { outcome(&t, kio_main_desc(), slot) };
+        let (p, failed) = unsafe { outcome(t, kio_main_desc(), slot) };
         // SAFETY: `outcome` made `p`, a live `Str`.
         let value = unsafe { core::str::from_utf8(obj::bytes(p)).expect("a Str is UTF-8").into() };
         // SAFETY: `p` is ours and live, and so is main's value if it is a pointer.
         unsafe {
             abi::rt_dec(abi::addr(p));
             if t.is_ptr(kio_main_desc()) {
-                obj::dec(&t, obj::from_slot(slot));
+                obj::dec(t, obj::from_slot(slot));
             }
         }
         let live = abi::rt_live();

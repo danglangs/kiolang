@@ -66,6 +66,7 @@ pub(crate) const T: Table = Table {
     fields: &FIELDS,
     variants: &VARIANTS,
     names: b"OptionNoneSome",
+    plans: &[],
 };
 
 fn s(x: &str) -> *mut Header {

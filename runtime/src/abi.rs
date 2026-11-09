@@ -13,15 +13,35 @@ use crate::desc::{RawTable, Table};
 use crate::entry::{rt_trap, trap3};
 use crate::obj::{self, Header};
 use crate::{coll, desc, float, json, text};
-use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
+use alloc::boxed::Box;
+use core::cell::UnsafeCell;
 
-static TABLE: AtomicU32 = AtomicU32::new(0);
+/// The table, with its plans (C8b7), as the first `rt_init` read it; `descs` is empty before.
+struct Registered(UnsafeCell<Table<'static>>);
 
-pub(crate) fn table() -> Table<'static> {
-    let raw = TABLE.load(Relaxed);
-    assert!(raw != 0, "rt_init was not called");
-    // SAFETY: `rt_init`'s contract; Wasm memory starts at address 0.
-    unsafe { RawTable::read(0, raw) }
+// SAFETY: wasm32-unknown-unknown has one thread, and the runtime starts none.
+unsafe impl Sync for Registered {}
+
+static TABLE: Registered = Registered(UnsafeCell::new(Table {
+    descs: &[],
+    slots: &[],
+    fields: &[],
+    variants: &[],
+    names: &[],
+    plans: &[],
+}));
+
+/// The table, by reference: a runtime call reads only the parts it uses.
+pub(crate) fn table() -> &'static Table<'static> {
+    let t = registered();
+    assert!(!t.descs.is_empty(), "rt_init was not called");
+    t
+}
+
+fn registered() -> &'static Table<'static> {
+    // SAFETY: written only by `rt_init`, the first runtime call, which holds no reference to
+    // it meanwhile.
+    unsafe { &*TABLE.0.get() }
 }
 
 pub(crate) fn ptr(a: u32) -> *mut Header {
@@ -34,17 +54,26 @@ pub(crate) fn addr(p: *mut Header) -> u32 {
 
 /// # Safety
 /// `table` is the address of a `RawTable` whose arrays are valid, aligned, never written, and
-/// keep `desc`'s invariants.
+/// keep `desc`'s invariants. A later call does nothing.
 #[no_mangle]
 pub unsafe extern "C" fn rt_init(table: u32) {
-    TABLE.store(table, Relaxed);
+    // SAFETY: the caller's guarantee; Wasm memory starts at address 0. No reference to
+    // `TABLE` is held across the write. The plans are leaked: they live as long as the table.
+    unsafe {
+        if !registered().descs.is_empty() {
+            return;
+        }
+        let mut t = RawTable::read(0, table);
+        t.plans = Box::leak(obj::plans(&t).into_boxed_slice());
+        *TABLE.0.get() = t;
+    }
 }
 
 /// A struct, variant `variant` of an enum, or a closure calling table entry `variant`, with
 /// count 1 and every slot 0.
 #[no_mangle]
 pub extern "C" fn rt_alloc(desc: u32, variant: u32) -> u32 {
-    addr(obj::alloc(&table(), desc, variant))
+    addr(obj::alloc(table(), desc, variant))
 }
 
 /// The address of the free lists' heads (heap.rs), for generated code's inline allocation
@@ -74,7 +103,7 @@ pub unsafe extern "C" fn rt_inc(p: u32) {
 #[no_mangle]
 pub unsafe extern "C" fn rt_dec(p: u32) {
     // SAFETY: the caller's guarantee.
-    unsafe { obj::dec(&table(), ptr(p)) }
+    unsafe { obj::dec(table(), ptr(p)) }
 }
 
 /// # Safety
@@ -82,7 +111,7 @@ pub unsafe extern "C" fn rt_dec(p: u32) {
 #[no_mangle]
 pub unsafe extern "C" fn rt_unique(p: u32) -> u32 {
     // SAFETY: the caller's guarantee.
-    unsafe { addr(obj::unique(&table(), ptr(p))) }
+    unsafe { addr(obj::unique(table(), ptr(p))) }
 }
 
 /// Objects allocated and not yet freed: 0 at the end of a run that did not trap.
@@ -109,14 +138,14 @@ pub extern "C" fn rt_list_new(desc: u32, cap: u32) -> u32 {
 /// either kind.
 #[no_mangle]
 pub extern "C" fn rt_map_new(desc: u32) -> u32 {
-    addr(coll::map_new(&table(), desc))
+    addr(coll::map_new(table(), desc))
 }
 
 /// `a == b` on values of descriptor `desc`.
 #[no_mangle]
 pub unsafe extern "C" fn rt_eq(desc: u32, a: i64, b: i64) -> bool {
     // SAFETY: the group's contract.
-    unsafe { coll::eq(&table(), desc, a as u64, b as u64) }
+    unsafe { coll::eq(table(), desc, a as u64, b as u64) }
 }
 
 /// `a.cmp(b)` on two `Str`s by bytes, as Rust's `str`: -1, 0 or 1.
@@ -138,7 +167,7 @@ pub unsafe extern "C" fn rt_concat(a: u32, b: u32) -> u32 {
 #[no_mangle]
 pub unsafe extern "C" fn rt_str_append(a: u32, b: u32) -> u32 {
     // SAFETY: the group's contract.
-    unsafe { addr(text::append(&table(), ptr(a), ptr(b))) }
+    unsafe { addr(text::append(table(), ptr(a), ptr(b))) }
 }
 
 #[no_mangle]
@@ -197,7 +226,7 @@ pub unsafe extern "C" fn rt_str_starts_with(s: u32, prefix: u32) -> bool {
 #[no_mangle]
 pub unsafe extern "C" fn rt_str_parse_int(desc: u32, none: u32, s: u32) -> u32 {
     // SAFETY: the group's contract.
-    unsafe { addr(text::parse_int(&table(), desc, ptr(none), ptr(s))) }
+    unsafe { addr(text::parse_int(table(), desc, ptr(none), ptr(s))) }
 }
 
 #[no_mangle]
@@ -210,21 +239,21 @@ pub unsafe extern "C" fn rt_str_ends_with(s: u32, suffix: u32) -> bool {
 #[no_mangle]
 pub unsafe extern "C" fn rt_str_strip_prefix(desc: u32, none: u32, s: u32, p: u32) -> u32 {
     // SAFETY: the group's contract.
-    unsafe { addr(text::strip_prefix(&table(), desc, ptr(none), ptr(s), ptr(p))) }
+    unsafe { addr(text::strip_prefix(table(), desc, ptr(none), ptr(s), ptr(p))) }
 }
 
 /// `desc` is `Option<Str>`; `none` is its pinned `None`.
 #[no_mangle]
 pub unsafe extern "C" fn rt_str_strip_suffix(desc: u32, none: u32, s: u32, p: u32) -> u32 {
     // SAFETY: the group's contract.
-    unsafe { addr(text::strip_suffix(&table(), desc, ptr(none), ptr(s), ptr(p))) }
+    unsafe { addr(text::strip_suffix(table(), desc, ptr(none), ptr(s), ptr(p))) }
 }
 
 /// `desc` is `Option<Int>`; `none` is its pinned `None`.
 #[no_mangle]
 pub unsafe extern "C" fn rt_str_find(desc: u32, none: u32, s: u32, sub: u32) -> u32 {
     // SAFETY: the group's contract.
-    unsafe { addr(text::find(&table(), desc, ptr(none), ptr(s), ptr(sub))) }
+    unsafe { addr(text::find(table(), desc, ptr(none), ptr(s), ptr(sub))) }
 }
 
 #[no_mangle]
@@ -237,7 +266,7 @@ pub unsafe extern "C" fn rt_str_replace(s: u32, from: u32, to: u32) -> u32 {
 #[no_mangle]
 pub unsafe extern "C" fn rt_str_parse_float(desc: u32, none: u32, s: u32) -> u32 {
     // SAFETY: the group's contract.
-    unsafe { addr(text::parse_float(&table(), desc, ptr(none), ptr(s))) }
+    unsafe { addr(text::parse_float(table(), desc, ptr(none), ptr(s))) }
 }
 
 /// `s.slice(a, b)`. Errors: out of bounds at `site`, with `a`, `b` and the length as the
@@ -276,7 +305,7 @@ pub extern "C" fn rt_float_to_str(x: f64) -> u32 {
 #[no_mangle]
 pub unsafe extern "C" fn rt_float_to_int(desc: u32, none: u32, x: f64) -> u32 {
     // SAFETY: the group's contract.
-    unsafe { addr(float::to_int(&table(), desc, ptr(none), x)) }
+    unsafe { addr(float::to_int(table(), desc, ptr(none), x)) }
 }
 
 #[no_mangle]
@@ -327,7 +356,7 @@ pub unsafe extern "C" fn rt_list_len(l: u32) -> i64 {
 #[no_mangle]
 pub unsafe extern "C" fn rt_list_get(l: u32, i: i64, site: u32) -> i64 {
     // SAFETY: the group's contract.
-    match unsafe { coll::list_get(&table(), ptr(l), i) } {
+    match unsafe { coll::list_get(table(), ptr(l), i) } {
         Ok(v) => v as i64,
         Err(e) => index_trap(site, e),
     }
@@ -336,49 +365,49 @@ pub unsafe extern "C" fn rt_list_get(l: u32, i: i64, site: u32) -> i64 {
 #[no_mangle]
 pub unsafe extern "C" fn rt_map_len(m: u32) -> i64 {
     // SAFETY: the group's contract.
-    unsafe { coll::map_len(&table(), ptr(m)) }
+    unsafe { coll::map_len(table(), ptr(m)) }
 }
 
 /// `desc` is `List<K>`.
 #[no_mangle]
 pub unsafe extern "C" fn rt_map_keys(desc: u32, m: u32) -> u32 {
     // SAFETY: the group's contract.
-    unsafe { addr(coll::map_keys(&table(), ptr(m), desc)) }
+    unsafe { addr(coll::map_keys(table(), ptr(m), desc)) }
 }
 
 /// `desc` is `Option<V>`, `none` its pinned `None`; `k` is an `Int` or a `Str` pointer.
 #[no_mangle]
 pub unsafe extern "C" fn rt_map_get(desc: u32, none: u32, m: u32, k: i64) -> u32 {
     // SAFETY: the group's contract.
-    unsafe { addr(coll::map_get(&table(), ptr(m), k as u64, desc, ptr(none))) }
+    unsafe { addr(coll::map_get(table(), ptr(m), k as u64, desc, ptr(none))) }
 }
 
 /// `l.contains(v)`; `v` is a slot value of the element type.
 #[no_mangle]
 pub unsafe extern "C" fn rt_list_contains(l: u32, v: i64) -> bool {
     // SAFETY: the group's contract.
-    unsafe { coll::list_contains(&table(), ptr(l), v as u64) }
+    unsafe { coll::list_contains(table(), ptr(l), v as u64) }
 }
 
 /// `r.ok()`: `desc` is `Option<T>`, `none` its pinned `None`.
 #[no_mangle]
 pub unsafe extern "C" fn rt_result_ok(desc: u32, none: u32, r: u32) -> u32 {
     // SAFETY: the group's contract.
-    unsafe { addr(coll::result_variant(&table(), ptr(r), 0, desc, ptr(none))) }
+    unsafe { addr(coll::result_variant(table(), ptr(r), 0, desc, ptr(none))) }
 }
 
 /// `r.err()`: `desc` is `Option<E>`, `none` its pinned `None`.
 #[no_mangle]
 pub unsafe extern "C" fn rt_result_err(desc: u32, none: u32, r: u32) -> u32 {
     // SAFETY: the group's contract.
-    unsafe { addr(coll::result_variant(&table(), ptr(r), 1, desc, ptr(none))) }
+    unsafe { addr(coll::result_variant(table(), ptr(r), 1, desc, ptr(none))) }
 }
 
 /// `o.ok_or(e)`: `desc` is `Result<T, E>`; `e` is a slot value of `E`.
 #[no_mangle]
 pub unsafe extern "C" fn rt_option_ok_or(desc: u32, o: u32, e: i64) -> u32 {
     // SAFETY: the group's contract.
-    unsafe { addr(coll::option_ok_or(&table(), ptr(o), e as u64, desc)) }
+    unsafe { addr(coll::option_ok_or(table(), ptr(o), e as u64, desc)) }
 }
 
 /// `o.unwrap_or(d)` on an `Option`.
@@ -425,7 +454,7 @@ pub unsafe extern "C" fn rt_result_is_err(r: u32) -> bool {
 #[no_mangle]
 pub unsafe extern "C" fn rt_json_parse(desc: u32, s: u32) -> u32 {
     // SAFETY: the group's contract.
-    unsafe { addr(json::parse(&table(), desc, ptr(s))) }
+    unsafe { addr(json::parse(table(), desc, ptr(s))) }
 }
 
 /// `j.to_json()`.
@@ -439,14 +468,14 @@ pub unsafe extern "C" fn rt_json_encode(j: u32) -> u32 {
 #[no_mangle]
 pub unsafe extern "C" fn rt_json_get(desc: u32, none: u32, j: u32, k: u32) -> u32 {
     // SAFETY: the group's contract.
-    unsafe { addr(json::get(&table(), desc, ptr(none), ptr(j), ptr(k))) }
+    unsafe { addr(json::get(table(), desc, ptr(none), ptr(j), ptr(k))) }
 }
 
 /// `j.at(i)`: `desc` is `Option<Json>`, `none` its pinned `None`.
 #[no_mangle]
 pub unsafe extern "C" fn rt_json_at(desc: u32, none: u32, j: u32, i: i64) -> u32 {
     // SAFETY: the group's contract.
-    unsafe { addr(json::at(&table(), desc, ptr(none), ptr(j), i)) }
+    unsafe { addr(json::at(table(), desc, ptr(none), ptr(j), i)) }
 }
 
 /// The `as_*` accessors: `desc` is `Option` of the payload type, `none` its pinned `None`.
@@ -455,7 +484,7 @@ macro_rules! json_as {
         #[no_mangle]
         pub unsafe extern "C" fn $name(desc: u32, none: u32, j: u32) -> u32 {
             // SAFETY: the group's contract.
-            unsafe { addr(json::as_variant(&table(), desc, ptr(none), ptr(j), json::$variant)) }
+            unsafe { addr(json::as_variant(table(), desc, ptr(none), ptr(j), json::$variant)) }
         }
     )*};
 }
@@ -477,7 +506,7 @@ json_as!(
 #[no_mangle]
 pub unsafe extern "C" fn rt_list_set(l: u32, i: i64, v: i64, site: u32) {
     // SAFETY: the group's contract.
-    if let Err(e) = unsafe { coll::list_set(&table(), ptr(l), i, v as u64) } {
+    if let Err(e) = unsafe { coll::list_set(table(), ptr(l), i, v as u64) } {
         index_trap(site, e)
     }
 }
@@ -505,7 +534,7 @@ pub unsafe extern "C" fn rt_list_push(l: u32, v: i64) {
 #[no_mangle]
 pub unsafe extern "C" fn rt_list_sort(l: u32) {
     // SAFETY: the group's contract.
-    unsafe { coll::list_sort(&table(), ptr(l)) }
+    unsafe { coll::list_sort(table(), ptr(l)) }
 }
 
 /// `l.pop()`: `desc` is `Option<T>`, `none` its pinned `None`. The element moves into the
@@ -513,7 +542,7 @@ pub unsafe extern "C" fn rt_list_sort(l: u32) {
 #[no_mangle]
 pub unsafe extern "C" fn rt_list_pop(desc: u32, none: u32, l: u32) -> u32 {
     // SAFETY: the group's contract.
-    unsafe { addr(coll::list_pop(&table(), ptr(l), desc, ptr(none))) }
+    unsafe { addr(coll::list_pop(table(), ptr(l), desc, ptr(none))) }
 }
 
 /// `b.push(n)`: returns the `Bytes` to store back in the place, `b` or a larger copy (`b` then
@@ -521,7 +550,7 @@ pub unsafe extern "C" fn rt_list_pop(desc: u32, none: u32, l: u32) -> u32 {
 #[no_mangle]
 pub unsafe extern "C" fn rt_bytes_push(b: u32, n: i64, site: u32) -> u32 {
     // SAFETY: the group's contract.
-    match unsafe { text::push(&table(), ptr(b), n) } {
+    match unsafe { text::push(table(), ptr(b), n) } {
         Ok(p) => addr(p),
         Err(_) => rt_trap(site, n, 0),
     }
@@ -531,14 +560,14 @@ pub unsafe extern "C" fn rt_bytes_push(b: u32, n: i64, site: u32) -> u32 {
 #[no_mangle]
 pub unsafe extern "C" fn rt_map_insert(m: u32, k: i64, v: i64) {
     // SAFETY: the group's contract.
-    unsafe { coll::map_insert(&table(), ptr(m), k as u64, v as u64) }
+    unsafe { coll::map_insert(table(), ptr(m), k as u64, v as u64) }
 }
 
 /// `m.remove(k)`.
 #[no_mangle]
 pub unsafe extern "C" fn rt_map_remove(m: u32, k: i64) {
     // SAFETY: the group's contract.
-    unsafe { coll::map_remove(&table(), ptr(m), k as u64) }
+    unsafe { coll::map_remove(table(), ptr(m), k as u64) }
 }
 
 fn index_trap(site: u32, e: coll::Error) -> ! {
@@ -587,7 +616,7 @@ unsafe fn unwrap_or(p: u32, success: u32, d: i64) -> i64 {
 pub unsafe extern "C" fn rt_list_slice(l: u32, a: i64, b: i64, site: u32) -> u32 {
     // SAFETY: the group's contract.
     unsafe {
-        match coll::list_slice(&table(), ptr(l), a, b) {
+        match coll::list_slice(table(), ptr(l), a, b) {
             Some(p) => addr(p),
             None => trap3(site, a, b, coll::list_len(ptr(l))),
         }
@@ -645,7 +674,7 @@ pub unsafe extern "C" fn rt_list_reverse(l: u32) {
 #[no_mangle]
 pub unsafe extern "C" fn rt_bytes_extend(b: u32, more: u32) -> u32 {
     // SAFETY: the group's contract.
-    unsafe { addr(text::extend(&table(), ptr(b), ptr(more))) }
+    unsafe { addr(text::extend(table(), ptr(b), ptr(more))) }
 }
 
 /// `l.sort_by_key(f)`, given `keys`, `f` of each element in order (a `List<Int>` or
@@ -653,7 +682,7 @@ pub unsafe extern "C" fn rt_bytes_extend(b: u32, more: u32) -> u32 {
 #[no_mangle]
 pub unsafe extern "C" fn rt_list_sort_by_key(l: u32, keys: u32) {
     // SAFETY: the group's contract.
-    unsafe { coll::list_sort_by_key(&table(), ptr(l), ptr(keys)) }
+    unsafe { coll::list_sort_by_key(table(), ptr(l), ptr(keys)) }
 }
 
 // `l.sort_by(less)`: generated code drives lang/src/sort.rs's merge sort, calling `less`

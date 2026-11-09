@@ -141,6 +141,7 @@ const T: Table = Table {
     fields: &FIELDS,
     variants: &VARIANTS,
     names: NAMES,
+    plans: &[],
 };
 
 struct NoCaps;

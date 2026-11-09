@@ -48,10 +48,11 @@ Compiled-only kio covers the whole language and every capability; the active str
 | W14 | kio-web: `bearer`, `*path` routes, HEAD as GET, strict paging, `protected` routes; the links app uses them |
 | L15, L16 (C15 part) | struct update `P { x: 1, ..p }` (written fields, then the base once, as Rust; generic bases inferred) and constants `const MAX: Int = 64;` (`Int`, `Float`, `Bool`, `Str` literals, `pub` across modules). Both disappear in lowering, so codegen is unchanged; kiogen generates both. Harness 478 ran both ways, 0 mismatches |
 | H13, H14, H15 | `Rng` (`--rng r`: OS randomness; `--rng r=seed:1`: a ChaCha20 stream, keyed by the request number under `--listen`), `Clock` (`--clock now`, or `fixed:<ms or RFC 3339>`), `Log` (`--log l=path`, appended, or `-`; escaped, 64 KB a line, 1 MB a run, `req N: ` under `--listen`). caps.wit (owner-approved), both paths, report, audit (count, range, value, byte length; never a drawn value or a line), grant hints. kio-web links: random 7-character slugs, `created_ms` and `ttl_s` with 410 on expiry, creates and deletes logged; deterministic tests with a seed and a fixed clock |
+| C8b7 | cheaper freeing (fuel stays): one precomputed plan per descriptor and variant (pointer slots as a mask, size), the table by reference, pointer-free objects freed in `dec` directly. Freeing fuel on a 2^22-leaf tree 4.61 to 2.75 G; tree 101 to 90 ms (fuel 2.26 to 1.80 G), word count 29.8 to 28.2, `HashMap` 23.6 to 22.4, json.kio 66 to 64, strings 5.0 to 4.5; fib 5% slower at the same fuel (code placement) |
 
 ## Next
 
-C8 (roadmap.md): freeing (54% of tree); tree's 4-5% from the larger size classes (#117); borrowed match bindings of a borrowed scrutinee (tree). The links target app (kio-web examples/links) gave L11, L12, H12, W14 (done); the maintainer then approved K2, H13-H15 and L13-L16: all done, with independent security reviews (fixes merged). Low priority after C8: the models-writing-kio eval (roadmap.md).
+C8 (roadmap.md): tree's remaining freeing (free-list pushes, a `List`'s separate buffer); tree's 4-5% from the larger size classes (#117); borrowed match bindings of a borrowed scrutinee (tree). The links target app (kio-web examples/links) gave L11, L12, H12, W14 (done); the maintainer then approved K2, H13-H15 and L13-L16: all done, with independent security reviews (fixes merged). Low priority after C8: the models-writing-kio eval (roadmap.md).
 
 ## Waiting on the maintainer
 

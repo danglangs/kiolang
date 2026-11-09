@@ -153,10 +153,10 @@ fn result<T, E>(
     let t = table();
     match r {
         Ok(v) => {
-            let v = f(&t, v);
-            ok(&t, ret, v)
+            let v = f(t, v);
+            ok(t, ret, v)
         }
-        Err(e) => err(&t, ret, name(e), None),
+        Err(e) => err(t, ret, name(e), None),
     }
 }
 
@@ -253,11 +253,11 @@ pub unsafe extern "C" fn rt_cap_http_get(ret: u32, h: u32, path: u32) -> u32 {
     let (c, path) = unsafe { (handle(h, Http::from_handle), text(path)) };
     let t = table();
     match in_place(|| c.get(path)) {
-        Ok(b) => ok(&t, ret, to_slot(bytes_obj(b))),
-        Err(HttpErr::Denied) => err(&t, ret, "Denied", None),
-        Err(HttpErr::Timeout) => err(&t, ret, "Timeout", None),
-        Err(HttpErr::TooLarge) => err(&t, ret, "TooLarge", None),
-        Err(HttpErr::Status(n)) => err(&t, ret, "Status", Some(n.into())),
+        Ok(b) => ok(t, ret, to_slot(bytes_obj(b))),
+        Err(HttpErr::Denied) => err(t, ret, "Denied", None),
+        Err(HttpErr::Timeout) => err(t, ret, "Timeout", None),
+        Err(HttpErr::TooLarge) => err(t, ret, "TooLarge", None),
+        Err(HttpErr::Status(n)) => err(t, ret, "Status", Some(n.into())),
     }
 }
 
@@ -344,7 +344,7 @@ pub unsafe extern "C" fn rt_cap_outgoing_send(
     let t = table();
     // A status that is not a `u16` cannot be valid, so it never reaches the host.
     let Ok(status) = u16::try_from(status) else {
-        return err(&t, ret, "Invalid", None);
+        return err(t, ret, "Invalid", None);
     };
     // SAFETY: the contract above.
     let (mut names, mut values, body) = unsafe { (string_list(names), string_list(values), bytes(body)) };
@@ -366,10 +366,10 @@ pub unsafe extern "C" fn rt_cap_outgoing_send(
         )
     };
     match out {
-        [0, _] => ok(&t, ret, 0),
+        [0, _] => ok(t, ret, 0),
         // caps.wit: `variant web-err { already-sent, invalid }`.
-        [1, 0] => err(&t, ret, "AlreadySent", None),
-        [1, 1] => err(&t, ret, "Invalid", None),
+        [1, 0] => err(t, ret, "AlreadySent", None),
+        [1, 1] => err(t, ret, "Invalid", None),
         _ => panic!("send: a malformed result"),
     }
 }
@@ -427,8 +427,8 @@ pub unsafe extern "C" fn rt_cap_kv_swap(ret: u32, h: u32, key: u32, old: u32, ne
         (
             handle(h, Kv::from_handle),
             text(key),
-            bytes_option(&t, old),
-            bytes_option(&t, new),
+            bytes_option(t, old),
+            bytes_option(t, new),
         )
     };
     result(ret, in_place(|| k.swap(key, old, new)), |_, b| b as u64, kv_err)
@@ -465,10 +465,10 @@ pub unsafe extern "C" fn rt_cap_kv_scan(ret: u32, h: u32, prefix: u32, after: u3
     let t = table();
     // A limit that is not a `u32` is outside 1 to 1,000, so it never reaches the host.
     let Ok(limit) = u32::try_from(limit) else {
-        return err(&t, ret, "TooLarge", None);
+        return err(t, ret, "TooLarge", None);
     };
     // SAFETY: the contract above.
-    let (k, prefix, after) = unsafe { (handle(h, Kv::from_handle), text(prefix), str_option(&t, after)) };
+    let (k, prefix, after) = unsafe { (handle(h, Kv::from_handle), text(prefix), str_option(t, after)) };
     let r = in_place(|| k.scan(prefix, after, limit));
     result(ret, r, |t, v| to_slot(entries(t, payload(t, ret, 0), v)), kv_err)
 }
@@ -516,7 +516,7 @@ pub unsafe extern "C" fn rt_cap_ws_message_header(ret: u32, h: u32, name: u32) -
     let m = message(h);
     let v = in_place(|| m.header(name)).map(|s| to_slot(str_obj(s)));
     // SAFETY: `ret` is an `Option<Str>`; a null `none` allocates one.
-    addr(unsafe { obj::option(&table(), ret, core::ptr::null_mut(), v) })
+    addr(unsafe { obj::option(table(), ret, core::ptr::null_mut(), v) })
 }
 
 fn sender(h: u32) -> ManuallyDrop<WsSend> {
@@ -544,7 +544,7 @@ pub unsafe extern "C" fn rt_cap_ws_send_binary(ret: u32, h: u32, b: u32) -> u32 
 pub extern "C" fn rt_cap_ws_send_close(ret: u32, h: u32, code: i64) -> u32 {
     // A code that is not a `u16` cannot be valid, so it never reaches the host.
     let Ok(code) = u16::try_from(code) else {
-        return err(&table(), ret, "Invalid", None);
+        return err(table(), ret, "Invalid", None);
     };
     let w = sender(h);
     result(ret, in_place(|| w.close(code)), unit, ws_err)
