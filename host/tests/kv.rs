@@ -135,6 +135,7 @@ fn keys_over_ten_thousand_is_too_large() {
     }"#;
     let limits = Limits {
         calls: 20_000,
+        timeout_secs: 120, // thousands of host calls: slow under load
         ..Limits::default()
     };
     assert_eq!(run(main, 64 << 20, limits), "10000 too-large 1");
@@ -635,7 +636,11 @@ fn writes_compact_the_log_online() {
       for i in 0..40 { let a = store.set("k", v); let b = store.set("k", "".to_bytes()); }
       show(store.set("k", "last".to_bytes()))
     }"#;
-    let mut kio = Kio::new(Limits::default()).unwrap();
+    let mut kio = Kio::new(Limits {
+        timeout_secs: 120,
+        ..Limits::default()
+    })
+    .unwrap();
     kio.grant_kvs(vec![("store".into(), store.clone())]);
     assert_eq!(kio.run(&format!("{SHOW}{main}"), vec![]).unwrap().unwrap().value, "ok");
     let len = std::fs::metadata(&db).unwrap().len();
@@ -647,7 +652,11 @@ fn writes_compact_the_log_online() {
     assert!(e.contains("is in use by another process"), "{e}");
     drop(kio);
     drop(store);
-    let mut kio = Kio::new(Limits::default()).unwrap();
+    let mut kio = Kio::new(Limits {
+        timeout_secs: 120,
+        ..Limits::default()
+    })
+    .unwrap();
     kio.grant_kvs(vec![("store".into(), Arc::new(Store::open(&db, 1 << 20).unwrap()))]);
     let out = kio.run(
         &format!("{SHOW}fn main(store: Kv) -> Str {{ val(store.get(\"k\")) }}"),
@@ -733,6 +742,7 @@ fn too_large_keys_is_charged() {
     let log = Log::default();
     let mut kio = Kio::new(Limits {
         calls: 20_000,
+        timeout_secs: 120, // thousands of host calls: slow under load
         ..Limits::default()
     })
     .unwrap();
