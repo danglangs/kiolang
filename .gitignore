@@ -17,3 +17,4 @@
 /examples/out/
 /examples/tour/out/*
 !/examples/tour/out/.gitkeep
+.claude/worktrees/
