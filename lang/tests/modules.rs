@@ -81,6 +81,19 @@ fn main(req: Incoming, res: Outgoing, public: Dir) -> Result<(), WebErr> {
 }
 "#;
 
+/// Grants nothing.
+struct NoCaps;
+
+impl Caps for NoCaps {
+    fn has(&self, _: &str, _: &str) -> bool {
+        false
+    }
+
+    fn call(&mut self, _: &str, _: &str, _: Vec<Value>) -> Result<Value, String> {
+        Err("no capabilities".into())
+    }
+}
+
 /// Grants one request and one `Dir` with no files; records what `send` is given.
 struct Stub {
     target: &'static str,
@@ -261,17 +274,67 @@ fn private_items_stay_private() {
 }
 
 #[test]
-fn modules_cannot_reach_each_other_or_the_root() {
-    let root_hint = "a module can only use its own items; pass what it needs as arguments";
+fn modules_use_each_others_public_items() {
+    let json = "pub enum Json { Null, Num(Int) } pub fn null() -> Json { Json::Null }
+                pub fn num(n: Int) -> Json { Json::Num(n) }";
+    let web = "pub struct Reply { body: json::Json }
+               pub fn reply(n: Int) -> Reply { web::Reply { body: json::num(n) } }
+               pub fn code(r: Reply) -> Int {
+                 match r.body { json::Json::Num(n) => n, json::Json::Null => 0 }
+               }
+               fn local() -> Int { web::code(web::reply(1)) }
+               pub fn empty() -> json::Json { json::Json::Null }";
+    let app = "mod web; mod json; fn main() -> Int { web::code(web::reply(7)) }";
+    let files = [("app", app), ("web", web), ("json", json)];
+    let p = check(&files).unwrap_or_else(|d| panic!("{d:?}"));
+    assert_eq!(common::big_stack(move || run(&p, &mut NoCaps).unwrap()), Value::Int(7));
+}
+
+#[test]
+fn modules_may_call_each_other() {
+    let web = "pub fn even(n: Int) -> Bool { if n == 0 { true } else { json::odd(n - 1) } }";
+    let json = "pub fn odd(n: Int) -> Bool { if n == 0 { false } else { web::even(n - 1) } }";
+    let app = "mod web; mod json; fn main() -> Bool { web::even(10) }";
+    let p = check(&[("app", app), ("web", web), ("json", json)]).unwrap_or_else(|d| panic!("{d:?}"));
+    assert_eq!(
+        common::big_stack(move || run(&p, &mut NoCaps).unwrap()),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn report_names_functions_of_both_modules() {
+    let web = "pub fn f(d: Dir) -> Int { json::g(d) }";
+    let json = "pub fn g(d: Dir) -> Int { d.read(\"x\"); 1 }";
+    let app = "mod web; mod json; fn main(d: Dir) -> Int { web::f(d) }";
+    let p = check(&[("app", app), ("web", web), ("json", json)]).unwrap();
+    let lines: Vec<_> = report(&p)
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect();
+    assert_eq!(lines, ["json::g : d read", "main : d read", "web::f : d read"]);
+}
+
+#[test]
+fn a_sibling_module_must_be_declared_and_public() {
+    fails(
+        &[("app", "mod web; fn main() {}"), ("web", "fn f() { db::g(); }")],
+        "unknown module `db`",
+        "declare it with `mod db;` in the root file",
+    );
     fails(
         &[
             ("app", "mod web; mod db; fn main() {}"),
             ("web", "fn f() { db::g(); }"),
-            ("db", "pub fn g() {}"),
+            ("db", "fn g() {}"),
         ],
-        "module `web` cannot use `db::g`",
-        root_hint,
+        "`g` is private to `db`",
+        "mark it `pub fn g` in db.kio",
     );
+}
+
+#[test]
+fn modules_cannot_reach_the_root() {
     let item_hint = "a module cannot use the root's items; define it in this module or pass values as arguments";
     fails(
         &[("app", "mod web; fn r() {} fn main() {}"), ("web", "fn f() { r(); }")],
@@ -288,8 +351,8 @@ fn modules_cannot_reach_each_other_or_the_root() {
     );
     fails(
         &[("app", "mod web; fn main() {}"), ("web", "fn f() { app::g(); }")],
-        "module `web` cannot use `app::g`",
-        root_hint,
+        "unknown module `app`",
+        "declare it with `mod app;` in the root file",
     );
 }
 

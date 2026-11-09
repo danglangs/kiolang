@@ -65,7 +65,7 @@ Everything else is rejected with a message that names the kio alternative, for e
 - **Comments:** `//` only.
 - **Reserved words.** All Rust keywords not used by kio are reserved and cannot be names.
 - **Type names start uppercase.** `struct Point`, `enum Status`. A lowercase name before `::` is a module, as in `web::text`.
-- **Modules.** `mod web;` in the root file loads `web.kio`; its `pub` items are used as `web::f`, `web::T`. Modules are flat: one file each, declared only in the root, and a module cannot use the root's or another module's items.
+- **Modules.** `mod web;` in the root file loads `web.kio`; its `pub` items are used as `web::f`, `web::T`. Modules are flat: one file each, declared only in the root. A module may use another declared module's `pub` items the same way (cycles are fine) but not the root's.
 
 ## Built-ins
 

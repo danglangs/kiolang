@@ -204,18 +204,21 @@ impl Scope<'_> {
         }
     }
 
-    /// The key of `name` in module `m`, as written `m::name`. Only the root may write it.
+    /// The key of `name` in module `m`, as written `m::name`; `m` is a declared module, possibly this one.
     fn member(&self, m: &str, name: &str, span: Span) -> Result<String, Diag> {
-        if !self.module.is_empty() {
-            let msg = format!("module `{}` cannot use `{m}::{name}`", self.module);
-            let hint = "a module can only use its own items; pass what it needs as arguments";
-            return Err(err(span, msg, Some(hint)));
-        }
         if !self.mods.contains(m) {
             let hint = format!("declare it with `mod {m};` in the root file");
             return Err(err(span, format!("unknown module `{m}`"), Some(&hint)));
         }
         Ok(format!("{m}::{name}"))
+    }
+
+    /// `check_public` for a use of `key`; a module may name its own private items as `m::item`.
+    fn public(&self, key: &str, public: bool, kw: &str, span: Span) -> Result<(), Diag> {
+        if module_of(key) == self.module {
+            return Ok(());
+        }
+        check_public(key, public, kw, span)
     }
 }
 
@@ -396,11 +399,11 @@ fn resolve(
             };
             let k = scope.member(m, n, t.span)?;
             if let Some(s) = structs.get(&k) {
-                check_public(&k, s.public, "struct", t.span)?;
+                scope.public(&k, s.public, "struct", t.span)?;
                 return Ok(Ty::Struct(k));
             }
             if let Some(e) = enums.get(&k) {
-                check_public(&k, e.public, "enum", t.span)?;
+                scope.public(&k, e.public, "enum", t.span)?;
                 return Ok(Ty::Enum(k));
             }
             let names = [sorted_names(structs, m), sorted_names(enums, m)].concat();
@@ -1318,7 +1321,7 @@ impl Checker<'_> {
                 ExprKind::StructLit(name, inits) => {
                     let k = self.home.member(m, name, e.span)?;
                     if let Some(s) = self.structs.get(&k) {
-                        check_public(&k, s.public, "struct", e.span)?;
+                        self.home.public(&k, s.public, "struct", e.span)?;
                     }
                     self.struct_lit(e, &k, inits)
                 }
@@ -1516,7 +1519,7 @@ impl Checker<'_> {
     fn module_variant(&mut self, e: &Expr, m: &str, en: &str, v: &str, args: &[Expr]) -> Result<Ty, Diag> {
         let k = self.home.member(m, en, e.span)?;
         if let Some(d) = self.enums.get(&k) {
-            check_public(&k, d.public, "enum", e.span)?;
+            self.home.public(&k, d.public, "enum", e.span)?;
         }
         self.variant_value(e, &k, v, args)
     }
@@ -1613,7 +1616,7 @@ impl Checker<'_> {
                 };
                 let k = self.home.member(m, named, p.span)?;
                 if let Some(d) = self.enums.get(&k) {
-                    check_public(&k, d.public, "enum", p.span)?;
+                    self.home.public(&k, d.public, "enum", p.span)?;
                 }
                 self.enum_pattern(p, st, shape, k, v, names)
             }
@@ -1801,7 +1804,7 @@ impl Checker<'_> {
             return Err(err(callee.span, format!("unknown function `{k}`"), Some(&hint)));
         };
         if module.is_some() {
-            check_public(&k, sig.public, "fn", callee.span)?;
+            self.home.public(&k, sig.public, "fn", callee.span)?;
         }
         if args.len() != sig.params.len() {
             let msg = format!("`{name}` takes {} arguments, found {}", sig.params.len(), args.len());
