@@ -26,7 +26,7 @@ fn idle_listen_rss() {
     let port: u16 = line.trim().rsplit(':').next().unwrap().parse().unwrap();
     std::thread::spawn(move || std::io::copy(&mut stderr, &mut std::io::sink()));
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    s.write_all(b"GET /hello/kio HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n")
+    s.write_all(b"GET /hello/kio HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n")
         .unwrap();
     let mut raw = String::new();
     s.read_to_string(&mut raw).unwrap();

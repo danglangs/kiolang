@@ -180,7 +180,7 @@ fn two_connections_run_concurrently() {
 fn a_request_that_is_not_an_upgrade_is_426() {
     let server = listen("../examples/ws/echo.kio", &[]);
     let mut s = TcpStream::connect(("127.0.0.1", server.1)).unwrap();
-    s.write_all(b"GET / HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n")
+    s.write_all(b"GET / HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n")
         .unwrap();
     let mut raw = String::new();
     s.read_to_string(&mut raw).unwrap();
@@ -410,7 +410,7 @@ fn raw_upgrade(port: u16, extra: &str, trailer: &[u8]) -> (TcpStream, String) {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
     let mut req = format!(
-        "GET / HTTP/1.1\r\nhost: x\r\nconnection: upgrade\r\nupgrade: websocket\r\nsec-websocket-version: 13\r\nsec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\n{extra}\r\n"
+        "GET / HTTP/1.1\r\nhost: localhost\r\nconnection: upgrade\r\nupgrade: websocket\r\nsec-websocket-version: 13\r\nsec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\n{extra}\r\n"
     )
     .into_bytes();
     req.extend(trailer);
@@ -712,12 +712,13 @@ fn the_connection_slot_is_freed_in_each_state() {
     // A 426, then a disconnect.
     drop(free("after close"));
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    s.write_all(b"GET / HTTP/1.1\r\nhost: x\r\n\r\n").unwrap();
+    s.write_all(b"GET / HTTP/1.1\r\nhost: localhost\r\n\r\n").unwrap();
     let _ = s.read(&mut [0u8; 100]);
     drop(s);
     // Gone halfway through the upgrade's headers.
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    s.write_all(b"GET / HTTP/1.1\r\nhost: x\r\nconnection: upg").unwrap();
+    s.write_all(b"GET / HTTP/1.1\r\nhost: localhost\r\nconnection: upg")
+        .unwrap();
     drop(s);
     let mut ws = free("after 426 and half an upgrade");
     // The peer closes but keeps the TCP connection open.
@@ -736,10 +737,15 @@ fn a_browser_origin_must_be_the_servers_host_or_allowed() {
     let status = |port, extra| raw_upgrade(port, extra, &[]).1;
     // No Origin (not a browser), and a page served from the same host, are accepted.
     assert!(status(server.1, "").starts_with("HTTP/1.1 101"));
-    assert!(status(server.1, "origin: http://x\r\n").starts_with("HTTP/1.1 101"));
-    assert!(status(server.1, "origin: https://X\r\n").starts_with("HTTP/1.1 101"));
+    assert!(status(server.1, "origin: http://localhost\r\n").starts_with("HTTP/1.1 101"));
+    assert!(status(server.1, "origin: https://LOCALHOST\r\n").starts_with("HTTP/1.1 101"));
     // A page on any other site is not.
-    for origin in ["http://evil.example", "null", "http://x.evil.example", "http://x:81"] {
+    for origin in [
+        "http://evil.example",
+        "null",
+        "http://localhost.evil.example",
+        "http://localhost:81",
+    ] {
         let (mut s, head) = raw_upgrade(server.1, &format!("origin: {origin}\r\n"), &[]);
         assert!(head.starts_with("HTTP/1.1 403"), "{origin}: {head}");
         let mut body = vec![0u8; 200];
@@ -751,6 +757,31 @@ fn a_browser_origin_must_be_the_servers_host_or_allowed() {
     let server = listen("../examples/ws/echo.kio", &["--ws-origin", "https://app.example"]);
     assert!(status(server.1, "origin: https://app.example\r\n").starts_with("HTTP/1.1 101"));
     assert!(status(server.1, "origin: http://app.example\r\n").starts_with("HTTP/1.1 403"));
+}
+
+/// H11: a WebSocket upgrade with a foreign `Host` is 421 before any sandbox runs; `--host` allows it.
+#[test]
+fn a_foreign_host_cannot_upgrade() {
+    let upgrade = |port, host: &str| {
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let req = format!("GET / HTTP/1.1\r\nhost: {host}\r\nconnection: upgrade\r\nupgrade: websocket\r\nsec-websocket-version: 13\r\nsec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n");
+        s.write_all(req.as_bytes()).unwrap();
+        let mut buf = vec![0u8; 400];
+        let n = s.read(&mut buf).unwrap();
+        String::from_utf8_lossy(&buf[..n]).into_owned()
+    };
+    let server = listen("../examples/ws/echo.kio", &[]);
+    for host in ["localhost", "127.0.0.1:1", "[::1]:2", "LocalHost"] {
+        assert!(upgrade(server.1, host).starts_with("HTTP/1.1 101"), "{host}");
+    }
+    let head = upgrade(server.1, "evil.example");
+    assert!(head.starts_with("HTTP/1.1 421"), "{head}");
+    assert!(head.contains("`--host <name>`"), "{head}");
+    drop(server);
+    let server = listen("../examples/ws/echo.kio", &["--host", "evil.example"]);
+    assert!(upgrade(server.1, "evil.example:80").starts_with("HTTP/1.1 101"));
+    assert!(upgrade(server.1, "other.example").starts_with("HTTP/1.1 421"));
 }
 
 /// Release only: `cargo test --release -p kio --test ws -- --ignored --nocapture`.

@@ -16,7 +16,7 @@ fn cli() -> i32 {
         ["mcp"] => return mcp::serve(),
         ["run", path, ref flags @ ..] => return run(path, flags),
         _ => eprintln!(
-            "kio: a capability-typed language; code names what it needs, the operator grants what that is.\n\nusage: kio check <prog.kio>\n       kio mcp\n       kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--kv name=path|:memory:]... [--kv-mb mb] [--audit log] [--listen addr] [--ws-origin origin]..."
+            "kio: a capability-typed language; code names what it needs, the operator grants what that is.\n\nusage: kio check <prog.kio>\n       kio mcp\n       kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--kv name=path|:memory:]... [--kv-mb mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]..."
         ),
     }
     2
@@ -77,6 +77,7 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     let mut audit = None;
     let mut listen = None;
     let mut ws_origins = Vec::new();
+    let mut hosts: Vec<String> = Vec::new();
     let mut dir_paths = Vec::new();
     let mut kv_specs: Vec<(String, String)> = Vec::new();
     let mut kv_mb = 64;
@@ -139,12 +140,16 @@ fn run(path: &str, flags: &[&str]) -> i32 {
                 ws_origins.push(origin.to_string());
                 continue;
             }
+            ["--host", name] => {
+                hosts.push(name.to_ascii_lowercase());
+                continue;
+            }
             ["--dir", spec] => match spec.split_once('=') {
                 Some(nd) => nd,
                 None => return fail(format!("--dir {spec}: expected name=path")),
             },
             _ => return fail(
-                "usage: kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--kv name=path|:memory:]... [--kv-mb mb] [--audit log] [--listen addr] [--ws-origin origin]..."
+                "usage: kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--kv name=path|:memory:]... [--kv-mb mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]..."
                     .into(),
             ),
         };
@@ -185,6 +190,9 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     if http && (takes("Incoming"), takes("Outgoing")) != (1, 1) {
         return fail("an HTTP server's main takes one Incoming and one Outgoing\n  hint: write `fn main(request: Incoming, response: Outgoing, ..)`".into());
     }
+    if listen.is_none() && !hosts.is_empty() {
+        return fail("--host without --listen\n  hint: --host names a Host the server answers to; add `--listen 127.0.0.1:8080` or drop it".into());
+    }
     match (listen, http, ws) {
         (None, true, _) => return fail("main takes Incoming/Outgoing but there is no address\n  hint: add `--listen 127.0.0.1:8080`".into()),
         (None, _, true) => return fail("main takes WsMessage/WsSend but there is no address\n  hint: add `--listen 127.0.0.1:8080`".into()),
@@ -214,7 +222,7 @@ fn run(path: &str, flags: &[&str]) -> i32 {
         Err(e) => return fail(e),
     };
     if let Some(addr) = listen {
-        return serve(files, dirs, kvs, addr, limits, ws_origins);
+        return serve(files, dirs, kvs, addr, limits, ws_origins, hosts);
     }
     let mut kio = match Kio::new(limits) {
         Ok(k) => k,
@@ -260,6 +268,7 @@ fn serve(
     addr: std::net::SocketAddr,
     limits: Limits,
     ws_origins: Vec<String>,
+    hosts: Vec<String>,
 ) -> i32 {
     let mut server = match Server::new(files.clone(), limits) {
         Err(e) => return fail(format!("{e:#}")),
@@ -267,7 +276,7 @@ fn serve(
         Ok(Ok(s)) => s,
     };
     server.grant_kvs(kvs);
-    match listen::serve(server, dirs, addr, ws_origins) {
+    match listen::serve(server, dirs, addr, ws_origins, hosts) {
         Ok(()) => 0,
         Err(e) => fail(e),
     }

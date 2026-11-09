@@ -76,6 +76,7 @@ pub struct ListenLimits {
     pub lifetime: Duration,
     pub ws_idle: Duration,
     pub ws_origins: Vec<String>,
+    pub hosts: Vec<String>,
 }
 
 impl Default for ListenLimits {
@@ -90,6 +91,7 @@ impl Default for ListenLimits {
             lifetime: LIFETIME,
             ws_idle: WS_IDLE,
             ws_origins: Vec::new(),
+            hosts: Vec::new(),
         }
     }
 }
@@ -102,20 +104,26 @@ struct Ctx {
     body_deadline: Duration,
     ws_idle: Duration,
     ws_origins: Vec<String>,
+    /// Whether `Host` is checked (loopback bind or `--host`), and the extra names it may be.
+    check_host: bool,
+    hosts: Vec<String>,
     /// The next WebSocket connection id.
     next_conn: AtomicU64,
 }
 
 /// Serve until Ctrl-C. `dirs` are opened once; each request gets clones. A WebSocket upgrade
-/// from a browser page is accepted from the server's own host or one of `ws_origins`.
+/// from a browser page is accepted from the server's own host or one of `ws_origins`. On a
+/// loopback `addr`, or when `hosts` is given, a request's `Host` must be a local name or in `hosts`.
 pub fn serve(
     server: Server,
     dirs: Vec<(String, Dir)>,
     addr: SocketAddr,
     ws_origins: Vec<String>,
+    hosts: Vec<String>,
 ) -> Result<(), String> {
     let limits = ListenLimits {
         ws_origins,
+        hosts,
         ..Default::default()
     };
     serve_with(server, dirs, addr, limits, |_| {})
@@ -154,6 +162,8 @@ pub fn serve_with(
             body_deadline: limits.body_deadline,
             ws_idle: limits.ws_idle,
             ws_origins: limits.ws_origins,
+            check_host: local.ip().is_loopback() || !limits.hosts.is_empty(),
+            hosts: limits.hosts,
             next_conn: AtomicU64::new(1),
         });
         let open = Arc::new(Semaphore::new(limits.connections));
@@ -216,6 +226,12 @@ async fn handle(
     slot: Arc<OwnedSemaphorePermit>,
     req: hyper::Request<Incoming>,
 ) -> Result<hyper::Response<Full<Bytes>>, Infallible> {
+    if ctx.check_host && !host_allowed(req.headers(), &ctx.hosts) {
+        let body = "this Host is not served here: the server allows it with `--host <name>`\n";
+        let mut r = hyper::Response::new(Full::new(Bytes::from(body)));
+        *r.status_mut() = StatusCode::MISDIRECTED_REQUEST;
+        return Ok(r);
+    }
     if ctx.server.ws_params().is_some() {
         return Ok(upgrade(ctx, slot, req));
     }
@@ -391,6 +407,41 @@ fn upgrade(
     h.insert("connection", "upgrade".parse().unwrap());
     h.insert("sec-websocket-accept", accept.parse().unwrap());
     r
+}
+
+/// Whether a request's `Host` names this server, against DNS rebinding: a page on `evil.example`
+/// whose name resolves to a local address sends `Host: evil.example`. Allowed are `localhost`,
+/// `127.0.0.1`, `[::1]` (any port, any case) and the names in `extra`, which are lowercase. A
+/// missing, repeated or non-UTF-8 `Host` is refused.
+fn host_allowed(headers: &hyper::HeaderMap, extra: &[String]) -> bool {
+    let mut hosts = headers.get_all("host").iter();
+    let host = match (hosts.next(), hosts.next()) {
+        (Some(h), None) => h,
+        _ => return false,
+    };
+    let Ok(host) = host.to_str() else {
+        return false;
+    };
+    let name = if host.starts_with('[') {
+        host.split_once(']').and_then(|(n, rest)| match rest {
+            "" => Some(&host[..=n.len()]),
+            _ => rest.strip_prefix(':').filter(|p| port(p)).map(|_| &host[..=n.len()]),
+        })
+    } else {
+        match host.split_once(':') {
+            None => Some(host),
+            Some((n, p)) => port(p).then_some(n),
+        }
+    };
+    let Some(name) = name else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    ["localhost", "127.0.0.1", "[::1]"].contains(&name.as_str()) || extra.contains(&name)
+}
+
+fn port(p: &str) -> bool {
+    !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Whether a WebSocket upgrade may proceed, against cross-site hijacking: a browser always sends
@@ -578,4 +629,52 @@ where
         sink.flush().await.map_err(|_| ())
     };
     matches!(tokio::time::timeout(WS_WRITE, send).await, Ok(Ok(())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::host_allowed;
+
+    fn allowed(host: Option<&str>, extra: &[&str]) -> bool {
+        let mut h = hyper::HeaderMap::new();
+        if let Some(host) = host {
+            h.insert("host", host.parse().unwrap());
+        }
+        let extra: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
+        host_allowed(&h, &extra)
+    }
+
+    #[test]
+    fn host_forms() {
+        for ok in [
+            "localhost",
+            "LocalHost:8080",
+            "127.0.0.1",
+            "127.0.0.1:80",
+            "[::1]",
+            "[::1]:3000",
+            "[::1]:0",
+        ] {
+            assert!(allowed(Some(ok), &[]), "{ok}");
+        }
+        for bad in [
+            "evil.example",
+            "evil.example:80",
+            "localhost.evil.example",
+            "localhost:",
+            "localhost:x",
+            "127.0.0.2",
+            "[::2]",
+            "[::1]x",
+            "::1",
+            "",
+            "localhost:80:80",
+        ] {
+            assert!(!allowed(Some(bad), &[]), "{bad}");
+        }
+        assert!(!allowed(None, &[]));
+        assert!(allowed(Some("App.Example:9"), &["app.example"]));
+        assert!(allowed(Some("localhost"), &["app.example"]));
+        assert!(!allowed(Some("evil.example"), &["app.example"]));
+    }
 }

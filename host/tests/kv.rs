@@ -450,7 +450,7 @@ fn listen(app: &str, extra: &[&str]) -> Server {
 /// GET `/` on a fresh connection: status and body.
 fn get(port: u16) -> (u16, String) {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    s.write_all(b"GET / HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n")
+    s.write_all(b"GET / HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n")
         .unwrap();
     let mut raw = String::new();
     s.read_to_string(&mut raw).unwrap();

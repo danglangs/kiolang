@@ -21,10 +21,15 @@ fn start(public: &std::path::Path) -> Kio {
 }
 
 fn start_app(app: &str, public: &std::path::Path) -> Kio {
+    start_with(app, public, &[])
+}
+
+fn start_with(app: &str, public: &std::path::Path, extra: &[&str]) -> Kio {
     let mut child = Command::new(env!("CARGO_BIN_EXE_kio"))
         .args(["run", app, "--dir"])
         .arg(format!("public={}", public.display()))
         .args(["--listen", "127.0.0.1:0"])
+        .args(extra)
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
@@ -44,7 +49,7 @@ fn start_app(app: &str, public: &std::path::Path) -> Kio {
 fn send(port: u16, method: &str, target: &str, body: &[u8]) -> (u16, Vec<u8>) {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     let head = format!(
-        "{method} {target} HTTP/1.1\r\nhost: x\r\nconnection: close\r\ncontent-length: {}\r\n\r\n",
+        "{method} {target} HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\ncontent-length: {}\r\n\r\n",
         body.len()
     );
     s.write_all(head.as_bytes()).unwrap();
@@ -204,7 +209,7 @@ fn stalled_headers_get_no_response_and_close() {
         },
     );
     let mut s = limits::connect(port);
-    s.write_all(b"GET / HTTP/1.1\r\nhost: x\r\n").unwrap();
+    s.write_all(b"GET / HTTP/1.1\r\nhost: localhost\r\n").unwrap();
     assert_eq!(limits::read_all(s), "");
 }
 
@@ -219,7 +224,7 @@ fn slow_body_is_408() {
         },
     );
     let mut s = limits::connect(port);
-    s.write_all(b"POST / HTTP/1.1\r\nhost: x\r\ncontent-length: 10\r\n\r\nabc")
+    s.write_all(b"POST / HTTP/1.1\r\nhost: localhost\r\ncontent-length: 10\r\n\r\nabc")
         .unwrap();
     assert!(limits::read_all(s).starts_with("HTTP/1.1 408"));
 }
@@ -235,7 +240,7 @@ fn idle_keep_alive_connection_is_closed() {
         },
     );
     let mut s = limits::connect(port);
-    s.write_all(b"GET / HTTP/1.1\r\nhost: x\r\n\r\n").unwrap();
+    s.write_all(b"GET / HTTP/1.1\r\nhost: localhost\r\n\r\n").unwrap();
     // One answer, then the server closes the idle connection (read_all returns at EOF).
     let got = limits::read_all(s);
     assert!(got.starts_with("HTTP/1.1 200") && got.ends_with("ok"));
@@ -254,7 +259,7 @@ fn connections_past_the_cap_are_dropped() {
     let _held = limits::connect(port);
     // The held connection takes the only slot; the next is closed without an answer.
     let mut s = limits::connect(port);
-    let _ = s.write_all(b"GET / HTTP/1.1\r\nhost: x\r\n\r\n");
+    let _ = s.write_all(b"GET / HTTP/1.1\r\nhost: localhost\r\n\r\n");
     assert_eq!(limits::read_all(s), "");
 }
 
@@ -295,7 +300,7 @@ fn connection_is_closed_at_the_lifetime_cap() {
     );
     // Never read the answer: the server must still close the connection at the cap.
     let mut s = limits::connect(port);
-    s.write_all(b"GET / HTTP/1.1\r\nhost: x\r\n\r\n").unwrap();
+    s.write_all(b"GET / HTTP/1.1\r\nhost: localhost\r\n\r\n").unwrap();
     let start = std::time::Instant::now();
     std::thread::sleep(limits::ms(800));
     assert!(limits::read_all(s).starts_with("HTTP/1.1 200"));
@@ -392,4 +397,120 @@ fn wrong_http_grant_counts_are_refused() {
             "{err}"
         );
     }
+}
+
+/// The status and body of `GET /` with the given `Host` header lines.
+fn get_with_host(port: u16, host_lines: &str) -> (u16, String) {
+    get_at("127.0.0.1".parse().unwrap(), port, host_lines)
+}
+
+fn get_at(ip: std::net::IpAddr, port: u16, host_lines: &str) -> (u16, String) {
+    let mut s = TcpStream::connect((ip, port)).unwrap();
+    s.write_all(format!("GET /hello/kio HTTP/1.1\r\n{host_lines}connection: close\r\n\r\n").as_bytes())
+        .unwrap();
+    let mut raw = Vec::new();
+    let _ = s.read_to_end(&mut raw);
+    let raw = String::from_utf8_lossy(&raw).into_owned();
+    let status = raw.split(' ').nth(1).unwrap().parse().unwrap();
+    (status, raw.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
+}
+
+/// H11: on a loopback bind only local names, and names given with `--host`, are served.
+#[test]
+fn host_header_is_checked_on_a_loopback_bind() {
+    let public = tempfile::tempdir().unwrap();
+    let kio = start(public.path());
+    for host in [
+        "localhost",
+        "LOCALHOST",
+        "localhost:8080",
+        "127.0.0.1",
+        "127.0.0.1:9",
+        "[::1]",
+        "[::1]:80",
+    ] {
+        assert_eq!(get_with_host(kio.port, &format!("host: {host}\r\n")).0, 200, "{host}");
+    }
+    for host_lines in [
+        "host: evil.example\r\n",
+        "host: evil.example:8080\r\n",
+        "host: localhost.evil.example\r\n",
+        "host: localhost\r\nhost: localhost\r\n",
+        "",
+    ] {
+        let (status, body) = get_with_host(kio.port, host_lines);
+        // hyper itself may answer 400 to a missing Host; otherwise the check answers 421.
+        if host_lines.is_empty() {
+            assert!(status == 400 || status == 421, "{status}");
+        } else {
+            assert_eq!(status, 421, "{host_lines}");
+            assert!(body.contains("`--host <name>`"), "{body}");
+        }
+    }
+    drop(kio);
+    let kio = start_with("../examples/serve/app.kio", public.path(), &["--host", "App.Example"]);
+    assert_eq!(get_with_host(kio.port, "host: app.example:81\r\n").0, 200);
+    assert_eq!(get_with_host(kio.port, "host: APP.EXAMPLE\r\n").0, 200);
+    assert_eq!(get_with_host(kio.port, "host: localhost\r\n").0, 200);
+    assert_eq!(get_with_host(kio.port, "host: evil.example\r\n").0, 421);
+}
+
+/// H11: a non-loopback bind serves any `Host` unless `--host` is given.
+#[test]
+fn host_header_is_unchecked_on_a_non_loopback_bind() {
+    use kio_host::{Limits, Server};
+    let ip = std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|s| s.connect("192.0.2.1:9").and_then(|_| s.local_addr()))
+        .map(|a| a.ip());
+    // No routable address (offline sandbox): fall back to the wildcard, also non-loopback.
+    let ip = ip
+        .ok()
+        .filter(|ip| !ip.is_loopback())
+        .unwrap_or("0.0.0.0".parse().unwrap());
+    // Connect to the bound address; the wildcard is reached through loopback.
+    let ip = if ip.is_unspecified() {
+        "127.0.0.1".parse().unwrap()
+    } else {
+        ip
+    };
+    let bind = if ip.is_loopback() {
+        "0.0.0.0".parse().unwrap()
+    } else {
+        ip
+    };
+    let run = |hosts: Vec<String>| {
+        let server = Server::new(
+            vec![("app.kio".into(), r#"fn main(req: Incoming, res: Outgoing) -> Result<(), WebErr> { res.send(200, [], [], "ok".to_bytes()) }"#.into())],
+            Limits::web(),
+        )
+        .unwrap()
+        .unwrap();
+        let limits = ListenLimits {
+            hosts,
+            ..Default::default()
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ =
+                kio_host::listen::serve_with(server, vec![], (bind, 0).into(), limits, |a| tx.send(a.port()).unwrap());
+        });
+        rx.recv().unwrap()
+    };
+    let port = run(vec![]);
+    assert_eq!(get_at(ip, port, "host: evil.example\r\n").0, 200);
+    let port = run(vec!["app.example".into()]);
+    assert_eq!(get_at(ip, port, "host: evil.example\r\n").0, 421);
+    assert_eq!(get_at(ip, port, "host: app.example\r\n").0, 200);
+}
+
+/// H11: `--host` without `--listen` is a usage error with a hint.
+#[test]
+fn host_without_listen_is_refused() {
+    let out = Command::new(env!("CARGO_BIN_EXE_kio"))
+        .args(["run", "../examples/serve/app.kio", "--host", "app.example"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--host without --listen\n  hint: "), "{err}");
 }
