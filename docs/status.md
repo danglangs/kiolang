@@ -27,10 +27,14 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 | C7a | C7 review follow-ups: hidden locals reused (17,000 calls in one function compile), more than 999 parameters a checker error, `--memory` below the initial memory reported as out of memory, a high-bits differential test over runtime slots, `Statics::desc` hashed (4,000 structs 263 to 226 ms) |
 | L7a | generic functions `fn f<T>(..)`: inferred from arguments, then the expected type, or `f::<Int>`; `T` opaque and never a capability; monomorphized in lowering (`first<Int>`), so compiled with no codegen change: harness 363 ran both ways, 0 mismatches. Needs its adversarial review (rule 1) |
 
+| C8a | bench/ (`bench/run.sh`): 9 benchmarks and HTTP against Rust, Python and the interpreter, with profiles. Compiled-only code is 1.1-2.3x Rust; runtime-heavy code 3-271x (quadratic `s = s + x`, zero-filled buffers, allocation, refcount and runtime calls, fuel); ranked C8b list in roadmap.md |
+
 ## Next
 
 1. C8a (measure against Rust and Python), then C8b (optimize).
 2. L7a adversarial review; L7b (generic structs and enums), L7c (bounds).
+1. C7a follow-ups; C8b (optimize from C8a's ranked list: in-place `Str` append first).
+2. L7 generics (owner-approved), interpreter first, then its compiler task.
 
 ## Waiting on the maintainer
 
@@ -38,11 +42,11 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 
 - open_questions #34: whether to add constants (proposed: check-time literals only). Not decided; nothing depends on it.
 
-## Speed (2026-11-06, release, run time; details in [roadmap.md](roadmap.md))
+## Speed (C8a, 2026-11-09, release, run time; all nine in [roadmap.md](roadmap.md))
 
-| | fib(35) | 30 M loop |
-|---|---|---|
-| Rust | 24 ms | 20 ms |
-| kio compiled (plus ~10 ms compile) | 117 ms | 46 ms |
-| Python 3.11 | 890 ms | 1.76 s |
-| kio interpreter (the test oracle since C5) | 3.8 s | 5.9 s |
+| | fib(35) | 30 M loop | tree | JSON 1 MB | 100 k concatenations |
+|---|---|---|---|---|---|
+| Rust | 23 ms | 97 ms | 36 ms | 8.2 ms | 5.5 ms |
+| kio compiled (plus 20-30 ms compile, cached) | 54 ms | 110 ms | 450 ms | 567 ms | 1.49 s |
+| Python 3.13 | 712 ms | 944 ms | 3.39 s | 19 ms | 12 ms |
+| kio interpreter (the test oracle) | 1.62 s | 1.37 s | 1.07 s | 848 ms | 1.60 s |

@@ -1,0 +1,4 @@
+// Startup alone: check, load and run an empty program.
+fn main() -> Int {
+    0
+}

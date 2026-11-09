@@ -1,0 +1,35 @@
+// A tree of 2^20 leaves built, then folded into a struct.
+enum Tree { Leaf(Int), Node(List<Tree>) }
+
+struct Stats { sum: Int, leaves: Int, depth: Int }
+
+fn build(d: Int, v: Int) -> Tree {
+    if d == 0 {
+        Tree::Leaf(v % 1000)
+    } else {
+        Tree::Node([build(d - 1, v * 2), build(d - 1, v * 2 + 1)])
+    }
+}
+
+fn fold(t: Tree) -> Stats {
+    match t {
+        Tree::Leaf(v) => Stats { sum: v, leaves: 1, depth: 0 },
+        Tree::Node(kids) => {
+            let mut s = Stats { sum: 0, leaves: 0, depth: 0 };
+            for k in kids {
+                let c = fold(k);
+                s.sum += c.sum;
+                s.leaves += c.leaves;
+                if c.depth + 1 > s.depth {
+                    s.depth = c.depth + 1;
+                }
+            }
+            s
+        }
+    }
+}
+
+fn main() -> Int {
+    let s = fold(build(20, 1));
+    s.sum * 1000 + s.leaves + s.depth
+}

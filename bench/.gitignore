@@ -1,0 +1,4 @@
+/target/
+/build/
+/data/
+__pycache__/

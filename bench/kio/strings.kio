@@ -1,0 +1,8 @@
+// 100 k concatenations and `to_str`.
+fn main() -> Int {
+    let mut s = "";
+    for i in 0..100000 {
+        s = s + i.to_str() + ",";
+    }
+    s.len()
+}

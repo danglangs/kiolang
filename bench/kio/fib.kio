@@ -1,0 +1,8 @@
+// fib(35) by naive recursion: calls.
+fn fib(n: Int) -> Int {
+    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+}
+
+fn main() -> Int {
+    fib(35)
+}

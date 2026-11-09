@@ -1,0 +1,13 @@
+# The native interpreter (the compiler's test oracle, not shipped) as a command for benchmarks.
+# Outside the workspace: `cargo build --release --manifest-path bench/interp/Cargo.toml`.
+[package]
+name = "kio-interp"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+lang = { path = "../../lang" }
+kio = { path = "../../host", features = ["test-hooks"] }

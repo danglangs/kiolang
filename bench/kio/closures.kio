@@ -1,0 +1,14 @@
+// `map` and `filter` with closures over 1 M elements.
+fn main() -> Int {
+    let mut xs: List<Int> = [];
+    for i in 0..1000000 {
+        xs.push(i);
+    }
+    let k = 3;
+    let ys = xs.map(|x| x * 2).filter(|x| x % k == 0);
+    let mut s = 0;
+    for y in ys {
+        s += y;
+    }
+    s + ys.len()
+}

@@ -8,7 +8,7 @@ Most languages today are not AI-safe: any line can read files, open sockets or s
 
 kio is a fresh language built around that idea, using Rust's ecosystem for speed and tooling. The goal is a general-purpose systems language: near-native speed, no garbage collector, memory and capability safe.
 
-**Status:** v0 works end to end: checking, the authority report, a Wasm sandbox with enforced limits, files, HTTP and serving. `kio run` compiles every program to Wasm and native code (within about 2-5x of Rust on compute, 8-38x faster than Python), checked against the interpreter on every test program; function values (`fn` types, closures) are not compiled yet ([docs/roadmap.md](docs/roadmap.md)). Where work stands: [docs/status.md](docs/status.md).
+**Status:** v0 works end to end: checking, the authority report, a Wasm sandbox with enforced limits, files, HTTP and serving. `kio run` compiles every program to Wasm and native code, checked against the interpreter on every test program: within 1.1-3x of Rust on integer, float and call-heavy code, but 10-270x slower where the runtime allocates and copies (string building, maps, trees, JSON); optimizing that is next ([docs/roadmap.md](docs/roadmap.md), [bench/](bench/README.md)). Where work stands: [docs/status.md](docs/status.md).
 
 ## Quickstart
 
@@ -185,6 +185,7 @@ v0 has no globals, reflection or `unsafe`. Capabilities are parameters only. See
 - [docs/web-support-todo.md](docs/web-support-todo.md): kio-web, a web framework in kio, and the language features it drives.
 - [docs/compiler-todo.md](docs/compiler-todo.md): compiling kio to Wasm, task by task, with the interpreter as the reference.
 - [docs/roadmap.md](docs/roadmap.md): speed today against native, the path to near-native, and what real apps need that kio lacks.
+- [bench/](bench/README.md): the benchmarks behind those numbers, against Rust and Python; `bench/run.sh` reruns them.
 - [docs/open_questions.md](docs/open_questions.md): decisions taken without full review, and how to undo each.
 - [caps.wit](caps.wit): the interface. The only hand-written source of truth for what crosses the sandbox wall.
 

@@ -1,0 +1,27 @@
+// Mandelbrot, 400x400, at most 100 iterations per point.
+fn main() -> Int {
+    let n = 400;
+    let max = 100;
+    let mut inside = 0;
+    let mut iters = 0;
+    for py in 0..n {
+        for px in 0..n {
+            let cx = -2.0 + 2.5 * px.to_float() / n.to_float();
+            let cy = -1.25 + 2.5 * py.to_float() / n.to_float();
+            let mut x = 0.0;
+            let mut y = 0.0;
+            let mut i = 0;
+            while i < max && x * x + y * y <= 4.0 {
+                let t = x * x - y * y + cx;
+                y = 2.0 * x * y + cy;
+                x = t;
+                i += 1;
+            }
+            iters += i;
+            if i == max {
+                inside += 1;
+            }
+        }
+    }
+    inside * 100000000 + iters
+}
