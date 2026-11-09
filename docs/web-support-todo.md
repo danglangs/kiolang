@@ -254,6 +254,24 @@ Each changes `caps.wit` or the language. Recommendation first, then the alternat
   Result: RSS 100 MB to 53 MB (footprint dirty 87 to 43 MB), 11 MB originally: the startup compiles freed ~90 MB that macOS malloc keeps resident; now single-threaded and the wizer run uses an unoptimized engine; startup 0.18 s to 0.61 s. `host/tests/idle_rss.rs` prints it.
   Interim: the compiler (docs/codegen.md) drops wizer and the second compile, the cause; re-measure idle RSS and startup at C5.
 
+- [ ] **WS1. WebSockets, a fresh sandbox per message.** Owner approved 2026-11-08 (option 1 below; no broadcast in v1). After K1. caps.wit:
+  ```wit
+  interface ws {
+    resource ws-message {
+      kind: func() -> string;     // "open", "text", "binary", "close"
+      conn: func() -> u64;        // connection id, unique per server run
+      data: func() -> list<u8>;   // empty for open and close
+    }
+    resource ws-send {
+      text:   func(s: string) -> result<_, ws-err>;
+      binary: func(b: list<u8>) -> result<_, ws-err>;
+      close:  func(code: u16) -> result<_, ws-err>;
+    }
+    variant ws-err { closed, too-large, invalid }
+  }
+  ```
+  A program whose `main` takes a `WsMessage` serves WebSockets under `--listen`: every request must be an upgrade (else 426); each event on a connection runs `main(msg, conn, ..)` in a fresh sandbox, one at a time per connection, in order; state between events goes through `Kv`. Sends are buffered and written after the sandbox ends (as responses are), so a slow client never holds an instance. Limits: message 1 MB (larger closes with 1009), 64 KB of queued events per connection, idle 5 min, the W8 connection cap; per-event limits as per request. `--audit` and `--http` stay refused with `--listen`. A new host dependency for the protocol (tungstenite, through hyper's upgrade). Pinned in detail before handoff.
+
 ## Later, driven by kio-web
 
 - **Function values.** Route tables and middleware as wrappers (`with_auth(handler)`). Today middleware is a call at the top of `handle`; timeouts, body limits and logging are host concerns.
