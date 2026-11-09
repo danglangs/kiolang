@@ -6,7 +6,7 @@
 |---|---|---|---|
 | Static: checker and report | What can this program touch? | `lang` | Done: `main : input read, out create` |
 | Enforced: host and limits | Can it touch anything else? | host, Wasmtime | Done: G1 to G5, fuel and every quota |
-| Recorded: audit log | What did it touch, this run? | host | Done: `kio run --audit log.jsonl` |
+| Recorded: audit log | What did it touch, this run? | host | Done: `kio run --audit log.jsonl`; under `--listen`, one log with each line's request number |
 
 Each layer holds without the one above it. The host enforces every guarantee even if the checker is wrong; the log records every call even if the program is hostile, because the host writes it. The log also checks the checker: every logged call must appear in the report, so a call the report did not predict is flagged as a checker bug.
 
@@ -88,7 +88,9 @@ kio run prog.kio --dir input=/srv/jobs/42/in --dir out=/srv/jobs/42/out
 
 **Http.** A grant names host and methods. The host checks the allowlist on the first request and on every redirect hop, refuses IP-literal hosts unless explicitly granted, and pins DNS resolution for the run. Response bodies are capped.
 
-**Kv.** `--kv name=:memory:` or a file: one store per grant, shared by every request; mutations go to an append-only log the host owns and locks, compacted when it grows ([open_questions](open_questions.md) #41-46).
+**Kv.** `--kv name=:memory:` or a file: one store per grant, shared by every request; mutations go to an append-only log the host owns and locks, compacted when it grows ([open_questions](open_questions.md) #41-46). `--kv name=path:ro` is a reader: refused at startup to a program whose report shows a write on it, and any write that reaches the host stops the run. It takes no lock; before each `get` and `keys` it applies the whole, checksummed records the writer appended since, and replays the file from the start when the path names a new inode (a compaction's rename) or the file shrank (#119-122).
+
+**Audit under `--listen`.** One log per server: the header (grants with their kinds, limits) once at startup, then each request's call lines and trailer, every line starting with `"req":N` (numbered as runs start) and, for a WebSocket event, `"conn":N`. Each line is one write under a lock, so concurrent requests never interleave mid-line (#123).
 
 **Serving.** `--listen` binds `Incoming`/`Outgoing` (HTTP) or `WsMessage`/`WsSend` (WebSockets) to `main`'s parameters by type, whatever their names. On a loopback bind a request's `Host` must be `localhost`, `127.0.0.1`, `[::1]` or a `--host` name (DNS rebinding); a WebSocket upgrade from a browser needs a same-host `Origin` or `--ws-origin`. The upgrade request's target and headers are kept for the connection's life and read by every event through `WsMessage.target`/`header` (WS1b).
 
@@ -119,7 +121,7 @@ The host never relies on the checker for safety. The handle table and host funct
 |---|---|---|
 | One run or request | guest memory | `let mut`, `List`, `Map`: the language |
 | Across requests, or across messages on one connection | host memory | `Kv` granted `--kv name=:memory:`: one map per grant, shared by every request (K1) |
-| Across restarts | a file, a directory or another service | `Kv` granted `--kv name=path` (an append-only log the host owns and locks), `Dir` (flat files), or a network capability |
+| Across restarts | a file, a directory or another service | `Kv` granted `--kv name=path` (an append-only log the host owns and locks; other processes may read it with `path:ro`), `Dir` (flat files), or a network capability |
 
 Only the first is in the language. Every other tier is a capability: named in `main`, granted by the operator, enforced and logged by the host, like any other I/O. A fresh sandbox per request is what makes the second tier necessary; other languages keep it in process globals, which kio does not have.
 

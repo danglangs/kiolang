@@ -9,9 +9,9 @@
 use crate::bindings::{Compiled as World, CompiledImports, Grant};
 use crate::ws::{WsEvent, WsFrame};
 use crate::{
-    config, end_audit, grants, limit_message, main_calls, named, new_store, on_run_stack, push_grants, set_stack,
-    single, spawn_ticker, start_audit, web_grants, ws_grants, Bound, Diag, DirPaths, Handles, KvGrants, Limits, Origin,
-    Outcome, Report, Request, Response, RunResult, State, Stopped,
+    audit_header, config, end_audit, grants, limit_message, main_calls, named, new_store, on_run_stack, push_grants,
+    set_stack, single, spawn_ticker, start_audit, web_grants, write_line, ws_grants, Audit, Bound, Diag, DirPaths,
+    Handles, KvGrants, Limits, Origin, Outcome, Report, Request, Response, RunResult, SharedLog, State, Stopped,
 };
 use cap_std::fs::Dir as RealDir;
 use codegen::Site;
@@ -19,8 +19,8 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
-use std::sync::{Arc, PoisonError};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+use std::sync::{Arc, Mutex, PoisonError};
 use wasmtime::component::{Component, HasSelf, InstancePre, Linker, Resource};
 use wasmtime::{Engine, InstanceAllocationStrategy, PoolingAllocationConfig, Result, Store};
 
@@ -495,6 +495,9 @@ pub struct Server {
     ws: Option<(String, String)>,
     /// `main`'s `Incoming` and `Outgoing` parameter names, for an HTTP server.
     http: (String, String),
+    /// The audit log every request writes to, and how many requests have been numbered for it.
+    audit: Option<SharedLog>,
+    requests: AtomicU64,
 }
 
 /// Instances the pool holds at once; one more fails `handle` until another request ends.
@@ -541,7 +544,28 @@ impl Server {
             kvs: vec![],
             ws,
             http,
+            audit: None,
+            requests: AtomicU64::new(0),
         }))
+    }
+
+    /// Write one audit log (H8) for the server to `out`: the header now, then each request's calls
+    /// and trailer, every line starting with the request's number (`"req":N`, from 1) and, for a
+    /// WebSocket event, its connection (`"conn":N`). Grant the `Kv` stores first: the header lists
+    /// them. `dir_paths` gives each `Dir` grant's path.
+    pub fn audit(&mut self, out: impl Write + Send + 'static, dir_paths: DirPaths) -> std::io::Result<()> {
+        let mut grants: Vec<(String, &str, Option<String>)> = Vec::new();
+        grants.extend(dir_paths.into_iter().map(|(n, p)| (n, "Dir", Some(p))));
+        let handles = match &self.ws {
+            Some((m, w)) => [(m, "WsMessage"), (w, "WsSend")],
+            None => [(&self.http.0, "Incoming"), (&self.http.1, "Outgoing")],
+        };
+        grants.extend(handles.into_iter().map(|(n, k)| (n.clone(), k, None)));
+        grants.extend(self.kvs.iter().map(|(n, s)| (n.clone(), "Kv", Some(s.label()))));
+        let out: SharedLog = Arc::new(Mutex::new(Box::new(out)));
+        write_line(&out, &audit_header(&self.program.files, &self.limits, &grants))?;
+        self.audit = Some(out);
+        Ok(())
     }
 
     /// Grant `kvs` by name to every request; all requests share each store.
@@ -564,7 +588,7 @@ impl Server {
     /// means no instance could be made (for example the pool is full).
     pub fn handle(&self, request: Request, dirs: Vec<(String, RealDir)>) -> std::result::Result<Response, String> {
         let mut sent = None;
-        let result = self.run_fresh(dirs, |s| {
+        let result = self.run_fresh(dirs, None, |s| {
             let (slot, handles) = web_grants(s, request, (&self.http.0, &self.http.1))?;
             sent = Some(slot);
             Ok(handles)
@@ -601,7 +625,8 @@ impl Server {
     ) -> std::result::Result<Option<Vec<WsFrame>>, String> {
         let names = self.ws.as_ref().ok_or("main takes no WsMessage")?;
         let mut sends = None;
-        let result = self.run_fresh(dirs, |s| {
+        let conn = event.conn;
+        let result = self.run_fresh(dirs, Some(conn), |s| {
             let (out, handles) = ws_grants(s, event, closed, names)?;
             sends = Some(out);
             Ok(handles)
@@ -621,10 +646,12 @@ impl Server {
     }
 
     /// Run `main` once in a fresh instance with `dirs`, the shared `Kv` stores and the handles
-    /// `grant` adds. The outcome, or why the run failed; `Err` means no instance could be made.
+    /// `grant` adds; with an audit log, as the next request (of WebSocket connection `conn`). The
+    /// outcome, or why the run failed; `Err` means no instance could be made.
     fn run_fresh(
         &self,
         dirs: Vec<(String, RealDir)>,
+        conn: Option<u64>,
         grant: impl FnOnce(&mut State) -> Result<Handles>,
     ) -> std::result::Result<std::result::Result<Outcome, String>, String> {
         let start = |e: wasmtime::Error| format!("cannot start instance: {e:#}");
@@ -633,14 +660,34 @@ impl Server {
         let handles = grant(store.data_mut()).map_err(start)?;
         let bound = push_grants(store.data_mut(), dirs, vec![], handles, self.kvs.clone()).map_err(start)?;
         let diags = |d: Vec<Diag>| d.iter().map(|d| d.message.as_str()).collect::<Vec<_>>().join("; ");
-        let (world, grants) = match instantiate(&mut store, &self.program, &bound).map_err(start)? {
-            Ok(w) => w,
-            Err(d) => return Ok(Err(diags(d))),
+        let started = instantiate(&mut store, &self.program, &bound).map_err(start)?;
+        // Numbered once it runs, so every number in the log has a trailer.
+        if let Some(out) = &self.audit {
+            let req = self.requests.fetch_add(1, Relaxed) + 1;
+            let tag = match conn {
+                Some(c) => format!(r#""req":{req},"conn":{c},"#),
+                None => format!(r#""req":{req},"#),
+            };
+            let out = out.clone();
+            store.data_mut().audit = Some(Audit { out, seq: 0, tag });
+        }
+        let result = match started {
+            Err(d) => Err(diags(d)),
+            Ok((world, grants)) => match call(&mut store, &world, &grants, &self.program, &self.limits) {
+                Ok(Ok(o)) => Ok(o),
+                Err(e) => Err(crate::explain(&e).unwrap_or_else(|| format!("{e:#}"))),
+                Ok(Err(d)) => Err(diags(d)),
+            },
         };
-        Ok(match call(&mut store, &world, &grants, &self.program, &self.limits) {
-            Ok(Ok(o)) => Ok(o),
-            Err(e) => Err(crate::explain(&e).unwrap_or_else(|| format!("{e:#}"))),
-            Ok(Err(d)) => Err(diags(d)),
-        })
+        let outcome = match &result {
+            Ok(o) if !o.failed => "ok",
+            Ok(_) => "failed",
+            Err(_) => "error",
+        };
+        let fuel_used = self.limits.fuel.saturating_sub(store.get_fuel().unwrap_or(0));
+        if let Err(e) = end_audit(store.data_mut(), fuel_used, outcome) {
+            return Ok(Err(format!("audit: cannot write the log: {e:#}")));
+        }
+        Ok(result)
     }
 }

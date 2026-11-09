@@ -403,7 +403,10 @@ fn grant_errors_have_hints() {
     let (code, _, err) = kio(&["run", &prog, "--kv", "store"]);
     assert_eq!(
         (code, err.as_str()),
-        (2, "kio: --kv store: expected name=path or name=:memory:\n")
+        (
+            2,
+            "kio: --kv store: expected name=path, name=path:ro or name=:memory:\n"
+        )
     );
     let (code, _, err) = kio(&["run", &prog, "--kv-mb", "0"]);
     assert_eq!(
@@ -777,4 +780,177 @@ fn replay_drops_a_zero_filled_tail() {
     let (code, _, err) = read_ab(t.path(), &db);
     assert_eq!(code, 2);
     assert!(err.contains("is corrupt at byte 53"), "{err}");
+}
+
+/// Answers the value of "token", `none`, or `err`.
+const READ_TOKEN: &str = r#"fn main(req: Incoming, res: Outgoing, store: Kv) -> Result<(), WebErr> {
+  let v = match store.get("token") { Ok(o) => match o { Some(b) => b.to_str(), None => "none" }, Err(e) => "err" };
+  res.send(200, [], [], v.to_bytes())
+}"#;
+
+/// A program that sets "token" to `value`.
+fn set_token(t: &Path, value: &str) -> String {
+    let src = format!(r#"fn main(store: Kv) -> Result<(), KvErr> {{ store.set("token", "{value}".to_bytes()) }}"#);
+    write(t, &format!("set-{value}.kio"), &src)
+}
+
+/// H12: each refusal of a read-only grant, at startup with exit 2 and a hint.
+#[test]
+fn read_only_grant_refusals() {
+    let t = tempfile::tempdir().unwrap();
+    let db = t.path().join("s.kv");
+    let ro = format!("store={}:ro", db.display());
+    let counter = write(t.path(), "count.kio", COUNTER);
+
+    // Missing: nothing to read yet, and nothing is created.
+    let reader = write(
+        t.path(),
+        "read.kio",
+        &format!("{SHOW}fn main(store: Kv) -> Str {{ val(store.get(\"token\")) }}"),
+    );
+    let (code, _, err) = kio(&["run", &reader, "--kv", &ro]);
+    assert_eq!(code, 2);
+    assert_eq!(
+        err,
+        format!(
+            "kio: --kv {ro}: {} does not exist\n  hint: a read-only store is written by another kio: run it once first, or drop `:ro`\n",
+            db.display()
+        )
+    );
+    assert!(!db.exists());
+
+    // A program that can write the store, before anything is opened.
+    let (code, _, err) = kio(&["run", &counter, "--kv", &ro]);
+    assert_eq!(
+        (code, err.as_str()),
+        (
+            2,
+            "kio: `store` is granted read-only but `main` can call `store set`\n  hint: drop `:ro` or remove the writes\n"
+        )
+    );
+    for (method, call) in [
+        ("delete", r#"store.delete("k")"#),
+        ("swap", r#"store.swap("k", None, None)"#),
+    ] {
+        let src = format!("fn main(store: Kv) -> Str {{ let r = {call}; \"\" }}");
+        let prog = write(t.path(), &format!("{method}.kio"), &src);
+        let (code, _, err) = kio(&["run", &prog, "--kv", &ro]);
+        assert_eq!(code, 2);
+        assert!(
+            err.contains(&format!("`main` can call `store {method}`\n  hint: drop `:ro`")),
+            "{err}"
+        );
+    }
+
+    let (code, _, err) = kio(&["run", &reader, "--kv", "store=:memory::ro"]);
+    assert_eq!(
+        (code, err.as_str()),
+        (
+            2,
+            "kio: --kv store=:memory::ro: an in-memory store is never read-only\n  hint: drop `:ro`; only this process can write it\n"
+        )
+    );
+
+    // The file now exists and reads; a symlink to it and a copy inside a `--dir` are refused.
+    let rw = format!("store={}", db.display());
+    assert_eq!(kio(&["run", &set_token(t.path(), "a"), "--kv", &rw]).0, 0);
+    assert_eq!(kio(&["run", &reader, "--kv", &ro]).1, "a\n");
+    let link = t.path().join("link.kv");
+    std::os::unix::fs::symlink(&db, &link).unwrap();
+    let (code, _, err) = kio(&["run", &reader, "--kv", &format!("store={}:ro", link.display())]);
+    assert_eq!(code, 2);
+    assert!(
+        err.contains("is a symbolic link\n  hint: grant the file it points to"),
+        "{err}"
+    );
+    let data = t.path().join("data");
+    std::fs::create_dir(&data).unwrap();
+    std::fs::copy(&db, data.join("s.kv")).unwrap();
+    let both = write(
+        t.path(),
+        "both.kio",
+        "fn main(d: Dir, store: Kv) -> Result<Option<Bytes>, KvErr> { store.get(\"token\") }",
+    );
+    let (code, _, err) = kio(&[
+        "run",
+        &both,
+        "--dir",
+        &format!("d={}", data.display()),
+        "--kv",
+        &format!("store={}:ro", data.join("s.kv").display()),
+    ]);
+    assert_eq!(
+        (code, err.as_str()),
+        (
+            2,
+            "kio: `--kv store` is inside `--dir d`\n  hint: keep stores outside granted directories\n"
+        )
+    );
+}
+
+/// H12: a write that reaches a read-only store (here through the library, which has no startup
+/// check) stops the run and is audited; the file is unchanged.
+#[test]
+fn a_write_to_a_read_only_store_stops_the_run() {
+    let t = tempfile::tempdir().unwrap();
+    let db = two_records(t.path());
+    let before = std::fs::read(&db).unwrap();
+    for (method, call) in [
+        ("set", r#"store.set("a", "x".to_bytes())"#),
+        ("delete", r#"store.delete("a")"#),
+        ("swap", r#"store.swap("a", None, None)"#),
+    ] {
+        let kvs = open_all(&[("store".into(), format!("{}:ro", db.display()))], 1).unwrap();
+        let log = Log::default();
+        let mut kio = Kio::new(Limits::default()).unwrap();
+        kio.audit(log.clone(), vec![]);
+        kio.grant_kvs(kvs);
+        let main = format!("fn main(store: Kv) -> Str {{ let r = {call}; \"done\" }}");
+        let e = kio.run(&main, vec![]).unwrap_err();
+        assert_eq!(
+            kio.explain(&e).unwrap(),
+            format!("kv: `store` is granted read-only, so `store {method}` stops the run")
+        );
+        let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(
+            lines[0].contains(&format!(r#""kind":"Kv","target":"{}:ro""#, db.display())),
+            "{text}"
+        );
+        assert!(
+            lines[1].contains(&format!(
+                r#""method":"{method}","arg":"a","bytes":0,"result":"stopped:read-only""#
+            )),
+            "{text}"
+        );
+        assert!(lines[2].starts_with(r#"{"event":"end","outcome":"error""#), "{text}");
+    }
+    assert_eq!(std::fs::read(&db).unwrap(), before);
+}
+
+/// H12: a `--listen` reader of `path:ro` sees what a separate writer process stores, without
+/// either holding the other off, including after the writer compacts the file (a new inode).
+#[test]
+fn a_reader_follows_a_writer_process_through_compaction() {
+    let t = tempfile::tempdir().unwrap();
+    let db = t.path().join("s.kv");
+    let rw = format!("store={}", db.display());
+    assert_eq!(kio(&["run", &set_token(t.path(), "v1"), "--kv", &rw]).0, 0);
+    let app = write(t.path(), "read.kio", READ_TOKEN);
+    let server = listen(&app, &["--kv", &format!("store={}:ro", db.display())]);
+    assert_eq!(get(server.1), (200, "v1".into()));
+    let ino = |p: &Path| std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(p).unwrap());
+    let first = ino(&db);
+    for v in ["v2", "v3"] {
+        let (code, _, err) = kio(&["run", &set_token(t.path(), v), "--kv", &rw]);
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(get(server.1), (200, v.into()));
+    }
+    assert_eq!(ino(&db), first, "appended in place");
+    // Three records of one key: the next writer compacts the log on open, then appends.
+    assert_eq!(kio(&["run", &set_token(t.path(), "v4"), "--kv", &rw]).0, 0);
+    assert_ne!(ino(&db), first, "compacted");
+    assert_eq!(get(server.1), (200, "v4".into()));
+    assert_eq!(kio(&["run", &set_token(t.path(), "v5"), "--kv", &rw]).0, 0);
+    assert_eq!(get(server.1), (200, "v5".into()));
 }

@@ -390,6 +390,8 @@ pub struct State {
     audit: Option<Audit>,
     /// Set by a call missing from the authority report.
     unexpected: bool,
+    /// Set by a write to a read-only `Kv` store.
+    read_only_write: bool,
     /// `(capability parameter, method)` pairs on `main`'s report line; any other call is a checker
     /// bug. Set at the start of every run, whether or not a log is written.
     allowed: HashSet<(String, String)>,
@@ -425,6 +427,7 @@ impl State {
             fail_writes: false,
             audit: None,
             unexpected: false,
+            read_only_write: false,
             allowed: HashSet::new(),
             handles: HashMap::new(),
             audit_msg: String::new(),
@@ -517,19 +520,33 @@ fn temp_name() -> String {
     format!(".kio-{h:016x}.tmp")
 }
 
-/// The audit log (H8): one JSON line per host call. Sizes only, never contents.
+/// The audit log (H8): one JSON line per host call. Sizes only, never contents. Under `--listen`
+/// every request writes to one shared log, and `tag` (`"req":3,"conn":1,`) names the request and
+/// its WebSocket connection at the start of each of its lines.
 struct Audit {
-    out: Box<dyn Write + Send>,
+    out: SharedLog,
     seq: u64,
+    tag: String,
 }
 
+/// An audit log that runs share.
+type SharedLog = Arc<Mutex<Box<dyn Write + Send>>>;
+
 impl Audit {
-    /// Write one line and flush it. `State::call` does this after the work, so a crash of the host
-    /// process inside a host call can lose that call's line.
+    /// Write one line (a JSON object) with the tag and flush it. `State::call` does this after the
+    /// work, so a crash of the host process inside a host call can lose that call's line.
     fn line(&mut self, line: &str) -> io::Result<()> {
-        writeln!(self.out, "{line}")?;
-        self.out.flush()
+        let tagged = format!("{{{}{}", self.tag, line.strip_prefix('{').unwrap_or(line));
+        write_line(&self.out, &tagged)
     }
+}
+
+/// Write `line` and a newline to `out` in one write under its lock, then flush: lines from
+/// concurrent requests never interleave.
+fn write_line(out: &SharedLog, line: &str) -> io::Result<()> {
+    let mut out = out.lock().unwrap_or_else(PoisonError::into_inner);
+    out.write_all(format!("{line}\n").as_bytes())?;
+    out.flush()
 }
 
 /// A JSON string literal.
@@ -609,6 +626,7 @@ impl State {
         let why = match &r {
             Ok(v) => result(v),
             Err(_) if self.unexpected => "stopped:unexpected".into(),
+            Err(_) if self.read_only_write => "stopped:read-only".into(),
             Err(_) if self.too_many_calls => "stopped:calls".into(),
             Err(_) if self.too_much_io => "stopped:io".into(),
             Err(_) if self.timed_out => "stopped:time".into(),
@@ -1284,7 +1302,7 @@ fn state_limit(s: &State, l: &Limits) -> Option<String> {
             l.memory >> 20
         ));
     }
-    if s.unexpected {
+    if s.unexpected || s.read_only_write {
         return Some(s.audit_msg.clone());
     }
     if s.too_many_calls {
@@ -1363,7 +1381,7 @@ fn push_grants(
         add(name, kind, rep, None);
     }
     for (name, store) in kvs {
-        let target = Some(store.target().to_string());
+        let target = Some(store.label());
         add(name, "Kv", s.table.push(store)?.rep(), target);
     }
     for b in &bound {
@@ -1382,18 +1400,36 @@ fn start_audit(
     files: &[(String, String)],
     bound: &[Bound],
 ) -> Result<()> {
-    let grant_json: Vec<String> = bound
+    let grants: Vec<_> = bound
         .iter()
         .map(|b| {
             let target = match b.kind {
                 "Dir" => dir_paths.iter().find(|(n, _)| *n == b.name).map(|(_, p)| p.clone()),
                 _ => b.target.clone(),
             };
-            let t = target.map_or("null".into(), |t| json(&t));
-            format!(r#"{{"name":{},"kind":"{}","target":{t}}}"#, json(&b.name), b.kind)
+            (b.name.clone(), b.kind, target)
         })
         .collect();
-    let header = format!(
+    let out: SharedLog = Arc::new(Mutex::new(out));
+    write_line(&out, &audit_header(files, l, &grants))?;
+    s.audit = Some(Audit {
+        out,
+        seq: 0,
+        tag: String::new(),
+    });
+    Ok(())
+}
+
+/// The audit header: the program's hash, each `(name, kind, target)` grant and the limits.
+fn audit_header(files: &[(String, String)], l: &Limits, grants: &[(String, &str, Option<String>)]) -> String {
+    let grant_json: Vec<String> = grants
+        .iter()
+        .map(|(name, kind, target)| {
+            let t = target.as_ref().map_or("null".into(), |t| json(t));
+            format!(r#"{{"name":{},"kind":"{kind}","target":{t}}}"#, json(name))
+        })
+        .collect();
+    format!(
         r#"{{"event":"start","program_hash":"{}","grants":[{}],"limits":{{"fuel":{},"timeout_secs":{},"stack":{},"memory":{},"calls":{},"io":{}}}}}"#,
         program_hash(files),
         grant_json.join(","),
@@ -1403,11 +1439,7 @@ fn start_audit(
         l.memory,
         l.calls,
         l.io
-    );
-    let mut audit = Audit { out, seq: 0 };
-    audit.line(&header)?;
-    s.audit = Some(audit);
-    Ok(())
+    )
 }
 
 /// Write the audit trailer, even when the run stopped. `outcome` is `ok`, `failed` or `error`.

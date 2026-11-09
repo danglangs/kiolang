@@ -13,6 +13,7 @@ Compiled-only kio covers the whole language and every capability; the active str
 | C3 (a-f) | runtime exports, descriptors, literals, leak check; Str, Bytes, List, Map, structs, enums, `Option`, `Result`, nested `match`, `?`, every built-in, `main` returning any type. Harness 46 to 240 ran both ways, 0 unsupported, 0 mismatches, 0 leaked; list and ADT code 4-6x faster than the interpreter |
 | C6a, C6b | generator (Int, Bool, control, calls, lists, structs/enums/`Option`/`match`/`?`): 250 programs both ways per CI run; front-end fuzzing, 210,000 inputs, no panic |
 | D1, K1 | `Dir` `list`/`write`/`remove`/`exists`; `Kv` (`--kv name=:memory:` or a file). Both adversarially reviewed, fixes merged |
+| H12 | `--kv name=path:ro`: a reader that follows another process writing the store (through its compactions), refused to a program that can write it; `--audit` under `--listen`, one log with each line's request (and WebSocket connection) number |
 | WS1 | WebSockets under `--listen`, a fresh sandbox per event; 7,800 echo events/s on one connection. Adversarially reviewed, fixes in (Origin check and `--ws-origin`; `close` always follows `open`) |
 | WS1b | `WsMessage.target()` and `header(name)`: every event of a connection sees its upgrade request (caps.wit, owner-approved); kio-web `examples/ws/` routes by path and checks a token |
 | kio-web | `api.kio`; notes on Dir and on Kv, 22 checks each; a generic `Route<A>` router (`dispatch`); a WebSocket example routed by path with bearer-token auth; json.kio removed for the built-in `Json` |

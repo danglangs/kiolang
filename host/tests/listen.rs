@@ -337,41 +337,81 @@ fn connection_is_closed_at_the_lifetime_cap() {
     assert!(start.elapsed() < limits::ms(2000));
 }
 
-/// W11b: `--audit` and `--http` conflict with `--listen`: exit 2 and a hint, before any file exists.
+/// W11b: `--http` conflicts with `--listen`: exit 2 and a hint.
 #[test]
-fn audit_and_http_are_refused_with_listen() {
-    let dir = tempfile::tempdir().unwrap();
-    let log = dir.path().join("audit.log");
-    for (flag, value, hint) in [
-        (
-            "--audit",
-            log.to_str().unwrap(),
-            "per-request audit logging is not supported yet; drop --audit",
-        ),
-        (
+fn http_is_refused_with_listen() {
+    let out = Command::new(env!("CARGO_BIN_EXE_kio"))
+        .args([
+            "run",
+            "../examples/serve/app.kio",
             "--http",
             "x=http://127.0.0.1:1",
-            "Http grants under --listen are not supported yet",
-        ),
-    ] {
-        let out = Command::new(env!("CARGO_BIN_EXE_kio"))
-            .args([
-                "run",
-                "../examples/serve/app.kio",
-                flag,
-                value,
-                "--listen",
-                "127.0.0.1:0",
-            ])
-            .output()
-            .unwrap();
-        assert_eq!(out.status.code(), Some(2), "{flag}");
-        assert!(
-            String::from_utf8_lossy(&out.stderr).contains(&format!("hint: {hint}")),
-            "{flag}"
-        );
+            "--listen",
+            "127.0.0.1:0",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("hint: Http grants under --listen are not supported yet"));
+}
+
+/// H12: `--audit` with `--listen` writes one log: the header once, then each request's calls and
+/// trailer, every line a whole JSON object carrying its request's number.
+#[test]
+fn audit_log_of_concurrent_requests() {
+    let public = tempfile::tempdir().unwrap();
+    std::fs::write(public.path().join("a.txt"), "hello").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    let kio = start_with(
+        "../examples/serve/app.kio",
+        public.path(),
+        &["--audit", log.to_str().unwrap()],
+    );
+    let port = kio.port;
+    let threads: Vec<_> = (0..3)
+        .map(|_| std::thread::spawn(move || send(port, "GET", "/a.txt", b"")))
+        .collect();
+    for t in threads {
+        assert_eq!(t.join().unwrap(), (200, b"hello".to_vec()));
     }
-    assert!(!log.exists());
+    // Each trailer is written before its response is sent.
+    let text = std::fs::read_to_string(&log).unwrap();
+    let lines: Vec<serde_json::Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))
+        .collect();
+    let head = &lines[0];
+    assert_eq!(head["event"], "start");
+    assert!(head.get("req").is_none());
+    let grants: Vec<(&str, &str)> = (head["grants"].as_array().unwrap().iter())
+        .map(|g| (g["name"].as_str().unwrap(), g["kind"].as_str().unwrap()))
+        .collect();
+    assert_eq!(grants, [("public", "Dir"), ("req", "Incoming"), ("res", "Outgoing")]);
+    assert_eq!(head["grants"][0]["target"], public.path().to_str().unwrap());
+    assert_eq!(lines.iter().filter(|l| l["event"] == "start").count(), 1);
+    let mut ends = Vec::new();
+    for req in 1..=3u64 {
+        let mine: Vec<_> = lines.iter().filter(|l| l["req"] == req).collect();
+        let (end, calls) = mine.split_last().unwrap();
+        assert_eq!(end["event"], "end");
+        assert_eq!(end["outcome"], "ok");
+        assert!(end["fuel_used"].as_u64().unwrap() > 0);
+        assert_eq!(end["calls"].as_u64().unwrap() as usize, calls.len());
+        assert!(end["io"].as_u64().unwrap() >= 5);
+        for (i, c) in calls.iter().enumerate() {
+            assert_eq!(
+                (c["event"].as_str(), c["seq"].as_u64()),
+                (Some("call"), Some(i as u64 + 1))
+            );
+        }
+        assert!(calls.iter().any(|c| c["method"] == "read" && c["arg"] == "a.txt"));
+        ends.push(*end);
+    }
+    assert_eq!(
+        ends.len() + 1 + lines.iter().filter(|l| l["event"] == "call").count(),
+        lines.len()
+    );
 }
 
 /// H10: `Incoming` and `Outgoing` bind by type, so any parameter names serve.

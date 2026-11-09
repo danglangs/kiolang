@@ -870,3 +870,44 @@ fn echo_events_per_second() {
     let piped = n as f64 / start.elapsed().as_secs_f64();
     println!("echo over one connection: {one:.0} events/s one at a time, {piped:.0} events/s 100 in flight");
 }
+
+/// H12: under `--audit` each event is a request in the server's one log, and its lines name the
+/// connection it came from.
+#[test]
+fn audit_lines_name_the_connection() {
+    let t = tempfile::tempdir().unwrap();
+    let log = t.path().join("audit.log");
+    let server = listen("../examples/ws/echo.kio", &["--audit", log.to_str().unwrap()]);
+    for _ in 0..2 {
+        let mut ws = connect(server.1);
+        assert_eq!(text(&mut ws, "hi"), "hi");
+        hang_up(ws);
+    }
+    // The close events run after the server answered our close.
+    let read = || -> Vec<serde_json::Value> {
+        let text = std::fs::read_to_string(&log).unwrap();
+        text.lines().map(|l| serde_json::from_str(l).unwrap()).collect()
+    };
+    let mut lines = read();
+    for _ in 0..50 {
+        if lines.iter().filter(|l| l["event"] == "end").count() == 6 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        lines = read();
+    }
+    assert_eq!(lines[0]["event"], "start");
+    let ends: Vec<_> = lines.iter().filter(|l| l["event"] == "end").collect();
+    assert_eq!(ends.len(), 6, "{lines:?}");
+    let mut reqs: Vec<u64> = ends.iter().map(|l| l["req"].as_u64().unwrap()).collect();
+    reqs.sort();
+    assert_eq!(reqs, [1, 2, 3, 4, 5, 6]);
+    for conn in [1, 2] {
+        assert_eq!(ends.iter().filter(|l| l["conn"] == conn).count(), 3);
+    }
+    // Every call line carries the same connection as its request's trailer.
+    for l in &lines[1..] {
+        let end = ends.iter().find(|e| e["req"] == l["req"]).unwrap();
+        assert_eq!(l["conn"], end["conn"]);
+    }
+}

@@ -16,7 +16,7 @@ fn cli() -> i32 {
         ["mcp"] => return mcp::serve(),
         ["run", path, ref flags @ ..] => return run(path, flags),
         _ => eprintln!(
-            "kio: a capability-typed language; code names what it needs, the operator grants what that is.\n\nusage: kio check <prog.kio>\n       kio mcp\n       kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--kv name=path|:memory:]... [--kv-mb mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]..."
+            "kio: a capability-typed language; code names what it needs, the operator grants what that is.\n\nusage: kio check <prog.kio>\n       kio mcp\n       kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--kv name=path[:ro]|:memory:]... [--kv-mb mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]..."
         ),
     }
     2
@@ -111,8 +111,13 @@ fn run(path: &str, flags: &[&str]) -> i32 {
             }
             ["--kv", spec] => {
                 match spec.split_once('=') {
+                    Some((_, ":memory::ro")) => {
+                        return fail(format!(
+                            "--kv {spec}: an in-memory store is never read-only\n  hint: drop `:ro`; only this process can write it"
+                        ))
+                    }
                     Some((name, s)) if !name.is_empty() && !s.is_empty() => kv_specs.push((name.into(), s.into())),
-                    _ => return fail(format!("--kv {spec}: expected name=path or name=:memory:")),
+                    _ => return fail(format!("--kv {spec}: expected name=path, name=path:ro or name=:memory:")),
                 }
                 continue;
             }
@@ -148,7 +153,7 @@ fn run(path: &str, flags: &[&str]) -> i32 {
                 None => return fail(format!("--dir {spec}: expected name=path")),
             },
             _ => return fail(
-                "usage: kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--kv name=path|:memory:]... [--kv-mb mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]..."
+                "usage: kio run <prog.kio> [--dir name=path]... [--http name=host]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--kv name=path[:ro]|:memory:]... [--kv-mb mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]..."
                     .into(),
             ),
         };
@@ -160,23 +165,28 @@ fn run(path: &str, flags: &[&str]) -> i32 {
             Err(e) => return fail(format!("--dir {name}={dir}: {e}")),
         }
     }
-    if listen.is_some() {
-        if audit.is_some() {
-            return fail(
-                "--audit with --listen\n  hint: per-request audit logging is not supported yet; drop --audit".into(),
-            );
-        }
-        if !https.is_empty() {
-            return fail("--http with --listen\n  hint: Http grants under --listen are not supported yet".into());
-        }
+    if listen.is_some() && !https.is_empty() {
+        return fail("--http with --listen\n  hint: Http grants under --listen are not supported yet".into());
     }
     // A program that fails to check is reported by the run below.
-    let params = lang::check_files(
+    let checked = lang::check_files(
         &files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect::<Vec<_>>(),
         &lang::CapTable::v0(),
-    )
-    .map(|p| p.main_params())
-    .unwrap_or_default();
+    );
+    let params = checked.as_ref().map(|p| p.main_params()).unwrap_or_default();
+    // A read-only store is refused to a program that can write it (H12); the host also stops
+    // any write that reaches it.
+    let report = checked.as_ref().map(lang::report).unwrap_or_default();
+    for (name, spec) in &kv_specs {
+        if !kio_host::kv::split_spec(spec).1 {
+            continue;
+        }
+        if let Some(m) = kio_host::kv::write_in_report(&report, name) {
+            return fail(format!(
+                "`{name}` is granted read-only but `main` can call `{name} {m}`\n  hint: drop `:ro` or remove the writes"
+            ));
+        }
+    }
     let takes = |ty: &str| params.iter().filter(|(_, t)| t == ty).count();
     let http = takes("Incoming") + takes("Outgoing") > 0;
     let ws = takes("WsMessage") + takes("WsSend") > 0;
@@ -213,6 +223,7 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     // A program that can write a store's log through a `Dir` could replace or craft it; a store
     // inside the cache could likewise become an entry.
     for (name, spec) in kv_specs.iter().filter(|(_, s)| s != ":memory:") {
+        let spec = kio_host::kv::split_spec(spec).0;
         let store = kio_host::cache::resolve(spec.as_ref());
         if let (Some(c), Some(s)) = (&resolved, store) {
             if s.starts_with(c) {
@@ -221,7 +232,7 @@ fn run(path: &str, flags: &[&str]) -> i32 {
                 ));
             }
         }
-        let parent = std::path::Path::new(spec.as_str()).parent();
+        let parent = std::path::Path::new(spec).parent();
         let parent = parent.filter(|p| !p.as_os_str().is_empty()).unwrap_or(".".as_ref());
         let Ok(parent) = std::fs::canonicalize(parent) else {
             continue;
@@ -239,7 +250,8 @@ fn run(path: &str, flags: &[&str]) -> i32 {
         Err(e) => return fail(e),
     };
     if let Some(addr) = listen {
-        return serve(files, dirs, kvs, addr, limits, ws_origins, hosts);
+        let audit = audit.map(|path| (path, dir_paths));
+        return serve(files, dirs, kvs, addr, limits, ws_origins, hosts, audit);
     }
     let mut kio = match Kio::new(limits) {
         Ok(k) => k,
@@ -280,7 +292,9 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     }
 }
 
-/// `run --listen`: check and compile once, then answer requests until Ctrl-C.
+/// `run --listen`: check and compile once, then answer requests until Ctrl-C. `audit` is the
+/// log's path and each `Dir` grant's `(name, path)`.
+#[allow(clippy::too_many_arguments)]
 fn serve(
     files: Vec<(String, String)>,
     dirs: Vec<(String, cap_std::fs::Dir)>,
@@ -289,6 +303,7 @@ fn serve(
     limits: Limits,
     ws_origins: Vec<String>,
     hosts: Vec<String>,
+    audit: Option<(String, kio_host::DirPaths)>,
 ) -> i32 {
     let mut server = match Server::new(files.clone(), limits) {
         Err(e) => return fail(format!("{e:#}")),
@@ -296,6 +311,12 @@ fn serve(
         Ok(Ok(s)) => s,
     };
     server.grant_kvs(kvs);
+    if let Some((path, dir_paths)) = audit {
+        let opened = std::fs::File::create(&path).and_then(|f| server.audit(f, dir_paths));
+        if let Err(e) = opened {
+            return fail(format!("--audit {path}: {e}"));
+        }
+    }
     match listen::serve(server, dirs, addr, ws_origins, hosts) {
         Ok(()) => 0,
         Err(e) => fail(e),
