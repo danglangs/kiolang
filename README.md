@@ -74,7 +74,7 @@ hi
 hi
 ```
 
-A browser page may connect only from the server's own host; `--ws-origin https://app.example` allows another origin (clients that send no `Origin`, such as websocat, are not browsers and are accepted).
+`msg.target()` and `msg.header("authorization")` show the upgrade request's path and headers, the same on every event of the connection, so a server can route by path or check a token. A browser page may connect only from the server's own host; `--ws-origin https://app.example` allows another origin (clients that send no `Origin`, such as websocat, are not browsers and are accepted).
 
 On a loopback `--listen`, a request's `Host` must be `localhost`, `127.0.0.1` or `[::1]` (against DNS rebinding); `--host app.example` allows another name, and is the only restriction on a non-loopback bind.
 

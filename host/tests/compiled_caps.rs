@@ -349,7 +349,8 @@ fn web_values_and_response_match_the_interpreter() {
 #[test]
 fn ws_values_and_frames_match_the_interpreter() {
     let src = r#"struct R { k: Str, c: Int, d: Bytes, t: Result<(), WsErr>, b: Result<(), WsErr>,
-        big: Result<(), WsErr>, bad: Result<(), WsErr>, close: Result<(), WsErr>, after: Result<(), WsErr> }
+        big: Result<(), WsErr>, bad: Result<(), WsErr>, close: Result<(), WsErr>, after: Result<(), WsErr>,
+        tg: Str, h: Option<Str>, none: Option<Str> }
     fn main(m: WsMessage, w: WsSend) -> R {
         let t = w.text(m.kind());
         let b = w.binary(m.data());
@@ -357,12 +358,17 @@ fn ws_values_and_frames_match_the_interpreter() {
         let bad = w.close(1005);
         let close = w.close(1000);
         let after = w.text("late");
-        R { k: m.kind(), c: m.conn(), d: m.data(), t: t, b: b, big: big, bad: bad, close: close, after: after }
+        R { k: m.kind(), c: m.conn(), d: m.data(), t: t, b: b, big: big, bad: bad, close: close, after: after,
+            tg: m.target(), h: m.header("X-Token"), none: m.header("cookie") }
     }"#;
     let event = || kio_host::ws::WsEvent {
         kind: "text",
         conn: 7,
         data: b"hi".to_vec(),
+        upgrade: std::sync::Arc::new(kio_host::ws::Upgrade {
+            target: "/a%20b?q=1".into(),
+            headers: vec![("x-token".into(), "s3cret".into()), ("x-token".into(), "second".into())],
+        }),
     };
     let names = ("m".to_string(), "w".to_string());
     let mut c = Kio::new(Limits::default()).unwrap();
@@ -373,7 +379,7 @@ fn ws_values_and_frames_match_the_interpreter() {
     assert_eq!(got, want.unwrap().value);
     assert_eq!(
         got,
-        r#"R { k: "text", c: 7, d: <2 bytes>, t: Ok(()), b: Ok(()), big: Err(WsErr::Invalid), bad: Err(WsErr::Invalid), close: Ok(()), after: Err(WsErr::Closed) }"#
+        r#"R { k: "text", c: 7, d: <2 bytes>, t: Ok(()), b: Ok(()), big: Err(WsErr::Invalid), bad: Err(WsErr::Invalid), close: Ok(()), after: Err(WsErr::Closed), tg: "/a%20b?q=1", h: Some("s3cret"), none: None }"#
     );
     assert_eq!(got_frames, want_frames);
     use kio_host::ws::WsFrame;

@@ -784,6 +784,68 @@ fn a_foreign_host_cannot_upgrade() {
     assert!(upgrade(server.1, "other.example").starts_with("HTTP/1.1 421"));
 }
 
+/// Records what each event sees of the upgrade request under `<kind><conn>`; a text message `n`
+/// answers with what connection `n`'s open, text and close events saw.
+const UPGRADE: &str = r#"fn show(o: Option<Str>) -> Str { match o { Some(s) => s, None => "none" } }
+fn get(c: Kv, key: Str) -> Str { match c.get(key).unwrap_or(None) { Some(b) => b.to_str(), None => "-" } }
+fn main(msg: WsMessage, conn: WsSend, c: Kv) -> Result<(), WsErr> {
+  let kind = msg.kind();
+  let seen = msg.target() + " " + show(msg.header("x-token")) + " " + show(msg.header("X-TOKEN")) + " " + show(msg.header("x-absent"));
+  let r = c.set(kind + msg.conn().to_str(), seen.to_bytes());
+  if kind == "text" {
+    let n = msg.data().to_str();
+    conn.text(get(c, "open" + n) + "|" + get(c, "text" + n) + "|" + get(c, "close" + n))
+  } else { Ok(()) }
+}"#;
+
+/// WS1b: every event of a connection sees its upgrade request's target and headers: the first
+/// value of a header, in any case, `None` when absent.
+#[test]
+fn every_event_sees_the_upgrade_request() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let t = tempfile::tempdir().unwrap();
+    let app = write(t.path(), "upgrade.kio", UPGRADE);
+    let server = listen(&app, &["--kv", "c=:memory:"]);
+    let port = server.1;
+    let tcp = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let mut req = format!("ws://127.0.0.1:{port}/room%201?x=y")
+        .into_client_request()
+        .unwrap();
+    req.headers_mut().append("X-Token", "abc".parse().unwrap());
+    req.headers_mut().append("x-token", "def".parse().unwrap());
+    let mut ws = client(req, tcp).unwrap().0;
+    let seen = "/room%201?x=y abc abc none";
+    assert_eq!(text(&mut ws, "1"), format!("{seen}|{seen}|-"));
+    hang_up(ws);
+    std::thread::sleep(Duration::from_millis(300));
+    // The close event saw the same; another connection sees its own request.
+    let mut ws = connect(port);
+    assert_eq!(text(&mut ws, "1"), format!("{seen}|{seen}|{seen}"));
+    assert_eq!(text(&mut ws, "2"), "/ none none none|/ none none none|-");
+    hang_up(ws);
+}
+
+/// WS1b: an upgrade with a header value that is not UTF-8 is 400, and no event runs.
+#[test]
+fn a_non_utf8_header_refuses_the_upgrade() {
+    let t = tempfile::tempdir().unwrap();
+    let app = write(t.path(), "count.kio", COUNT);
+    let server = listen(&app, &["--kv", "c=:memory:"]);
+    let mut s = TcpStream::connect(("127.0.0.1", server.1)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let req = b"GET / HTTP/1.1\r\nhost: localhost\r\nconnection: upgrade\r\nupgrade: websocket\r\nsec-websocket-version: 13\r\nsec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\nx-bad: caf\xe9\r\n\r\n";
+    s.write_all(req).unwrap();
+    let mut buf = vec![0u8; 400];
+    let n = s.read(&mut buf).unwrap();
+    let head = String::from_utf8_lossy(&buf[..n]).into_owned();
+    assert!(head.starts_with("HTTP/1.1 400"), "{head}");
+    std::thread::sleep(Duration::from_millis(300));
+    let mut ws = connect(server.1);
+    assert_eq!(text(&mut ws, "x"), "o1 c0 t1");
+    hang_up(ws);
+}
+
 /// Release only: `cargo test --release -p kio --test ws -- --ignored --nocapture`.
 #[test]
 #[ignore]

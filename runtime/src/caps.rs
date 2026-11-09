@@ -452,6 +452,22 @@ pub extern "C" fn rt_cap_ws_message_data(_: u32, h: u32) -> u32 {
     addr(bytes_obj(in_place(|| m.data())))
 }
 
+#[no_mangle]
+pub extern "C" fn rt_cap_ws_message_target(_: u32, h: u32) -> u32 {
+    let m = message(h);
+    addr(str_obj(in_place(|| m.target())))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_cap_ws_message_header(ret: u32, h: u32, name: u32) -> u32 {
+    // SAFETY: the contract above.
+    let name = unsafe { text(name) };
+    let m = message(h);
+    let v = in_place(|| m.header(name)).map(|s| to_slot(str_obj(s)));
+    // SAFETY: `ret` is an `Option<Str>`; a null `none` allocates one.
+    addr(unsafe { obj::option(&table(), ret, core::ptr::null_mut(), v) })
+}
+
 fn sender(h: u32) -> ManuallyDrop<WsSend> {
     // SAFETY: see `handle`.
     unsafe { handle(h, WsSend::from_handle) }

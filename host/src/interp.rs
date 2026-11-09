@@ -303,6 +303,11 @@ impl lang::Caps for Native<'_> {
             // Ids count up from 1, so they fit an `Int`.
             ("WsMessage", "conn", []) => Value::Int(HostWsMessage::conn(s, own(rep)).map_err(stop)? as i64),
             ("WsMessage", "data", []) => bytes(HostWsMessage::data(s, own(rep)).map_err(stop)?),
+            ("WsMessage", "target", []) => Value::Str(HostWsMessage::target(s, own(rep)).map_err(stop)?.into()),
+            ("WsMessage", "header", [Value::Str(n)]) => {
+                let v = HostWsMessage::header(s, own(rep), n.to_string()).map_err(stop)?;
+                option(v.map(|v| Value::Str(v.into())))
+            }
             ("WsSend", "text", [Value::Str(t)]) => result(
                 HostWsSend::text(s, own(rep), t.to_string())
                     .map_err(stop)?

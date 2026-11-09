@@ -61,6 +61,9 @@ interface ws {
     kind: func() -> string;     // "open", "text", "binary", "close"
     conn: func() -> u64;        // connection id, unique per server run
     data: func() -> list<u8>;   // empty for open and close
+    // The upgrade request's, the same for every event of the connection (WS1b).
+    target: func() -> string;                      // "/path?query" as sent, percent-encoding kept
+    header: func(name: string) -> option<string>;  // the first value; name in any case
   }
   // Sends on that connection, written in order after the run ends.
   resource ws-send {

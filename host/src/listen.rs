@@ -1,7 +1,7 @@
 //! `kio run --listen`: the HTTP accept loop on top of `Server` (web decisions 2-4), and WebSocket
 //! connections for a program whose `main` takes a `WsMessage` (WS1).
 
-use crate::ws::{WsEvent, WsFrame};
+use crate::ws::{Upgrade, WsEvent, WsFrame};
 use crate::{Request, Response, Server};
 use cap_std::fs::Dir;
 use futures_util::{SinkExt, StreamExt};
@@ -388,6 +388,9 @@ fn upgrade(
         *r.status_mut() = StatusCode::FORBIDDEN;
         return r;
     }
+    let Some(request) = upgrade_request(&req) else {
+        return reply(StatusCode::BAD_REQUEST);
+    };
     let upgraded = hyper::upgrade::on(&mut req);
     tokio::spawn(async move {
         if let Ok(io) = upgraded.await {
@@ -398,7 +401,7 @@ fn upgrade(
                 .write_buffer_size(WS_BUFFER)
                 .max_write_buffer_size(WS_WRITE_BUFFER);
             let ws = WebSocketStream::from_raw_socket(TokioIo::new(io), Role::Server, Some(config)).await;
-            connection(ctx, ws).await;
+            connection(ctx, ws, request).await;
         }
         drop(slot);
     });
@@ -409,6 +412,18 @@ fn upgrade(
     h.insert("connection", "upgrade".parse().unwrap());
     h.insert("sec-websocket-accept", accept.parse().unwrap());
     r
+}
+
+/// What the connection's events see of its upgrade request; `None` if a header value is not
+/// UTF-8, as for an HTTP request.
+fn upgrade_request(req: &hyper::Request<Incoming>) -> Option<Arc<Upgrade>> {
+    let mut headers = Vec::new();
+    for (name, value) in req.headers() {
+        // hyper lowercases names.
+        headers.push((name.as_str().to_string(), value.to_str().ok()?.to_string()));
+    }
+    let target = req.uri().path_and_query().map_or("/", |p| p.as_str()).to_string();
+    Some(Arc::new(Upgrade { target, headers }))
 }
 
 /// Whether a request's `Host` names this server, against DNS rebinding: a page on `evil.example`
@@ -477,13 +492,18 @@ type Ran = Result<Option<Vec<WsFrame>>, StatusCode>;
 /// meanwhile. An event waits for a worker as long as it takes (the queue bounds what waits). A
 /// run's sends are written after it ends. A failed run closes with 1011 and drops the waiting
 /// messages; the close event always comes last, once no more frames will be read.
-async fn connection<S>(ctx: Arc<Ctx>, ws: WebSocketStream<S>)
+async fn connection<S>(ctx: Arc<Ctx>, ws: WebSocketStream<S>, upgrade: Arc<Upgrade>)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let conn = ctx.next_conn.fetch_add(1, Relaxed);
     let (mut sink, mut stream) = ws.split();
-    let event = |kind, data| WsEvent { kind, conn, data };
+    let event = |kind, data| WsEvent {
+        kind,
+        conn,
+        data,
+        upgrade: upgrade.clone(),
+    };
     let cost = |e: &WsEvent| e.data.len() + WS_EVENT_COST;
     let mut queue = VecDeque::from([event("open", vec![])]);
     let mut queued = WS_EVENT_COST;

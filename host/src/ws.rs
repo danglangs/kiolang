@@ -16,6 +16,25 @@ pub struct WsEvent {
     pub kind: &'static str,
     pub conn: u64,
     pub data: Vec<u8>,
+    /// The connection's upgrade request, shared by its events.
+    pub upgrade: Arc<Upgrade>,
+}
+
+/// What a program sees of a connection's upgrade request (WS1b).
+#[derive(Debug, Default)]
+pub struct Upgrade {
+    /// "/path?query" as sent.
+    pub target: String,
+    /// Lowercase names, in order, values UTF-8.
+    pub headers: Vec<(String, String)>,
+}
+
+impl Upgrade {
+    /// The first value of header `name`, in any case.
+    pub fn header(&self, name: &str) -> Option<String> {
+        let (_, v) = self.headers.iter().find(|(n, _)| n.eq_ignore_ascii_case(name))?;
+        Some(v.clone())
+    }
 }
 
 /// A frame a run asked to send, written after the run ends.
@@ -61,6 +80,22 @@ impl HostWsMessage for State {
             Ok(data)
         };
         self.call(m.rep(), "data", "data", data, ok)
+    }
+
+    fn target(&mut self, m: Resource<WsMessage>) -> Result<String> {
+        self.call(
+            m.rep(),
+            "target",
+            "target",
+            |s| Ok(s.event(&m)?.upgrade.target.clone()),
+            ok,
+        )
+    }
+
+    /// The audit log gets the name, never the value.
+    fn header(&mut self, m: Resource<WsMessage>, name: String) -> Result<Option<String>> {
+        let header = |s: &mut Self| Ok(s.event(&m)?.upgrade.header(&name));
+        self.call(m.rep(), "header", &name, header, ok)
     }
 
     fn drop(&mut self, m: Resource<WsMessage>) -> Result<()> {

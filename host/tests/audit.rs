@@ -226,3 +226,70 @@ fn dir_methods_are_logged() {
         );
     }
 }
+
+/// WS1b: `WsMessage.target` and `header` are logged with the header's name, never its value,
+/// the same compiled and interpreted, and checked against the report.
+#[test]
+fn ws_upgrade_calls_are_logged_by_name() {
+    let src = r#"fn main(m: WsMessage, w: WsSend) -> Result<(), WsErr> {
+        let t = m.target();
+        let a = m.header("Authorization").unwrap_or("");
+        let c = m.header("cookie").unwrap_or("");
+        w.text(t + a + c)
+    }"#;
+    let event = || kio_host::ws::WsEvent {
+        kind: "text",
+        conn: 1,
+        data: vec![],
+        upgrade: Arc::new(kio_host::ws::Upgrade {
+            target: "/chat?room=1".into(),
+            headers: vec![("authorization".into(), "Bearer s3cret".into())],
+        }),
+    };
+    let names = ("m".to_string(), "w".to_string());
+    let run = |compiled: bool, hide: Option<&str>| {
+        let log = Log::default();
+        let stopped = if compiled {
+            let mut c = Kio::new(Limits::default()).unwrap();
+            c.audit(log.clone(), vec![]);
+            if let Some(m) = hide {
+                c.hide_from_report("m", m);
+            }
+            !matches!(c.run_ws(src, vec![], event(), false, &names), Ok((Ok(_), _)))
+        } else {
+            let mut k = Interp::new(Limits::default()).unwrap();
+            k.audit(log.clone(), vec![]);
+            if let Some(m) = hide {
+                k.hide_from_report("m", m);
+            }
+            !matches!(k.run_ws(src, vec![], event(), false, &names), Ok((Ok(_), _)))
+        };
+        (log.lines(), stopped)
+    };
+    let (lines, stopped) = run(false, None);
+    assert!(!stopped);
+    let call = |seq, method, arg| {
+        format!(
+            r#"{{"event":"call","seq":{seq},"cap":"m","kind":"WsMessage","method":"{method}","arg":"{arg}","bytes":0,"result":"ok"}}"#
+        )
+    };
+    assert_eq!(lines[1], call(1, "target", "target"));
+    assert_eq!(lines[2], call(2, "header", "Authorization"));
+    assert_eq!(lines[3], call(3, "header", "cookie"));
+    assert!(!lines.iter().any(|l| l.contains("s3cret")), "{lines:?}");
+    let cut = |l: &String| l.split(r#","peak_memory":"#).next().unwrap().to_string();
+    let compiled: Vec<_> = run(true, None).0.iter().map(cut).collect();
+    assert_eq!(compiled, lines.iter().map(cut).collect::<Vec<_>>());
+    for m in ["target", "header"] {
+        for compiled in [false, true] {
+            let (lines, stopped) = run(compiled, Some(m));
+            assert!(stopped, "{m}");
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.contains(&format!(r#""method":"{m}""#)) && l.contains(r#""unexpected":true"#)),
+                "{m}: {lines:?}"
+            );
+        }
+    }
+}

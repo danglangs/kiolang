@@ -148,6 +148,7 @@ fn event() -> WsEvent {
         kind: "text",
         conn: 7,
         data: b"hi".to_vec(),
+        upgrade: Default::default(),
     }
 }
 

@@ -135,6 +135,8 @@ pub fn v0() -> CapTable {
                     method("kind", vec![], Ty::Str),
                     method("conn", vec![], Ty::Int),
                     method("data", vec![], Ty::Bytes),
+                    method("target", vec![], Ty::Str),
+                    method("header", vec![Ty::Str], Ty::Option(Box::new(Ty::Str))),
                 ],
             },
             CapType {
