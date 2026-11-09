@@ -16,9 +16,12 @@ const MAP_STR_LIST: u32 = 15;
 const DEEP: u32 = 16; // List<DEEP>
 const RES_STR: u32 = 17; // Result<Str, Str>
 const LIST_FLOAT: u32 = 18;
+const HASH_STR_INT: u32 = 19;
+const HASH_INT_STR: u32 = 20;
+const HASH_STR_LIST: u32 = 21;
 
 const NAME: Name = Name { off: 0, len: 0 };
-const DESCS: [Desc; 19] = [
+const DESCS: [Desc; 22] = [
     Desc::Unit,
     Desc::Int,
     Desc::Bool,
@@ -62,6 +65,18 @@ const DESCS: [Desc; 19] = [
         variants: Slice { start: 6, len: 2 },
     },
     Desc::List { elem: desc::FLOAT },
+    Desc::HashMap {
+        key: desc::STR,
+        value: desc::INT,
+    },
+    Desc::HashMap {
+        key: desc::INT,
+        value: desc::STR,
+    },
+    Desc::HashMap {
+        key: desc::STR,
+        value: LIST_INT,
+    },
 ];
 const SLOTS: [u32; 6] = [desc::INT, desc::STR, CHAIN, desc::STR, LIST_INT, LIST_INT];
 const FIELDS: [Name; 6] = [Name { off: 0, len: 0 }; 6];
@@ -263,45 +278,59 @@ fn copy_on_write_through_a_callee() {
     assert_eq!(obj::live(), before);
 }
 
+/// A `Map`'s keys in key order, a `HashMap`'s in insertion order.
 #[test]
 fn map_keys_are_in_order() {
     let _l = lock();
     let before = obj::live();
-    let m = coll::map_new(MAP_INT_STR);
-    // SAFETY: `m` is a unique `Map<Int, Str>`.
-    unsafe {
-        for (k, v) in [(3i64, "x"), (-1, "y"), (2, "z")] {
-            coll::map_insert(&T, m, k as u64, s(v));
+    let cases = [
+        (MAP_INT_STR, MAP_STR_INT, [-1, 2, 3], ["", "a", "ab", "b", "c"]),
+        (HASH_INT_STR, HASH_STR_INT, [3, -1, 2], ["b", "a", "c", "", "ab"]),
+    ];
+    for (int_str, str_int, ints, strs) in cases {
+        let m = coll::map_new(&T, int_str);
+        // SAFETY: `m` is a unique map from `Int` to `Str`.
+        unsafe {
+            for (k, v) in [(3i64, "x"), (-1, "y"), (2, "z")] {
+                coll::map_insert(&T, m, k as u64, s(v));
+            }
+            let ks = coll::map_keys(&T, m, LIST_INT);
+            assert_eq!(contents(ks), ints);
+            dec(ks);
         }
-        let ks = coll::map_keys(&T, m, LIST_INT);
-        assert_eq!(contents(ks), [-1, 2, 3]);
-        dec(ks);
-    }
-    dec(m);
+        dec(m);
 
-    let m = coll::map_new(MAP_STR_INT);
-    // SAFETY: `m` is a unique `Map<Str, Int>`; each key is read, so the test still owns it.
-    unsafe {
-        for (k, v) in [("b", 1), ("a", 2), ("c", 3), ("", 4), ("ab", 5)] {
-            let k = s(k);
-            coll::map_insert(&T, m, k, v);
-            dec(from_slot(k));
+        let m = coll::map_new(&T, str_int);
+        // SAFETY: `m` is a unique map from `Str` to `Int`; each key is read, so the test still
+        // owns it.
+        unsafe {
+            for (k, v) in [("b", 1), ("a", 2), ("c", 3), ("", 4), ("ab", 5)] {
+                let k = s(k);
+                coll::map_insert(&T, m, k, v);
+                dec(from_slot(k));
+            }
+            let ks = coll::map_keys(&T, m, LIST_STR);
+            let got: alloc::vec::Vec<_> = (0..5).map(|i| str_at(ks, i)).collect();
+            assert_eq!(got, strs.map(str::as_bytes));
+            dec(ks);
         }
-        let ks = coll::map_keys(&T, m, LIST_STR);
-        let got: alloc::vec::Vec<_> = (0..5).map(|i| str_at(ks, i)).collect();
-        assert_eq!(got, [&b""[..], b"a", b"ab", b"b", b"c"]);
-        dec(ks);
+        dec(m);
     }
-    dec(m);
     assert_eq!(obj::live(), before);
 }
 
 #[test]
 fn map_get_insert_remove() {
+    for d in [MAP_INT_STR, HASH_INT_STR] {
+        map_get_insert_remove_of(d);
+    }
+}
+
+fn map_get_insert_remove_of(d: u32) {
     let _l = lock();
     let before = obj::live();
-    let m = coll::map_new(MAP_INT_STR);
-    // SAFETY: `m` is a unique `Map<Int, Str>`.
+    let m = coll::map_new(&T, d);
+    // SAFETY: `m` is a unique map from `Int` to `Str`.
     unsafe {
         let none = coll::map_get(&T, m, 1, OPT_STR, core::ptr::null_mut());
         assert_eq!(*field_u32(none), 0);
@@ -314,7 +343,7 @@ fn map_get_insert_remove() {
         coll::map_insert(&T, m, 2, s("two"));
         coll::map_remove(&T, m, 2);
         coll::map_remove(&T, m, 9);
-        assert_eq!(coll::map_len(m), 1);
+        assert_eq!(coll::map_len(&T, m), 1);
 
         let some = coll::map_get(&T, m, 1, OPT_STR, core::ptr::null_mut());
         assert_eq!(*field_u32(some), 1);
@@ -334,10 +363,16 @@ fn field_u32(p: *mut Header) -> *mut u32 {
 
 #[test]
 fn map_with_int_values_and_str_keys() {
+    for d in [MAP_STR_INT, HASH_STR_INT] {
+        map_with_int_values_and_str_keys_of(d);
+    }
+}
+
+fn map_with_int_values_and_str_keys_of(d: u32) {
     let _l = lock();
     let before = obj::live();
-    let m = coll::map_new(MAP_STR_INT);
-    // SAFETY: `m` is a unique `Map<Str, Int>`.
+    let m = coll::map_new(&T, d);
+    // SAFETY: `m` is a unique map from `Str` to `Int`.
     unsafe {
         let k = s("a");
         coll::map_insert(&T, m, k, 10);
@@ -365,9 +400,15 @@ fn map_with_int_values_and_str_keys() {
 /// map's own copy, made by the first `insert`, is the one it keeps.
 #[test]
 fn str_keys_are_looked_up_borrowed() {
+    for d in [MAP_STR_INT, HASH_STR_INT] {
+        str_keys_are_looked_up_borrowed_of(d);
+    }
+}
+
+fn str_keys_are_looked_up_borrowed_of(d: u32) {
     let _l = lock();
     let before = obj::live();
-    let m = coll::map_new(MAP_STR_INT);
+    let m = coll::map_new(&T, d);
     let with = |k: &str, f: &dyn Fn(u64)| {
         let k = s(k);
         f(k);
@@ -395,7 +436,7 @@ fn str_keys_are_looked_up_borrowed() {
         with("b", &|k| assert_eq!(get(k), None));
         let ks = coll::map_keys(&T, m, LIST_STR);
         assert_eq!(str_at(ks, 0), b"a key longer than a word");
-        assert_eq!((coll::map_len(m), coll::list_len(ks)), (2, 2));
+        assert_eq!((coll::map_len(&T, m), coll::list_len(ks)), (2, 2));
         dec(ks);
     }
     dec(m);
@@ -404,10 +445,16 @@ fn str_keys_are_looked_up_borrowed() {
 
 #[test]
 fn map_copy_on_write_through_a_callee() {
+    for d in [MAP_STR_LIST, HASH_STR_LIST] {
+        map_copy_on_write_through_a_callee_of(d);
+    }
+}
+
+fn map_copy_on_write_through_a_callee_of(d: u32) {
     let _l = lock();
     let before = obj::live();
     let l = ints(&[1]);
-    let m = coll::map_new(MAP_STR_LIST);
+    let m = coll::map_new(&T, d);
     let k = s("k");
     // SAFETY: `m` is a unique `Map<Str, List<Int>>`.
     unsafe { coll::map_insert(&T, m, k, to_slot(l)) };
@@ -418,7 +465,7 @@ fn map_copy_on_write_through_a_callee() {
     unsafe { coll::map_remove(&T, m2, k) };
     assert_eq!(rc(l), 1);
     // SAFETY: `m` is live.
-    assert_eq!(unsafe { coll::map_len(m) }, 1);
+    assert_eq!(unsafe { coll::map_len(&T, m) }, 1);
     dec(from_slot(k));
     dec(m);
     dec(m2);
@@ -447,21 +494,27 @@ fn equality() {
     unsafe { coll::list_set(&T, y, 1, s("c")).unwrap() };
     assert!(!eq(LIST_STR, x, y));
 
-    let mk = |ks: &[(&str, i64)]| {
-        let m = coll::map_new(MAP_STR_INT);
-        for &(k, v) in ks {
-            let k = s(k);
-            // SAFETY: `m` is a unique `Map<Str, Int>`.
-            unsafe { coll::map_insert(&T, m, k, v as u64) };
-            dec(from_slot(k));
+    // Either kind of map: the same keys and values, inserted in any order.
+    let mut maps = alloc::vec::Vec::new();
+    for d in [MAP_STR_INT, HASH_STR_INT] {
+        let mk = |ks: &[(&str, i64)]| {
+            let m = coll::map_new(&T, d);
+            for &(k, v) in ks {
+                let k = s(k);
+                // SAFETY: `m` is a unique map from `Str` to `Int`.
+                unsafe { coll::map_insert(&T, m, k, v as u64) };
+                dec(from_slot(k));
+            }
+            m
+        };
+        let (m1, m2) = (mk(&[("a", 1), ("b", 2)]), mk(&[("b", 2), ("a", 1)]));
+        assert!(eq(d, m1, m2) && eq(d, m1, m1));
+        let others = [mk(&[("a", 1), ("b", 3)]), mk(&[("a", 1), ("c", 2)]), mk(&[("a", 1)])];
+        for &o in &others {
+            assert!(!eq(d, m1, o) && !eq(d, o, m1));
         }
-        m
-    };
-    let (m1, m2) = (mk(&[("a", 1), ("b", 2)]), mk(&[("b", 2), ("a", 1)]));
-    assert!(eq(MAP_STR_INT, m1, m2));
-    let others = [mk(&[("a", 1), ("b", 3)]), mk(&[("a", 1), ("c", 2)]), mk(&[("a", 1)])];
-    for &o in &others {
-        assert!(!eq(MAP_STR_INT, m1, o));
+        maps.extend([m1, m2]);
+        maps.extend(others);
     }
 
     // A record holding a Str and a list; an enum with and without payload.
@@ -495,12 +548,10 @@ fn equality() {
     let (l1, l2, l3) = (ll(&[&[1], &[2, 3]]), ll(&[&[1], &[2, 3]]), ll(&[&[1], &[2, 4]]));
     assert!(eq(LIST_LIST, l1, l2) && !eq(LIST_LIST, l1, l3));
 
-    for p in [
-        a, b, c, d, x, y, m1, m2, p, q, r, r2, s4, s4b, s5, none, none2, l1, l2, l3,
-    ] {
+    for p in [a, b, c, d, x, y, p, q, r, r2, s4, s4b, s5, none, none2, l1, l2, l3] {
         dec(p);
     }
-    others.into_iter().for_each(dec);
+    maps.into_iter().for_each(dec);
     assert_eq!(obj::live(), before);
 }
 
@@ -732,10 +783,16 @@ fn result_ok_err_and_option_ok_or() {
 
 #[test]
 fn map_get_returns_the_pinned_none() {
+    for d in [MAP_STR_INT, HASH_STR_INT] {
+        map_get_returns_the_pinned_none_of(d);
+    }
+}
+
+fn map_get_returns_the_pinned_none_of(d: u32) {
     let _l = lock();
     let before = obj::live();
     let none = pinned_none(OPT_INT);
-    let m = coll::map_new(MAP_STR_INT);
+    let m = coll::map_new(&T, d);
     let k = s("k");
     // SAFETY: a `Map<Str, Int>` and a `Str` key.
     unsafe {
@@ -748,5 +805,50 @@ fn map_get_returns_the_pinned_none() {
     dec(from_slot(k));
     dec(m);
     unpin(none);
+    assert_eq!(obj::live(), before);
+}
+
+/// A `HashMap` owns its `Str` keys (copies) and its values' references through growth,
+/// compaction after removes, sorted buckets and copy-on-write; freeing it frees them all.
+#[test]
+fn hash_map_frees_what_it_holds() {
+    let _l = lock();
+    let before = obj::live();
+    let n = if cfg!(miri) { 60 } else { 2_000 };
+    // Keys built to share one hash, so their bucket is sorted, beside ordinary ones.
+    let parts = crate::hmap::colliding_parts(2, 8);
+    let mut keys: alloc::vec::Vec<alloc::vec::Vec<u8>> = parts[0]
+        .iter()
+        .flat_map(|a| parts[1].iter().map(move |b| [&a[..], &b[..]].concat()))
+        .collect();
+    keys.extend((0..n).map(|i| alloc::format!("key {i}").into_bytes()));
+    let m = coll::map_new(&T, HASH_STR_LIST);
+    let key = |k: &[u8]| to_slot(obj::new_bytes(desc::STR, k));
+    // SAFETY: `m` is a unique `HashMap<Str, List<Int>>` (and `c`, a copy, once made unique);
+    // each key is a live `Str` the test owns.
+    unsafe {
+        for (i, k) in keys.iter().enumerate() {
+            let k = key(k);
+            coll::map_insert(&T, m, k, to_slot(ints(&[i as i64])));
+            dec(from_slot(k));
+        }
+        let c = callee(m);
+        for k in keys.iter().step_by(2) {
+            let k = key(k);
+            coll::map_remove(&T, c, k);
+            coll::map_insert(&T, c, k, to_slot(ints(&[])));
+            coll::map_remove(&T, c, k);
+            dec(from_slot(k));
+        }
+        assert_eq!(coll::map_len(&T, m), keys.len() as i64);
+        assert_eq!(coll::map_len(&T, c), (keys.len() / 2) as i64);
+        let ks = coll::map_keys(&T, c, LIST_STR);
+        assert_eq!(str_at(ks, 0), keys[1]);
+        assert_eq!(str_at(ks, 1), keys[3]);
+        dec(ks);
+        assert!(!eq(HASH_STR_LIST, m, c));
+        dec(c);
+    }
+    dec(m);
     assert_eq!(obj::live(), before);
 }

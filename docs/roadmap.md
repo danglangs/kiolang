@@ -15,6 +15,7 @@ C8b5, 2026-11-09: Apple M3 Max (16 cores, 64 GB), release builds, rustc 1.99.1 `
 | tree of 2^20 leaves built and folded | 33 ms | 2.87 s | 98 ms | 185 ms | 438 ms | 3.78 to 2.21 G | 22 ms | 1.03 s | 3.0x slower | 29x faster |
 | `map`/`filter` with closures, 1 M | 5.8 ms | 77 ms | 13 ms | 13 ms | 36 ms | 0.21 G, same | 22 ms | 96 ms | 2.3x slower | 5.8x faster |
 | word count, 1 MB of text | 6.5 ms | 17 ms | 45 ms | 70 ms | 98 ms | 1.12 to 0.68 G | 23 ms | 67 ms | 6.9x slower | 2.7x slower |
+| word count on `HashMap` (C13, load 6.2, best of 7) | 5.7 ms | 17 ms (`map.py`) | 32 ms | | | | | 40 ms | 5.6x slower | 1.9x slower |
 | JSON parse + encode, 1 MB (json.kio) | 8.0 ms | 17 ms | 66 ms | 81 ms | 554 ms | 1.12 to 0.93 G | 24 ms | 812 ms | 8.3x slower | 3.8x slower |
 | JSON parse + encode, 1 MB (built-in `parse_json`, `to_json`; C12, load 6.5) | 7.8 ms | 17 ms | 17 ms | | | | 23 ms | 14 ms | 2.2x slower | 1.0x |
 | 100 k `s = s + i.to_str() + ","` | 4.6 ms | 7.2 ms | 5.2 ms | 5.3 ms | 1.37 s | 0.08 G, same | 23 ms | 1.57 s | 1.1x slower | 1.4x faster |

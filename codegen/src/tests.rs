@@ -151,6 +151,7 @@ fn main() -> Int {
     let s = Shape::Line(1, t);
     let o: Option<Int> = Some(5);
     let r: Result<Map<Str, Int>, Bytes> = Ok(Map::new());
+    let h: HashMap<Int, Str> = HashMap::new();
     match "b" { "a" => 1, _ => 0 }
 }"#,
     );
@@ -165,6 +166,7 @@ fn main() -> Int {
     let map_ty = Ty::Map(Box::new(Ty::Str), Box::new(Ty::Int));
     let res = s.desc(&Ty::Result(Box::new(map_ty.clone()), Box::new(Ty::Bytes)));
     let map = s.desc(&map_ty);
+    let hash = s.desc(&Ty::HashMap(Box::new(Ty::Int), Box::new(Ty::Str)));
     let a = s.str("a");
     assert_eq!(
         (a, s.str("b")),
@@ -202,9 +204,9 @@ fn main() -> Int {
         t.descs[..6],
         [Desc::Unit, Desc::Int, Desc::Bool, Desc::Str, Desc::Bytes, Desc::Float]
     );
-    // The program's seven other types, all added from the module: the lookups above added
+    // The program's eight other types, all added from the module: the lookups above added
     // none. Then the two functions used as values.
-    assert_eq!(t.descs.len(), 15);
+    assert_eq!(t.descs.len(), 16);
     let Desc::Record { name, slots } = t.desc(tree) else {
         panic!("{:?}", t.desc(tree))
     };
@@ -214,6 +216,7 @@ fn main() -> Int {
     assert_eq!(t.field_name(slots, 1), b"kids");
     assert_eq!(t.desc(list_tree), Desc::List { elem: tree });
     assert_eq!(t.desc(map), Desc::Map { key: 3, value: 1 });
+    assert_eq!(t.desc(hash), Desc::HashMap { key: 1, value: 3 });
 
     // SAFETY: the literal is a pinned `Str` in `buf`.
     unsafe {

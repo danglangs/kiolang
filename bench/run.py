@@ -35,6 +35,7 @@ BENCHES = [
     ("strings", "100 k `s = s + i.to_str() + \",\"`", None),
     ("list", "1 M push, sort, index and `for` sums", None),
     ("map", "word count, 1 MB of text", "words.txt"),
+    ("hashmap", "word count on `HashMap`, 1 MB", "words.txt"),
     ("tree", "tree of 2^20 leaves built and folded", None),
     ("closures", "`map`/`filter` with closures, 1 M", None),
     ("mandel", "Mandelbrot 400x400, 100 iterations", None),
@@ -67,7 +68,7 @@ def best(cmd, env=None, runs=RUNS):
 
 
 # Benchmarks timed against another's Rust and Python versions.
-SHARED = {"json_builtin": "json"}
+SHARED = {"json_builtin": "json", "hashmap": "map"}
 
 
 def commands(name, data):

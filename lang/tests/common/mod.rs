@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 use lang::CapTable;
 
+pub mod collide;
 pub mod corpus;
 
 /// The capability table every capability test uses.

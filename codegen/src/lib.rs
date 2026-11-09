@@ -215,7 +215,7 @@ fn val_type(t: &Ty) -> Option<ValType> {
         Ty::Int => Some(ValType::I64),
         Ty::Bool => Some(ValType::I32),
         Ty::Float => Some(ValType::F64),
-        Ty::Str | Ty::Bytes | Ty::List(_) | Ty::Map(..) => Some(ValType::I32),
+        Ty::Str | Ty::Bytes | Ty::List(_) | Ty::Map(..) | Ty::HashMap(..) => Some(ValType::I32),
         Ty::Struct(_) | Ty::Enum(_) | Ty::Option(_) | Ty::Result(..) | Ty::Fn(..) => Some(ValType::I32),
         // A handle in the component's table, never counted.
         Ty::Cap(_) => Some(ValType::I32),
@@ -232,6 +232,7 @@ fn is_ptr(t: &Ty) -> bool {
             | Ty::Bytes
             | Ty::List(_)
             | Ty::Map(..)
+            | Ty::HashMap(..)
             | Ty::Struct(_)
             | Ty::Enum(_)
             | Ty::Option(_)

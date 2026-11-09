@@ -2,7 +2,7 @@ use std::{env, path::PathBuf, process::Command};
 
 /// Builds runtime.wasm, the complete core module codegen appends each program to.
 fn main() {
-    for p in ["../runtime", "../caps.wit", "build.rs"] {
+    for p in ["../runtime", "../lang/src/hmap.rs", "../caps.wit", "build.rs"] {
         println!("cargo:rerun-if-changed={p}");
     }
     let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("..");

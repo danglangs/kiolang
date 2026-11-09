@@ -1,0 +1,26 @@
+// Word count over 1 MB of text (data/words.txt), on `HashMap` (map.kio is the same on `Map`).
+fn main(data: Dir) -> Int {
+    let text = match data.read("words.txt") {
+        Ok(b) => b.to_str(),
+        Err(_) => return -1,
+    };
+    let mut counts: HashMap<Str, Int> = HashMap::new();
+    let mut total = 0;
+    for line in text.lines() {
+        for w in line.split(" ") {
+            if w.len() > 0 {
+                counts.insert(w, counts.get(w).unwrap_or(0) + 1);
+                total += 1;
+            }
+        }
+    }
+    let mut most = 0;
+    let keys = counts.keys();
+    for k in keys {
+        let c = counts.get(k).unwrap_or(0);
+        if c > most {
+            most = c;
+        }
+    }
+    keys.len() * 1000000000 + most * 1000000 + total
+}

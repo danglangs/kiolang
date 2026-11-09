@@ -4,6 +4,7 @@
 //! - `desc`: type descriptors, the table codegen emits as data.
 //! - `display`: a value as `kio run` prints it.
 //! - `heap`: the allocator, size-class free lists over dlmalloc.
+//! - `hmap`: `HashMap`'s table, lang/src/hmap.rs itself (one source for both paths).
 //! - `json`: built-in JSON, parsed into and encoded from kio objects.
 //! - `obj`: object layout, allocation, `inc`, `dec`, `unique`; the safe-to-call Rust layer.
 //! - `abi`: the `extern "C"` functions generated code calls, over `u32` addresses (wasm32 only).
@@ -26,6 +27,8 @@ pub mod desc;
 pub mod display;
 pub mod float;
 pub mod heap;
+#[path = "../../lang/src/hmap.rs"]
+pub mod hmap;
 pub mod json;
 pub mod obj;
 pub mod text;

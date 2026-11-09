@@ -105,10 +105,11 @@ pub extern "C" fn rt_list_new(desc: u32, cap: u32) -> u32 {
     addr(coll::list_new(desc, alloc::vec::Vec::with_capacity(cap as usize)))
 }
 
-/// `Map::new()` of descriptor `desc`.
+/// `Map::new()` or `HashMap::new()`, by descriptor `desc`. Each `rt_map_` function takes
+/// either kind.
 #[no_mangle]
 pub extern "C" fn rt_map_new(desc: u32) -> u32 {
-    addr(coll::map_new(desc))
+    addr(coll::map_new(&table(), desc))
 }
 
 /// `a == b` on values of descriptor `desc`.
@@ -335,7 +336,7 @@ pub unsafe extern "C" fn rt_list_get(l: u32, i: i64, site: u32) -> i64 {
 #[no_mangle]
 pub unsafe extern "C" fn rt_map_len(m: u32) -> i64 {
     // SAFETY: the group's contract.
-    unsafe { coll::map_len(ptr(m)) }
+    unsafe { coll::map_len(&table(), ptr(m)) }
 }
 
 /// `desc` is `List<K>`.

@@ -31,6 +31,7 @@ const MAP: u32 = 7;
 const RECORD: u32 = 8;
 const ENUM: u32 = 9;
 const FN: u32 = 10;
+const HASH_MAP: u32 = 11;
 
 pub struct Statics<'m> {
     m: &'m Module,
@@ -114,6 +115,7 @@ impl<'m> Statics<'m> {
         self.descs[i as usize] = match t {
             Ty::List(e) => [LIST, self.desc(e), 0, 0, 0],
             Ty::Map(k, v) => [MAP, self.desc(k), self.desc(v), 0, 0],
+            Ty::HashMap(k, v) => [HASH_MAP, self.desc(k), self.desc(v), 0, 0],
             Ty::Struct(id) => {
                 let s = &m.structs[id.0 as usize];
                 let slots: Vec<u32> = s.fields.iter().map(|(_, t)| self.desc(t)).collect();

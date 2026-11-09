@@ -63,6 +63,11 @@ pub enum Desc {
         name: Name,
         slots: Slice,
     },
+    /// Last, so the tags before it are unchanged.
+    HashMap {
+        key: u32,
+        value: u32,
+    },
 }
 
 /// Bytes `off..off + len` of `Table::names`.

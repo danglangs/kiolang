@@ -4,7 +4,7 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 
 ## Now
 
-Compiled-only kio covers the whole language and every capability; the active stream is speed (C8): code that stays in compiled Wasm is 1.1-2.1x Rust, runtime-heavy code 2.3-8x (table below). The differential harness runs 398 programs both ways (0 mismatches) and the generator 250 more per CI run.
+Compiled-only kio covers the whole language and every capability; the active stream is speed (C8): code that stays in compiled Wasm is 1.1-2.1x Rust, runtime-heavy code 2.3-8x (table below). The differential harness runs 440 programs both ways (0 mismatches) and the generator 250 more per CI run.
 
 | Done | Result |
 |---|---|
@@ -37,10 +37,11 @@ Compiled-only kio covers the whole language and every capability; the active str
 | C8b4 | borrowed parameters (a pointer parameter only read in place is passed without an inc; optimistic fixpoint, `fn`-value wrappers adapt) and `Str` map lookups without a key copy. Word count 74 to 70 ms, JSON 83 to 80, tree 179 to 185 (same count, code moved) |
 | L9, C12 | built-in JSON: a reserved `Json` enum, `Str.parse_json() -> Result<Json, Str>`, `Json.to_json()`, accessors (`get`, `at`, `as_*`), json.kio's rules and messages, depth 128; the interpreter (lang/src/json.rs) and the runtime (runtime/src/json.rs, building kio objects directly) agree on the harness, a generated-JSON fuzz test and byte mutations. 1 MB parse + encode 17 ms compiled (`serde_json` 7.8 ms, json.kio 82 ms). kio-web still declares its own `Json` and is refused until it moves to the built-in |
 | C8b5 | less work per operation (fuel stays): generated code pops the size-class free lists, fresh blocks carved 32 at a time from 64 KB chunks, freeing without descriptor copies, `Str` map keys compared by an 8-byte prefix. Tree 185 to 98 ms (fuel 3.78 to 2.21 G), word count 70 to 45, JSON 81 to 66 |
+| L10, C13 | `HashMap<K, V>` (owner-approved): `Map`'s keys and methods, insertion-ordered iteration, order-insensitive `==`, a fixed hash with buckets sorted past 8 entries (100,000 colliding keys in under a second either way; with chains only, out of fuel). One table source (lang/src/hmap.rs) for the interpreter and the runtime; codegen reuses `Map`'s calls. Word count 45 ms on `Map`, 32 on `HashMap` (Rust 5.7); kiogen generates maps; harness 440 ran both ways, 0 mismatches |
 
 ## Next
 
-C8 (roadmap.md): freeing (54% of tree); word count's double search for `insert(k, get(k) + 1)` (open_questions #101) and `split`'s allocations; borrowed match bindings of a borrowed scrutinee (tree).
+C8 (roadmap.md): freeing (54% of tree); word count's double search for `insert(k, get(k) + 1)` (open_questions #110, #115; on `HashMap` too) and `split`'s allocations; borrowed match bindings of a borrowed scrutinee (tree).
 
 ## Waiting on the maintainer
 

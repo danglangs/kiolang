@@ -1,4 +1,5 @@
 use crate::check::Program;
+use crate::hmap::{self, HashKey, HashMap};
 use crate::ir::*;
 use crate::Span;
 use std::borrow::Cow;
@@ -32,6 +33,8 @@ pub enum Value {
     List(Rc<Vec<Value>>),
     /// Ordered by key, so `keys()` and iteration are deterministic.
     Map(Rc<BTreeMap<Key, Value>>),
+    /// In insertion order; `==` ignores the order.
+    HashMap(Rc<HashMap<Key, Value>>),
     /// The struct and its field values in declaration order.
     Struct(StructId, Vec<Value>),
     /// The enum, the variant's index in declaration order and its payload.
@@ -68,6 +71,15 @@ impl Key {
         match self {
             Key::Int(n) => Value::Int(*n),
             Key::Str(s) => Value::Str(s.as_str().into()),
+        }
+    }
+}
+
+impl HashKey for Key {
+    fn hash(&self) -> u64 {
+        match self {
+            Key::Int(n) => hmap::hash_int(*n),
+            Key::Str(s) => hmap::hash_bytes(s.as_bytes()),
         }
     }
 }
@@ -370,6 +382,12 @@ impl<'a> Interp<'a> {
             (Value::Map(map), Mut::MapRemove, k, _) => {
                 Rc::make_mut(map).remove(&Key::from_value(k));
             }
+            (Value::HashMap(map), Mut::MapInsert, k, Some(v)) => {
+                Rc::make_mut(map).insert(Key::from_value(k), v);
+            }
+            (Value::HashMap(map), Mut::MapRemove, k, _) => {
+                Rc::make_mut(map).remove(&Key::from_value(k));
+            }
             _ => unreachable!("checked mutation"),
         }
         Ok(Value::Unit)
@@ -416,7 +434,10 @@ impl<'a> Interp<'a> {
             ExprKind::Builtin(b, recv, args) => self.builtin(*b, recv, args, e.span),
             ExprKind::Mutate(place, op, args) => self.mutate(place, *op, args, e.span),
             ExprKind::List(items) => self.list(items),
-            ExprKind::MapNew => Ok(Value::Map(Rc::default())),
+            ExprKind::MapNew => match e.ty {
+                Ty::HashMap(..) => Ok(Value::HashMap(Rc::default())),
+                _ => Ok(Value::Map(Rc::default())),
+            },
             ExprKind::StructLit(s, inits) => self.struct_lit(*s, inits),
             ExprKind::Field(..) | ExprKind::Index(..) => self.read(e),
             ExprKind::Variant(en, i, args) => self.variant(*en, *i, args),
@@ -551,6 +572,9 @@ impl<'a> Interp<'a> {
             (Value::Str(_), Ty::Str) | (Value::Bytes(_), Ty::Bytes) => true,
             (Value::List(vals), Ty::List(t)) => vals.iter().all(|v| self.fits(v, t)),
             (Value::Map(m), Ty::Map(k, t)) => m
+                .iter()
+                .all(|(key, v)| self.fits(&key.to_value(), k) && self.fits(v, t)),
+            (Value::HashMap(m), Ty::HashMap(k, t)) => m
                 .iter()
                 .all(|(key, v)| self.fits(&key.to_value(), k) && self.fits(v, t)),
             (Value::Enum(EnumRef::Result, i, vals), Ty::Result(ok, e)) if vals.len() == 1 => match i {
@@ -966,6 +990,12 @@ fn builtin(recv: &Value, b: Builtin, (arg, arg2): Args, span: Span) -> Res {
         (B::MapLen, Value::Map(m)) => Value::Int(m.len() as i64),
         (B::MapKeys, Value::Map(m)) => Value::List(m.keys().map(Key::to_value).collect::<Vec<_>>().into()),
         (B::MapGet, Value::Map(m)) => match m.get(&Key::from_value(arg.expect("checked argument"))) {
+            Some(v) => some(v.clone()),
+            None => none(),
+        },
+        (B::MapLen, Value::HashMap(m)) => Value::Int(m.len() as i64),
+        (B::MapKeys, Value::HashMap(m)) => Value::List(m.keys().map(Key::to_value).collect::<Vec<_>>().into()),
+        (B::MapGet, Value::HashMap(m)) => match m.get(&Key::from_value(arg.expect("checked argument"))) {
             Some(v) => some(v.clone()),
             None => none(),
         },

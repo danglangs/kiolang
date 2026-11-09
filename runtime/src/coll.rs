@@ -1,17 +1,18 @@
-//! List and Map operations, and structural equality. Semantics are the interpreter's.
+//! List, Map and HashMap operations, and structural equality. Semantics are the interpreter's.
 //!
 //! Ownership, per docs/codegen.md: a receiver is borrowed (codegen decs it after the call), and
 //! so is an `Int` or `Str` key. A mutator (`list_set`, `push`, `insert`, `remove`) takes a
 //! receiver the caller made `unique` and changes it in place. A value passed to `list_set`,
 //! `push` or `insert` is owned by the container from then on, except when the call fails: then
 //! nothing was consumed. Results are owned (+1). Whether a `u64` is a pointer comes from the
-//! container's own descriptor, so callers pass no element types.
+//! container's own descriptor, so callers pass no element types. A `map_` function takes a
+//! `Map` or a `HashMap` (a "map"), which its descriptor tells apart.
 //!
 //! Every `unsafe fn` has the contract of `obj`, and its container argument has the type its
 //! name says.
 
 use crate::desc::{self, Desc, Table};
-use crate::obj::{self, bytes, elems, elems_mut, field, from_slot, to_slot, Header, Key, Map};
+use crate::obj::{self, bytes, elems, elems_mut, field, from_slot, to_slot, HashMap, Header, Key, Map};
 use crate::text;
 use alloc::vec::Vec;
 use core::mem::ManuallyDrop;
@@ -29,6 +30,11 @@ unsafe fn map<'a>(p: *mut Header) -> &'a mut Map {
     unsafe { &mut *field(p, BODY) }
 }
 
+unsafe fn hash_map<'a>(p: *mut Header) -> &'a mut HashMap {
+    // SAFETY: a `HashMap` object holds its `HashMap` at BODY.
+    unsafe { &mut *field(p, BODY) }
+}
+
 /// The element descriptor of list `p`.
 unsafe fn elem(t: &Table, p: *mut Header) -> u32 {
     // SAFETY: `p` is live.
@@ -38,12 +44,13 @@ unsafe fn elem(t: &Table, p: *mut Header) -> u32 {
     }
 }
 
-/// The key and value descriptors of map `p`.
-unsafe fn kv(t: &Table, p: *mut Header) -> (u32, u32) {
+/// The key and value descriptors of map `p`, and whether it is a `HashMap`.
+unsafe fn kv(t: &Table, p: *mut Header) -> (u32, u32, bool) {
     // SAFETY: `p` is live.
     match t.desc(unsafe { (*p).desc }) {
-        Desc::Map { key, value } => (key, value),
-        d => panic!("{d:?} is not a Map"),
+        Desc::Map { key, value } => (key, value, false),
+        Desc::HashMap { key, value } => (key, value, true),
+        d => panic!("{d:?} is not a map"),
     }
 }
 
@@ -155,32 +162,43 @@ pub unsafe fn list_push(p: *mut Header, v: u64) {
     unsafe { obj::list_mut(p) }.push(v);
 }
 
-/// An empty map of descriptor `desc`.
-pub fn map_new(desc: u32) -> *mut Header {
-    obj::new_map(desc, Map::new())
+/// An empty map of descriptor `desc`, a `Map` or a `HashMap`.
+pub fn map_new(t: &Table, desc: u32) -> *mut Header {
+    match t.desc(desc) {
+        Desc::HashMap { .. } => obj::new_hash_map(desc, HashMap::new()),
+        _ => obj::new_map(desc, Map::new()),
+    }
 }
 
 /// # Safety
-/// `p` is a `Map`.
-pub unsafe fn map_len(p: *mut Header) -> i64 {
+/// `p` is a map.
+pub unsafe fn map_len(t: &Table, p: *mut Header) -> i64 {
     // SAFETY: the caller's guarantee.
-    unsafe { map(p) }.len() as i64
+    unsafe {
+        match kv(t, p).2 {
+            true => hash_map(p).len() as i64,
+            false => map(p).len() as i64,
+        }
+    }
 }
 
-/// `m.keys()` as a `List` of descriptor `list_desc`, in key order. `Str` keys are rebuilt as
-/// new `Str` objects.
+/// `m.keys()` as a `List` of descriptor `list_desc`, in key order (a `Map`) or insertion order
+/// (a `HashMap`). `Str` keys are rebuilt as new `Str` objects.
 ///
 /// # Safety
-/// `p` is a `Map`, and `list_desc` is the list of its key type.
+/// `p` is a map, and `list_desc` is the list of its key type.
 pub unsafe fn map_keys(t: &Table, p: *mut Header, list_desc: u32) -> *mut Header {
+    let slot = |k: &Key| match k {
+        Key::Int(n) => *n as u64,
+        Key::Str(s) => to_slot(obj::new_bytes(desc::STR, s)),
+    };
     // SAFETY: the caller's guarantee.
-    let keys = unsafe { map(p) }
-        .keys()
-        .map(|k| match k {
-            Key::Int(n) => *n as u64,
-            Key::Str(s) => to_slot(obj::new_bytes(desc::STR, s)),
-        })
-        .collect();
+    let keys = unsafe {
+        match kv(t, p).2 {
+            true => hash_map(p).keys().map(slot).collect(),
+            false => map(p).keys().map(slot).collect(),
+        }
+    };
     debug_assert!(matches!(t.desc(list_desc), Desc::List { .. }));
     obj::new_list(list_desc, keys)
 }
@@ -190,14 +208,18 @@ pub unsafe fn map_keys(t: &Table, p: *mut Header, list_desc: u32) -> *mut Header
 /// `none` as `obj::option`'s.
 ///
 /// # Safety
-/// `p` is a `Map`; `k` is a key of its key type; `option_desc` is `Option` of its value type;
+/// `p` is a map; `k` is a key of its key type; `option_desc` is `Option` of its value type;
 /// `none` is null or a `None` of it.
 pub unsafe fn map_get(t: &Table, p: *mut Header, k: u64, option_desc: u32, none: *mut Header) -> *mut Header {
     // SAFETY: the caller's guarantee.
     unsafe {
-        let (key, value) = kv(t, p);
-        let v = map(p).get(&*probe(key, k)).map(|&v| share(t, value, v));
-        obj::option(t, option_desc, none, v)
+        let (key, value, hashed) = kv(t, p);
+        let k = probe(key, k);
+        let v = match hashed {
+            true => hash_map(p).get(&k),
+            false => map(p).get(&k),
+        };
+        obj::option(t, option_desc, none, v.map(|&v| share(t, value, v)))
     }
 }
 
@@ -290,15 +312,22 @@ pub unsafe fn option_ok_or(t: &Table, o: *mut Header, e: u64, result_desc: u32) 
 /// dec'd. `k` is an `Int` or a `Str` pointer, read not consumed.
 ///
 /// # Safety
-/// `p` is a unique `Map`; `k` is a key of its key type.
+/// `p` is a unique map; `k` is a key of its key type.
 pub unsafe fn map_insert(t: &Table, p: *mut Header, k: u64, v: u64) {
     // SAFETY: the caller's guarantee.
     unsafe {
-        let (key, value) = kv(t, p);
+        let (key, value, hashed) = kv(t, p);
         // A key already present is found without copying it, and kept.
-        match map(p).get_mut(&*probe(key, k)) {
-            Some(slot) => release(t, value, core::mem::replace(slot, v)),
-            None => {
+        let found = match hashed {
+            true => hash_map(p).get_mut(&probe(key, k)),
+            false => map(p).get_mut(&probe(key, k)),
+        };
+        match (found, hashed) {
+            (Some(slot), _) => release(t, value, core::mem::replace(slot, v)),
+            (None, true) => {
+                hash_map(p).insert(key_of(key, k), v);
+            }
+            (None, false) => {
                 map(p).insert(key_of(key, k), v);
             }
         }
@@ -308,12 +337,16 @@ pub unsafe fn map_insert(t: &Table, p: *mut Header, k: u64, v: u64) {
 /// `m.remove(k)` on a unique map; an absent key does nothing.
 ///
 /// # Safety
-/// `p` is a unique `Map`; `k` is a key of its key type.
+/// `p` is a unique map; `k` is a key of its key type.
 pub unsafe fn map_remove(t: &Table, p: *mut Header, k: u64) {
     // SAFETY: the caller's guarantee.
     unsafe {
-        let (key, value) = kv(t, p);
-        if let Some(old) = map(p).remove(&*probe(key, k)) {
+        let (key, value, hashed) = kv(t, p);
+        let old = match hashed {
+            true => hash_map(p).remove(&probe(key, k)),
+            false => map(p).remove(&probe(key, k)),
+        };
+        if let Some(old) = old {
             release(t, value, old);
         }
     }
@@ -368,6 +401,18 @@ unsafe fn eq_one(t: &Table, work: &mut Vec<(u32, u64, u64)>, d: u32, a: u64, b: 
                     && x.iter().zip(y.iter()).all(|((kx, vx), (ky, vy))| {
                         work.push((value, *vx, *vy));
                         kx == ky
+                    })
+            }
+            // The same keys, in any order, with equal values.
+            Desc::HashMap { value, .. } => {
+                let (x, y) = (&*field::<HashMap>(a, BODY), &*field::<HashMap>(b, BODY));
+                x.len() == y.len()
+                    && x.iter().all(|(k, vx)| match y.get(k) {
+                        Some(vy) => {
+                            work.push((value, *vx, *vy));
+                            true
+                        }
+                        None => false,
                     })
             }
             Desc::Record { slots, .. } => {

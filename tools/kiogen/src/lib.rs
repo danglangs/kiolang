@@ -51,6 +51,10 @@ pub struct Features {
     /// `match` on literals, and `split` and `lines` into `List<Str>` locals, indexed, counted,
     /// searched and iterated with `for`.
     pub strings: bool,
+    /// `HashMap<Int, Int>` and `HashMap<Str, Int>` locals, helper parameters and `main`
+    /// results: `HashMap::new()`, copies, `insert`, `remove`, `get`, `len`, `keys`, `==`, and
+    /// `for` over `keys()` (insertion order).
+    pub hashmaps: bool,
 }
 
 impl Default for Features {
@@ -65,6 +69,7 @@ impl Default for Features {
             floats: true,
             closures: true,
             strings: true,
+            hashmaps: true,
         }
     }
 }
@@ -177,6 +182,11 @@ enum Ty {
     Str,
     /// `List<Str>`, from `split` or `lines`; only immutable locals have it.
     StrList,
+    /// `HashMap<Int, Int>` and `HashMap<Str, Int>`: locals, helper parameters and `main`'s
+    /// result. A map's `max` bounds its size, as a list's does; a `Str` key is at most
+    /// `PARAM_MAX` bytes.
+    IntMap,
+    StrMap,
 }
 
 struct Var {
@@ -293,6 +303,8 @@ impl Gen<'_> {
             Ty::Opt => "Option<Int>",
             Ty::Str => "Str",
             Ty::StrList => "List<Str>",
+            Ty::IntMap => "HashMap<Int, Int>",
+            Ty::StrMap => "HashMap<Str, Int>",
         }
     }
 
@@ -314,6 +326,13 @@ impl Gen<'_> {
                 }
             }
         }
+        if self.features.hashmaps {
+            for p in params.iter_mut() {
+                if self.rng.chance(10) {
+                    *p = *self.rng.pick(&[Ty::IntMap, Ty::StrMap]);
+                }
+            }
+        }
         if recursive {
             params.insert(0, Ty::Int);
         }
@@ -323,7 +342,8 @@ impl Gen<'_> {
         self.ret_bound = RET_MAX;
         for (j, (n, t)) in names.iter().zip(&params).enumerate() {
             self.declare(n.clone(), *t, false, recursive && j == 0);
-            self.var(n).smax = PARAM_MAX;
+            let v = self.var(n);
+            (v.smax, v.max) = (PARAM_MAX, MAX_LEN);
         }
         let sig: Vec<String> = names
             .iter()
@@ -364,6 +384,8 @@ impl Gen<'_> {
             ret = Ty::Float;
         } else if self.features.strings && self.rng.chance(10) {
             ret = Ty::Str;
+        } else if self.features.hashmaps && self.rng.chance(8) {
+            ret = *self.rng.pick(&[Ty::IntMap, Ty::StrMap]);
         }
         self.start(ret);
         self.ret_bound = MAX_STR;
@@ -463,6 +485,11 @@ impl Gen<'_> {
                 return s;
             }
         }
+        if self.features.hashmaps && self.rng.chance(if self.has_maps() { 40 } else { 10 }) {
+            if let Some(s) = self.map_stmt() {
+                return s;
+            }
+        }
         if self.features.strings && self.rng.chance(25) {
             if let Some(s) = self.str_stmt() {
                 return s;
@@ -541,7 +568,9 @@ impl Gen<'_> {
     }
 
     fn assign(&mut self) -> Option<String> {
-        let names = self.visible(|v| v.mutable && !v.fixed && !matches!(v.ty, Ty::List | Ty::Str | Ty::StrList));
+        let names = self.visible(|v| {
+            v.mutable && !v.fixed && !matches!(v.ty, Ty::List | Ty::Str | Ty::StrList | Ty::IntMap | Ty::StrMap)
+        });
         if names.is_empty() {
             return None;
         }
@@ -790,6 +819,7 @@ impl Gen<'_> {
             Ty::List | Ty::StrList => unreachable!("lists come from list_expr and str_stmt"),
             Ty::S | Ty::K | Ty::Opt => self.adt(ty, depth),
             Ty::Str => self.str_upto(depth, self.ret_bound),
+            Ty::IntMap | Ty::StrMap => self.map_expr(ty).0,
         }
     }
 
@@ -851,6 +881,11 @@ impl Gen<'_> {
         if depth > 0 && self.features.strings && self.rng.chance(8) {
             return self.str_int(depth - 1);
         }
+        if depth > 0 && self.features.hashmaps && self.has_maps() && self.rng.chance(15) {
+            if let Some(e) = self.map_int(depth - 1) {
+                return e;
+            }
+        }
         if depth > 0 && self.features.floats && self.rng.chance(8) {
             let x = self.float(depth - 1);
             return match self.rng.below(2) {
@@ -909,6 +944,11 @@ impl Gen<'_> {
         }
         if depth > 0 && self.features.strings && self.rng.chance(8) {
             return self.str_bool(depth - 1);
+        }
+        if depth > 0 && self.features.hashmaps && self.has_maps() && self.rng.chance(15) {
+            if let Some(e) = self.map_bool(depth - 1) {
+                return e;
+            }
         }
         if depth > 0 && self.features.floats && self.rng.chance(10) {
             let d = depth - 1;
@@ -1446,6 +1486,160 @@ impl Gen<'_> {
         self.mult /= runs;
         Some(format!("{pad}for {w} in {src} {body}\n"))
     }
+
+    /// Whether a map is visible.
+    fn has_maps(&self) -> bool {
+        !self.visible(|v| matches!(v.ty, Ty::IntMap | Ty::StrMap)).is_empty()
+    }
+
+    /// A map of type `ty` (`IntMap` or `StrMap`) and a bound on its size: a visible one, or
+    /// `HashMap::new()`, which only appears where the context gives its type.
+    fn map_expr(&mut self, ty: Ty) -> (String, u64) {
+        let maps = self.visible(|v| v.ty == ty);
+        if !maps.is_empty() && self.rng.chance(60) {
+            let name = self.rng.pick(&maps).clone();
+            let max = self.var(&name).max;
+            return (name, max);
+        }
+        ("HashMap::new()".to_string(), 0)
+    }
+
+    /// A key for a map of type `ty`: mostly one of a few, so lookups and removes find keys.
+    fn map_key(&mut self, ty: Ty) -> String {
+        match (ty, self.rng.chance(60)) {
+            (Ty::IntMap, true) => self.rng.below(8).to_string(),
+            (Ty::IntMap, false) => self.expr(Ty::Int, 1),
+            (_, true) => self.rng.pick(&STR_LITS[..6]).0.to_string(),
+            _ => self.str_upto(1, PARAM_MAX),
+        }
+    }
+
+    /// A map statement: a `let`, `insert`, `remove`, an assignment, or a `for` over `keys()`.
+    fn map_stmt(&mut self) -> Option<String> {
+        let pad = self.pad();
+        let kind = self.rng.below(8);
+        if kind == 0 {
+            // A new map, then a few inserts if it is mutable, so later statements find entries.
+            let ty = *self.rng.pick(&[Ty::IntMap, Ty::StrMap]);
+            let (init, max) = self.map_expr(ty);
+            let name = self.name("h");
+            let mutable = self.rng.chance(70);
+            let m = if mutable { "mut " } else { "" };
+            let mut s = format!("{pad}let {m}{name}: {} = {init};\n", Self::ty_name(ty));
+            let mut n = if mutable { self.rng.below(4) } else { 0 };
+            if max + n * self.mult > MAX_LEN {
+                n = 0;
+            }
+            for _ in 0..n {
+                let (k, v) = (self.map_key(ty), self.expr(Ty::Int, 1));
+                s += &format!("{pad}{name}.insert({k}, {v});\n");
+            }
+            self.declare(name.clone(), ty, mutable, false);
+            self.var(&name).max = max + n * self.mult;
+            return Some(s);
+        }
+        if kind == 7 {
+            return self.map_for();
+        }
+        let mult = self.mult;
+        let mutable: Vec<String> = self
+            .visible(|v| matches!(v.ty, Ty::IntMap | Ty::StrMap) && v.mutable && !v.fixed)
+            .into_iter()
+            .filter(|n| kind > 3 || self.var(n).max + mult <= MAX_LEN)
+            .collect();
+        if mutable.is_empty() {
+            return None;
+        }
+        let name = self.rng.pick(&mutable).clone();
+        let ty = self.var_ty(&name);
+        let k = self.map_key(ty);
+        match kind {
+            1..=3 => {
+                let v = self.expr(Ty::Int, 2);
+                self.var(&name).max += mult;
+                Some(format!("{pad}{name}.insert({k}, {v});\n"))
+            }
+            4 | 5 => Some(format!("{pad}{name}.remove({k});\n")),
+            _ => {
+                let (e, max) = self.map_expr(ty);
+                let v = self.var(&name);
+                v.max = v.max.max(max);
+                Some(format!("{pad}{name} = {e};\n"))
+            }
+        }
+    }
+
+    /// `for k in m.keys()` over a visible map, in insertion order. Its passes are bounded by the
+    /// map's `max`, or by `MAX_LEN` inside another loop, as `for_list`'s.
+    fn map_for(&mut self) -> Option<String> {
+        let maps = self.visible(|v| matches!(v.ty, Ty::IntMap | Ty::StrMap));
+        if maps.is_empty()
+            || !self.features.loops
+            || self.loops >= MAX_LOOPS
+            || self.nest >= MAX_NEST
+            || self.cost > BUDGET / 2
+        {
+            return None;
+        }
+        let name = self.rng.pick(&maps).clone();
+        let ty = self.var_ty(&name);
+        let runs = match self.loops {
+            0 => self.var(&name).max.max(1),
+            _ => MAX_LEN,
+        };
+        let pad = self.pad();
+        let k = self.name("k");
+        self.mult *= runs;
+        self.loops += 1;
+        self.scopes.push(vec![]);
+        let kty = if ty == Ty::IntMap { Ty::Int } else { Ty::Str };
+        self.declare(k.clone(), kty, false, true);
+        self.var(&k).smax = PARAM_MAX;
+        let body = self.block(3, Ty::Unit);
+        self.scopes.pop();
+        self.loops -= 1;
+        self.mult /= runs;
+        Some(format!("{pad}for {k} in {name}.keys() {body}\n"))
+    }
+
+    /// An `Int` from a visible map: `len()`, `keys().len()` or `get(k).unwrap_or(e)`.
+    fn map_int(&mut self, d: u32) -> Option<String> {
+        let maps = self.visible(|v| matches!(v.ty, Ty::IntMap | Ty::StrMap));
+        if maps.is_empty() {
+            return None;
+        }
+        let name = self.rng.pick(&maps).clone();
+        let ty = self.var_ty(&name);
+        Some(match self.rng.below(4) {
+            0 => format!("{name}.len()"),
+            1 => format!("{name}.keys().len()"),
+            _ => {
+                let k = self.map_key(ty);
+                format!("{name}.get({k}).unwrap_or({})", self.int(d))
+            }
+        })
+    }
+
+    /// A `Bool` from a visible map: `get(k).is_some()`, `keys().contains(k)`, or `==`/`!=`
+    /// with another map of its type.
+    fn map_bool(&mut self, _d: u32) -> Option<String> {
+        let maps = self.visible(|v| matches!(v.ty, Ty::IntMap | Ty::StrMap));
+        if maps.is_empty() {
+            return None;
+        }
+        let name = self.rng.pick(&maps).clone();
+        let ty = self.var_ty(&name);
+        Some(match self.rng.below(3) {
+            0 => format!("{name}.get({}).is_some()", self.map_key(ty)),
+            1 => format!("{name}.keys().contains({})", self.map_key(ty)),
+            _ => {
+                let same = self.visible(|v| v.ty == ty);
+                let other = self.rng.pick(&same).clone();
+                let op = *self.rng.pick(&["==", "!="]);
+                format!("({name} {op} {other})")
+            }
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1483,6 +1677,30 @@ mod tests {
         for m in [".map(|el| ", ".filter(|el| ", ".any(|el| ", ".all(|el| "] {
             assert!(all.matches(m).count() > 10, "{m}: {}", all.matches(m).count());
         }
+    }
+
+    /// `HashMap`s appear in a run of the default size, with every operation, both key types, as
+    /// parameters and as `main`'s result.
+    #[test]
+    fn hashmaps_are_generated() {
+        let all: String = (0..250).map(|s| super::program(s, &Default::default())).collect();
+        for m in [
+            ": HashMap<Int, Int> = HashMap::new()",
+            ": HashMap<Str, Int> = HashMap::new()",
+            ".insert(",
+            ".remove(",
+            ".keys().len()",
+            ".keys() {",
+            ".keys().contains(",
+            ").is_some()",
+            ": HashMap<Int, Int>,",
+            ": HashMap<Str, Int>,",
+            "-> HashMap<",
+        ] {
+            assert!(all.matches(m).count() > 10, "{m}: {}", all.matches(m).count());
+        }
+        let eq = all.matches(" == h").count() + all.matches(" != h").count();
+        assert!(eq > 5, "{eq}");
     }
 
     /// Strings appear in a run of the default size, with the in-place append's patterns.

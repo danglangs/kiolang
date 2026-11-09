@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::eval::Value;
+use crate::eval::{Key, Value};
 use crate::ir::{self, EnumRef};
 use crate::parse::parse_file;
 use crate::{Diag, Span};
@@ -94,13 +94,8 @@ impl Program {
             Value::Bytes(b) => format!("<{} bytes>", b.len()),
             Value::Unit => "()".to_string(),
             Value::List(vs) => format!("[{}]", list(vs)),
-            Value::Map(m) => {
-                let entries: Vec<_> = m
-                    .iter()
-                    .map(|(k, v)| format!("{}: {}", self.nested(&k.to_value()), self.nested(v)))
-                    .collect();
-                format!("{{{}}}", entries.join(", "))
-            }
+            Value::Map(m) => self.entries(m.iter()),
+            Value::HashMap(m) => self.entries(m.iter()),
             Value::Struct(s, vs) => {
                 let s = &self.ir.structs[s.0 as usize];
                 let fields: Vec<_> = (s.fields.iter().zip(vs))
@@ -133,6 +128,14 @@ impl Program {
         }
     }
 
+    /// A map's entries as `{k: v, ..}`, in the order given.
+    fn entries<'v>(&self, entries: impl Iterator<Item = (&'v Key, &'v Value)>) -> String {
+        let entries: Vec<_> = entries
+            .map(|(k, v)| format!("{}: {}", self.nested(&k.to_value()), self.nested(v)))
+            .collect();
+        format!("{{{}}}", entries.join(", "))
+    }
+
     pub(crate) fn is_cap(&self, ty: &str) -> bool {
         self.cap_methods.keys().any(|(c, _)| c == ty)
     }
@@ -154,6 +157,7 @@ pub enum Ty {
     Result(Box<Ty>, Box<Ty>),
     List(Box<Ty>),
     Map(Box<Ty>, Box<Ty>),
+    HashMap(Box<Ty>, Box<Ty>),
     /// A capability, which only a parameter can hold.
     Cap(String),
     /// A function value: parameter types and return type. Never mentions a capability.
@@ -177,6 +181,7 @@ pub(crate) fn subst(ty: &Ty, binds: &[(String, Ty)]) -> Ty {
         Ty::List(t) => Ty::List(s(t)),
         Ty::Result(t, e) => Ty::Result(s(t), s(e)),
         Ty::Map(k, v) => Ty::Map(s(k), s(v)),
+        Ty::HashMap(k, v) => Ty::HashMap(s(k), s(v)),
         Ty::Fn(ps, r) => Ty::Fn(ps.iter().map(|p| subst(p, binds)).collect(), s(r)),
         Ty::Struct(k, args) => Ty::Struct(k.clone(), args.iter().map(|a| subst(a, binds)).collect()),
         Ty::Enum(k, args) => Ty::Enum(k.clone(), args.iter().map(|a| subst(a, binds)).collect()),
@@ -194,7 +199,7 @@ fn unbounded<'t>(ty: &'t Ty, own: &[TParam]) -> Option<&'t str> {
     match ty {
         Ty::Param(t) if bound_of(own, t).is_none() => Some(t),
         Ty::Option(t) | Ty::List(t) => unbounded(t, own),
-        Ty::Result(t, e) | Ty::Map(t, e) => unbounded(t, own).or_else(|| unbounded(e, own)),
+        Ty::Result(t, e) | Ty::Map(t, e) | Ty::HashMap(t, e) => unbounded(t, own).or_else(|| unbounded(e, own)),
         Ty::Fn(ps, r) => ps.iter().find_map(|p| unbounded(p, own)).or_else(|| unbounded(r, own)),
         Ty::Struct(_, args) | Ty::Enum(_, args) => args.iter().find_map(|a| unbounded(a, own)),
         _ => None,
@@ -241,7 +246,7 @@ fn has_param(ty: &Ty) -> bool {
     match ty {
         Ty::Param(_) => true,
         Ty::Option(t) | Ty::List(t) => has_param(t),
-        Ty::Result(t, e) | Ty::Map(t, e) => has_param(t) || has_param(e),
+        Ty::Result(t, e) | Ty::Map(t, e) | Ty::HashMap(t, e) => has_param(t) || has_param(e),
         Ty::Fn(ps, r) => ps.iter().any(has_param) || has_param(r),
         Ty::Struct(_, args) | Ty::Enum(_, args) => args.iter().any(has_param),
         _ => false,
@@ -252,7 +257,7 @@ fn has_param(ty: &Ty) -> bool {
 fn ty_size(ty: &Ty) -> usize {
     1 + match ty {
         Ty::Option(t) | Ty::List(t) => ty_size(t),
-        Ty::Result(t, e) | Ty::Map(t, e) => ty_size(t) + ty_size(e),
+        Ty::Result(t, e) | Ty::Map(t, e) | Ty::HashMap(t, e) => ty_size(t) + ty_size(e),
         Ty::Fn(ps, r) => ps.iter().map(ty_size).sum::<usize>() + ty_size(r),
         Ty::Struct(_, args) | Ty::Enum(_, args) => args.iter().map(ty_size).sum(),
         _ => 0,
@@ -300,6 +305,7 @@ impl fmt::Display for Ty {
             Ty::Result(t, e) => write!(f, "Result<{t}, {e}>"),
             Ty::List(t) => write!(f, "List<{t}>"),
             Ty::Map(k, v) => write!(f, "Map<{k}, {v}>"),
+            Ty::HashMap(k, v) => write!(f, "HashMap<{k}, {v}>"),
             Ty::Fn(ps, r) => {
                 let ps: Vec<_> = ps.iter().map(Ty::to_string).collect();
                 write!(f, "fn({})", ps.join(", "))?;
@@ -334,7 +340,7 @@ fn bare(key: &str) -> &str {
 
 /// Names that user types may not take: built-in types, capabilities and their error enums.
 fn reserved(caps: &CapTable, name: &str) -> bool {
-    matches!(name, "Option" | "Result" | "Map" | "Json")
+    matches!(name, "Option" | "Result" | "Map" | "HashMap" | "Json")
         || caps.enums.iter().any(|e| e.name == name)
         || caps.caps.iter().any(|c| c.name == name)
 }
@@ -830,7 +836,9 @@ fn fits(p: &Ty, a: &Ty) -> bool {
     match (p, a) {
         (Ty::Param(_), _) | (_, Ty::Never) => true,
         (Ty::Option(p), Ty::Option(a)) | (Ty::List(p), Ty::List(a)) => fits(p, a),
-        (Ty::Result(p, q), Ty::Result(a, b)) | (Ty::Map(p, q), Ty::Map(a, b)) => fits(p, a) && fits(q, b),
+        (Ty::Result(p, q), Ty::Result(a, b))
+        | (Ty::Map(p, q), Ty::Map(a, b))
+        | (Ty::HashMap(p, q), Ty::HashMap(a, b)) => fits(p, a) && fits(q, b),
         (Ty::Fn(ps, r), Ty::Fn(qs, s)) => {
             ps.len() == qs.len() && ps.iter().zip(qs).all(|(p, q)| fits(p, q)) && fits(r, s)
         }
@@ -862,7 +870,7 @@ fn mentions(ty: &Ty, t: &str) -> bool {
     match ty {
         Ty::Param(n) => n == t,
         Ty::Option(x) | Ty::List(x) => mentions(x, t),
-        Ty::Result(x, y) | Ty::Map(x, y) => mentions(x, t) || mentions(y, t),
+        Ty::Result(x, y) | Ty::Map(x, y) | Ty::HashMap(x, y) => mentions(x, t) || mentions(y, t),
         Ty::Fn(ps, r) => ps.iter().any(|p| mentions(p, t)) || mentions(r, t),
         Ty::Struct(_, args) | Ty::Enum(_, args) => args.iter().any(|a| mentions(a, t)),
         _ => false,
@@ -914,7 +922,9 @@ fn unify(
             }
         }
         (Ty::Option(p), Ty::Option(a)) | (Ty::List(p), Ty::List(a)) => go(p, a),
-        (Ty::Result(p, q), Ty::Result(a, b)) | (Ty::Map(p, q), Ty::Map(a, b)) => {
+        (Ty::Result(p, q), Ty::Result(a, b))
+        | (Ty::Map(p, q), Ty::Map(a, b))
+        | (Ty::HashMap(p, q), Ty::HashMap(a, b)) => {
             go(p, a)?;
             go(q, b)
         }
@@ -1034,20 +1044,21 @@ fn resolve(
                 Ok(Ty::Result(Box::new(a), Box::new(b)))
             }
             ("List", [a]) => Ok(Ty::List(Box::new(resolve(a, caps, structs, enums, scope)?))),
-            ("Map", [k, v]) => {
+            ("Map" | "HashMap", [k, v]) => {
                 let key = resolve(k, caps, structs, enums, scope)?;
                 if !matches!(key, Ty::Int | Ty::Str) {
-                    let msg = format!("`{key}` cannot be a Map key");
-                    return Err(err(k.span, msg, Some("Map keys must be Int or Str")));
+                    let msg = format!("`{key}` cannot be a {n} key");
+                    return Err(err(k.span, msg, Some(&format!("{n} keys must be Int or Str"))));
                 }
-                let v = resolve(v, caps, structs, enums, scope)?;
-                Ok(Ty::Map(Box::new(key), Box::new(v)))
+                let (k, v) = (Box::new(key), Box::new(resolve(v, caps, structs, enums, scope)?));
+                Ok(if n == "Map" { Ty::Map(k, v) } else { Ty::HashMap(k, v) })
             }
-            ("Option" | "Result" | "List" | "Map", _) => {
+            ("Option" | "Result" | "List" | "Map" | "HashMap", _) => {
                 let (count, hint) = match n.as_str() {
                     "Option" => (1, "write `Option<T>`"),
                     "Result" => (2, "write `Result<T, E>`"),
                     "Map" => (2, "write `Map<K, V>`"),
+                    "HashMap" => (2, "write `HashMap<K, V>`"),
                     _ => (1, "write `List<T>`"),
                 };
                 let msg = format!("`{n}` takes {count} type arguments, found {}", args.len());
@@ -1127,12 +1138,14 @@ fn unknown_type(t: &Type) -> Diag {
     let hint = match name.as_str() {
         "String" | "str" | "char" => "use `Str`".to_string(),
         "Vec" => "use `List<T>`".to_string(),
-        "HashMap" | "BTreeMap" => "use `Map<K, V>`".to_string(),
+        "BTreeMap" => "use `Map<K, V>`".to_string(),
         "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" => "use `Int`".to_string(),
         "f32" | "f64" => "use `Float`".to_string(),
         "bool" => "use `Bool`".to_string(),
-        _ => "types are Int, Float, Bool, Str, Bytes, (), Option, Result, List, Map and your structs and enums"
-            .to_string(),
+        _ => {
+            "types are Int, Float, Bool, Str, Bytes, (), Option, Result, List, Map, HashMap and your structs and enums"
+                .to_string()
+        }
     };
     err(t.span, format!("unknown type `{name}`"), Some(&hint))
 }
@@ -1152,7 +1165,7 @@ fn cap_in(ty: &Ty) -> Option<&str> {
     match ty {
         Ty::Cap(c) => Some(c),
         Ty::Option(t) | Ty::List(t) => cap_in(t),
-        Ty::Result(t, e) | Ty::Map(t, e) => cap_in(t).or_else(|| cap_in(e)),
+        Ty::Result(t, e) | Ty::Map(t, e) | Ty::HashMap(t, e) => cap_in(t).or_else(|| cap_in(e)),
         Ty::Fn(ps, r) => ps.iter().find_map(cap_in).or_else(|| cap_in(r)),
         // Unreachable: no type argument holds a capability; checked again as a second wall.
         Ty::Struct(_, args) | Ty::Enum(_, args) => args.iter().find_map(cap_in),
@@ -1165,7 +1178,7 @@ fn fn_takes_cap(ty: &Ty) -> bool {
     match ty {
         Ty::Fn(..) => cap_in(ty).is_some(),
         Ty::Option(t) | Ty::List(t) => fn_takes_cap(t),
-        Ty::Result(t, e) | Ty::Map(t, e) => fn_takes_cap(t) || fn_takes_cap(e),
+        Ty::Result(t, e) | Ty::Map(t, e) | Ty::HashMap(t, e) => fn_takes_cap(t) || fn_takes_cap(e),
         Ty::Struct(_, args) | Ty::Enum(_, args) => args.iter().any(fn_takes_cap),
         _ => false,
     }
@@ -1426,11 +1439,11 @@ fn method(caps: &CapTable, recv: &Ty, name: &str) -> Option<(Vec<Ty>, Ty)> {
         (Ty::Option(_), "is_some" | "is_none") | (Ty::Result(..), "is_ok" | "is_err") => Some((vec![], Ty::Bool)),
         (Ty::Result(t, _), "ok") => Some((vec![], Ty::Option(t.clone()))),
         (Ty::Result(_, e), "err") => Some((vec![], Ty::Option(e.clone()))),
-        (Ty::Map(..), "len") => Some((vec![], Ty::Int)),
-        (Ty::Map(k, _), "keys") => Some((vec![], Ty::List(k.clone()))),
-        (Ty::Map(k, v), "get") => Some((vec![(**k).clone()], Ty::Option(v.clone()))),
-        (Ty::Map(k, v), "insert") => Some((vec![(**k).clone(), (**v).clone()], Ty::Unit)),
-        (Ty::Map(k, _), "remove") => Some((vec![(**k).clone()], Ty::Unit)),
+        (Ty::Map(..) | Ty::HashMap(..), "len") => Some((vec![], Ty::Int)),
+        (Ty::Map(k, _) | Ty::HashMap(k, _), "keys") => Some((vec![], Ty::List(k.clone()))),
+        (Ty::Map(k, v) | Ty::HashMap(k, v), "get") => Some((vec![(**k).clone()], Ty::Option(v.clone()))),
+        (Ty::Map(k, v) | Ty::HashMap(k, v), "insert") => Some((vec![(**k).clone(), (**v).clone()], Ty::Unit)),
+        (Ty::Map(k, _) | Ty::HashMap(k, _), "remove") => Some((vec![(**k).clone()], Ty::Unit)),
         (Ty::Str, "to_bytes") => Some((vec![], Ty::Bytes)),
         (Ty::Str, "split") => Some((vec![Ty::Str], Ty::List(Box::new(Ty::Str)))),
         (Ty::Str, "lines") => Some((vec![], Ty::List(Box::new(Ty::Str)))),
@@ -1653,7 +1666,7 @@ fn has_fn<'a>(ty: &'a Ty, fields: &'a Fields, variants: &'a Variants, seen: &mut
     match ty {
         Ty::Fn(..) => true,
         Ty::Option(t) | Ty::List(t) => walk(t),
-        Ty::Result(t, e) | Ty::Map(t, e) => walk(t) || walk(e),
+        Ty::Result(t, e) | Ty::Map(t, e) | Ty::HashMap(t, e) => walk(t) || walk(e),
         Ty::Struct(_, args) | Ty::Enum(_, args) if args.iter().any(&mut walk) => true,
         Ty::Struct(n, _) => seen.insert(n) && fields[n].iter().any(|(_, t)| has_fn(t, fields, variants, seen)),
         Ty::Enum(n, _) => {
@@ -2035,7 +2048,7 @@ fn apps<'t>(ty: &'t Ty, out: &mut Vec<&'t Ty>) {
             args.iter().for_each(|a| apps(a, out));
         }
         Ty::Option(t) | Ty::List(t) => apps(t, out),
-        Ty::Result(t, e) | Ty::Map(t, e) => {
+        Ty::Result(t, e) | Ty::Map(t, e) | Ty::HashMap(t, e) => {
             apps(t, out);
             apps(e, out);
         }
@@ -2278,7 +2291,7 @@ impl<'a> Checker<'a> {
         let hint = match (en, self.variants.get(en)) {
             ("Option", _) => suggest(v, &["None", "Some"], "variants"),
             ("Result", _) => suggest(v, &["Ok", "Err"], "variants"),
-            ("Map", _) => "the only Map function is `Map::new()`".to_string(),
+            ("Map" | "HashMap", _) => format!("the only {en} function is `{en}::new()`"),
             (_, Some(vs)) => suggest(v, &vs.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), "variants"),
             _ if !self.home.module.is_empty() && self.enums.contains_key(bare(en)) => ROOT_ITEM.to_string(),
             _ => suggest(bare(en), &sorted_names(self.enums, module_of(en)), "enums"),
@@ -2655,7 +2668,9 @@ impl<'a> Checker<'a> {
         let recv_ty = self.operand(recv, None)?;
         if matches!(
             (&recv_ty, name),
-            (Ty::List(_), "push" | "sort" | "pop") | (Ty::Bytes, "push") | (Ty::Map(..), "insert" | "remove")
+            (Ty::List(_), "push" | "sort" | "pop")
+                | (Ty::Bytes, "push")
+                | (Ty::Map(..) | Ty::HashMap(..), "insert" | "remove")
         ) {
             self.mutation_target(recv, name, &recv_ty)?;
         }
@@ -2864,24 +2879,26 @@ impl<'a> Checker<'a> {
         Ok(expected.expect("matched above").clone())
     }
 
-    /// `Map::new()`, which takes its type from `expected`.
-    fn map_new(&self, e: &Expr, args: &[Expr], expected: Option<&Ty>) -> Result<Ty, Diag> {
+    /// `Map::new()` or `HashMap::new()` (`map` names which), which takes its type from
+    /// `expected`.
+    fn map_new(&self, e: &Expr, map: &str, args: &[Expr], expected: Option<&Ty>) -> Result<Ty, Diag> {
         if !args.is_empty() {
-            let msg = format!("`Map::new` takes 0 arguments, found {}", args.len());
-            return Err(err(e.span, msg, Some("write `Map::new()`")));
+            let msg = format!("`{map}::new` takes 0 arguments, found {}", args.len());
+            return Err(err(e.span, msg, Some(&format!("write `{map}::new()`"))));
         }
         match expected {
-            Some(t @ Ty::Map(..)) => Ok(t.clone()),
+            Some(t @ Ty::Map(..)) if map == "Map" => Ok(t.clone()),
+            Some(t @ Ty::HashMap(..)) if map == "HashMap" => Ok(t.clone()),
             Some(t) => {
-                let msg = format!("expected {t}, found a Map");
-                Err(err(e.span, msg, Some("`Map::new()` makes a `Map<K, V>`")))
+                let msg = format!("expected {t}, found a {map}");
+                Err(err(e.span, msg, Some(&format!("`{map}::new()` makes a `{map}<K, V>`"))))
             }
             None => {
-                let hint = "add a type: `let m: Map<Str, Int> = Map::new();`";
+                let hint = format!("add a type: `let m: {map}<Str, Int> = {map}::new();`");
                 Err(err(
                     e.span,
-                    "cannot tell the type of `Map::new()`".to_string(),
-                    Some(hint),
+                    format!("cannot tell the type of `{map}::new()`"),
+                    Some(&hint),
                 ))
             }
         }
@@ -3352,7 +3369,9 @@ impl<'a> Checker<'a> {
             ExprKind::Name(name) if builtin(name).is_some() => return self.constructor(e, name, args, expected),
             ExprKind::Name(name) => (name, None, None),
             ExprKind::Turbofish(name, tys) => (name, None, Some(tys.as_slice())),
-            ExprKind::Path(en, v) if en == "Map" && v == "new" => return self.map_new(e, args, expected),
+            ExprKind::Path(en, v) if (en == "Map" || en == "HashMap") && v == "new" => {
+                return self.map_new(e, en, args, expected)
+            }
             ExprKind::Path(en, v) => return self.variant_value(e, &self.enum_key(en), v, args, expected),
             ExprKind::Module(m, inner) => match &inner.kind {
                 ExprKind::Name(name) => (name, Some(m.as_str()), None),
@@ -3552,7 +3571,7 @@ impl<'a> Checker<'a> {
             ExprKind::Call(f, args) => match &f.kind {
                 ExprKind::Name(n) if n == "Some" => args.first().is_some_and(|x| self.needs_expected(x)),
                 ExprKind::Name(n) if n == "Ok" || n == "Err" => true,
-                ExprKind::Path(m, n) if m == "Map" && n == "new" => true,
+                ExprKind::Path(m, n) if (m == "Map" || m == "HashMap") && n == "new" => true,
                 _ => self.open_use(a),
             },
             // A generic function named as a value.

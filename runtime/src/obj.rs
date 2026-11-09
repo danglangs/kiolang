@@ -8,6 +8,7 @@
 //! Str, Bytes  [rc][desc][len u32][cap u32][bytes; cap]
 //! List        [rc][desc][ListBody: elements, len, cap]
 //! Map         [rc][desc][Map]
+//! HashMap     [rc][desc][HashMap]
 //! Fn          [rc][desc][table index u32][0 u32][capture 0]..
 //! ```
 //!
@@ -26,6 +27,7 @@
 
 use crate::desc::{self, Desc, Table};
 use crate::heap;
+use crate::hmap::{self, HashKey};
 use alloc::alloc::{handle_alloc_error, Layout};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -152,8 +154,18 @@ impl PartialEq for Key {
 
 impl Eq for Key {}
 
+impl HashKey for Key {
+    fn hash(&self) -> u64 {
+        match self {
+            Key::Int(n) => hmap::hash_int(*n),
+            Key::Str(s) => hmap::hash_bytes(s),
+        }
+    }
+}
+
 pub type List = Vec<u64>;
 pub type Map = BTreeMap<Key, u64>;
+pub type HashMap = hmap::HashMap<Key, u64>;
 
 /// How a `List` object holds its elements: the parts of a `Vec<u64>`, in a layout fixed here
 /// (`Vec`'s own is not), so generated code may read them. On wasm32 the elements' address is
@@ -176,7 +188,11 @@ const _: () = assert!(
 pub(crate) const HEADER: usize = 8;
 const ENUM_SLOTS: usize = 16;
 pub(crate) const BYTES_DATA: usize = 16;
-const _: () = assert!(HEADER.is_multiple_of(align_of::<ListBody>()) && HEADER.is_multiple_of(align_of::<Map>()));
+const _: () = assert!(
+    HEADER.is_multiple_of(align_of::<ListBody>())
+        && HEADER.is_multiple_of(align_of::<Map>())
+        && HEADER.is_multiple_of(align_of::<HashMap>())
+);
 
 impl ListBody {
     fn of(v: List) -> ListBody {
@@ -462,6 +478,14 @@ pub fn new_map(desc: u32, m: Map) -> *mut Header {
     p
 }
 
+/// A `HashMap` with descriptor `desc`, owning its values' references.
+pub fn new_hash_map(desc: u32, m: HashMap) -> *mut Header {
+    let p = new(HEADER + size_of::<HashMap>(), desc);
+    // SAFETY: room for a `HashMap` at HEADER, aligned (asserted above).
+    unsafe { field::<HashMap>(p, HEADER).write(m) };
+    p
+}
+
 /// Adds a reference.
 ///
 /// # Safety
@@ -572,6 +596,15 @@ unsafe fn free(t: &Table, mut p: *mut Header) {
                     ptr::drop_in_place(field::<Map>(p, HEADER));
                     HEADER + size_of::<Map>()
                 }
+                Desc::HashMap { value, .. } => {
+                    if t.is_ptr(*value) {
+                        (*field::<HashMap>(p, HEADER))
+                            .values()
+                            .for_each(|&v| child(from_slot(v)));
+                    }
+                    ptr::drop_in_place(field::<HashMap>(p, HEADER));
+                    HEADER + size_of::<HashMap>()
+                }
                 d @ (Desc::Unit | Desc::Int | Desc::Bool | Desc::Float) => panic!("{d:?} is not an object"),
             };
             free_memory(p, size);
@@ -620,6 +653,7 @@ unsafe fn copy(t: &Table, p: *mut Header) -> *mut Header {
         match t.desc(desc) {
             Desc::List { .. } => body(q).write(ListBody::of(elems(p).to_vec())),
             Desc::Map { .. } => field::<Map>(q, HEADER).write((*field::<Map>(p, HEADER)).clone()),
+            Desc::HashMap { .. } => field::<HashMap>(q, HEADER).write((*field::<HashMap>(p, HEADER)).clone()),
             _ => ptr::copy_nonoverlapping(field::<u8>(p, HEADER), field(q, HEADER), size - HEADER),
         }
         ptrs(t, q, |c| inc(c));
@@ -635,6 +669,9 @@ unsafe fn ptrs(t: &Table, p: *mut Header, mut f: impl FnMut(*mut Header)) {
             Desc::List { elem } if t.is_ptr(elem) => elems(p).iter().for_each(|&v| f(from_slot(v))),
             Desc::Map { value, .. } if t.is_ptr(value) => {
                 (*field::<Map>(p, HEADER)).values().for_each(|&v| f(from_slot(v)))
+            }
+            Desc::HashMap { value, .. } if t.is_ptr(value) => {
+                (*field::<HashMap>(p, HEADER)).values().for_each(|&v| f(from_slot(v)))
             }
             Desc::Record { .. } | Desc::Enum { .. } | Desc::Fn { .. } => {
                 let (off, slots) = record(t, p);
@@ -676,6 +713,7 @@ unsafe fn size(t: &Table, p: *mut Header) -> usize {
             Desc::Str | Desc::Bytes => BYTES_DATA + *field::<u32>(p, 12) as usize,
             Desc::List { .. } => HEADER + size_of::<ListBody>(),
             Desc::Map { .. } => HEADER + size_of::<Map>(),
+            Desc::HashMap { .. } => HEADER + size_of::<HashMap>(),
             Desc::Record { .. } | Desc::Enum { .. } | Desc::Fn { .. } => {
                 let (off, slots) = record(t, p);
                 off + 8 * slots.len()

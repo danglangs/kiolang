@@ -3,7 +3,7 @@
 
 use crate::desc::{self, Desc, Name, Slice, Table, Variant};
 use crate::display::display;
-use crate::obj::{self, from_slot, to_slot, Header, Key, Map};
+use crate::obj::{self, from_slot, to_slot, HashMap, Header, Key, Map};
 use crate::tests::lock;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -24,6 +24,8 @@ const LIST_INT: u32 = 17;
 const LIST_LIST: u32 = 18;
 const DEEP: u32 = 19; // List<DEEP>
 const LIST_FLOAT: u32 = 20;
+const HASH_STR_INT: u32 = 21;
+const HASH_INT_STR: u32 = 22;
 
 /// Where `s` is in `NAMES`.
 const fn name(s: &str) -> Name {
@@ -55,7 +57,7 @@ const fn variant(n: &str, start: u32, len: u32) -> Variant {
     }
 }
 
-const DESCS: [Desc; 21] = [
+const DESCS: [Desc; 23] = [
     Desc::Unit,
     Desc::Int,
     Desc::Bool,
@@ -101,6 +103,14 @@ const DESCS: [Desc; 21] = [
     Desc::List { elem: LIST_INT },
     Desc::List { elem: DEEP },
     Desc::List { elem: desc::FLOAT },
+    Desc::HashMap {
+        key: desc::STR,
+        value: desc::INT,
+    },
+    Desc::HashMap {
+        key: desc::INT,
+        value: desc::STR,
+    },
 ];
 const SLOTS: [u32; 9] = [
     desc::INT,
@@ -159,14 +169,16 @@ fn build(d: u32, v: &Value) -> u64 {
         (Desc::Map { key, value }, Value::Map(m)) => {
             let mut out = Map::new();
             for (k, v) in m.iter() {
-                let k = match k {
-                    lang::Key::Int(n) => Key::Int(*n),
-                    lang::Key::Str(s) => Key::Str(s.as_bytes().into()),
-                };
-                assert_eq!(key, if matches!(k, Key::Int(_)) { desc::INT } else { desc::STR });
-                out.insert(k, build(value, v));
+                out.insert(map_key(key, k), build(value, v));
             }
             to_slot(obj::new_map(d, out))
+        }
+        (Desc::HashMap { key, value }, Value::HashMap(m)) => {
+            let mut out = HashMap::new();
+            for (k, v) in m.iter() {
+                out.insert(map_key(key, k), build(value, v));
+            }
+            to_slot(obj::new_hash_map(d, out))
         }
         (Desc::Record { slots, .. }, Value::Struct(_, vs)) => fill(obj::alloc(&T, d, 0), T.slots(slots), vs),
         (Desc::Enum { variants, .. }, Value::Enum(_, i, vs)) => {
@@ -175,6 +187,16 @@ fn build(d: u32, v: &Value) -> u64 {
         }
         (d, v) => panic!("{d:?} does not fit {v:?}"),
     }
+}
+
+/// The interpreter's key `k` as the runtime's, of key descriptor `key`.
+fn map_key(key: u32, k: &lang::Key) -> Key {
+    let k = match k {
+        lang::Key::Int(n) => Key::Int(*n),
+        lang::Key::Str(s) => Key::Str(s.as_bytes().into()),
+    };
+    assert_eq!(key, if matches!(k, Key::Int(_)) { desc::INT } else { desc::STR });
+    k
 }
 
 fn fill(p: *mut Header, slots: &[u32], vs: &[Value]) -> u64 {
@@ -287,6 +309,15 @@ fn lists_and_maps() {
     assert_eq!(case("Map<Str, Int>", "Map::new()", MAP_STR_INT), "{}");
     let m = "let mut m: Map<Int, Str> = Map::new(); m.insert(2, \"x\"); m.insert(-1, \"y\\n\"); m";
     assert_eq!(case("Map<Int, Str>", m, MAP_INT_STR), "{-1: \"y\\n\", 2: \"x\"}");
+    // A `HashMap` in insertion order, after a remove and a re-insert.
+    let m = "let mut m: HashMap<Str, Int> = HashMap::new(); m.insert(\"b\", 1); m.insert(\"a\\\"\", 2); m.insert(\"c\", 3); m.remove(\"b\"); m.insert(\"b\", 4); m";
+    assert_eq!(
+        case("HashMap<Str, Int>", m, HASH_STR_INT),
+        "{\"a\\\"\": 2, \"c\": 3, \"b\": 4}"
+    );
+    assert_eq!(case("HashMap<Str, Int>", "HashMap::new()", HASH_STR_INT), "{}");
+    let m = "let mut m: HashMap<Int, Str> = HashMap::new(); m.insert(2, \"x\"); m.insert(-1, \"y\\n\"); m";
+    assert_eq!(case("HashMap<Int, Str>", m, HASH_INT_STR), "{2: \"x\", -1: \"y\\n\"}");
 }
 
 #[test]

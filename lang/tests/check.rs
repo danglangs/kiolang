@@ -1429,8 +1429,8 @@ fn rust_isms_are_rejected_with_the_kio_way() {
             "use `List<T>`",
         ),
         (
-            "fn f(m: HashMap<Str, Int>) {} fn main() {}",
-            "unknown type `HashMap`",
+            "fn f(m: BTreeMap<Str, Int>) {} fn main() {}",
+            "unknown type `BTreeMap`",
             "use `Map<K, V>`",
         ),
         ("fn f(n: i32) {} fn main() {}", "unknown type `i32`", "use `Int`"),

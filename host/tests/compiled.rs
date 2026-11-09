@@ -1817,3 +1817,113 @@ fn inline_allocation_reuses_blocks_of_every_class() {
         }"#;
     assert_eq!(value(src), "35460");
 }
+
+// HashMap (C13): the `Map` tests above, on `HashMap`, plus insertion order, order-insensitive
+// `==`, copy-on-write through a callee and keys built to collide.
+
+#[path = "../../lang/tests/common/collide.rs"]
+mod collide;
+
+#[test]
+fn hash_maps_values_and_builtins() {
+    let src = r#"fn main() -> Str {
+        let mut m: HashMap<Str, Int> = HashMap::new(); m.insert("b", 2); m.insert("a", 1); m.insert("c", 3); m.remove("c"); m.remove("zz");
+        let ks = m.keys();
+        let mut n: HashMap<Str, Int> = HashMap::new(); n.insert("a", 1); n.insert("b", 2);
+        let mut e: HashMap<Int, ()> = HashMap::new(); e.insert(1, ()); e.remove(1);
+        ks[0] + ks[1] + m.len().to_str() + if m == n { "T" } else { "F" } + e.len().to_str()
+            + m.get("a").unwrap_or(9).to_str() + m.get("c").unwrap_or(9).to_str()
+    }"#;
+    assert_eq!(value(src), "ba2T019");
+}
+
+/// As `map_insert_remove_and_keys_ownership`, and the keys keep insertion order: a replaced
+/// value keeps its key's place, a removed key loses it.
+#[test]
+fn hash_map_insert_remove_and_keys_ownership() {
+    let src = r#"fn main() -> Str {
+        let mut m: HashMap<Str, Str> = HashMap::new();
+        for i in 0..10 { m.insert(i.to_str() + "k", i.to_str() + "v"); m.insert(i.to_str() + "k", "v" + i.to_str()); }
+        for i in 0..5 { m.remove(i.to_str() + "k"); }
+        m.insert("0k", "again");
+        let mut n = 0;
+        for i in 0..3 { n += m.keys().len(); n += m.keys()[0].len(); }
+        let ms = [m]; let mut ms2 = ms; ms2[0].remove("9k");
+        let ks = m.keys();
+        (n * 100 + m.len() * 10 + ms2[0].len()).to_str() + ks[0] + ks[5] + m.get("0k").unwrap_or("-")
+    }"#;
+    assert_eq!(value(src), "24655k0kagain");
+}
+
+/// A callee changing its copy changes only the copy, in both kinds of value a map holds.
+#[test]
+fn hash_map_copy_on_write_through_a_callee() {
+    let src = r#"fn grow(m: HashMap<Str, List<Int>>) -> HashMap<Str, List<Int>> {
+            let mut n = m; n.insert("z", [9]); n.remove("a"); n.insert("a", [8]); n
+        }
+        fn count(m: HashMap<Int, Int>) -> Int { let mut n = m; for i in 0..100 { n.insert(i, i); } n.len() }
+        fn main() -> List<HashMap<Str, List<Int>>> {
+            let mut a: HashMap<Str, List<Int>> = HashMap::new();
+            a.insert("a", [1]); a.insert("b", []);
+            let mut c: HashMap<Int, Int> = HashMap::new(); c.insert(-1, 0);
+            let k = count(c) + c.len();
+            a.insert("n", [k]);
+            [grow(a), a]
+        }"#;
+    assert_eq!(
+        value(src),
+        r#"[{"b": [], "n": [102], "z": [9], "a": [8]}, {"a": [1], "b": [], "n": [102]}]"#
+    );
+}
+
+#[test]
+fn hash_map_equality_ignores_order() {
+    let src = r#"fn main() -> List<Bool> {
+        let mut a: HashMap<Int, List<Str>> = HashMap::new();
+        let mut b: HashMap<Int, List<Str>> = HashMap::new();
+        for i in 0..20 { a.insert(i, [i.to_str()]); b.insert(19 - i, [(19 - i).to_str()]); }
+        let mut c = b; c.insert(3, ["x"]);
+        let mut d = b; d.remove(3);
+        let mut e = d; e.insert(20, ["3"]);
+        [a == b, a != b, a == c, a == d, a == e, d == d]
+    }"#;
+    assert_eq!(value(src), "[true, false, false, false, false, true]");
+}
+
+#[test]
+fn hash_map_display_in_insertion_order() {
+    let src = r#"fn main() -> HashMap<Str, List<Int>> { let mut m: HashMap<Str, List<Int>> = HashMap::new(); m.insert("k", [1, 2]); m.insert("a", []); m.insert("k", [3]); m }"#;
+    assert_eq!(outcome(src), (r#"{"k": [3], "a": []}"#.to_string(), false));
+    let src = "fn main() -> HashMap<Int, Option<Float>> { let mut m: HashMap<Int, Option<Float>> = HashMap::new(); m.insert(5, None); m.insert(-5, Some(0.0 / 0.0)); m }";
+    assert_eq!(outcome(src), ("{5: None, -5: Some(NaN)}".to_string(), false));
+}
+
+/// Many inserts and removes: the table grows and compacts, and every key and value is freed
+/// (each run checks no object is left).
+#[test]
+fn hash_map_grows_and_compacts() {
+    let src = r#"fn main() -> Str {
+        let mut m: HashMap<Str, Str> = HashMap::new();
+        for i in 0..3000 { m.insert("key " + i.to_str(), i.to_str()); }
+        for i in 0..2990 { m.remove("key " + i.to_str()); }
+        let mut n: HashMap<Int, Int> = HashMap::new();
+        for i in 0..3000 { n.insert(i * 7919, i); if i % 3 == 0 { n.remove((i - 3) * 7919); } }
+        let ks = m.keys();
+        ks[0] + ks[9] + m.len().to_str() + n.len().to_str() + n.get(2999 * 7919).unwrap_or(0).to_str()
+    }"#;
+    assert_eq!(value(src), "key 2990key 29991020012999");
+}
+
+/// 100,000 `Str` keys with one hash, inserted and looked up both ways within a time bound
+/// (under a second each in a debug build). With chains only (`TREEIFY` raised), compiled runs
+/// out of its 20 G fuel and the interpreter does not finish in 100 s.
+#[test]
+fn hash_map_colliding_keys_stay_fast() {
+    let src = collide::colliding_program(317);
+    let t = std::time::Instant::now();
+    assert_eq!(compiled(&src), Ok(collide::colliding_result(317).to_string()));
+    assert!(t.elapsed().as_secs() < 30, "compiled: {:?}", t.elapsed());
+    let t = std::time::Instant::now();
+    assert_eq!(interpreted(&src), Ok(collide::colliding_result(317).to_string()));
+    assert!(t.elapsed().as_secs() < 30, "interpreted: {:?}", t.elapsed());
+}

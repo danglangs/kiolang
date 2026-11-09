@@ -96,6 +96,9 @@ pub enum Ty {
     Result(Box<Ty>, Box<Ty>),
     List(Box<Ty>),
     Map(Box<Ty>, Box<Ty>),
+    /// Insertion-ordered; its methods are `Map`'s `Builtin`s and `Mut`s, and `MapNew` makes
+    /// one when that is the expression's type.
+    HashMap(Box<Ty>, Box<Ty>),
     Cap(CapId),
     /// A function value: parameter types and return type. Never mentions a capability.
     Fn(Vec<Ty>, Box<Ty>),
@@ -197,6 +200,7 @@ pub enum ExprKind {
     /// A built-in method that changes a local in place: `push`, `insert`, `remove`.
     Mutate(Place, Mut, Vec<Expr>),
     List(Vec<Expr>),
+    /// `Map::new()` or `HashMap::new()`, by the expression's type.
     MapNew,
     /// Each field's declaration index and value, in source order, which is evaluation order.
     StructLit(StructId, Vec<(u32, Expr)>),
