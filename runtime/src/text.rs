@@ -65,7 +65,53 @@ pub unsafe fn len(p: *mut Header) -> i64 {
 /// The module's contract; `a` and `b` are both `Str` or both `Bytes`.
 pub unsafe fn eq(a: *mut Header, b: *mut Header) -> bool {
     // SAFETY: the caller's guarantee.
-    unsafe { obj::bytes(a) == obj::bytes(b) }
+    unsafe { bytes_eq(obj::bytes(a), obj::bytes(b)) }
+}
+
+/// `a == b`, 8 bytes at a time while 8 are left, then byte by byte (C8b2): on wasm32 `[u8]`'s
+/// own `==` is `memcmp`, a loop over single bytes.
+pub fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && {
+        let i = same_words(a, b);
+        a[i..].iter().zip(&b[i..]).all(|(p, q)| p == q)
+    }
+}
+
+/// `a.cmp(b)` by bytes: 8 at a time while 8 are left in both, then byte by byte, so a short
+/// string that differs early costs no more than `memcmp`. In an unequal word the lowest
+/// differing byte (the word is little-endian) is the first: Wasm has no byte swap, so this
+/// finds it with `ctz` rather than comparing big-endian words.
+pub fn bytes_cmp(a: &[u8], b: &[u8]) -> core::cmp::Ordering {
+    let n = a.len().min(b.len());
+    let mut i = same_words(a, b);
+    if i + 8 <= n {
+        let (p, q) = (word(a, i), word(b, i));
+        let at = (p ^ q).trailing_zeros() / 8 * 8;
+        return ((p >> at) & 0xff).cmp(&((q >> at) & 0xff));
+    }
+    while i < n {
+        if a[i] != b[i] {
+            return a[i].cmp(&b[i]);
+        }
+        i += 1;
+    }
+    a.len().cmp(&b.len())
+}
+
+/// The offset of the first 8-byte word where `a` and `b` differ, else of the first byte after
+/// the whole words both have: every byte before it is equal.
+fn same_words(a: &[u8], b: &[u8]) -> usize {
+    let n = a.len().min(b.len());
+    let mut i = 0;
+    while i + 8 <= n && word(a, i) == word(b, i) {
+        i += 8;
+    }
+    i
+}
+
+/// The 8 bytes of `s` at `i`, little-endian (byte `i` lowest).
+fn word(s: &[u8], i: usize) -> u64 {
+    u64::from_le_bytes(s[i..i + 8].try_into().expect("8 bytes"))
 }
 
 /// `a + b` on `Str`s.
@@ -96,34 +142,38 @@ fn grown(needed: usize, cap: usize) -> usize {
 /// it to a buffer at least twice as large); otherwise (shared or pinned) the result is a new
 /// `Str` with room to grow, and `a` is dropped. Returns the result, count 1.
 ///
-/// `a` and `b` may be one object: the caller then holds two references, so it is copied, never
-/// grown under `b`.
+/// `a` and `b` may be one object: it is then copied, never grown under `b`, and dropped once
+/// copied, so the caller may hold one reference or two.
 ///
 /// # Safety
 /// The module's contract.
 pub unsafe fn append(t: &Table, a: *mut Header, b: *mut Header) -> *mut Header {
     // SAFETY: the caller's guarantee; `a` has `len` and `cap` at 8 and 12 and `cap` bytes of
     // room. `b` stays live and unchanged until its bytes are copied: only an `a` with count 1,
-    // which is then not `b`, is written or freed before that.
+    // which is then not `b`, is written before that, and `a` is freed after.
     unsafe {
         let add = obj::bytes(b);
         let len = *obj::field::<u32>(a, 8) as usize;
         let cap = *obj::field::<u32>(a, 12) as usize;
         let needed = len.checked_add(add.len()).expect("over 4 GiB");
-        let a = if (*a).rc == 1 && a != b {
-            if needed <= cap {
+        let len32 = u32::try_from(needed).expect("over 4 GiB");
+        if (*a).rc == 1 && a != b {
+            let a = if needed <= cap {
                 a
             } else {
                 obj::regrow(a, grown(needed, cap))
-            }
+            };
+            core::ptr::copy_nonoverlapping(add.as_ptr(), obj::field(a, obj::BYTES_DATA + len), add.len());
+            *obj::field::<u32>(a, 8) = len32;
+            a
         } else {
+            // `a` is dropped after `b`'s bytes are copied: it may be `b` (C8b2).
             let q = obj::new_bytes_cap(desc::STR, obj::bytes(a), grown(needed, len));
+            core::ptr::copy_nonoverlapping(add.as_ptr(), obj::field(q, obj::BYTES_DATA + len), add.len());
+            *obj::field::<u32>(q, 8) = len32;
             obj::dec(t, a);
             q
-        };
-        core::ptr::copy_nonoverlapping(add.as_ptr(), obj::field(a, obj::BYTES_DATA + len), add.len());
-        *obj::field::<u32>(a, 8) = u32::try_from(needed).expect("over 4 GiB");
-        a
+        }
     }
 }
 

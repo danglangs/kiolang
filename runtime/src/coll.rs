@@ -12,6 +12,7 @@
 
 use crate::desc::{self, Desc, Table};
 use crate::obj::{self, bytes, elems, elems_mut, field, from_slot, to_slot, Header, Key, Map};
+use crate::text;
 use alloc::vec::Vec;
 
 /// A program error. Codegen turns it into a `trap`: `index {index} out of bounds for length {len}`.
@@ -209,7 +210,7 @@ pub unsafe fn list_sort(t: &Table, p: *mut Header) {
     unsafe {
         match elem(t, p) {
             desc::INT => elems_mut(p).sort_by_key(|&v| v as i64),
-            desc::STR => elems_mut(p).sort_by(|&a, &b| bytes(from_slot(a)).cmp(bytes(from_slot(b)))),
+            desc::STR => elems_mut(p).sort_by(|&a, &b| text::bytes_cmp(bytes(from_slot(a)), bytes(from_slot(b)))),
             d => panic!("sort of a List of descriptor {d}"),
         }
     }
@@ -335,7 +336,7 @@ unsafe fn eq_one(t: &Table, work: &mut Vec<(u32, u64, u64)>, d: u32, a: u64, b: 
         let (a, b) = (from_slot(a), from_slot(b));
         match desc {
             Desc::Unit | Desc::Int | Desc::Bool | Desc::Float => unreachable!("a scalar"),
-            Desc::Str | Desc::Bytes => a == b || bytes(a) == bytes(b),
+            Desc::Str | Desc::Bytes => a == b || text::bytes_eq(bytes(a), bytes(b)),
             // Shared references: `a` and `b` may be one object.
             Desc::List { elem } => {
                 let (x, y) = (elems(a), elems(b));

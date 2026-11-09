@@ -41,12 +41,42 @@ pub struct Header {
 }
 
 /// A `Map` key, as the interpreter's. `Str` keys are copied out of their objects, so they
-/// order by bytes and are not counted.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+/// order by bytes and are not counted. Ordered as a derived `Ord` would (`Int` before `Str`),
+/// with `Str`s compared 8 bytes at a time.
+#[derive(Debug, Clone)]
 pub enum Key {
     Int(i64),
     Str(Box<[u8]>),
 }
+
+impl Ord for Key {
+    fn cmp(&self, other: &Key) -> core::cmp::Ordering {
+        match (self, other) {
+            (Key::Int(a), Key::Int(b)) => a.cmp(b),
+            (Key::Str(a), Key::Str(b)) => crate::text::bytes_cmp(a, b),
+            (Key::Int(_), Key::Str(_)) => core::cmp::Ordering::Less,
+            (Key::Str(_), Key::Int(_)) => core::cmp::Ordering::Greater,
+        }
+    }
+}
+
+impl PartialOrd for Key {
+    fn partial_cmp(&self, other: &Key) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for Key {
+    fn eq(&self, other: &Key) -> bool {
+        match (self, other) {
+            (Key::Int(a), Key::Int(b)) => a == b,
+            (Key::Str(a), Key::Str(b)) => crate::text::bytes_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Key {}
 
 pub type List = Vec<u64>;
 pub type Map = BTreeMap<Key, u64>;
@@ -417,23 +447,44 @@ unsafe fn release(p: *mut Header) -> bool {
 /// The module's contract, and `p` has no references left.
 unsafe fn free(t: &Table, mut p: *mut Header) {
     let mut work = Vec::new(); // allocates only if a child dies too
+                               // One descriptor lookup per object (C8b2): its size and children as `size` and `ptrs` find
+                               // them.
     loop {
         // SAFETY: `p` is unreferenced, so its children and memory are ours to release.
         unsafe {
-            let size = size(t, p);
-            ptrs(t, p, |c| {
+            let mut child = |c| {
                 if release(c) {
                     work.push(c)
                 }
-            });
-            match t.desc((*p).desc) {
-                Desc::List { .. } => {
+            };
+            let size = match t.desc((*p).desc) {
+                Desc::Str | Desc::Bytes => BYTES_DATA + *field::<u32>(p, 12) as usize,
+                Desc::List { elem } => {
+                    if t.is_ptr(elem) {
+                        elems(p).iter().for_each(|&v| child(from_slot(v)));
+                    }
                     let b = body(p).read();
-                    drop(Vec::from_raw_parts(b.ptr, b.len, b.cap))
+                    drop(Vec::from_raw_parts(b.ptr, b.len, b.cap));
+                    HEADER + size_of::<ListBody>()
                 }
-                Desc::Map { .. } => ptr::drop_in_place(field::<Map>(p, HEADER)),
-                _ => {}
-            }
+                Desc::Map { value, .. } => {
+                    if t.is_ptr(value) {
+                        (*field::<Map>(p, HEADER)).values().for_each(|&v| child(from_slot(v)));
+                    }
+                    ptr::drop_in_place(field::<Map>(p, HEADER));
+                    HEADER + size_of::<Map>()
+                }
+                d @ (Desc::Record { .. } | Desc::Enum { .. } | Desc::Fn { .. }) => {
+                    let (off, slots) = record_of(t, d, p);
+                    for (i, &s) in slots.iter().enumerate() {
+                        if t.is_ptr(s) {
+                            child(from_slot(*field::<u64>(p, off + 8 * i)));
+                        }
+                    }
+                    off + 8 * slots.len()
+                }
+                d @ (Desc::Unit | Desc::Int | Desc::Bool | Desc::Float) => panic!("{d:?} is not an object"),
+            };
             free_memory(p, size);
         }
         match work.pop() {
@@ -507,9 +558,15 @@ unsafe fn ptrs(t: &Table, p: *mut Header, mut f: impl FnMut(*mut Header)) {
 
 /// A struct's, enum variant's or closure's first slot offset and slot descriptors.
 pub(crate) unsafe fn record<'t>(t: &Table<'t>, p: *mut Header) -> (usize, &'t [u32]) {
+    // SAFETY: the caller's guarantee.
+    unsafe { record_of(t, t.desc((*p).desc), p) }
+}
+
+/// `record`, given `p`'s descriptor `d`.
+unsafe fn record_of<'t>(t: &Table<'t>, d: Desc, p: *mut Header) -> (usize, &'t [u32]) {
     // SAFETY: `p` is live; an enum has its variant at HEADER.
     unsafe {
-        match t.desc((*p).desc) {
+        match d {
             Desc::Record { slots, .. } => (HEADER, t.slots(slots)),
             Desc::Enum { variants, .. } => (ENUM_SLOTS, t.slots(t.variant(variants, *field(p, HEADER)).slots)),
             Desc::Fn { slots, .. } => (ENUM_SLOTS, t.slots(slots)),

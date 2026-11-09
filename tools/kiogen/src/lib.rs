@@ -15,6 +15,13 @@
 //! `enum K { Z, One(Int), Two(Int, Option<Int>) }`. A `match` lists some of a fixed sequence of
 //! arms, each more specific than or disjoint from the later ones, then `_`, which always has a
 //! value left to match (`K::Two(_, None)`, or `None`), so every arm is reachable.
+//!
+//! With `strings`, every `Str` has a bound on its length (`Var::smax`), kept under `MAX_STR`:
+//! an append inside a loop adds its parts' bound times the loop's passes, and only a mutable
+//! `Str` declared as an accumulator (`Var::acc`) may be appended to there. Inside a loop no
+//! `Str` value that is stored reads an accumulator, whose bound grows as the loop runs; only
+//! `len`, `==`, `contains`, `split(..).len()` and `match` read one. A parameter is at most
+//! `PARAM_MAX` bytes and a helper's result at most `RET_MAX`.
 
 /// What programs may contain. Int and Bool expressions with every operator, `let`, `let mut`,
 /// assignment, `+=`, `-=`, `if`/`else` and `return` are always on.
@@ -39,6 +46,11 @@ pub struct Features {
     /// `map`, `filter`, `any` and `all` on `List<Int>` values, each with a closure applying one
     /// operator to the element and a literal or a captured `Int` local.
     pub closures: bool,
+    /// `Str` locals, parameters and results: literals, `+`, `+=`, `s = s + a + b` (the
+    /// compiler's in-place append) and `s = s + s`, `to_str`, `trim`, `len`, `==`, `contains`,
+    /// `match` on literals, and `split` and `lines` into `List<Str>` locals, indexed, counted,
+    /// searched and iterated with `for`.
+    pub strings: bool,
 }
 
 impl Default for Features {
@@ -52,6 +64,7 @@ impl Default for Features {
             adts: true,
             floats: true,
             closures: true,
+            strings: true,
         }
     }
 }
@@ -71,6 +84,7 @@ pub fn program(seed: u64, features: &Features) -> String {
         ret: Ty::Unit,
         ind: 0,
         this: None,
+        ret_bound: MAX_STR,
     };
     let mut out = String::new();
     if features.adts {
@@ -96,6 +110,26 @@ const MAX_NEST: u32 = 3;
 const MAX_DEPTH: u32 = 3;
 /// Longest a list can grow: a `push` is generated only while the list's bound stays within it.
 const MAX_LEN: u64 = 100;
+/// Longest a `Str` can grow, in bytes, and the most a parameter or a helper's result holds.
+const MAX_STR: u64 = 2000;
+const PARAM_MAX: u64 = 64;
+const RET_MAX: u64 = 256;
+/// `Str` literals as written, and their length in bytes: empty, short, with separators, a
+/// two-byte character, and long ones sharing a prefix (the runtime compares 8 bytes at a time).
+const STR_LITS: &[(&str, u64)] = &[
+    ("\"\"", 0),
+    ("\"a\"", 1),
+    ("\"b\"", 1),
+    ("\"ab\"", 2),
+    ("\"a,b\"", 3),
+    ("\"x y z\"", 5),
+    ("\"a\\nb\\n\"", 4),
+    ("\"\u{e9}\"", 2),
+    ("\"abcdefgh\"", 8),
+    ("\"abcdefghi\"", 9),
+    ("\"prefix-shared-key-1\"", 19),
+    ("\"prefix-shared-key-2\"", 19),
+];
 
 /// xorshift64*, seeded through splitmix64 so nearby seeds give unrelated streams.
 struct Rng(u64);
@@ -140,6 +174,9 @@ enum Ty {
     S,
     K,
     Opt,
+    Str,
+    /// `List<Str>`, from `split` or `lines`; only immutable locals have it.
+    StrList,
 }
 
 struct Var {
@@ -152,6 +189,11 @@ struct Var {
     /// in range; `max` bounds the passes of a `for` over it and grows with each `push`.
     min: u64,
     max: u64,
+    /// For a `Str`: a bound on its length; for a `List<Str>`, on each element's.
+    smax: u64,
+    /// A mutable `Str` that loops may append to, so read inside no loop but as `len`, `==`,
+    /// `contains` and the like.
+    acc: bool,
 }
 
 struct Func {
@@ -180,6 +222,8 @@ struct Gen<'a> {
     ind: usize,
     /// The recursive helper being generated: its name and parameters.
     this: Option<(String, Vec<Ty>)>,
+    /// The longest `Str` the function being generated may return.
+    ret_bound: u64,
 }
 
 impl Gen<'_> {
@@ -200,6 +244,8 @@ impl Gen<'_> {
             fixed,
             min: 0,
             max: 0,
+            smax: 0,
+            acc: false,
         };
         self.scopes.last_mut().unwrap().push(var);
     }
@@ -245,6 +291,8 @@ impl Gen<'_> {
             Ty::S => "S",
             Ty::K => "K",
             Ty::Opt => "Option<Int>",
+            Ty::Str => "Str",
+            Ty::StrList => "List<Str>",
         }
     }
 
@@ -254,17 +302,28 @@ impl Gen<'_> {
             ret = Ty::Opt;
         } else if self.features.floats && self.rng.chance(20) {
             ret = Ty::Float;
+        } else if self.features.strings && self.rng.chance(15) {
+            ret = Ty::Str;
         }
         let recursive = self.features.recursion && matches!(ret, Ty::Int | Ty::Bool) && self.rng.chance(35);
         let mut params: Vec<Ty> = (0..self.rng.below(4)).map(|_| self.ty()).collect();
+        if self.features.strings {
+            for p in params.iter_mut() {
+                if self.rng.chance(15) {
+                    *p = Ty::Str;
+                }
+            }
+        }
         if recursive {
             params.insert(0, Ty::Int);
         }
         let name = format!("f{i}");
         let names: Vec<String> = (0..params.len()).map(|j| format!("p{j}")).collect();
         self.start(ret);
+        self.ret_bound = RET_MAX;
         for (j, (n, t)) in names.iter().zip(&params).enumerate() {
             self.declare(n.clone(), *t, false, recursive && j == 0);
+            self.var(n).smax = PARAM_MAX;
         }
         let sig: Vec<String> = names
             .iter()
@@ -303,8 +362,11 @@ impl Gen<'_> {
             ret = *self.rng.pick(&[Ty::S, Ty::K, Ty::Opt]);
         } else if self.features.floats && self.rng.chance(15) {
             ret = Ty::Float;
+        } else if self.features.strings && self.rng.chance(10) {
+            ret = Ty::Str;
         }
         self.start(ret);
+        self.ret_bound = MAX_STR;
         let arrow = match ret {
             Ty::Unit => String::new(),
             t => format!(" -> {}", Self::ty_name(t)),
@@ -349,7 +411,7 @@ impl Gen<'_> {
         let (name, params) = self.this.clone().unwrap();
         let mut args = vec!["(p0 - 1)".to_string()];
         for t in &params[1..] {
-            args.push(self.expr(*t, 1));
+            args.push(self.arg(*t));
         }
         let call = format!("{name}({})", args.join(", "));
         let e = self.expr(self.ret, 1);
@@ -398,6 +460,11 @@ impl Gen<'_> {
         }
         if self.features.adts && self.rng.chance(15) {
             if let Some(s) = self.adt_stmt() {
+                return s;
+            }
+        }
+        if self.features.strings && self.rng.chance(25) {
+            if let Some(s) = self.str_stmt() {
                 return s;
             }
         }
@@ -474,7 +541,7 @@ impl Gen<'_> {
     }
 
     fn assign(&mut self) -> Option<String> {
-        let names = self.visible(|v| v.mutable && !v.fixed && v.ty != Ty::List);
+        let names = self.visible(|v| v.mutable && !v.fixed && !matches!(v.ty, Ty::List | Ty::Str | Ty::StrList));
         if names.is_empty() {
             return None;
         }
@@ -706,7 +773,7 @@ impl Gen<'_> {
         let f = *self.rng.pick(&fits);
         self.cost += self.funcs[f].cost * self.mult;
         let params = self.funcs[f].params.clone();
-        let mut args: Vec<String> = params.iter().map(|t| self.expr(*t, 1)).collect();
+        let mut args: Vec<String> = params.iter().map(|t| self.arg(*t)).collect();
         if self.funcs[f].recursive {
             args[0] = format!("({} % 6)", args[0]);
         }
@@ -720,8 +787,17 @@ impl Gen<'_> {
             Ty::Bool => self.bool(depth),
             Ty::Float => self.float(depth),
             Ty::Unit => "()".into(),
-            Ty::List => unreachable!("lists come from list_expr"),
+            Ty::List | Ty::StrList => unreachable!("lists come from list_expr and str_stmt"),
             Ty::S | Ty::K | Ty::Opt => self.adt(ty, depth),
+            Ty::Str => self.str_upto(depth, self.ret_bound),
+        }
+    }
+
+    /// An argument for a parameter of type `t`.
+    fn arg(&mut self, t: Ty) -> String {
+        match t {
+            Ty::Str => self.str_upto(1, PARAM_MAX),
+            t => self.expr(t, 1),
         }
     }
 
@@ -771,6 +847,9 @@ impl Gen<'_> {
         }
         if depth > 0 && self.features.adts && self.rng.chance(15) {
             return self.adt_int(depth - 1);
+        }
+        if depth > 0 && self.features.strings && self.rng.chance(8) {
+            return self.str_int(depth - 1);
         }
         if depth > 0 && self.features.floats && self.rng.chance(8) {
             let x = self.float(depth - 1);
@@ -827,6 +906,9 @@ impl Gen<'_> {
         }
         if depth > 0 && self.features.adts && self.rng.chance(10) {
             return self.adt_bool(depth - 1);
+        }
+        if depth > 0 && self.features.strings && self.rng.chance(8) {
+            return self.str_bool(depth - 1);
         }
         if depth > 0 && self.features.floats && self.rng.chance(10) {
             let d = depth - 1;
@@ -1121,6 +1203,249 @@ impl Gen<'_> {
         }
         Some(format!("{pad}match {scrut} {{\n{}{pad}}}\n", arms.concat()))
     }
+
+    /// A `Str` expression and a bound on its length. Inside a loop it reads no accumulator.
+    fn str_expr(&mut self, depth: u32) -> (String, u64) {
+        self.cost += self.mult;
+        if depth == 0 || self.rng.chance(30) {
+            return self.str_leaf();
+        }
+        let d = depth - 1;
+        loop {
+            match self.rng.below(10) {
+                0..=3 => {
+                    let ((a, x), (b, y)) = (self.str_expr(d), self.str_expr(d));
+                    return (format!("({a} + {b})"), x + y);
+                }
+                4 => return (format!("({}).to_str()", self.int(d)), 20),
+                5 => {
+                    let c = self.bool(d);
+                    let ((a, x), (b, y)) = (self.str_expr(d), self.str_expr(d));
+                    return (format!("(if {c} {{ {a} }} else {{ {b} }})"), x.max(y));
+                }
+                6 => {
+                    let lists = self.visible(|v| v.ty == Ty::StrList);
+                    if !lists.is_empty() {
+                        let ws = self.rng.pick(&lists).clone();
+                        let i = self.index(&ws);
+                        return (format!("{ws}[{i}]"), self.var(&ws).smax);
+                    }
+                }
+                7 => {
+                    if let Some(c) = self.call(Ty::Str) {
+                        return (c, RET_MAX);
+                    }
+                }
+                8 => {
+                    let (a, x) = self.str_expr(d);
+                    return (format!("({a}).trim()"), x);
+                }
+                _ => return self.str_leaf(),
+            }
+        }
+    }
+
+    /// A visible `Str` (no accumulator inside a loop) or a literal.
+    fn str_leaf(&mut self) -> (String, u64) {
+        let in_loop = self.loops > 0;
+        let vars = self.visible(|v| v.ty == Ty::Str && !(in_loop && v.acc));
+        if !vars.is_empty() && self.rng.chance(50) {
+            let n = self.rng.pick(&vars).clone();
+            let m = self.var(&n).smax;
+            return (n, m);
+        }
+        let (s, n) = *self.rng.pick(STR_LITS);
+        (s.to_string(), n)
+    }
+
+    /// A `Str` expression of at most `bound` bytes.
+    fn str_upto(&mut self, depth: u32, bound: u64) -> String {
+        for _ in 0..3 {
+            let (s, n) = self.str_expr(depth);
+            if n <= bound {
+                return s;
+            }
+        }
+        "\"q\"".to_string()
+    }
+
+    /// A `Str` that is read and not kept, so it may be any visible one.
+    fn str_read(&mut self, depth: u32) -> String {
+        let vars = self.visible(|v| v.ty == Ty::Str);
+        if !vars.is_empty() && self.rng.chance(40) {
+            return self.rng.pick(&vars).clone();
+        }
+        self.str_expr(depth).0
+    }
+
+    /// A separator for `split`: mostly a non-empty literal.
+    fn sep(&mut self) -> String {
+        if self.rng.chance(5) {
+            return self.str_read(0);
+        }
+        self.rng
+            .pick(&["\",\"", "\" \"", "\"a\"", "\"ab\"", "\"\\n\""])
+            .to_string()
+    }
+
+    /// An `Int` from strings: a length, a count of parts, or a `match` on literals.
+    fn str_int(&mut self, d: u32) -> String {
+        let lists = self.visible(|v| v.ty == Ty::StrList);
+        match self.rng.below(6) {
+            0 | 1 => format!("({}).len()", self.str_read(d)),
+            2 if !lists.is_empty() => format!("{}.len()", self.rng.pick(&lists)),
+            2 | 3 => format!("({}).split({}).len()", self.str_read(d), self.sep()),
+            4 => format!("({}).lines().len()", self.str_read(d)),
+            _ => {
+                let scrut = self.str_read(d);
+                let mut arms = Vec::new();
+                for (lit, _) in STR_LITS {
+                    if self.rng.chance(25) {
+                        arms.push(format!("{lit} => {}", self.int(d)));
+                    }
+                }
+                arms.push(format!("_ => {}", self.int(d)));
+                format!("(match {scrut} {{ {} }})", arms.join(", "))
+            }
+        }
+    }
+
+    /// A `Bool` from strings: `==`, `!=`, `contains` on a `Str` or a `List<Str>`.
+    fn str_bool(&mut self, d: u32) -> String {
+        let lists = self.visible(|v| v.ty == Ty::StrList);
+        match self.rng.below(4) {
+            0 | 1 => {
+                let op = *self.rng.pick(&["==", "!="]);
+                format!("({} {op} {})", self.str_read(d), self.str_read(d))
+            }
+            2 if !lists.is_empty() => {
+                let ws = self.rng.pick(&lists).clone();
+                format!("{ws}.contains({})", self.str_read(d))
+            }
+            _ => format!("({}).contains({})", self.str_read(d), self.str_read(d)),
+        }
+    }
+
+    /// A `Str` or `List<Str>` statement: a `let`, an assignment or append, or a `for` over parts.
+    fn str_stmt(&mut self) -> Option<String> {
+        let pad = self.pad();
+        match self.rng.below(10) {
+            0..=2 => {
+                let (e, max) = self.str_expr(MAX_DEPTH);
+                if max > MAX_STR {
+                    return None;
+                }
+                let name = self.name("s");
+                let mutable = self.rng.chance(70);
+                let annot = if self.rng.chance(30) { ": Str" } else { "" };
+                let m = if mutable { "mut " } else { "" };
+                self.declare(name.clone(), Ty::Str, mutable, false);
+                let acc = mutable && self.rng.chance(50);
+                let v = self.var(&name);
+                (v.smax, v.acc) = (max, acc);
+                Some(format!("{pad}let {m}{name}{annot} = {e};\n"))
+            }
+            3..=6 => self.str_assign(),
+            7 => {
+                let (s, max) = self.str_expr(1);
+                let (src, min) = match self.rng.chance(60) {
+                    true => (format!("({s}).split({})", self.sep()), 1),
+                    false => (format!("({s}).lines()"), 0),
+                };
+                let name = self.name("ws");
+                self.declare(name.clone(), Ty::StrList, false, false);
+                let v = self.var(&name);
+                (v.min, v.max, v.smax) = (min, max + 1, max);
+                Some(format!("{pad}let {name} = {src};\n"))
+            }
+            _ => self.str_for(),
+        }
+    }
+
+    /// An assignment to a mutable `Str`. Inside a loop, only an append of small parts to an
+    /// accumulator, whose bound grows by the parts' times the passes.
+    fn str_assign(&mut self) -> Option<String> {
+        let in_loop = self.loops > 0;
+        let names = self.visible(|v| v.ty == Ty::Str && v.mutable && !v.fixed && (!in_loop || v.acc));
+        if names.is_empty() {
+            return None;
+        }
+        let name = self.rng.pick(&names).clone();
+        let cur = self.var(&name).smax;
+        let (stmt, new) = if in_loop {
+            let parts: Vec<(String, u64)> = (0..1 + self.rng.below(2)).map(|_| self.str_expr(1)).collect();
+            let add: u64 = parts.iter().map(|p| p.1).sum();
+            let s = match parts.len() == 1 && self.rng.chance(50) {
+                true => format!("{name} += {};", parts[0].0),
+                false => {
+                    let ps: Vec<&str> = parts.iter().map(|p| p.0.as_str()).collect();
+                    format!("{name} = {name} + {};", ps.join(" + "))
+                }
+            };
+            (s, cur.saturating_add(self.mult.saturating_mul(add)))
+        } else {
+            match self.rng.below(5) {
+                0 => {
+                    let (p, n) = self.str_expr(2);
+                    (format!("{name} += {p};"), cur + n)
+                }
+                1 => {
+                    let ((a, x), (b, y)) = (self.str_expr(1), self.str_expr(1));
+                    (format!("{name} = {name} + {a} + {b};"), cur + x + y)
+                }
+                2 => (format!("{name} = {name} + {name};"), 2 * cur),
+                3 => (format!("{name} = {name} + \"-\" + {name};"), 2 * cur + 1),
+                _ => {
+                    let (e, n) = self.str_expr(MAX_DEPTH);
+                    (format!("{name} = {e};"), cur.max(n))
+                }
+            }
+        };
+        if new > MAX_STR {
+            return None;
+        }
+        self.var(&name).smax = new;
+        Some(format!("{}{stmt}\n", self.pad()))
+    }
+
+    /// `for w in ws` over a `List<Str>` local, or over a `split` or `lines` of a `Str`; its
+    /// passes are bounded by the parts' count, at most the length plus one.
+    fn str_for(&mut self) -> Option<String> {
+        if !self.features.loops || self.loops >= MAX_LOOPS || self.nest >= MAX_NEST || self.cost > BUDGET / 2 {
+            return None;
+        }
+        let lists = self.visible(|v| v.ty == Ty::StrList);
+        let (src, runs, smax) = if !lists.is_empty() && self.rng.chance(50) {
+            let ws = self.rng.pick(&lists).clone();
+            let v = self.var(&ws);
+            let (runs, smax) = (v.max, v.smax);
+            (ws, runs, smax)
+        } else {
+            let (s, m) = self.str_expr(1);
+            let src = match self.rng.chance(60) {
+                true => format!("({s}).split({})", self.sep()),
+                false => format!("({s}).lines()"),
+            };
+            (src, m + 1, m)
+        };
+        let cap = if self.loops > 0 { 65 } else { MAX_STR + 1 };
+        if runs > cap {
+            return None;
+        }
+        let runs = runs.max(1);
+        let pad = self.pad();
+        let w = self.name("w");
+        self.mult *= runs;
+        self.loops += 1;
+        self.scopes.push(vec![]);
+        self.declare(w.clone(), Ty::Str, false, true);
+        self.var(&w).smax = smax;
+        let body = self.block(3, Ty::Unit);
+        self.scopes.pop();
+        self.loops -= 1;
+        self.mult /= runs;
+        Some(format!("{pad}for {w} in {src} {body}\n"))
+    }
 }
 
 #[cfg(test)]
@@ -1158,5 +1483,34 @@ mod tests {
         for m in [".map(|el| ", ".filter(|el| ", ".any(|el| ", ".all(|el| "] {
             assert!(all.matches(m).count() > 10, "{m}: {}", all.matches(m).count());
         }
+    }
+
+    /// Strings appear in a run of the default size, with the in-place append's patterns.
+    #[test]
+    fn strings_are_generated() {
+        let all: String = (0..250).map(|s| super::program(s, &Default::default())).collect();
+        for m in [
+            "let mut s",
+            " += ",
+            ".split(",
+            ".lines()",
+            ".contains(",
+            ").to_str()",
+            ").len()",
+            "-> Str",
+            ": Str",
+            "for w",
+            "\"prefix-shared-key-1\" => ",
+        ] {
+            assert!(all.matches(m).count() > 10, "{m}: {}", all.matches(m).count());
+        }
+        // `s = s + ..` chains, and `s = s + s`.
+        let chain = all.lines().filter(|l| {
+            let l = l.trim();
+            l.split_once(" = ")
+                .is_some_and(|(x, e)| x.starts_with('s') && e.starts_with(&format!("{x} + ")))
+        });
+        let n = chain.count();
+        assert!(n > 30, "{n}");
     }
 }

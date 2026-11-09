@@ -330,6 +330,12 @@ fn append_in_place_only_when_unique() {
         let rr = text::append(&T, r, r);
         assert_eq!(obj::bytes(rr), b"abxyabxy");
         assert_eq!(obj::bytes(r), b"abxy");
+        // `a += a` with `a` borrowed: one reference, which `append` takes; the copy is made
+        // before it is dropped (a test build poisons freed bytes).
+        let one = s("cd");
+        let cc = text::append(&T, one, one);
+        assert_eq!(obj::bytes(cc), b"cdcd");
+        dec(cc);
         // A pinned literal is copied and never written.
         let lit = s("lit");
         (*lit).rc = obj::PINNED;
@@ -589,4 +595,48 @@ fn slice_cases() {
     assert_eq!(bytes_slice(&[1, 2], 2, 1), Err(Err::SliceBounds));
     assert_eq!(bytes_slice(&[1, 2], 0, 3), Err(Err::SliceBounds));
     assert_eq!(obj::live(), base);
+}
+
+/// The word-at-a-time comparisons agree with `[u8]`'s own on pairs of short strings (bytes
+/// above 0x7f included, which a signed compare would misorder), at lengths on both sides of a
+/// word and differing at every position.
+#[test]
+fn word_compare_matches_bytes() {
+    let mut xs: Vec<Vec<u8>> = Vec::new();
+    for len in 0..19 {
+        for fill in [0u8, b'a', 0xff] {
+            let base = alloc::vec![fill; len];
+            xs.push(base.clone());
+            for i in 0..len {
+                for b in [0u8, b'b', 0x80] {
+                    let mut x = base.clone();
+                    x[i] = b;
+                    xs.push(x);
+                }
+            }
+        }
+    }
+    // Miri is slow: every 41st string against every 13th.
+    let (sa, sb) = if cfg!(miri) { (41, 13) } else { (1, 1) };
+    for a in xs.iter().step_by(sa) {
+        for b in xs.iter().step_by(sb) {
+            assert_eq!(text::bytes_eq(a, b), a == b, "{a:?} {b:?}");
+            assert_eq!(text::bytes_cmp(a, b), a.cmp(b), "{a:?} {b:?}");
+        }
+    }
+}
+
+/// Map keys order as a derived `Ord` would: `Int` before `Str`, `Str`s by bytes.
+#[test]
+fn keys_order_as_bytes() {
+    use crate::obj::Key;
+    let k = |s: &[u8]| Key::Str(s.into());
+    assert!(Key::Int(5) < k(b""));
+    assert!(Key::Int(-1) < Key::Int(0));
+    assert!(k(b"abcdefgh") < k(b"abcdefgh\0"));
+    assert!(k(b"abcdefgz") > k(b"abcdefgh\xff"));
+    assert!(k(b"\x80") > k(b"\x7f\xff\xff\xff\xff\xff\xff\xff\xff"));
+    assert_eq!(k(b"abcdefghij"), k(b"abcdefghij"));
+    assert_ne!(k(b"abcdefghij"), k(b"abcdefghik"));
+    assert_ne!(Key::Int(0), k(b""));
 }

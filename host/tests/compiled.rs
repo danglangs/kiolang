@@ -1460,3 +1460,162 @@ fn functions_given_to_builtins_run_in_order() {
         }"#;
     assert_eq!(value(src), "3oddstop");
 }
+
+// Fewer reference counts (C8b2): last uses move, local operands are borrowed. Each test is a
+// program that frees too early, frees twice or leaks if its rule is wrong.
+
+/// A last use hands over the local's reference and zeroes the slot, so the scope's end and the
+/// exits drop nothing: as an argument, a `let`, a block's tail, `return`, in one branch, and of
+/// a parameter. New strings of the same size reuse a freed object's memory, so a second drop
+/// of a moved local frees one of them.
+#[test]
+fn last_uses_move() {
+    let src = r#"fn f(s: Str) -> Str { s + "!" }
+        fn id(s: Str) -> Str { s }
+        fn ret(s: Str) -> Str { let t = s + "?"; return t; }
+        fn pick(a: Str, b: Str, first: Bool) -> Str { if first { a } else { b } }
+        fn main() -> Str {
+            let a = 1.to_str() + "a";
+            let b = f(a);
+            let r1 = 2.to_str() + "b";
+            let c = id(b);
+            let d = c;
+            let r2 = 3.to_str() + "c";
+            let e = { let x = d + "x"; x };
+            let g = if e.len() > 0 { id(e) } else { e + "no" };
+            let h = pick(g, r1 + "", true);
+            ret(h) + r1 + r2
+        }"#;
+    assert_eq!(value(src), "1a!x?2b3c");
+}
+
+/// A read with a later use is a copy: before `a + b`, before `||`, a `match` arm or an `if`
+/// branch that may read it, or in a pass of a loop when the local is declared outside it.
+#[test]
+fn reads_before_a_later_use_copy() {
+    let src = r#"fn f(s: Str) -> Str { s + "!" }
+        fn main() -> Str {
+            let a = 1.to_str();
+            let b = f(a);
+            let c = a + b;
+            let mut acc = "";
+            for i in 0..3 { acc = acc + f(c); }
+            let mut n = 0;
+            while n < 20 { let t = f(acc); n += t.len(); }
+            let k = if n > 100 { f(c) } else { c + "" };
+            let d = 2.to_str();
+            let both = f(d).len() > 5 || d.len() > 0;
+            let e = 3.to_str();
+            let arm = match f(e).len() { 2 => e + "m", _ => "" };
+            let z = 4.to_str();
+            let mut out = "";
+            for i in 0..3 { out = out + f(z); }
+            let mut j = 0;
+            while j < 2 { out = out + f(z); j += 1; }
+            let y = 5.to_str();
+            let fy = f(y);
+            let then = if fy.len() > 1 { y + "t" } else { "e" };
+            acc + "|" + k + "|" + c + n.to_str() + arm + if both { "T" } else { "F" } + out + then
+        }"#;
+    assert_eq!(value(src), "11!!11!!11!!|11!|11!263mT4!4!4!4!4!5t");
+}
+
+/// `x = f(x)` moves `x` into the call and stores the result; `x += f(x)` and a place write
+/// read `x` after the value, so a read of `x` in the value is a copy.
+#[test]
+fn assignments_and_place_writes_read_after_the_value() {
+    let src = r#"fn f(s: Str) -> Str { s + "!" }
+        fn sum(xs: List<Int>) -> Int { let mut n = 0; for x in xs { n += x; } n }
+        fn main() -> Str {
+            let mut s = 1.to_str();
+            s = f(s);
+            s += f(s);
+            let mut xs = [1, 2];
+            xs[0] = sum(xs);
+            xs.push(sum(xs));
+            let mut m: Map<Str, Str> = Map::new();
+            m.insert(s, f(s));
+            s + "|" + xs[0].to_str() + xs[2].to_str() + m.len().to_str()
+        }"#;
+    assert_eq!(value(src), "1!1!!|351");
+}
+
+/// A borrowed operand is the local itself, so a later operand must not reassign it, change it
+/// in place or move it: then the local is evaluated as a copy instead.
+#[test]
+fn borrowed_operands_see_no_later_change() {
+    let src = r#"fn f(s: Str) -> Str { s + "!" }
+        fn g(xs: List<Str>) -> Int { xs.len() }
+        fn main() -> Str {
+            let a = 1.to_str();
+            let e1 = a == f(a);
+            let mut b = 2.to_str();
+            let e2 = b == { b = 3.to_str(); b };
+            let mut c = 4.to_str();
+            let s = c + { c = c + "x"; c };
+            let mut xs = [5.to_str()];
+            let n = xs[{ xs = [6.to_str(), 7.to_str()]; 0 }];
+            let mut ys = [8.to_str()];
+            let k = ys.contains({ ys.push(9.to_str()); ys[1] });
+            let zs = [1.to_str()];
+            let m = zs.len() + g(zs);
+            let tf = |b: Bool| if b { "T" } else { "F" };
+            tf(e1) + tf(e2) + s + n + tf(k) + m.to_str()
+        }"#;
+    assert_eq!(value(src), "FF44x5F2");
+}
+
+/// Borrowed and not dropped: a local `match` scrutinee (whose arm reassigns it), the operand of
+/// `?`, a called `fn` value, the receiver and function of `map`, a map key, and appended parts.
+/// Each is used again afterwards, so a drop of the borrow frees it early.
+#[test]
+fn borrows_are_not_dropped() {
+    let src = r#"fn first(o: Option<Str>) -> Option<Str> { let x = o?; let y = o?; Some(x + y) }
+        fn main() -> Str {
+            let mut o = Some(1.to_str());
+            let m = match o { Some(v) => { o = None; v + "m" }, None => "" };
+            let p = match o { Some(v) => v, None => 2.to_str() };
+            let q = first(Some(3.to_str())).unwrap_or("");
+            let k = 4.to_str();
+            let f = |x: Str| x + k;
+            let r = f(5.to_str()) + f(6.to_str());
+            let xs = [7.to_str()];
+            let g = |x: Str| x + "g";
+            let ys = xs.map(g);
+            let zs = xs.map(g);
+            let key = 8.to_str() + "k";
+            let mut mp: Map<Str, Int> = Map::new();
+            mp.insert(key, 1);
+            mp.insert(key, mp.get(key).unwrap_or(0) + 1);
+            mp.remove(key);
+            let t = 9.to_str();
+            let mut s = "s" + "";
+            s = s + t + t;
+            s += t;
+            m + p + q + r + ys[0] + zs[0] + xs[0] + key + mp.len().to_str() + s + t + k
+        }"#;
+    assert_eq!(value(src), "1m23354647g7g78k0s99994");
+}
+
+/// `len`, an index and `push` on `Bytes` are inline when in range and with room (C8b2); the
+/// runtime grows the buffer and reports errors, also for a bad byte when there is room.
+#[test]
+fn bytes_inline_paths() {
+    let src = r#"fn main() -> Int {
+            let mut b = "".to_bytes();
+            for i in 0..40 { b.push(i * 6); }
+            let c = b;
+            b.push(7);
+            "héllo".len() * 1000000 + b.len() * 10000 + c.len() * 100 + b[39] + b[40]
+        }"#;
+    assert_eq!(value(src), "6414241");
+    for (push, want) in [
+        ("256", "byte 256 out of range 0..=255"),
+        ("0 - 1", "byte -1 out of range 0..=255"),
+    ] {
+        let src = format!("fn main() {{ let mut b = \"\".to_bytes(); b.push(1); b.push({push}); }}");
+        assert_eq!(error(&src), want);
+    }
+    let src = r#"fn main() -> Int { let mut b = "a".to_bytes(); b.push(1); b[2] }"#;
+    assert_eq!(error(src), "index 2 out of bounds for length 2");
+}

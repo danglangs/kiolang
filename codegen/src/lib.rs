@@ -7,12 +7,13 @@
 //! module as a component.
 
 mod data;
+mod moves;
 
 use anyhow::{anyhow, Context, Result};
 use data::Statics;
 use lang::ir::{self, BinOp, Builtin, ExprKind, Module, Mut, StmtKind, Ty, UnOp};
 use lang::Span;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use wasm_encoder::reencode::{self, Reencode};
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, DataSection, ElementSection, Elements, Encode, Function, Ieee64, Instruction,
@@ -345,6 +346,23 @@ const LIST_CAP: wasm_encoder::MemArg = wasm_encoder::MemArg {
     memory_index: 0,
 };
 
+/// A `Str`'s or `Bytes`' length, capacity and first byte (runtime/src/obj.rs).
+const BYTES_LEN: wasm_encoder::MemArg = wasm_encoder::MemArg {
+    offset: 8,
+    align: 2,
+    memory_index: 0,
+};
+const BYTES_CAP: wasm_encoder::MemArg = wasm_encoder::MemArg {
+    offset: 12,
+    align: 2,
+    memory_index: 0,
+};
+const BYTES_DATA: wasm_encoder::MemArg = wasm_encoder::MemArg {
+    offset: 16,
+    align: 0,
+    memory_index: 0,
+};
+
 /// An object's reference count, at byte 0.
 const RC: wasm_encoder::MemArg = wasm_encoder::MemArg {
     offset: 0,
@@ -444,6 +462,7 @@ fn func<'m>(
         rc_scratch: None,
         list_scratch: None,
         owned,
+        moves: moves::moves(f, is_ptr),
         depth: 0,
         loops: Vec::new(),
         code: Vec::new(),
@@ -489,6 +508,9 @@ struct FuncGen<'a, 'm> {
     /// operands evaluated so far. A scope's end releases its part; an exit releases the part
     /// of every scope it leaves.
     owned: Vec<u32>,
+    /// The reads of pointer locals that are last uses (moves.rs): each hands over the local's
+    /// reference and zeroes its slot, rather than adding a reference.
+    moves: HashSet<*const ir::Expr>,
     /// Open Wasm blocks, loops and ifs that can hold kio code.
     depth: u32,
     /// For each enclosing kio loop, innermost last: the depth of its `break` and `continue`
@@ -533,6 +555,10 @@ impl FuncGen<'_, '_> {
         match name {
             "rt_list_len" => self.list_len(),
             "rt_list_push" => self.list_push(),
+            // A `Str`'s or `Bytes`' length is its header's `len` (C8b2).
+            "rt_str_len" | "rt_bytes_len" => {
+                self.sink().i32_load(BYTES_LEN).i64_extend_i32_u();
+            }
             _ => {
                 let f = self.rt.export(name);
                 self.sink().call(f);
@@ -599,6 +625,53 @@ impl FuncGen<'_, '_> {
         }
         let mut s = self.sink();
         s.else_().local_get(l).local_get(i).i32_const(site as i32).call(f).end();
+    }
+
+    /// `rt_bytes_get` of `Bytes` `b` at index `i` (locals), inline when `i` is in bounds: pushes
+    /// the byte. Out of bounds, the runtime reports the error at `site`.
+    fn bytes_get(&mut self, b: u32, i: u32, site: u32) {
+        let f = self.rt.export("rt_bytes_get");
+        let mut s = self.sink();
+        s.local_get(i)
+            .local_get(b)
+            .i32_load(BYTES_LEN)
+            .i64_extend_i32_u()
+            .i64_lt_u();
+        s.if_(BlockType::Result(ValType::I64));
+        s.local_get(b)
+            .local_get(i)
+            .i32_wrap_i64()
+            .i32_add()
+            .i64_load8_u(BYTES_DATA);
+        s.else_().local_get(b).local_get(i).i32_const(site as i32).call(f).end();
+    }
+
+    /// `rt_bytes_push` of the unique `Bytes` and the `Int` on the stack, inline when the `Int` is
+    /// a byte and there is room, as `list_push`: the byte is stored after the last and `len`
+    /// grows by one. Otherwise the runtime pushes (growing) or reports the error at `site`.
+    /// Leaves the object to store back.
+    fn bytes_push(&mut self, site: u32) {
+        let [l, n, v] = self.list_scratch();
+        let f = self.rt.export("rt_bytes_push");
+        let mut s = self.sink();
+        s.local_set(v).local_set(l);
+        s.local_get(v).i64_const(255).i64_le_u();
+        s.local_get(l)
+            .i32_load(BYTES_LEN)
+            .local_tee(n)
+            .local_get(l)
+            .i32_load(BYTES_CAP)
+            .i32_lt_u()
+            .i32_and();
+        s.if_(BlockType::Result(ValType::I32));
+        s.local_get(l)
+            .local_get(n)
+            .i32_add()
+            .local_get(v)
+            .i64_store8(BYTES_DATA);
+        s.local_get(l).local_get(n).i32_const(1).i32_add().i32_store(BYTES_LEN);
+        s.local_get(l);
+        s.else_().local_get(l).local_get(v).i32_const(site as i32).call(f).end();
     }
 
     /// Three locals for the inline list operations: a list (`i32`), a length (`i32`) and a
@@ -683,9 +756,36 @@ impl FuncGen<'_, '_> {
     /// that an exit while a later one runs releases it; the caller truncates `owned` to the
     /// mark once it has used them.
     fn operands(&mut self, xs: &[&ir::Expr]) -> (usize, Vec<Option<u32>>) {
+        let (mark, temps, _) = self.operands_borrowing(xs, |_| false);
+        (mark, temps)
+    }
+
+    /// `operands`, except that an operand `i` for which `borrow(i)` holds and which is a read
+    /// of a pointer local that no later operand mentions is not evaluated: its hidden local is
+    /// the local itself, borrowed (C8b2). The third result flags those, which the caller must
+    /// not drop and may use only until it runs code other than these operands. Nothing evaluated
+    /// after a borrowed read can then change or move the local: only an assignment, a place
+    /// write or a read in a later operand's own code could (a call cannot reach the caller's
+    /// locals), and none mentions it.
+    fn operands_borrowing(
+        &mut self,
+        xs: &[&ir::Expr],
+        borrow: impl Fn(usize) -> bool,
+    ) -> (usize, Vec<Option<u32>>, Vec<bool>) {
         let mark = self.owned.len();
         let mut temps = Vec::new();
-        for x in xs {
+        let mut borrowed = Vec::new();
+        for (i, x) in xs.iter().enumerate() {
+            if let ExprKind::Local(id) = x.kind {
+                let later = || xs[i + 1..].iter().any(|y| moves::mentions(y, id));
+                if let (true, Some(l)) = (is_ptr(&x.ty) && borrow(i), self.local(id)) {
+                    if !later() {
+                        temps.push(Some(l));
+                        borrowed.push(true);
+                        continue;
+                    }
+                }
+            }
             self.expr(x);
             let t = val_type(&x.ty).map(|vt| self.temp(vt));
             if let Some(t) = t {
@@ -695,8 +795,9 @@ impl FuncGen<'_, '_> {
                 }
             }
             temps.push(t);
+            borrowed.push(false);
         }
-        (mark, temps)
+        (mark, temps, borrowed)
     }
 
     /// Pushes operand `x` from its hidden local `t`. An operand of type `!` has none, and
@@ -715,15 +816,21 @@ impl FuncGen<'_, '_> {
 
     /// Evaluates `xs`, then runs `f` to use them from their hidden locals without taking
     /// them, then drops the pointers among them: a runtime operation borrows its arguments.
+    /// A local operand is borrowed (`operands_borrowing`), so neither copied nor dropped.
     fn borrowing(&mut self, xs: &[&ir::Expr], f: impl FnOnce(&mut Self, &[Option<u32>])) {
-        let (mark, temps) = self.operands(xs);
+        let (mark, temps, borrowed) = self.operands_borrowing(xs, |_| true);
         f(self, &temps);
-        for (x, t) in xs.iter().zip(&temps) {
-            if let (true, Some(t)) = (is_ptr(&x.ty), t) {
+        self.drop_operands(xs, &temps, &borrowed);
+        self.owned.truncate(mark);
+    }
+
+    /// Drops the pointer operands among `xs` that were evaluated, not borrowed.
+    fn drop_operands(&mut self, xs: &[&ir::Expr], temps: &[Option<u32>], borrowed: &[bool]) {
+        for ((x, t), b) in xs.iter().zip(temps).zip(borrowed) {
+            if let (true, false, Some(t)) = (is_ptr(&x.ty), *b, t) {
                 self.dec(*t);
             }
         }
-        self.owned.truncate(mark);
     }
 
     /// Calls runtime export `name` on `xs`, which it borrows, with `site` last if it can fail.
@@ -894,7 +1001,7 @@ impl FuncGen<'_, '_> {
                 };
                 match op {
                     None => match appended(place.root, value) {
-                        Some(parts) => self.append(l, parts),
+                        Some(parts) => self.append(place.root, l, parts),
                         // The value first, then the old one dropped.
                         None => {
                             self.expr(value);
@@ -906,12 +1013,22 @@ impl FuncGen<'_, '_> {
                     Some(BinOp::Concat) => {
                         // `x + value`: the value first, then `rt_str_append` takes the old `x`
                         // (growing it in place if `x` held its only reference) and borrows the
-                        // value, which is then dropped.
-                        let v = self.temp(ValType::I32);
-                        self.expr(value);
-                        self.sink().local_set(v).local_get(l).local_get(v);
+                        // value, which is then dropped. A read of another local is borrowed
+                        // instead (C8b2); `x += x` reads `x` +1, so `x` is copied.
+                        let y = match value.kind {
+                            ExprKind::Local(y) if y != place.root => self.local(y),
+                            _ => None,
+                        };
+                        let v = y.unwrap_or_else(|| self.temp(ValType::I32));
+                        if y.is_none() {
+                            self.expr(value);
+                            self.sink().local_set(v);
+                        }
+                        self.sink().local_get(l).local_get(v);
                         self.call_rt("rt_str_append");
-                        self.dec(v);
+                        if y.is_none() {
+                            self.dec(v);
+                        }
                     }
                     Some(op @ (BinOp::FAdd | BinOp::FSub)) => {
                         let v = self.temp(ValType::F64);
@@ -1000,17 +1117,19 @@ impl FuncGen<'_, '_> {
     /// in place. A part that reads `x` holds a reference of its own, so the old value is then
     /// shared and copied, as is a pinned literal; after a part that reassigns `x`, the read
     /// holds the old value's only reference. Leaves the result to store.
-    fn append(&mut self, l: u32, parts: Vec<&ir::Expr>) {
-        let (mark, temps) = self.operands(&parts);
+    ///
+    /// A part that reads another local is borrowed (`operands_borrowing`); one reading `x` is
+    /// not, since `x`'s reference is dropped before the appends.
+    fn append(&mut self, x: ir::LocalId, l: u32, parts: Vec<&ir::Expr>) {
+        let other = |i: usize| i > 0 && parts[i].kind != ExprKind::Local(x);
+        let (mark, temps, borrowed) = self.operands_borrowing(&parts, other);
         self.dec(l);
         self.get(parts[0], temps[0]);
         for (x, t) in parts.iter().zip(&temps).skip(1) {
             self.get(x, *t);
             self.call_rt("rt_str_append");
         }
-        for t in temps.iter().skip(1).flatten() {
-            self.dec(*t);
-        }
+        self.drop_operands(&parts[1..], &temps[1..], &borrowed[1..]);
         self.owned.truncate(mark);
     }
 
@@ -1128,7 +1247,9 @@ impl FuncGen<'_, '_> {
         let (mut xs, sites) = self.indexes(place);
         let n = xs.len();
         xs.extend(args);
-        let (mark, temps) = self.operands(&xs);
+        // A map key is borrowed: it is read after the walk, which changes only the root.
+        let key = matches!(op, Mut::MapInsert | Mut::MapRemove);
+        let (mark, temps, borrowed) = self.operands_borrowing(&xs, |i| key && i == n);
         let (cur, slot) = self.walk(place, &temps, &sites, place.steps.len(), &mut 0);
         let args: Vec<(&ir::Expr, Option<u32>)> = args.iter().zip(temps[n..].iter().copied()).collect();
         if op == Mut::ListPop {
@@ -1150,8 +1271,7 @@ impl FuncGen<'_, '_> {
             }
             self.sink().local_get(cur);
             self.get(args[0].0, args[0].1);
-            self.sink().i32_const(site as i32);
-            self.call_rt("rt_bytes_push");
+            self.bytes_push(site);
             match slot {
                 Some(_) => self.sink().i64_extend_i32_u().i64_store(SLOT),
                 None => self.sink().local_set(cur),
@@ -1170,7 +1290,7 @@ impl FuncGen<'_, '_> {
                 op => unreachable!("{op:?} is handled above"),
             });
             if let (Mut::MapInsert | Mut::MapRemove, (k, Some(t))) = (op, args[0]) {
-                if is_ptr(&k.ty) {
+                if is_ptr(&k.ty) && !borrowed[n] {
                     self.dec(t);
                 }
             }
@@ -1295,11 +1415,17 @@ impl FuncGen<'_, '_> {
             ExprKind::Unit => {}
             ExprKind::Local(id) => {
                 if let Some(l) = self.local(*id) {
-                    if is_ptr(&e.ty) {
-                        // A copy: the local keeps its own reference.
-                        self.inc(l);
+                    if is_ptr(&e.ty) && self.moves.contains(&(e as *const ir::Expr)) {
+                        // The last use: the reference moves out, and the slot is left empty,
+                        // so the scope's end and every exit drop nothing (`rt_dec(0)`).
+                        self.sink().local_get(l).i32_const(0).local_set(l);
+                    } else {
+                        if is_ptr(&e.ty) {
+                            // A copy: the local keeps its own reference.
+                            self.inc(l);
+                        }
+                        self.sink().local_get(l);
                     }
-                    self.sink().local_get(l);
                 }
             }
             ExprKind::Unary(UnOp::Not, x) => {
@@ -1467,7 +1593,12 @@ impl FuncGen<'_, '_> {
             }
             ExprKind::Index(base, i) if base.ty == Ty::Bytes => {
                 let site = self.site(e.span, OUT_OF_BOUNDS);
-                self.rt_op("rt_bytes_get", &[&**base, &**i], Some(site));
+                self.borrowing(&[&**base, &**i], |g, temps| match temps {
+                    [Some(b), Some(i)] => g.bytes_get(*b, *i, site),
+                    _ => {
+                        g.sink().unreachable();
+                    }
+                });
             }
             ExprKind::Index(base, i) => {
                 // The element is +1, as a slot.
@@ -1599,7 +1730,8 @@ impl FuncGen<'_, '_> {
             return self.expr(callee); // `!`: nothing after it runs
         };
         let xs: Vec<&ir::Expr> = std::iter::once(callee).chain(args).collect();
-        let (mark, temps) = self.operands(&xs);
+        // A local callee is borrowed: the call cannot change the caller's locals.
+        let (mark, temps, borrowed) = self.operands_borrowing(&xs, |i| i == 0);
         let c = temps[0].expect("a fn value");
         self.sink().local_get(c);
         for (x, t) in args.iter().zip(&temps[1..]) {
@@ -1607,7 +1739,9 @@ impl FuncGen<'_, '_> {
         }
         self.owned.truncate(mark);
         self.call_through(c, params, ret);
-        self.dec(c);
+        if !borrowed[0] {
+            self.dec(c);
+        }
     }
 
     /// Calls the `fn(params) -> ret` value in local `c` through its table entry, on the object
@@ -1626,7 +1760,7 @@ impl FuncGen<'_, '_> {
     /// `f` are dropped. Between the operands and the drops nothing leaves the function (a call
     /// returns or traps), so neither needs its place in `owned` past its evaluation.
     fn with_fn(&mut self, b: Builtin, recv: &ir::Expr, f: &ir::Expr, ty: &Ty, span: Span) {
-        let (mark, temps) = self.operands(&[recv, f]);
+        let (mark, temps, borrowed) = self.operands_borrowing(&[recv, f], |_| true);
         self.owned.truncate(mark);
         let (Some(r), Some(c), Ty::Fn(params, ret)) = (temps[0], temps[1], &f.ty) else {
             // The receiver or `f` is `!`: nothing after it runs.
@@ -1641,8 +1775,7 @@ impl FuncGen<'_, '_> {
             Builtin::ListAll => self.list_any(false, r, c, &recv.ty, sig, span),
             _ => self.enum_map(b, r, c, &recv.ty, sig, ty),
         }
-        self.dec(r);
-        self.dec(c);
+        self.drop_operands(&[recv, f], &temps, &borrowed);
     }
 
     /// Opens a loop over the elements of list `r`: `i` from 0 to its length, read once.
@@ -1838,6 +1971,14 @@ impl FuncGen<'_, '_> {
         }
     }
 
+    /// The Wasm local of `e` if it is a read of a pointer local, to borrow in place.
+    fn borrowed_local(&self, e: &ir::Expr) -> Option<u32> {
+        match e.kind {
+            ExprKind::Local(id) if is_ptr(&e.ty) => self.local(id),
+            _ => None,
+        }
+    }
+
     /// Whether `e` is a local, or a field of one, so it can be read without a reference.
     fn in_place(&self, e: &ir::Expr) -> bool {
         match &e.kind {
@@ -1873,14 +2014,22 @@ impl FuncGen<'_, '_> {
             return self.expr(scrut);
         }
         let mark = self.owned.len();
-        let s = val_type(&scrut.ty).map(|vt| self.temp(vt));
-        self.expr(scrut);
-        if let Some(s) = s {
-            self.sink().local_set(s);
-            if is_ptr(&scrut.ty) {
-                self.owned.push(s);
+        let s = match self.borrowed_local(scrut) {
+            // A local scrutinee is read in place (C8b2): the tests and bindings read it before
+            // any arm's body runs, and bindings hold references of their own.
+            Some(l) => Some(l),
+            None => {
+                let s = val_type(&scrut.ty).map(|vt| self.temp(vt));
+                self.expr(scrut);
+                if let Some(s) = s {
+                    self.sink().local_set(s);
+                    if is_ptr(&scrut.ty) {
+                        self.owned.push(s);
+                    }
+                }
+                s
             }
-        }
+        };
         let vt = val_type(ty);
         let end = self.open(Open::Block, vt.map_or(BlockType::Empty, BlockType::Result));
         for arm in arms {
@@ -1991,10 +2140,14 @@ impl FuncGen<'_, '_> {
             Ty::Result(t, _) => (0, &**t),
             t => unreachable!("`?` on {t:?}"),
         };
-        let s = self.temp(ValType::I32);
-        self.expr(x);
-        self.sink().local_set(s);
-        self.owned.push(s);
+        // A local is read in place (C8b2): nothing runs between the read and the test.
+        let borrowed = self.borrowed_local(x);
+        let s = borrowed.unwrap_or_else(|| self.temp(ValType::I32));
+        if borrowed.is_none() {
+            self.expr(x);
+            self.sink().local_set(s);
+            self.owned.push(s);
+        }
         self.sink().local_get(s).i32_load(VARIANT).i32_const(success).i32_ne();
         self.open(Open::If, BlockType::Empty);
         let r = self.temp(ValType::I32);
@@ -2035,8 +2188,10 @@ impl FuncGen<'_, '_> {
             self.inc_top();
             self.sink().local_get(v);
         }
-        self.owned.pop();
-        self.dec(s);
+        if borrowed.is_none() {
+            self.owned.pop();
+            self.dec(s);
+        }
     }
 
     /// `a op b` on two `Float` from the stack: IEEE, as Rust's `f64`, so nothing traps. Wasm
