@@ -5,9 +5,9 @@
 //! body is `[tag u8][key len u32][key][value]`: tag 1 sets `key` to `value`, tag 2 deletes it.
 //!
 //! A read-only grant (`path:ro`, H12) takes no lock, so another process may write the file: before
-//! each `get` and `keys` the reader applies the whole records appended since, and replays the file
-//! again when the path names a new file (the writer compacted it) or the file shrank.
-use crate::kio::caps::kv::{HostKv, Kv, KvErr};
+//! each `get`, `keys` and `scan` the reader applies the whole records appended since, and replays
+//! the file again when the path names a new file (the writer compacted it) or the file shrank.
+use crate::kio::caps::kv::{HostKv, Kv, KvEntry, KvErr};
 use crate::{outcome, State};
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions, TryLockError};
@@ -28,6 +28,11 @@ const KEY_MAX: usize = 1024;
 const VALUE_MAX: usize = 1 << 20;
 /// Most keys one `keys` call returns.
 const KEYS_MAX: usize = 10_000;
+/// Most entries one `scan` call returns, and most key plus value bytes in them.
+const SCAN_MAX: u32 = 1_000;
+const SCAN_BYTES_MAX: usize = 8 << 20;
+/// The longest decimal `Int` (`-9223372036854775808`): what `add` is charged for writing.
+const ADD_BYTES: usize = 20;
 /// Largest record body a valid file holds.
 const BODY_MAX: usize = 1 + 4 + KEY_MAX + VALUE_MAX;
 /// Record framing plus body header: what a record adds to its key and value.
@@ -54,6 +59,10 @@ struct Inner {
     live: u64,
     /// The log; `None` in memory.
     log: Option<Log>,
+    /// A reader's last full replay failed: the file's device, inode and length then, and the
+    /// error. The same file at the same length is not read again (a hostile append would
+    /// otherwise cost every call a replay); a new file or length retries.
+    stuck: Option<((u64, u64), u64, String)>,
 }
 
 /// The open log and its path. A writer holds the file's lock and `len` is the file's length; a
@@ -74,10 +83,10 @@ pub fn split_spec(spec: &str) -> (&str, bool) {
     }
 }
 
-/// The first write (`set`, `delete`, `swap`) an authority report's `main` line shows on `name`.
+/// The first write (`set`, `delete`, `swap`, `add`) an authority report's `main` line shows on `name`.
 pub fn write_in_report(report: &str, name: &str) -> Option<&'static str> {
     let calls = crate::main_calls(report);
-    ["set", "delete", "swap"]
+    ["set", "delete", "swap", "add"]
         .into_iter()
         .find(|m| calls.contains(&(name.to_string(), m.to_string())))
 }
@@ -131,7 +140,12 @@ impl Store {
             limit,
             id: log.as_ref().map(|l| l.id),
             read_only,
-            inner: Mutex::new(Inner { map, live, log }),
+            inner: Mutex::new(Inner {
+                map,
+                live,
+                log,
+                stuck: None,
+            }),
         }
     }
 
@@ -271,6 +285,59 @@ impl Store {
         Ok(Ok(found().map(|(k, _)| k.clone()).collect()))
     }
 
+    /// The entries whose key starts with `prefix` and is greater than `after`, in key order, at
+    /// most `limit` of them; and the key and value bytes looked at, which a refused call still
+    /// cost. `too-large` for a limit outside 1 to `SCAN_MAX`, a prefix over `KEY_MAX`, or
+    /// entries past `SCAN_BYTES_MAX` in all.
+    fn scan(&self, prefix: &str, after: Option<&str>, limit: u32) -> io::Result<(Result<Vec<KvEntry>, KvErr>, usize)> {
+        if prefix.len() > KEY_MAX || !(1..=SCAN_MAX).contains(&limit) {
+            return Ok((Err(KvErr::TooLarge), 0));
+        }
+        let inner = self.current()?;
+        // Every key with the prefix is at least the prefix, so a smaller `after` excludes nothing.
+        let from = match after {
+            Some(a) if a >= prefix => Bound::Excluded(a),
+            _ => Bound::Included(prefix),
+        };
+        let found = (inner.map.range::<str, _>((from, Bound::Unbounded)))
+            .take_while(|(k, _)| k.starts_with(prefix))
+            .take(limit as usize);
+        let (mut out, mut bytes) = (Vec::new(), 0);
+        for (k, v) in found {
+            bytes += k.len() + v.len();
+            if bytes > SCAN_BYTES_MAX {
+                return Ok((Err(KvErr::TooLarge), bytes));
+            }
+            out.push(KvEntry {
+                key: k.clone(),
+                value: v.clone(),
+            });
+        }
+        Ok((Ok(out), bytes))
+    }
+
+    /// Add `n` to the integer at `key` (absent: 0) under one lock and store the sum as decimal
+    /// text, the form `Int.to_str()` writes; any other stored text is `not-int`.
+    fn add(&self, key: &str, n: i64) -> io::Result<Result<i64, KvErr>> {
+        if let Err(e) = check_key(key) {
+            return Ok(Err(e));
+        }
+        let mut inner = self.inner();
+        let cur = match inner.map.get(key) {
+            None => 0,
+            Some(v) => match stored_int(v) {
+                Some(i) => i,
+                None => return Ok(Err(KvErr::NotInt)),
+            },
+        };
+        let Some(new) = cur.checked_add(n) else {
+            return Ok(Err(KvErr::Overflow));
+        };
+        Ok(inner
+            .put(key, Some(new.to_string().into_bytes()), self.limit)?
+            .map(|()| new))
+    }
+
     /// Compare and set under one lock, so no other call sees or changes `key` in between.
     fn swap(&self, key: &str, old: Option<Vec<u8>>, new: Option<Vec<u8>>) -> io::Result<Result<bool, KvErr>> {
         if let Err(e) = check_key(key) {
@@ -290,7 +357,8 @@ impl Inner {
     /// shorter than what was applied, replay the file at the path from the start. A record still
     /// being written, or a tail of zeros, waits for the next call. A bad record where the last one
     /// ended replays the whole file too (it may have been rewritten in place), and is an error
-    /// only if that finds the file corrupt; the view is then kept and the next call tries again.
+    /// only if that finds the file corrupt; the view is then kept, and the next call tries again
+    /// once the file at the path is another or has another length (`stuck`).
     fn follow(&mut self) -> io::Result<()> {
         let Some(log) = &mut self.log else { return Ok(()) };
         let shown = log.path.display();
@@ -304,6 +372,12 @@ impl Inner {
         }
         if !at_path.is_file() {
             return Err(io::Error::other(format!("{shown}: not a regular file")));
+        }
+        let now = ((at_path.dev(), at_path.ino()), at_path.len());
+        if let Some((id, len, e)) = &self.stuck {
+            if (*id, *len) == now {
+                return Err(io::Error::other(e.clone()));
+            }
         }
         let len = log.file.metadata()?.len();
         // The old file stays open here, so the new one cannot have its inode.
@@ -319,10 +393,17 @@ impl Inner {
                 return Ok(());
             }
         }
-        let (new, map) =
-            read_log(&log.path).map_err(|e| io::Error::other(e.lines().next().unwrap_or_default().to_string()))?;
+        let (new, map) = match read_log(&log.path) {
+            Ok(r) => r,
+            Err(e) => {
+                let e = e.lines().next().unwrap_or_default().to_string();
+                self.stuck = Some((now.0, now.1, e.clone()));
+                return Err(io::Error::other(e));
+            }
+        };
         *log = new;
         self.map = map;
+        self.stuck = None;
         Ok(())
     }
 
@@ -367,6 +448,14 @@ impl Inner {
         }
         Ok(Ok(()))
     }
+}
+
+/// The `Int` whose `to_str()` is exactly `v`: no sign on a positive, no leading zeros, no
+/// spaces, no `-0`.
+fn stored_int(v: &[u8]) -> Option<i64> {
+    let s = std::str::from_utf8(v).ok()?;
+    let i: i64 = s.parse().ok()?;
+    (i.to_string() == s).then_some(i)
 }
 
 fn check_key(key: &str) -> Result<(), KvErr> {
@@ -698,6 +787,49 @@ impl HostKv for State {
         )
     }
 
+    fn scan(
+        &mut self,
+        h: Resource<Kv>,
+        prefix: String,
+        after: Option<String>,
+        limit: u32,
+    ) -> Result<Result<Vec<KvEntry>, KvErr>> {
+        let arg = prefix.clone();
+        self.call(
+            h.rep(),
+            "scan",
+            &arg,
+            |s| {
+                let shown = after.as_deref().map_or("null".to_string(), crate::json);
+                let r = s.kv(&h, move |st| Ok(Ok(st.scan(&prefix, after.as_deref(), limit)?)))?;
+                // The store's result is the inner `Ok`; `kv`'s own `Full` (a disk error) cost nothing.
+                let (r, bytes) = r.unwrap_or_else(|e| (Err(e), 0));
+                let count = r.as_ref().map_or(0, Vec::len);
+                s.audit_extra = format!(r#","after":{shown},"limit":{limit},"count":{count}"#);
+                s.spend_io(bytes)?;
+                Ok(r)
+            },
+            outcome,
+        )
+    }
+
+    fn add(&mut self, h: Resource<Kv>, key: String, n: i64) -> Result<Result<i64, KvErr>> {
+        let arg = key.clone();
+        self.call(
+            h.rep(),
+            "add",
+            &arg,
+            |s| {
+                s.audit_extra = format!(r#","n":{n}"#);
+                s.writable(&h, "add")?;
+                // The longest value `add` writes, charged first, so a call the quota stops changes nothing.
+                s.spend_io(ADD_BYTES)?;
+                s.kv(&h, move |st| st.add(&key, n))
+            },
+            outcome,
+        )
+    }
+
     fn drop(&mut self, h: Resource<Kv>) -> Result<()> {
         let _ = self.table.delete(Resource::<Arc<Store>>::new_own(h.rep()));
         Ok(())
@@ -767,6 +899,10 @@ mod tests {
         w.set("b", b"3".to_vec()).unwrap().unwrap();
         assert_eq!(get(&r, "a").unwrap().as_deref(), Some("2"));
         assert_eq!(r.keys("").unwrap().unwrap(), ["a", "b"]);
+        let (scanned, bytes) = r.scan("", None, 10).unwrap();
+        let pairs: Vec<(String, Vec<u8>)> = scanned.unwrap().into_iter().map(|e| (e.key, e.value)).collect();
+        assert_eq!(pairs, [("a".into(), b"2".to_vec()), ("b".into(), b"3".to_vec())]);
+        assert_eq!(bytes, 4);
         w.delete("b").unwrap().unwrap();
         assert_eq!(get(&r, "b").unwrap(), None);
 
@@ -782,6 +918,44 @@ mod tests {
         // A tail of zeros (a writer's power loss) waits too.
         append(&db, &[0; 16]);
         assert_eq!(get(&r, "c").unwrap().as_deref(), Some("4"));
+    }
+
+    /// H12 review: a reader whose full replay failed does not read the file again until the path
+    /// names another file or the length changes, so a hostile append costs one replay, not one per call.
+    #[test]
+    fn a_failed_replay_is_remembered_until_the_file_changes() {
+        let t = tempfile::tempdir().unwrap();
+        let db = t.path().join("s.kv");
+        let w = Store::open(&db, 1 << 20).unwrap();
+        w.set("a", b"1".to_vec()).unwrap().unwrap();
+        let r = Store::open_read_only(&db, 1 << 20).unwrap();
+        assert_eq!(get(&r, "a").unwrap().as_deref(), Some("1"));
+        let good = record(SET, "a", b"2");
+        let mut bad = good.clone();
+        bad[good.len() - 1] ^= 1;
+        append(&db, &bad);
+        let e = get(&r, "a").unwrap_err().to_string();
+        assert_eq!(e, format!("{} is corrupt at byte 23", db.display()));
+        // Mended in place, same length: not read again, so still the remembered error.
+        OpenOptions::new()
+            .write(true)
+            .open(&db)
+            .unwrap()
+            .write_all_at(&good, 23)
+            .unwrap();
+        for _ in 0..100 {
+            assert_eq!(get(&r, "a").unwrap_err().to_string(), e);
+        }
+        // A longer file is read again, and is whole now.
+        append(&db, &record(SET, "b", b"3"));
+        assert_eq!(get(&r, "a").unwrap().as_deref(), Some("2"));
+        assert_eq!(get(&r, "b").unwrap().as_deref(), Some("3"));
+        // Garbage again; a writer's compaction (a new inode) recovers.
+        append(&db, &bad);
+        assert!(get(&r, "a").is_err());
+        let map = BTreeMap::from([("a".to_string(), b"9".to_vec())]);
+        drop(rewrite(&db, &map).unwrap());
+        assert_eq!(get(&r, "a").unwrap().as_deref(), Some("9"));
     }
 
     #[test]

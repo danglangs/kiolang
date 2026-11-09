@@ -42,7 +42,8 @@ interface web {
 }
 
 interface kv {
-  variant kv-err { too-large, full }
+  variant kv-err { too-large, full, not-int, overflow }
+  record kv-entry { key: string, value: list<u8> }
 
   // A key-value store the host keeps across runs and requests. Keys are 1 to 1,024 bytes.
   resource kv {
@@ -52,6 +53,12 @@ interface kv {
     keys:   func(prefix: string) -> result<list<string>, kv-err>; // sorted by bytes
     // Set `key` to `new` (`none` deletes) only if its value is `old` (`none` = absent), atomically.
     swap:   func(key: string, old: option<list<u8>>, new: option<list<u8>>) -> result<bool, kv-err>;
+    // The entries whose key starts with `prefix` and is greater than `after` (by bytes), in key
+    // order, at most `limit` of them (1 to 1,000, else too-large; too-large past 8 MB in all).
+    scan:   func(prefix: string, after: option<string>, limit: u32) -> result<list<kv-entry>, kv-err>;
+    // Add `n` to the decimal integer stored at `key` (absent counts as 0), atomically; the new
+    // value, stored as decimal text. Another value is not-int; past 64 bits is overflow.
+    add:    func(key: string, n: s64) -> result<s64, kv-err>;
   }
 }
 

@@ -628,6 +628,10 @@ impl<'a> Interp<'a> {
                 };
                 vals.len() == payload.len() && vals.iter().zip(payload).all(|(v, t)| self.fits(v, t))
             }
+            (Value::Struct(sid, vals), Ty::Struct(id)) if sid == id => {
+                let fields = &self.m.structs[id.0 as usize].fields;
+                vals.len() == fields.len() && vals.iter().zip(fields).all(|(v, (_, t))| self.fits(v, t))
+            }
             _ => false,
         }
     }

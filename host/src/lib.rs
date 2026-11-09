@@ -398,6 +398,8 @@ pub struct State {
     /// Grant name and kind of each handle.
     handles: HashMap<u32, (String, &'static str)>,
     audit_msg: String,
+    /// More fields of the current call's audit line (`,"n":1`), set by the call; cleared after it.
+    audit_extra: String,
     /// Compiled code: the third value of the next runtime error's message (compiled.rs).
     trap_c: i64,
     table: ResourceTable,
@@ -431,6 +433,7 @@ impl State {
             allowed: HashSet::new(),
             handles: HashMap::new(),
             audit_msg: String::new(),
+            audit_extra: String::new(),
             trap_c: 0,
             table: ResourceTable::new(),
         }
@@ -621,6 +624,7 @@ impl State {
             .count_call()
             .and_then(|()| self.check_report(handle, method))
             .and_then(|()| f(self));
+        let extra = std::mem::take(&mut self.audit_extra);
         let Some(mut a) = self.audit.take() else { return r };
         let (cap, kind) = self.handles.get(&handle).cloned().unwrap_or(("?".into(), "?"));
         let why = match &r {
@@ -634,7 +638,7 @@ impl State {
         };
         a.seq += 1;
         let line = format!(
-            r#"{{"event":"call","seq":{},"cap":{},"kind":"{kind}","method":{},"arg":{},"bytes":{},"result":{}{},"ms":{:.1}}}"#,
+            r#"{{"event":"call","seq":{},"cap":{},"kind":"{kind}","method":{},"arg":{},"bytes":{},"result":{}{extra}{},"ms":{:.1}}}"#,
             a.seq,
             json(&cap),
             json(method),

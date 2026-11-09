@@ -16,7 +16,7 @@
 use crate::abi::{addr, ptr, table};
 use crate::desc::{self, Desc, Table};
 use crate::entry::kio::caps::fs::{Dir, IoErr};
-use crate::entry::kio::caps::kv::{Kv, KvErr};
+use crate::entry::kio::caps::kv::{Kv, KvEntry, KvErr};
 use crate::entry::kio::caps::net::{Http, HttpErr};
 use crate::entry::kio::caps::web::Incoming;
 use crate::entry::kio::caps::ws::{WsErr, WsMessage, WsSend};
@@ -175,6 +175,8 @@ fn kv_err(e: KvErr) -> &'static str {
     match e {
         KvErr::TooLarge => "TooLarge",
         KvErr::Full => "Full",
+        KvErr::NotInt => "NotInt",
+        KvErr::Overflow => "Overflow",
     }
 }
 
@@ -427,6 +429,52 @@ pub unsafe extern "C" fn rt_cap_kv_swap(ret: u32, h: u32, key: u32, old: u32, ne
         )
     };
     result(ret, in_place(|| k.swap(key, old, new)), |_, b| b as u64, kv_err)
+}
+
+/// An `Option<Str>` argument's contents.
+///
+/// # Safety
+/// `o` is a live `Option<Str>` that outlives the call.
+unsafe fn str_option<'a>(t: &Table, o: u32) -> Option<&'a str> {
+    // SAFETY: the caller's guarantee; a `Str` is UTF-8.
+    unsafe { bytes_option(t, o).map(|b| core::str::from_utf8_unchecked(b)) }
+}
+
+/// A `List<KvEntry>` of descriptor `list`: each entry a record of its `Str` key and `Bytes` value.
+fn entries(t: &Table, list: u32, v: Vec<KvEntry>) -> *mut Header {
+    let Desc::List { elem } = t.desc(list) else {
+        panic!("not a list")
+    };
+    let entry = |e: KvEntry| {
+        let p = obj::alloc(t, elem, 0);
+        // SAFETY: `KvEntry` has two slots, key then value, which take the objects' references.
+        unsafe {
+            *obj::slot(t, p, 0) = to_slot(str_obj(e.key));
+            *obj::slot(t, p, 1) = to_slot(bytes_obj(e.value));
+        }
+        to_slot(p)
+    };
+    obj::new_list(list, v.into_iter().map(entry).collect())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_cap_kv_scan(ret: u32, h: u32, prefix: u32, after: u32, limit: i64) -> u32 {
+    let t = table();
+    // A limit that is not a `u32` is outside 1 to 1,000, so it never reaches the host.
+    let Ok(limit) = u32::try_from(limit) else {
+        return err(&t, ret, "TooLarge", None);
+    };
+    // SAFETY: the contract above.
+    let (k, prefix, after) = unsafe { (handle(h, Kv::from_handle), text(prefix), str_option(&t, after)) };
+    let r = in_place(|| k.scan(prefix, after, limit));
+    result(ret, r, |t, v| to_slot(entries(t, payload(t, ret, 0), v)), kv_err)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_cap_kv_add(ret: u32, h: u32, key: u32, n: i64) -> u32 {
+    // SAFETY: the contract above.
+    let (k, key) = unsafe { (handle(h, Kv::from_handle), text(key)) };
+    result(ret, in_place(|| k.add(key, n)), |_, v| v as u64, kv_err)
 }
 
 fn message(h: u32) -> ManuallyDrop<WsMessage> {

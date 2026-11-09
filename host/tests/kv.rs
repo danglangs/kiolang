@@ -1,6 +1,6 @@
-//! K1: the `Kv` capability.
+//! K1: the `Kv` capability; K2: `scan` and `add`.
 use kio_host::kv::{open_all, Store};
-use kio_host::{Kio, Limits};
+use kio_host::{Interp, Kio, Limits};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
@@ -336,11 +336,16 @@ fn report_lists_kv_methods_and_the_host_checks_them() {
       store.set("a", "1".to_bytes())?;
       let v = store.get("a")?;
       let ks = store.keys("")?;
+      let es = store.scan("", None, 10)?;
+      let n = store.add("n", 1)?;
       let s = store.swap("a", v, None)?;
       store.delete("a")
     }"#;
     let prog = write(t.path(), "all.kio", src);
-    assert_eq!(kio(&["check", &prog]).1, "main : store delete get keys set swap\n");
+    assert_eq!(
+        kio(&["check", &prog]).1,
+        "main : store add delete get keys scan set swap\n"
+    );
 
     let mut kio = Kio::new(Limits::default()).unwrap();
     kio.grant_kvs(vec![("store".into(), Arc::new(Store::memory(1 << 20)))]);
@@ -831,6 +836,7 @@ fn read_only_grant_refusals() {
     for (method, call) in [
         ("delete", r#"store.delete("k")"#),
         ("swap", r#"store.swap("k", None, None)"#),
+        ("add", r#"store.add("k", 1)"#),
     ] {
         let src = format!("fn main(store: Kv) -> Str {{ let r = {call}; \"\" }}");
         let prog = write(t.path(), &format!("{method}.kio"), &src);
@@ -899,6 +905,7 @@ fn a_write_to_a_read_only_store_stops_the_run() {
         ("set", r#"store.set("a", "x".to_bytes())"#),
         ("delete", r#"store.delete("a")"#),
         ("swap", r#"store.swap("a", None, None)"#),
+        ("add", r#"store.add("a", 1)"#),
     ] {
         let kvs = open_all(&[("store".into(), format!("{}:ro", db.display()))], 1).unwrap();
         let log = Log::default();
@@ -1012,5 +1019,208 @@ fn read_only_refusal_sees_writes_through_helpers() {
         std::fs::read(&db).unwrap().len(),
         8 + 8 + 1 + 4 + 5 + 1,
         "nothing was written"
+    );
+}
+
+// ---- K2: `scan` and `add`
+
+/// Shows `add`'s and `scan`'s results as text: a scan as `key=value,...`.
+const SHOW2: &str = r#"
+fn err_name(e: KvErr) -> Str {
+  match e { KvErr::TooLarge => "too-large", KvErr::Full => "full", KvErr::NotInt => "not-int", KvErr::Overflow => "overflow" }
+}
+fn added(r: Result<Int, KvErr>) -> Str { match r { Ok(n) => n.to_str(), Err(e) => err_name(e) } }
+fn scanned(r: Result<List<KvEntry>, KvErr>) -> Str {
+  match r {
+    Ok(es) => { let mut ks: List<Str> = []; for e in es { ks.push(e.key + "=" + e.value.to_str()); } ks.join(",") }
+    Err(e) => err_name(e),
+  }
+}
+fn count(r: Result<List<KvEntry>, KvErr>) -> Str { match r { Ok(es) => es.len().to_str(), Err(e) => err_name(e) } }
+"#;
+
+/// Run `main` (plus `SHOW` and `SHOW2`) compiled and interpreted, each on a fresh in-memory store
+/// of `limit` bytes; the value both gave.
+fn both(main: &str, limit: u64) -> String {
+    let src = format!("{SHOW}{SHOW2}{main}");
+    let mut kio = Kio::new(Limits::default()).unwrap();
+    kio.grant_kvs(vec![("store".into(), Arc::new(Store::memory(limit)))]);
+    let compiled = kio.run(&src, vec![]).unwrap().unwrap().value;
+    let mut interp = Interp::new(Limits::default()).unwrap();
+    interp.grant_kvs(vec![("store".into(), Arc::new(Store::memory(limit)))]);
+    let interpreted = interp.run(&src, vec![]).unwrap().unwrap().value;
+    assert_eq!(compiled, interpreted, "compiled vs interpreted");
+    compiled
+}
+
+#[test]
+fn scan_pages_through_2500_keys() {
+    let main = r#"fn pad(i: Int) -> Str {
+      let s = i.to_str();
+      if i < 10 { "000" + s } else { if i < 100 { "00" + s } else { if i < 1000 { "0" + s } else { s } } }
+    }
+    fn main(store: Kv) -> Str {
+      for i in 0..2500 { let r = store.set("k/" + pad(i), i.to_str().to_bytes()); }
+      let r = store.set("other", "x".to_bytes());
+      let mut after: Option<Str> = None;
+      let mut pages: List<Str> = [];
+      let mut total = 0;
+      let mut more = true;
+      while more {
+        let page = match store.scan("k/", after, 1000) { Ok(es) => es, Err(e) => return err_name(e) };
+        total += page.len();
+        pages.push(page.len().to_str());
+        if page.len() == 1000 { after = Some(page[999].key); } else { more = false; }
+      }
+      let all = match store.scan("", None, 1000) { Ok(es) => es, Err(e) => return err_name(e) };
+      let past = scanned(store.scan("k/", Some("k/9999"), 5));
+      let before = scanned(store.scan("k/", Some("a"), 2));
+      let one = scanned(store.scan("k/", Some("k/2498"), 5));
+      let none = scanned(store.scan("zzz", None, 5));
+      pages.join(",") + " " + total.to_str() + " " + all.len().to_str() + " " + all[0].key + " [" + past + "] ["
+        + before + "] [" + one + "] [" + none + "] " + scanned(store.scan("k/", None, 0)) + " "
+        + scanned(store.scan("k/", None, 1001)) + " " + scanned(store.scan("k/", None, -1)) + " "
+        + scanned(store.scan(big(11), None, 1))
+    }"#;
+    assert_eq!(
+        both(main, 1 << 20),
+        "1000,1000,500 2500 1000 k/0000 [] [k/0000=0,k/0001=1] [k/2499=2499] [] too-large too-large too-large too-large"
+    );
+}
+
+#[test]
+fn scan_over_eight_megabytes_is_too_large() {
+    let main = r#"fn main(store: Kv) -> Str {
+      let v = big(20);
+      for i in 0..9 { let r = store.set("v/" + i.to_str(), v.to_bytes()); }
+      count(store.scan("v/", None, 1000)) + " " + count(store.scan("v/", None, 8)) + " " + count(store.scan("v/", None, 7))
+        + " " + count(store.scan("v/", Some("v/1"), 7))
+    }"#;
+    // Eight values of 1 MB plus their keys pass 8 MB; seven do not.
+    assert_eq!(both(main, 16 << 20), "too-large too-large 7 7");
+}
+
+#[test]
+fn add_reads_and_writes_decimal_text() {
+    let main = r#"fn main(store: Kv) -> Str {
+      let a = added(store.add("n", 5));
+      let b = added(store.add("n", -7));
+      let c = val(store.get("n"));
+      let d = added(store.add("n", 2));
+      let e = val(store.get("n"));
+      let mut bad: List<Str> = [];
+      for s in [" 1", "01", "+1", "-0", "1 ", "abc", "", "1.0", "１"] {
+        let r = store.set("t", s.to_bytes());
+        bad.push(added(store.add("t", 1)));
+      }
+      let r = store.set("max", "9223372036854775807".to_bytes());
+      let f = added(store.add("max", 1));
+      let g = val(store.get("max"));
+      let r = store.set("min", "-9223372036854775808".to_bytes());
+      let h = added(store.add("min", -1));
+      let i = added(store.add("min", 1));
+      let j = added(store.add("fresh", -3));
+      let k = added(store.add(big(11), 1)) + added(store.add("", 1));
+      let l = added(store.add("t", 0));
+      a + " " + b + " " + c + " " + d + " " + e + " [" + bad.join(",") + "] " + f + " " + g + " " + h + " " + i + " " + j + " " + k + " " + l
+    }"#;
+    assert_eq!(
+        both(main, 1 << 20),
+        "5 -2 -2 0 0 [not-int,not-int,not-int,not-int,not-int,not-int,not-int,not-int,not-int] overflow 9223372036854775807 overflow -9223372036854775807 -3 too-largetoo-large not-int"
+    );
+}
+
+#[test]
+fn add_counts_against_the_store_limit() {
+    let main = r#"fn main(store: Kv) -> Str {
+      added(store.add("n", 1)) + " " + added(store.add("n", 99)) + " " + added(store.add("n", 1)) + " " + added(store.add("abcdefghij", 1))
+        + " " + added(store.add("n", -100)) + " " + val(store.get("n"))
+    }"#;
+    // 11 bytes for the key `abcdefghij` and `1` pass the 10-byte store; a refused `add` leaves it.
+    assert_eq!(both(main, 10), "1 100 101 full 1 1");
+}
+
+/// Each request adds one to "n" and answers the value it stored.
+const ADD_ONE: &str = r#"fn main(req: Incoming, res: Outgoing, store: Kv) -> Result<(), WebErr> {
+  match store.add("n", 1) {
+    Ok(n) => res.send(200, [], [], n.to_str().to_bytes()),
+    Err(e) => res.send(500, [], [], "".to_bytes()),
+  }
+}"#;
+
+#[test]
+fn twenty_concurrent_adds_give_exactly_twenty() {
+    let t = tempfile::tempdir().unwrap();
+    let app = write(t.path(), "add.kio", ADD_ONE);
+    let db = t.path().join("n.kv");
+    let flag = format!("store={}", db.display());
+    let server = listen(&app, &["--kv", &flag]);
+    let port = server.1;
+    let threads: Vec<_> = (0..20)
+        .map(|_| {
+            std::thread::spawn(move || loop {
+                match get(port) {
+                    (200, body) => return body.parse::<u32>().unwrap(),
+                    (status, _) => assert_eq!(status, 503),
+                }
+            })
+        })
+        .collect();
+    let mut seen: Vec<u32> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+    seen.sort();
+    assert_eq!(seen, (1..=20).collect::<Vec<_>>());
+    drop(server);
+    // Persisted as text: the file reopens with the count, and `get` reads it.
+    let read = write(
+        t.path(),
+        "read.kio",
+        r#"fn main(store: Kv) -> Str { match store.get("n") { Ok(Some(b)) => b.to_str(), _ => "?" } }"#,
+    );
+    assert_eq!(kio(&["run", &read, "--kv", &flag]).1, "20\n");
+}
+
+#[test]
+fn audit_lines_for_scan_and_add() {
+    let main = r#"fn main(store: Kv) -> Str {
+      let a = added(store.add("c/1", 5));
+      let b = show(store.set("c/2", "xy".to_bytes()));
+      let c = scanned(store.scan("c/", None, 10));
+      let d = scanned(store.scan("c/", Some("c/1"), 1));
+      let e = added(store.add("c/2", 1));
+      ""
+    }"#;
+    let log = Log::default();
+    let mut kio = Kio::new(Limits::default()).unwrap();
+    kio.audit(log.clone(), vec![]);
+    kio.grant_kvs(vec![("store".into(), Arc::new(Store::memory(1 << 20)))]);
+    kio.run(&format!("{SHOW}{SHOW2}{main}"), vec![]).unwrap().unwrap();
+    let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    let lines: Vec<String> = text
+        .lines()
+        .map(|l| match l.find(r#","ms":"#) {
+            Some(i) => format!("{}}}", &l[..i]),
+            None => l.to_string(),
+        })
+        .collect();
+    let call = |seq: u32, method: &str, arg: &str, bytes: u32, result: &str, extra: &str| {
+        format!(
+            r#"{{"event":"call","seq":{seq},"cap":"store","kind":"Kv","method":"{method}","arg":"{arg}","bytes":{bytes},"result":"{result}"{extra}}}"#
+        )
+    };
+    assert_eq!(lines[1], call(1, "add", "c/1", 20, "ok", r#","n":5"#));
+    assert_eq!(lines[2], call(2, "set", "c/2", 2, "ok", ""));
+    assert_eq!(
+        lines[3],
+        call(3, "scan", "c/", 9, "ok", r#","after":null,"limit":10,"count":2"#)
+    );
+    assert_eq!(
+        lines[4],
+        call(4, "scan", "c/", 5, "ok", r#","after":"c/1","limit":1,"count":1"#)
+    );
+    assert_eq!(lines[5], call(5, "add", "c/2", 20, "not-int", r#","n":1"#));
+    assert!(
+        lines[6].starts_with(r#"{"event":"end","outcome":"ok","calls":5,"io":56,"#),
+        "{}",
+        lines[6]
     );
 }

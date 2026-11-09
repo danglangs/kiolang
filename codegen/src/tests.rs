@@ -39,17 +39,17 @@ fn every_capability_method_compiles() {
     let mut body = String::new();
     for c in &caps.caps {
         for (method, params, _) in &c.methods {
-            let args: Vec<&str> = params
-                .iter()
-                .map(|t| match t {
-                    lang::check::Ty::Str => "\"a\"",
-                    lang::check::Ty::Bytes => "\"a\".to_bytes()",
-                    lang::check::Ty::Int => "1",
-                    lang::check::Ty::List(_) => "[\"a\"]",
-                    lang::check::Ty::Option(_) => "Some(\"a\".to_bytes())",
+            fn arg(t: &lang::check::Ty) -> String {
+                match t {
+                    lang::check::Ty::Str => "\"a\"".into(),
+                    lang::check::Ty::Bytes => "\"a\".to_bytes()".into(),
+                    lang::check::Ty::Int => "1".into(),
+                    lang::check::Ty::List(_) => "[\"a\"]".into(),
+                    lang::check::Ty::Option(t) => format!("Some({})", arg(t)),
                     t => panic!("a test argument of type {t:?}"),
-                })
-                .collect();
+                }
+            }
+            let args: Vec<String> = params.iter().map(arg).collect();
             body += &format!(
                 "    let r{calls} = {}.{method}({});\n",
                 c.name.to_lowercase(),
@@ -62,7 +62,7 @@ fn every_capability_method_compiles() {
     let src = format!("fn main({}) {{\n{body}}}", params.join(", "));
     let wasm = compile(&module(&src)).unwrap();
     wasmparser::Validator::new().validate_all(&wasm.component).unwrap();
-    assert_eq!(calls, 26);
+    assert_eq!(calls, 28);
 }
 
 #[test]
@@ -159,9 +159,11 @@ fn main() -> Int {
     const BASE: u32 = 24;
     const TABLE: u32 = 46;
     let mut s = Statics::new(&m, BASE, TABLE);
-    let tree = s.desc(&Ty::Struct(StructId(0)));
+    // The capability structs (`KvEntry`) come first.
+    let tree_id = StructId(m.structs.iter().position(|s| s.name == "Tree").unwrap() as u32);
+    let tree = s.desc(&Ty::Struct(tree_id));
     let shape = s.desc(&Ty::Enum(EnumId(m.enums.len() as u32 - 1)));
-    let list_tree = s.desc(&Ty::List(Box::new(Ty::Struct(StructId(0)))));
+    let list_tree = s.desc(&Ty::List(Box::new(Ty::Struct(tree_id))));
     let opt = s.desc(&Ty::Option(Box::new(Ty::Int)));
     let map_ty = Ty::Map(Box::new(Ty::Str), Box::new(Ty::Int));
     let res = s.desc(&Ty::Result(Box::new(map_ty.clone()), Box::new(Ty::Bytes)));

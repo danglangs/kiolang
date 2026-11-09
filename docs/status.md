@@ -14,6 +14,7 @@ Compiled-only kio covers the whole language and every capability; the active str
 | C6a, C6b | generator (Int, Bool, control, calls, lists, structs/enums/`Option`/`match`/`?`): 250 programs both ways per CI run; front-end fuzzing, 210,000 inputs, no panic |
 | D1, K1 | `Dir` `list`/`write`/`remove`/`exists`; `Kv` (`--kv name=:memory:` or a file). Both adversarially reviewed, fixes merged |
 | H12 | `--kv name=path:ro`: a reader that follows another process writing the store (through its compactions), refused to a program that can write it; `--audit` under `--listen`, one log with each line's request (and WebSocket connection) number |
+| K2 | `Kv.scan(prefix, after, limit)` pages through entries as `List<KvEntry>` (a built-in struct from a caps.wit record); `Kv.add(key, n)` counts atomically in decimal text. Both paths, authority report, audit (`after`, `limit`, `count`; `n`), read-only refusal. kio-web's links app lists with two `scan`s instead of `keys` plus a `get` per link and counts hits with one `add` (no swap loop) |
 | WS1 | WebSockets under `--listen`, a fresh sandbox per event; 7,800 echo events/s on one connection. Adversarially reviewed, fixes in (Origin check and `--ws-origin`; `close` always follows `open`) |
 | WS1b | `WsMessage.target()` and `header(name)`: every event of a connection sees its upgrade request (caps.wit, owner-approved); kio-web `examples/ws/` routes by path and checks a token |
 | kio-web | `api.kio`; notes on Dir and on Kv, 22 checks each; a generic `Route<A>` router (`dispatch`); a WebSocket example routed by path with bearer-token auth; json.kio removed for the built-in `Json` |
@@ -45,7 +46,7 @@ Compiled-only kio covers the whole language and every capability; the active str
 
 ## Next
 
-C8 (roadmap.md): freeing (54% of tree); tree's 4-5% from the larger size classes (#117); borrowed match bindings of a borrowed scrutinee (tree). The links target app (kio-web examples/links) gave L11, L12, H12, W14 (done); the maintainer then approved K2, H13-H15 and L13-L16: L13-L16 done; K2 (Kv `scan`, `add`) and H13-H15 (`Rng`, `Clock`, `Log`) in progress.
+C8 (roadmap.md): freeing (54% of tree); tree's 4-5% from the larger size classes (#117); borrowed match bindings of a borrowed scrutinee (tree). The links target app (kio-web examples/links) gave L11, L12, H12, W14 (done); the maintainer then approved K2, H13-H15 and L13-L16: L13-L16 and K2 (Kv `scan`, `add`) done; H13-H15 (`Rng`, `Clock`, `Log`) in progress.
 
 ## Waiting on the maintainer
 

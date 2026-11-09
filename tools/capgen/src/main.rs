@@ -36,6 +36,12 @@ fn kio(r: &Resolve, t: &Option<Type>) -> Result<String> {
                     pascal(r.types[*id].name.as_ref().unwrap())
                 )
             }
+            TypeDefKind::Record(_) => {
+                format!(
+                    "Ty::Struct(\"{}\".into(), vec![])",
+                    pascal(r.types[*id].name.as_ref().unwrap())
+                )
+            }
             k => bail!("unsupported WIT type `{}`", k.as_str()),
         },
         t => bail!("unsupported WIT type `{t:?}`"),
@@ -45,7 +51,14 @@ fn kio(r: &Resolve, t: &Option<Type>) -> Result<String> {
 fn main() -> Result<()> {
     let mut r = Resolve::new();
     r.push_file(format!("{ROOT}/caps.wit"))?;
-    let (mut caps, mut enums) = (String::new(), String::new());
+    let (mut caps, mut enums, mut structs) = (String::new(), String::new(), String::new());
+    // A scalar, `Str` or `Bytes` as an AST type: a variant's payload or a record's field.
+    let plain = |t: &Type, what: &str| -> Result<String> {
+        match kio(&r, &Some(*t))?.strip_prefix("Ty::") {
+            Some(n) if !n.contains('(') => Ok(format!("ty(\"{n}\")")),
+            _ => bail!("unsupported type on `{what}`: only scalars, strings and bytes"),
+        }
+    };
     for (_, i) in &r.interfaces {
         for (name, &id) in &i.types {
             let name = pascal(name);
@@ -72,10 +85,7 @@ fn main() -> Result<()> {
                     for c in &v.cases {
                         let fields = match &c.ty {
                             None => String::new(),
-                            Some(t) => match kio(&r, &Some(*t))?.strip_prefix("Ty::") {
-                                Some(n) if !n.contains('(') => format!("ty(\"{n}\")"),
-                                _ => bail!("unsupported payload on `{}`: only scalars and bytes", c.name),
-                            },
+                            Some(t) => plain(t, &c.name)?,
                         };
                         cs += &format!("case(\"{}\", vec![{fields}]),", pascal(&c.name));
                     }
@@ -90,6 +100,16 @@ fn main() -> Result<()> {
                     enums +=
                         &format!("Enum {{ name: \"{name}\".into(), tparams: vec![], variants: vec![{cs}], span: at, public: true }},");
                 }
+                // A record is a built-in struct: the program can name it, read its fields and build one.
+                TypeDefKind::Record(rec) => {
+                    let mut fs = String::new();
+                    for f in &rec.fields {
+                        let ty = plain(&f.ty, &f.name)?;
+                        fs += &format!("field(\"{}\", {ty}),", f.name.replace('-', "_"));
+                    }
+                    structs +=
+                        &format!("Struct {{ name: \"{name}\".into(), tparams: vec![], fields: vec![{fs}], span: at, public: true }},");
+                }
                 k => bail!("unsupported WIT declaration `{name}`: {}", k.as_str()),
             }
         }
@@ -101,8 +121,9 @@ fn main() -> Result<()> {
          let at = Span {{ start: 0, end: 0, file: 0 }};\n\
          let ty = |n: &str| Type {{ kind: TypeKind::Named(n.into(), vec![]), span: at }};\n\
          let case = |n: &str, fields: Vec<Type>| Variant {{ name: n.into(), fields, span: at }};\n\
+         let field = |n: &str, ty: Type| Param {{ name: n.into(), ty, span: at }};\n\
          let method = |n: &str, params, ret| (n.to_string(), params, ret);\n\
-         CapTable {{ caps: vec![{caps}], enums: vec![{enums}] }}\n}}\n"
+         CapTable {{ caps: vec![{caps}], enums: vec![{enums}], structs: vec![{structs}] }}\n}}\n"
     );
     let mut fmt = Command::new("rustfmt")
         .args(["--edition", "2021"])

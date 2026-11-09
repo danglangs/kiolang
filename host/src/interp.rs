@@ -5,7 +5,7 @@
 //! fuel, memory and stack limits do not apply.
 
 use crate::kio::caps::fs::{HostDir, IoErr};
-use crate::kio::caps::kv::{HostKv, KvErr};
+use crate::kio::caps::kv::{HostKv, KvEntry, KvErr};
 use crate::kio::caps::net::{HostHttp, HttpErr};
 use crate::kio::caps::web::{HostIncoming, HostOutgoing, WebErr};
 use crate::kio::caps::ws::{HostWsMessage, HostWsSend, WsErr};
@@ -16,7 +16,7 @@ use crate::{
     Stopped,
 };
 use cap_std::fs::Dir as RealDir;
-use lang::ir::{EnumId, EnumRef};
+use lang::ir::{EnumId, EnumRef, StructId};
 use lang::{CapTable, Value};
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -166,7 +166,12 @@ impl Interp {
                     Err(diags) => Ok(Err(diags.into_iter().map(Diag::from).collect())),
                     Ok(_) => {
                         let grants = bound.iter().map(|b| (b.name.clone(), (b.kind, b.rep))).collect();
-                        let mut native = Native { s: &mut s, grants };
+                        let entry = struct_id("KvEntry");
+                        let mut native = Native {
+                            s: &mut s,
+                            grants,
+                            entry,
+                        };
                         let r = lang::run(&program, &mut native);
                         match (r, state_limit(&s, &self.limits)) {
                             // A host call refused by a quota, the report check or the deadline
@@ -212,6 +217,8 @@ impl Interp {
 struct Native<'a> {
     s: &'a mut State,
     grants: BTreeMap<String, (&'static str, u32)>,
+    /// The program's id for the built-in `KvEntry`, which `scan` returns.
+    entry: StructId,
 }
 
 impl lang::Caps for Native<'_> {
@@ -298,6 +305,22 @@ impl lang::Caps for Native<'_> {
                 let (old, new) = (bytes_option(old)?, bytes_option(new)?);
                 let r = HostKv::swap(s, own(rep), k.to_string(), old, new).map_err(stop)?;
                 result(r.map(Value::Bool).map_err(kv_err))
+            }
+            ("Kv", "scan", [Value::Str(p), after, Value::Int(limit)]) => {
+                // A limit that is not a `u32` is outside 1 to 1,000, so it never reaches the host.
+                let Ok(limit) = u32::try_from(*limit) else {
+                    return Ok(result(Err(err_value("KvErr", "TooLarge", vec![]))));
+                };
+                let r = HostKv::scan(s, own(rep), p.to_string(), str_option(after)?, limit).map_err(stop)?;
+                let entry = |e: KvEntry| Value::Struct(self.entry, vec![Value::Str(e.key.into()), bytes(e.value)]);
+                result(
+                    r.map(|es| Value::List(es.into_iter().map(entry).collect::<Vec<_>>().into()))
+                        .map_err(kv_err),
+                )
+            }
+            ("Kv", "add", [Value::Str(k), Value::Int(n)]) => {
+                let r = HostKv::add(s, own(rep), k.to_string(), *n).map_err(stop)?;
+                result(r.map(Value::Int).map_err(kv_err))
             }
             ("WsMessage", "kind", []) => Value::Str(HostWsMessage::kind(s, own(rep)).map_err(stop)?.into()),
             // Ids count up from 1, so they fit an `Int`.
@@ -386,6 +409,17 @@ fn bytes_option(v: &Value) -> Result<Option<Vec<u8>>, String> {
     }
 }
 
+fn str_option(v: &Value) -> Result<Option<String>, String> {
+    match v {
+        Value::Enum(EnumRef::Option, 0, _) => Ok(None),
+        Value::Enum(EnumRef::Option, 1, p) => match p.as_slice() {
+            [Value::Str(s)] => Ok(Some(s.to_string())),
+            _ => Err("expected Option<Str>".into()),
+        },
+        _ => Err("expected Option<Str>".into()),
+    }
+}
+
 /// `Result` is variant 0 for `Ok` and 1 for `Err`.
 fn result(r: Result<Value, Value>) -> Value {
     match r {
@@ -403,6 +437,17 @@ fn err_value(en: &str, case: &str, payload: Vec<Value>) -> Value {
         .position(|v| v.name == case)
         .expect("generated variant");
     Value::Enum(EnumRef::User(EnumId(id as u32)), i, payload)
+}
+
+/// A capability struct's id: the lowered program numbers these structs first, in table order.
+fn struct_id(name: &str) -> StructId {
+    let table = CapTable::v0();
+    let id = table
+        .structs
+        .iter()
+        .position(|s| s.name == name)
+        .expect("generated struct");
+    StructId(id as u32)
 }
 
 fn io_err(e: IoErr) -> Value {
@@ -437,6 +482,8 @@ fn kv_err(e: KvErr) -> Value {
     let case = match e {
         KvErr::TooLarge => "TooLarge",
         KvErr::Full => "Full",
+        KvErr::NotInt => "NotInt",
+        KvErr::Overflow => "Overflow",
     };
     err_value("KvErr", case, vec![])
 }

@@ -17,6 +17,11 @@ pub fn v0() -> CapTable {
         fields,
         span: at,
     };
+    let field = |n: &str, ty: Type| Param {
+        name: n.into(),
+        ty,
+        span: at,
+    };
     let method = |n: &str, params, ret| (n.to_string(), params, ret);
     CapTable {
         caps: vec![
@@ -127,6 +132,19 @@ pub fn v0() -> CapTable {
                         ],
                         Ty::Result(Box::new(Ty::Bool), Box::new(Ty::Enum("KvErr".into(), vec![]))),
                     ),
+                    method(
+                        "scan",
+                        vec![Ty::Str, Ty::Option(Box::new(Ty::Str)), Ty::Int],
+                        Ty::Result(
+                            Box::new(Ty::List(Box::new(Ty::Struct("KvEntry".into(), vec![])))),
+                            Box::new(Ty::Enum("KvErr".into(), vec![])),
+                        ),
+                    ),
+                    method(
+                        "add",
+                        vec![Ty::Str, Ty::Int],
+                        Ty::Result(Box::new(Ty::Int), Box::new(Ty::Enum("KvErr".into(), vec![]))),
+                    ),
                 ],
             },
             CapType {
@@ -196,7 +214,12 @@ pub fn v0() -> CapTable {
             Enum {
                 name: "KvErr".into(),
                 tparams: vec![],
-                variants: vec![case("TooLarge", vec![]), case("Full", vec![])],
+                variants: vec![
+                    case("TooLarge", vec![]),
+                    case("Full", vec![]),
+                    case("NotInt", vec![]),
+                    case("Overflow", vec![]),
+                ],
                 span: at,
                 public: true,
             },
@@ -212,5 +235,12 @@ pub fn v0() -> CapTable {
                 public: true,
             },
         ],
+        structs: vec![Struct {
+            name: "KvEntry".into(),
+            tparams: vec![],
+            fields: vec![field("key", ty("Str")), field("value", ty("Bytes"))],
+            span: at,
+            public: true,
+        }],
     }
 }

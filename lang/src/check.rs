@@ -8,12 +8,14 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-/// The capability types a program may use, and the error enums their methods return.
+/// The capability types a program may use, and the error enums and structs their methods return.
 #[derive(Debug, Default)]
 pub struct CapTable {
     pub caps: Vec<CapType>,
     /// Declared as ordinary enums before the user's types, such as `IoErr`.
     pub enums: Vec<Enum>,
+    /// Declared as ordinary structs before the user's types, such as `KvEntry`.
+    pub structs: Vec<Struct>,
 }
 
 impl CapTable {
@@ -340,10 +342,11 @@ fn bare(key: &str) -> &str {
     key.rsplit_once("::").map_or(key, |(_, n)| n)
 }
 
-/// Names that user types may not take: built-in types, capabilities and their error enums.
+/// Names that user types may not take: built-in types, capabilities and their error enums and structs.
 fn reserved(caps: &CapTable, name: &str) -> bool {
     matches!(name, "Option" | "Result" | "Map" | "HashMap" | "Json")
         || caps.enums.iter().any(|e| e.name == name)
+        || caps.structs.iter().any(|s| s.name == name)
         || caps.caps.iter().any(|c| c.name == name)
 }
 
@@ -1970,6 +1973,10 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
         order.push(e.name.clone());
         enums.insert(e.name.clone(), e);
     }
+    for s in caps.structs.iter().cloned() {
+        order.push(s.name.clone());
+        structs.insert(s.name.clone(), s);
+    }
     for (i, items) in parsed.into_iter().enumerate() {
         let module = if i == 0 { "" } else { names[i] };
         for item in items {
@@ -2827,7 +2834,7 @@ impl<'a> Checker<'a> {
             }
             ExprKind::List(items) => self.list_lit(e, items, expected),
             ExprKind::StructLit(name, inits, base) => {
-                self.struct_lit(e, &key(self.home.module, name), inits, base.as_deref(), expected)
+                self.struct_lit(e, &self.home.own(self.caps, name), inits, base.as_deref(), expected)
             }
             ExprKind::Path(en, v) => self.variant_value(e, &self.enum_key(en), v, &[], expected),
             ExprKind::Module(m, inner) => match &inner.kind {

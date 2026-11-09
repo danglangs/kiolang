@@ -23,7 +23,11 @@ pub fn lower(p: &Program, caps: &CapTable) -> Module {
     let funcs = sorted(p.funcs.keys().filter(|k| p.sigs[*k].tparams.is_empty()).collect());
     // So is a generic type: one struct or enum per instance, made when its type is lowered.
     let plain = |k: &&String| p.tparams[*k].is_empty();
-    let structs = sorted(p.structs.keys().filter(plain).collect());
+    // The capability structs (`KvEntry`) at fixed ids, in table order; then the program's.
+    let mut structs: Vec<String> = caps.structs.iter().map(|s| s.name.clone()).collect();
+    structs.extend(sorted(
+        p.structs.keys().filter(|k| !structs.contains(k) && plain(k)).collect(),
+    ));
     // The capability error enums, then `Json`, at fixed ids; then the program's.
     let mut enums: Vec<String> = caps.enums.iter().map(|e| e.name.clone()).collect();
     enums.push("Json".to_string());
