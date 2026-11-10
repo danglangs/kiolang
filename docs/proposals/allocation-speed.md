@@ -105,3 +105,6 @@ So: tree reaches 2x; `fib` reaches it only if one-level self-inlining works; the
 - **Unboxed values inside lists and fields** (not proposed) would change the object representation every runtime operation rests on; raise it only if tree's 1.6x is not enough.
 - **C8c9, fuel per loop and per call:** changes what `--fuel` counts (iterations and calls plus the runtime's self-charging, not instructions) and puts the runtime's charging on the security boundary. Recommend: decide after C8c1-C8c8 land, with the measured gap then in hand; the ceiling is 25-40% on runtime-heavy rows and 5% on compute.
 - **Wasmtime inlining** stays off (measured: fib +23%, compile 3x); revisit when its thresholds become configurable.
+
+
+**Correction (C8c7, 2026-11-10).** Change 7 does not pay: the bench words are near-uniform, so a 64-slot `Map` cache hits 1.4% and costs fuel (+5.7%), and `HashMap` already stores each entry's hash and compares prefixes. Dropped; see compiler-todo.md C8c7.
