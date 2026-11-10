@@ -155,15 +155,15 @@ v0, working end to end.
 { "mcpServers": { "kio": { "command": "kio", "args": ["mcp"] } } }
 ```
 
-Models write kio about as well as Python. Given only the language reference, on 30 backend tasks ([eval/](eval/)):
+Models write kio as well as Python. Given the language reference (what `kio_primer` serves), on 45 backend tasks ([eval/](eval/)):
 
-| | kio, first try | kio, by try 5 | Python, first try |
-|---|---|---|---|
-| Haiku 5.5 | 24/30 | 30/30 | 28/30 |
-| Sonnet 5.5 | 30/30 | 30/30 | 30/30 |
-| Opus 5.5 | 28/30 | 30/30 | 30/30 |
+| | kio, first try | kio, by try 5 | Python, first try | Python, by try 5 |
+|---|---|---|---|---|
+| Haiku 5.5 | 42/45 | 45/45 | 39/45 | 45/45 |
+| Sonnet 5.5 | 43/45 | 45/45 | 44/45 | 45/45 |
+| Opus 5.5 | 43/45 | 45/45 | 45/45 | 45/45 |
 
-kio is a Rust subset on purpose, and its errors name the fix: every miss was solved by the next try.
+kio is a Rust subset on purpose, and its errors name the fix. Without the reference, models write full Rust and rarely finish: give agents the primer.
 
 ## Why not containers or static analysis
 
@@ -191,7 +191,7 @@ The cost is the ecosystem: few libraries, no package manager yet. Agents write m
 
 ## Roadmap
 
-- **Now:** harder eval tasks (E2).
+- **Now:** what the eval showed models reaching for: an assignment as a match arm, `None` typed from the other branch, more than one parse error per check.
 - **Next:** allocation speed (escape analysis).
 - **Later:** `par_map` and tasks (pinned), packages.
 

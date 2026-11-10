@@ -105,12 +105,12 @@ A CRUD app over a `Dir` (W9a) proves the language. A target app proves the ecosy
 
 The design bets that models write kio from language.md and the checker's hints. Evidence so far is agents with the docs in context (the links app). Unmeasured: a cold or smaller model.
 
-Eval (E1, eval/, 2026-11-10): 30 tasks (compute, `Dir`, `Kv`, `Db`, HTTP handlers and clients), the model given only language.md (kio) or nothing (Python), up to 5 rounds with `kio check` and test feedback, through `claude -p`.
+Eval (E1, E2; eval/, 2026-11-10): 45 tasks (E1's 30: compute, `Dir`, `Kv`, `Db`, HTTP handlers and clients; E2's 15 harder: retries against a flaky upstream, idempotent replays across restarts, a ledger with overflow checks, a resumable sync, webhook signatures, a parser), up to 5 rounds with `kio check` and test feedback, through `claude -p`. kio gets language.md; Python gets nothing; "kio, no spec" gets one line ("a subset of Rust with capabilities as parameters").
 
-| Model | kio: checks first try | kio: passes first try | kio: by round 5 | Python: first try | Python: by round 5 | Cost kio / Python |
+| Model | kio first try | kio by round 5 | Python first try | Python by round 5 | kio, no spec, by round 5 | Cost kio / Python |
 |---|---|---|---|---|---|---|
-| Haiku 5.5 | 28/30 | 24/30 | 30/30 | 28/30 | 30/30 | $0.13 / $0.05 |
-| Sonnet 5.5 | 30/30 | 30/30 | 30/30 | 30/30 | 30/30 | $1.05 / $0.44 |
-| Opus 5.5 | 28/30 | 28/30 | 30/30 | 30/30 | 30/30 | $2.04 / $0.87 |
+| Haiku 5.5 | 42/45 | 45/45 | 39/45 | 45/45 | 0/45 | $0.30 / $0.14 |
+| Sonnet 5.5 | 43/45 | 45/45 | 44/45 | 45/45 | 1/45 | $2.10 / $0.93 |
+| Opus 5.5 | 43/45 | 45/45 | 45/45 | 45/45 | 1/45 | $3.81 / $1.85 |
 
-No model asked for a grant the task did not give. What cost a round in kio: `split("")` to get characters (Haiku, 2 tasks: kio had no `chars()`, added in L21), `for` over `Bytes` (Haiku; added in L22), `bool` for `Bool` (Haiku), tuples (Opus, 2 tasks; the L20 hint fixed each in one round). kio costs about 2.3x Python per task: language.md (~9k tokens) rides in every prompt. Sonnet and Opus pass every task in both languages, so the next round needs harder tasks to tell them apart.
+With the spec, kio matches Python: every model solves every task, and most first-try misses are logic errors Python's runs share (43, 25). kio-specific misses: `bool` for `Bool`, `to_str()` on a `Str`, an assignment as a match arm, a tuple; each fixed by the next round. No model asked for a grant the task did not give. Without the spec, models write Rust (`&str`, `Vec`, `i64`, macros, `as`, lifetimes, tuples) and the checker reports one parse error per round, so 5 rounds rarely suffice: the spec (`kio mcp`'s primer) is what makes models fluent. kio costs about 2x Python: language.md rides in every prompt.
