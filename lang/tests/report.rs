@@ -150,3 +150,105 @@ fn a_shadowed_capability_is_not_charged_with_other_methods() {
     let p = check(src, &lang::CapTable::v0()).unwrap();
     assert_eq!(report(&p).trim(), "main : none");
 }
+
+/// `lang::report_diff` of two programs, each `(name, source)` files with the root first.
+fn diff(old: &[(&str, &str)], new: &[(&str, &str)]) -> Vec<String> {
+    let caps = common::caps();
+    let p = |f: &[(&str, &str)]| lang::check_files(f, &caps).expect("program checks");
+    lang::report_diff(&p(old), &p(new))
+}
+
+const CREATE: &str = r#"fn create(links: Kv, log: Log) -> Result<(), KvErr> { links.set("k", "v".to_bytes())?; let _w = log.write("made"); Ok(()) }"#;
+const DIFF_OLD: &str = r#"
+fn delete(links: Kv, log: Log) -> Result<(), KvErr> { links.delete("k")?; let _w = log.write("gone"); Ok(()) }
+fn main(links: Kv, log: Log) -> Result<(), KvErr> { create(links, log)?; delete(links, log) }
+"#;
+
+fn old() -> String {
+    format!("{CREATE}{DIFF_OLD}")
+}
+
+#[test]
+fn diff_no_change() {
+    assert_eq!(diff(&[("a.kio", &old())], &[("a.kio", &old())]), Vec::<String>::new());
+}
+
+#[test]
+fn diff_added_method() {
+    let new = old().replace(
+        r#"links.delete("k")?;"#,
+        r#"links.delete("k")?; let _o = links.get("k")?;"#,
+    );
+    assert_eq!(
+        diff(&[("a.kio", &old())], &[("a.kio", &new)]),
+        ["+ delete: links get", "+ main: links get"]
+    );
+}
+
+#[test]
+fn diff_removed_method() {
+    let new = old().replace(r#"let _w = log.write("gone"); "#, "");
+    assert_eq!(diff(&[("a.kio", &old())], &[("a.kio", &new)]), ["- delete: log write"]);
+}
+
+#[test]
+fn diff_new_main_parameter() {
+    // The new grant comes first; `main` then reaches `hook send` through `notify`, a new function.
+    let new = old()
+        .replace(
+            "fn main(links: Kv, log: Log)",
+            "fn main(links: Kv, log: Log, hook: Http)",
+        )
+        .replace("create(links, log)?;", "create(links, log)?; notify(hook);")
+        + r#"fn notify(hook: Http) { let _r = hook.send("POST", "/", [], "{}".to_bytes()); }"#;
+    let want = ["+ main: grant hook: Http", "+ main: hook send", "+ notify: hook send"];
+    assert_eq!(diff(&[("a.kio", &old())], &[("a.kio", &new)]), want);
+}
+
+#[test]
+fn diff_new_main_parameter_unused() {
+    // A grant `main` asks for is authority even when nothing calls it yet.
+    let new = old().replace("fn main(links: Kv, log: Log)", "fn main(links: Kv, log: Log, out: Dir)");
+    assert_eq!(
+        diff(&[("a.kio", &old())], &[("a.kio", &new)]),
+        ["+ main: grant out: Dir"]
+    );
+}
+
+#[test]
+fn diff_grant_type_changed() {
+    let (old, new) = ("fn main(d: Dir) -> Int { 1 }", "fn main(d: Kv) -> Int { 1 }");
+    assert_eq!(
+        diff(&[("a.kio", old)], &[("a.kio", new)]),
+        ["+ main: grant d: Kv", "- main: grant d: Dir"]
+    );
+}
+
+#[test]
+fn diff_new_function_counts_in_full() {
+    // `log write` and `links keys` both count, though `main` could already write the log.
+    let new = old() + r#"fn audit(log: Log, links: Kv) -> Int { let _w = log.write("x"); let _k = links.keys(""); 0 }"#;
+    assert_eq!(
+        diff(&[("a.kio", &old())], &[("a.kio", &new)]),
+        ["+ audit: log write, links keys"]
+    );
+}
+
+#[test]
+fn diff_function_moved_to_module() {
+    // `create` and `store::create` are different functions: one removed and one added, each in
+    // full. `main`'s own authority is unchanged.
+    let root = format!(
+        "mod store;\n{}",
+        DIFF_OLD.replace("create(links, log)?;", "store::create(links, log)?;")
+    );
+    let store = format!("pub {CREATE}");
+    let want = [
+        "- create: links set, log write",
+        "+ store::create: links set, log write",
+    ];
+    assert_eq!(
+        diff(&[("a.kio", &old())], &[("a.kio", &root), ("store.kio", &store)]),
+        want
+    );
+}

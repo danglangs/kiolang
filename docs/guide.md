@@ -4,6 +4,7 @@ The operator's and user's reference: every grant, limit and output of `kio run`.
 
 ```
 kio check <prog.kio>             the authority report, or errors with hints
+kio check <new.kio> --base <old.kio>   the authority new adds or drops; exit 3 if any added
 kio run <prog.kio> [grants] [limits] [--audit log] [--listen addr]
 kio mcp                          the MCP server (README, "Use from an agent")
 ```
@@ -181,6 +182,29 @@ $ grep denied /tmp/leak.jsonl
 ```
 
 Each run writes a `start` line (program hash, grants, limits), its calls, and an `end` line (outcome, calls, I/O, peak memory, fuel used). Under `--listen` it is one log for the server: the header once, then each request's calls and trailer, every line starting with `"req":N` (and `"conn":N` for a WebSocket event); the trailer counts calls made after the response was sent (`"after_send":N`).
+
+## Reviewing authority in a pull request
+
+`kio check NEW --base OLD` diffs the two programs' reports: what a reviewer approves. Modules resolve beside each entry. `main`'s parameters come first, as each is a new grant; then each function's capability methods added (`+`) or dropped (`-`). A function on one side only counts in full, so one moved into a module shows as removed and added.
+
+```
+$ kio check app.kio --base old/app.kio
++ main: grant hook: Http
++ main: hook send
++ notify: hook send, log write
+authority added: 3 lines (exit 3)
+```
+
+Exit 0: no authority added (`no change in authority`, or `authority removed only`). Exit 3: some added. Exit 1: a side does not check (the message names `base` or `new`).
+
+`tools/authority-diff.sh BASE_REF ENTRY.kio` checks `BASE_REF` out with `git worktree add` into a temporary directory and diffs `ENTRY.kio` against it (`KIO` names the binary). In CI, as a GitHub Actions job step that fails a pull request adding authority until someone with the right to approve it does:
+
+```yaml
+- uses: actions/checkout@v4
+  with: { fetch-depth: 0 }
+- name: Authority diff
+  run: tools/authority-diff.sh origin/${{ github.base_ref }} app.kio
+```
 
 ## Compile cache
 

@@ -52,10 +52,11 @@ Compiled-only kio covers the whole language and every capability. What real apps
 | H17 | `Db` (`--db d=path`, `path:ro` or `:memory:`): SQLite in the host behind one fenced connection per grant (authorizer, defensive mode, no attached databases, lowered limits, a progress handler on the run's deadline, a 256 MB heap cap); `query`/`exec`/`transaction` with `?` parameters as `SqlValue`; both paths, report, audit (SQL cut at 256, counts, bytes; never a value), `:ro` refused to writers. kio-web examples/sqlnotes |
 | C8b7 | cheaper freeing (fuel stays): one precomputed plan per descriptor and variant (pointer slots as a mask, size), the table by reference, pointer-free objects freed in `dec` directly. Freeing fuel on a 2^22-leaf tree 4.61 to 2.75 G; tree 101 to 90 ms (fuel 2.26 to 1.80 G), word count 29.8 to 28.2, `HashMap` 23.6 to 22.4, json.kio 66 to 64, strings 5.0 to 4.5; fib 5% slower at the same fuel (code placement) |
 | H18 | concurrency stage 1b: under `--listen`, `send` answers the client at once and `main` runs on under the request's limits, holding its worker; a failure after it goes to stderr and the audit log; trailer `"after_send":N` (#146, #147). kio-web links counts a hit after the redirect: one-client redirects 6.0k to 7.0-7.6k/s, 20 clients unchanged (~15k) |
+| P1 | `kio check NEW --base OLD`: the authority diff (`+ main: grant hook: Http`, `+ create: hook send`), exit 3 when any was added; `tools/authority-diff.sh BASE_REF ENTRY` for CI (guide.md, "Reviewing authority in a pull request") |
 
 ## Next
 
-Product direction A: approving AI-written code by its authority report ([product-todo.md](product-todo.md)): the models-writing-kio eval (roadmap.md), an authority diff for pull requests, secrets as host-injected `Http` headers.
+Product direction A: approving AI-written code by its authority report ([product-todo.md](product-todo.md)): P1 (the authority diff) done; E1 (the models-writing-kio eval) and S1 (secrets as host-injected `Http` headers) next.
 
 Also open: C8 (roadmap.md): tree's remaining freeing (free-list pushes, a `List`'s separate buffer); tree's 4-5% from the larger size classes (#117); borrowed match bindings of a borrowed scrutinee (tree). Pinned, not started: L18 `par_map` and L19 `scope`/`spawn` (concurrency stages 2 and 3, when a program needs them).
 

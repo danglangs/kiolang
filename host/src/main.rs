@@ -16,10 +16,11 @@ fn cli() -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
         ["check", path] => return check(path),
+        ["check", path, "--base", base] => return check_base(path, base),
         ["mcp"] => return mcp::serve(),
         ["run", path, ref flags @ ..] => return run(path, flags),
         _ => eprintln!(
-            "kio: a capability-typed language; code names what it needs, the operator grants what that is.\n\nusage: kio check <prog.kio>\n       kio mcp\n       kio run <prog.kio> {USAGE}"
+            "kio: a capability-typed language; code names what it needs, the operator grants what that is.\n\nusage: kio check <prog.kio> [--base <old.kio>]\n       kio mcp\n       kio run <prog.kio> {USAGE}"
         ),
     }
     2
@@ -61,6 +62,38 @@ fn check(path: &str) -> i32 {
             0
         }
         Err(diags) => print_diags(&files, diags),
+    }
+}
+
+/// The authority `path` adds over `base` and the authority it drops: exit 3 when any was added.
+fn check_base(path: &str, base: &str) -> i32 {
+    let (old, new) = match (read_files(base), read_files(path)) {
+        (Ok(o), Ok(n)) => (o, n),
+        (Err(code), _) | (_, Err(code)) => return code,
+    };
+    match kio_host::diff_files(&old, &new) {
+        Ok(lines) if lines.is_empty() => {
+            println!("no change in authority");
+            0
+        }
+        Ok(lines) => {
+            println!("{}", lines.join("\n"));
+            let added = lines.iter().filter(|l| l.starts_with('+')).count();
+            if added == 0 {
+                println!("authority removed only");
+                return 0;
+            }
+            println!(
+                "authority added: {added} line{} (exit 3)",
+                if added == 1 { "" } else { "s" }
+            );
+            3
+        }
+        Err((is_base, diags)) => {
+            let (side, files) = if is_base { ("base", &old) } else { ("new", &new) };
+            eprintln!("kio: the {side} program {} does not check", files[0].0);
+            print_diags(files, diags)
+        }
     }
 }
 

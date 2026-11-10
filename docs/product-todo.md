@@ -19,11 +19,12 @@ operator runs it:  kio run app.kio --http stripe=… --http-header stripe=Author
   - Output: `eval/results/<date>-<model>-<lang>.json`; a table in roadmap.md (Haiku, Sonnet and Opus 5.5, kio vs Python) and the ten diagnostics hit most, each becoming an L12-style task.
   - Done: the 30 tasks, each with a reference kio and Python solution that pass their checks (CI runs the references, not the models); one full run per model recorded.
 
-- [ ] **P1. `kio check NEW --base OLD`: the authority diff.** What a reviewer approves.
+- [x] **P1. `kio check NEW --base OLD`: the authority diff.** What a reviewer approves.
   - `lang::report_diff(old, new) -> Vec<String>`: per function, the capability methods added (`+ create: hook send`) and removed (`- ...`); `main`'s parameters first, as a new parameter is a new grant: `+ main: grant hook: Http`. Functions present in one side only count as all-added or all-removed. Unchanged functions are not shown; nothing changed prints `no change in authority`.
   - Exit codes: 0 when no authority was added (removals only, or nothing); 3 when any was added; 1 when either side fails to check (the message names which side).
   - `tools/authority-diff.sh BASE_REF ENTRY.kio`: checks out `BASE_REF` with `git worktree add` into a temporary directory, runs `kio check ENTRY --base <tmp>/ENTRY`, removes it. guide.md gains a section with a CI example (a job step, not a published action).
   - Done: tests for an added method, a new `main` parameter, a removed method (exit 0), a new function using a capability, a function moved to a module, no change, a base that fails to check; the links app diffed against a version without the webhook shows exactly `hook send` added.
+  - Result: `lang::authority` (the structure `report` prints) and `report_diff`; `kio check --base` prints the lines and `authority added: N lines (exit 3)` or `authority removed only`. kio-web links against itself without the webhook: `+ main: grant hook: Http`, `+ main: hook send`, `+ notify: hook send, log write` (notify is new, so its `log write` counts too). Tests: lang/tests/report.rs (`diff_*`, 8), host/tests/authority_diff.rs (6).
 
 - [ ] **S1. Secrets as headers the host adds.** The program never holds the key, so it cannot leak it.
   - `--http-header name=Header:SOURCE`, `SOURCE` = `env:VAR` or `file:PATH`, read once at start (missing or empty: refused, with a hint). Repeatable; only on a granted `Http` name.

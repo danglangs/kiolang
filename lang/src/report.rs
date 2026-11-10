@@ -5,9 +5,82 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Methods reachable on each capability parameter, keyed by (function, parameter).
 type Uses = BTreeMap<(String, String), BTreeSet<String>>;
 
+/// What a program may do: per function, each capability parameter that calls something with the
+/// methods it may call (in parameter order); and `main`'s parameters as `(name, type)`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Authority {
+    pub funcs: BTreeMap<String, Vec<(String, BTreeSet<String>)>>,
+    pub main: Vec<(String, String)>,
+}
+
 /// One line per function: its capability parameters and the methods they may call, including
 /// through helpers. Reads the checked AST only.
 pub fn report(p: &Program) -> String {
+    let a = authority(p);
+    let width = a.funcs.keys().map(|n| n.len()).max().unwrap_or(0) + 1;
+    let mut lines = Vec::new();
+    for (name, params) in &a.funcs {
+        let used = if params.is_empty() {
+            "none".to_string()
+        } else {
+            uses_str(params)
+        };
+        lines.push(format!("{name:<width$}: {used}"));
+    }
+    lines.join("\n")
+}
+
+/// `hook send, log write`.
+fn uses_str(params: &[(String, BTreeSet<String>)]) -> String {
+    let parts: Vec<String> = params
+        .iter()
+        .map(|(d, ms)| format!("{d} {}", ms.iter().map(String::as_str).collect::<Vec<_>>().join(" ")))
+        .collect();
+    parts.join(", ")
+}
+
+/// The authority `new` has that `old` lacks (`+` lines) and the reverse (`-` lines): `main`'s
+/// parameters first (`+ main: grant hook: Http`), then each function by name
+/// (`+ create: hook send`). A function on one side only counts in full; a parameter is matched by
+/// name. Empty when nothing changed.
+pub fn report_diff(old: &Program, new: &Program) -> Vec<String> {
+    let (old, new) = (authority(old), authority(new));
+    let mut lines = Vec::new();
+    for (sign, a, b) in [('+', &new, &old), ('-', &old, &new)] {
+        for (d, ty) in a.main.iter().filter(|g| !b.main.contains(g)) {
+            lines.push(format!("{sign} main: grant {d}: {ty}"));
+        }
+    }
+    let none = Vec::new();
+    let names: BTreeSet<&String> = old.funcs.keys().chain(new.funcs.keys()).collect();
+    for name in names {
+        let (o, n) = (
+            old.funcs.get(name).unwrap_or(&none),
+            new.funcs.get(name).unwrap_or(&none),
+        );
+        for (sign, a, b) in [('+', n, o), ('-', o, n)] {
+            let mut only = Vec::new();
+            for (d, ms) in a {
+                let theirs = b.iter().find(|(e, _)| e == d).map(|(_, t)| t);
+                let ms: BTreeSet<String> = ms
+                    .iter()
+                    .filter(|m| !theirs.is_some_and(|t| t.contains(*m)))
+                    .cloned()
+                    .collect();
+                if !ms.is_empty() {
+                    only.push((d.clone(), ms));
+                }
+            }
+            if !only.is_empty() {
+                lines.push(format!("{sign} {name}: {}", uses_str(&only)));
+            }
+        }
+    }
+    lines
+}
+
+/// The structure `report` prints.
+pub fn authority(p: &Program) -> Authority {
     let is_cap = |d: &Param| matches!(&d.ty.kind, TypeKind::Named(n, a) if a.is_empty() && p.is_cap(n));
     let mut uses = Uses::new();
     for (name, f) in &p.funcs {
@@ -62,26 +135,32 @@ pub fn report(p: &Program) -> String {
         }
     }
 
-    let mut names: Vec<&String> = p.funcs.keys().collect();
-    names.sort();
-    let width = names.iter().map(|n| n.len()).max().unwrap_or(0) + 1;
-    let mut lines = Vec::new();
-    for name in names {
-        let mut parts = Vec::new();
-        for d in &p.funcs[name].params {
-            if let Some(ms) = uses.get(&(name.clone(), d.name.clone())).filter(|ms| !ms.is_empty()) {
-                let ms: Vec<&str> = ms.iter().map(String::as_str).collect();
-                parts.push(format!("{} {}", d.name, ms.join(" ")));
+    let mut a = Authority::default();
+    for (name, f) in &p.funcs {
+        let mut params = Vec::new();
+        for d in &f.params {
+            if let Some(ms) = uses.remove(&(name.clone(), d.name.clone())).filter(|ms| !ms.is_empty()) {
+                params.push((d.name.clone(), ms));
             }
         }
-        let used = if parts.is_empty() {
-            "none".to_string()
-        } else {
-            parts.join(", ")
-        };
-        lines.push(format!("{name:<width$}: {used}"));
+        a.funcs.insert(name.clone(), params);
     }
-    lines.join("\n")
+    if let Some(f) = p.funcs.get("main") {
+        a.main = f.params.iter().map(|d| (d.name.clone(), type_str(&d.ty))).collect();
+    }
+    a
+}
+
+/// `Http`, `List<Int>`, `web::Point`, as the source writes it.
+fn type_str(t: &Type) -> String {
+    let list = |ts: &[Type]| ts.iter().map(type_str).collect::<Vec<_>>().join(", ");
+    match &t.kind {
+        TypeKind::Unit => "()".into(),
+        TypeKind::Named(n, a) if a.is_empty() => n.clone(),
+        TypeKind::Named(n, a) => format!("{n}<{}>", list(a)),
+        TypeKind::Module(m, t) => format!("{m}::{}", type_str(t)),
+        TypeKind::Fn(a, r) => format!("fn({}) -> {}", list(a), type_str(r)),
+    }
 }
 
 /// Calls `visit` on every expression in the block, outer before inner.

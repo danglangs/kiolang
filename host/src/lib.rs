@@ -107,6 +107,21 @@ pub fn check_files(files: &[(String, String)]) -> std::result::Result<Report, Ve
     }
 }
 
+/// The authority `new` has over `old` and the reverse (see `lang::report_diff`), or the
+/// diagnostics of the first side that fails to check: `Err((true, ..))` for `old`.
+pub fn diff_files(
+    old: &[(String, String)],
+    new: &[(String, String)],
+) -> std::result::Result<Vec<String>, (bool, Vec<Diag>)> {
+    let check = |files: &[(String, String)]| {
+        let pairs: Vec<(&str, &str)> = files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
+        lang::check_files(&pairs, &lang::CapTable::v0()).map_err(|ds| ds.into_iter().map(Diag::from).collect())
+    };
+    let old = check(old).map_err(|d| (true, d))?;
+    let new = check(new).map_err(|d| (false, d))?;
+    Ok(lang::report_diff(&old, &new))
+}
+
 /// The most one `Dir.read` returns; a larger file is `too-large`.
 const READ_CAP: u64 = 10 << 20;
 
