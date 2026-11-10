@@ -174,6 +174,12 @@ fn lines_trim_contains() {
         let e = s("");
         assert!(take_list(text::lines(LIST_STR, e)).is_empty());
         dec(e);
+        let c = s("aé日本🦀");
+        assert_eq!(take_list(text::chars(LIST_STR, c)), ["a", "é", "日", "本", "🦀"]);
+        dec(c);
+        let e = s("");
+        assert!(take_list(text::chars(LIST_STR, e)).is_empty());
+        dec(e);
         let t = s(" \t a b\n\u{a0}");
         assert_eq!(take(text::trim(t)), "a b");
         dec(t);

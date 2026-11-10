@@ -49,7 +49,7 @@ pub struct Features {
     pub closures: bool,
     /// `Str` locals, parameters and results: literals, `+`, `+=`, `s = s + a + b` (the
     /// compiler's in-place append) and `s = s + s`, `to_str`, `trim`, `len`, `==`, `contains`,
-    /// `match` on literals, and `split` and `lines` into `List<Str>` locals, indexed, counted,
+    /// `match` on literals, and `split`, `lines` and `chars` into `List<Str>` locals, indexed, counted,
     /// searched and iterated with `for`.
     pub strings: bool,
     /// `HashMap<Int, Int>` and `HashMap<Str, Int>` locals, helper parameters and `main`
@@ -181,7 +181,7 @@ enum Ty {
     K,
     Opt,
     Str,
-    /// `List<Str>`, from `split` or `lines`; only immutable locals have it.
+    /// `List<Str>`, from `split`, `lines` or `chars`; only immutable locals have it.
     StrList,
     /// `HashMap<Int, Int>` and `HashMap<Str, Int>`: locals, helper parameters and `main`'s
     /// result. A map's `max` bounds its size, as a list's does; a `Str` key is at most
@@ -1367,6 +1367,15 @@ impl Gen<'_> {
             .to_string()
     }
 
+    /// The parts of `s` as a `List<Str>` (`split`, `lines` or `chars`), with the least count.
+    fn parts(&mut self, s: &str) -> (String, u64) {
+        match self.rng.below(5) {
+            0..=2 => (format!("({s}).split({})", self.sep()), 1),
+            3 => (format!("({s}).lines()"), 0),
+            _ => (format!("({s}).chars()"), 0),
+        }
+    }
+
     /// An `Int` from strings: a length, a count of parts, or a `match` on literals.
     fn str_int(&mut self, d: u32) -> String {
         let lists = self.visible(|v| v.ty == Ty::StrList);
@@ -1374,7 +1383,10 @@ impl Gen<'_> {
             0 | 1 => format!("({}).len()", self.str_read(d)),
             2 if !lists.is_empty() => format!("{}.len()", self.rng.pick(&lists)),
             2 | 3 => format!("({}).split({}).len()", self.str_read(d), self.sep()),
-            4 => format!("({}).lines().len()", self.str_read(d)),
+            4 => {
+                let m = if self.rng.chance(50) { "lines" } else { "chars" };
+                format!("({}).{m}().len()", self.str_read(d))
+            }
             _ => {
                 let scrut = self.str_read(d);
                 let mut arms = Vec::new();
@@ -1427,10 +1439,7 @@ impl Gen<'_> {
             3..=6 => self.str_assign(),
             7 => {
                 let (s, max) = self.str_expr(1);
-                let (src, min) = match self.rng.chance(60) {
-                    true => (format!("({s}).split({})", self.sep()), 1),
-                    false => (format!("({s}).lines()"), 0),
-                };
+                let (src, min) = self.parts(&s);
                 let name = self.name("ws");
                 self.declare(name.clone(), Ty::StrList, false, false);
                 let v = self.var(&name);
@@ -1487,7 +1496,7 @@ impl Gen<'_> {
         Some(format!("{}{stmt}\n", self.pad()))
     }
 
-    /// `for w in ws` over a `List<Str>` local, or over a `split` or `lines` of a `Str`; its
+    /// `for w in ws` over a `List<Str>` local, or over a `split`, `lines` or `chars` of a `Str`; its
     /// passes are bounded by the parts' count, at most the length plus one.
     fn str_for(&mut self) -> Option<String> {
         if !self.features.loops || self.loops >= MAX_LOOPS || self.nest >= MAX_NEST || self.cost > BUDGET / 2 {
@@ -1501,11 +1510,7 @@ impl Gen<'_> {
             (ws, runs, smax)
         } else {
             let (s, m) = self.str_expr(1);
-            let src = match self.rng.chance(60) {
-                true => format!("({s}).split({})", self.sep()),
-                false => format!("({s}).lines()"),
-            };
-            (src, m + 1, m)
+            (self.parts(&s).0, m + 1, m)
         };
         let cap = if self.loops > 0 { 65 } else { MAX_STR + 1 };
         if runs > cap {
@@ -1784,6 +1789,7 @@ mod tests {
             " += ",
             ".split(",
             ".lines()",
+            ".chars()",
             ".contains(",
             ").to_str()",
             ").len()",

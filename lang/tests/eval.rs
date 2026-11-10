@@ -663,7 +663,10 @@ fn str_split() {
     );
     assert_eq!(int("fn main() -> List<Str> { \"\".split(\",\") }"), strs(&[""]));
     let src = "fn main() -> List<Str> { \"abc\".split(\"\") }";
-    fails(src, "`split` needs a non-empty separator");
+    fails(
+        src,
+        "`split` needs a non-empty separator; to split into characters, use `s.chars()`",
+    );
     let e = exec(src).unwrap_err();
     assert_eq!(&src[e.span.start..e.span.end], "\"abc\".split(\"\")");
 }

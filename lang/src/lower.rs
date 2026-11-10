@@ -792,6 +792,7 @@ impl<'a> Lowerer<'a> {
                     (T::Str, "to_bytes") => Builtin::StrToBytes,
                     (T::Str, "split") => Builtin::StrSplit,
                     (T::Str, "lines") => Builtin::StrLines,
+                    (T::Str, "chars") => Builtin::StrChars,
                     (T::Str, "trim") => Builtin::StrTrim,
                     (T::Str, "contains") => Builtin::StrContains,
                     (T::Str, "starts_with") => Builtin::StrStartsWith,

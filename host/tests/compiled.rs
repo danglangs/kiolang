@@ -527,7 +527,7 @@ fn list_errors_match() {
     );
     assert_eq!(
         error(r#"fn main() -> Int { "a".split("").len() }"#),
-        "`split` needs a non-empty separator"
+        "`split` needs a non-empty separator; to split into characters, use `s.chars()`"
     );
 }
 

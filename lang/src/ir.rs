@@ -261,6 +261,7 @@ pub enum Builtin {
     StrToBytes,
     StrSplit,
     StrLines,
+    StrChars,
     StrTrim,
     StrContains,
     StrStartsWith,

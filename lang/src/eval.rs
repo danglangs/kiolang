@@ -1048,11 +1048,20 @@ fn builtin(recv: &Value, b: Builtin, (arg, arg2): Args, span: Span) -> Res {
         (B::StrSplit, Value::Str(s)) => {
             let sep = str_arg(arg);
             if sep.is_empty() {
-                return Err(fail(span, "`split` needs a non-empty separator"));
+                return Err(fail(
+                    span,
+                    "`split` needs a non-empty separator; to split into characters, use `s.chars()`",
+                ));
             }
             Value::List(s.split(&*sep).map(|p| Value::Str(p.into())).collect::<Vec<_>>().into())
         }
         (B::StrLines, Value::Str(s)) => Value::List(s.lines().map(|l| Value::Str(l.into())).collect::<Vec<_>>().into()),
+        (B::StrChars, Value::Str(s)) => Value::List(
+            s.chars()
+                .map(|c| Value::Str(c.to_string().into()))
+                .collect::<Vec<_>>()
+                .into(),
+        ),
         (B::StrTrim, Value::Str(s)) => Value::Str(s.trim().into()),
         (B::StrContains, Value::Str(s)) => Value::Bool(s.contains(&*str_arg(arg))),
         (B::StrStartsWith, Value::Str(s)) => Value::Bool(s.starts_with(&*str_arg(arg))),

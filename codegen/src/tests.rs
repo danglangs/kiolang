@@ -132,6 +132,7 @@ fn the_runtime_exports_every_operation() {
         "rt_str_to_bytes",
         "rt_str_split",
         "rt_str_lines",
+        "rt_str_chars",
         "rt_str_trim",
         "rt_str_contains",
         "rt_str_starts_with",

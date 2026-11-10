@@ -204,6 +204,13 @@ pub unsafe extern "C" fn rt_str_lines(desc: u32, s: u32) -> u32 {
     unsafe { addr(text::lines(desc, ptr(s))) }
 }
 
+/// `desc` is `List<Str>`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_str_chars(desc: u32, s: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unsafe { addr(text::chars(desc, ptr(s))) }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rt_str_trim(s: u32) -> u32 {
     // SAFETY: the group's contract.

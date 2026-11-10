@@ -340,6 +340,16 @@ pub unsafe fn lines(list: u32, s: *mut Header) -> *mut Header {
     unsafe { strs(list, str_of(s).lines()) }
 }
 
+/// `Str.chars()`: a `List<Str>` with descriptor `list`, one `Str` per Unicode scalar value.
+///
+/// # Safety
+/// The module's contract; `list` is the descriptor of `List<Str>`.
+pub unsafe fn chars(list: u32, s: *mut Header) -> *mut Header {
+    // SAFETY: the caller's guarantee.
+    let s = unsafe { str_of(s) };
+    strs(list, s.char_indices().map(|(i, c)| &s[i..i + c.len_utf8()]))
+}
+
 /// `Str.trim()`: Unicode whitespace off both ends.
 ///
 /// # Safety

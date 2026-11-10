@@ -562,3 +562,41 @@ fn main() -> Str {
     assert_eq!(msg, "`to_str` takes 0 arguments, found 1");
     assert_eq!(hint.as_deref(), Some("`Bool.to_str` is declared as `to_str() -> Str`"));
 }
+
+/// L21: `Str.chars()`, one `Str` per Unicode scalar value, as Rust's `chars`.
+#[test]
+fn str_chars() {
+    assert_eq!(
+        shows(r#"fn main() -> List<Str> { "abc".chars() }"#),
+        r#"["a", "b", "c"]"#
+    );
+    assert_eq!(shows(r#"fn main() -> List<Str> { "".chars() }"#), "[]");
+    assert_eq!(shows(r#"fn main() -> List<Str> { "é".chars() }"#), r#"["é"]"#);
+    assert_eq!(shows(r#"fn main() -> List<Str> { "日本".chars() }"#), r#"["日", "本"]"#);
+    // A combining accent is its own scalar value (displayed escaped, as Rust's `{:?}`); an
+    // emoji is one 4-byte character.
+    let src = r#"fn main() -> List<Str> { "é🦀!".chars() }"#;
+    assert_eq!(shows(src), r#"["e", "\u{301}", "🦀", "!"]"#);
+    let src = r#"
+fn main() -> Str {
+    let s = "añ日🦀";
+    let mut out = "";
+    for c in s.chars() {
+        out = out + c.len().to_str() + ",";
+    }
+    out + s.chars().len().to_str() + "," + s.chars().join("")
+}"#;
+    assert_eq!(shows(src), "1,2,3,4,4,añ日🦀");
+    let (msg, hint) = rejects(r#"fn main() { "a".chars(1); }"#);
+    assert_eq!(msg, "`chars` takes 0 arguments, found 1");
+    assert_eq!(
+        hint.as_deref(),
+        Some("`Str.chars` is declared as `chars() -> List<Str>`")
+    );
+    let (msg, at) = fails(r#"fn main() -> Int { "abc".split("").len() }"#);
+    assert_eq!(
+        msg,
+        "`split` needs a non-empty separator; to split into characters, use `s.chars()`"
+    );
+    assert_eq!(at, r#""abc".split("")"#);
+}
