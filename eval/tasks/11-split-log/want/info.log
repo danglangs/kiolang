@@ -1,0 +1,3 @@
+2026-11-09T10:00:00Z INFO server starting on :8080
+2026-11-09T10:00:01Z info config loaded from /etc/app.toml
+2026-11-09T10:00:09Z INFO shutdown requested

@@ -1,0 +1,13 @@
+2026-11-09T10:00:00Z INFO server starting on :8080
+2026-11-09T10:00:01Z info config loaded from /etc/app.toml
+2026-11-09T10:00:02Z DEBUG cache warm: 1200 keys
+2026-11-09T10:00:03Z WARN slow query: 812ms SELECT * FROM orders
+2026-11-09T10:00:04Z ERROR db timeout after 5000ms
+2026-11-09T10:00:05Z Warning disk 91% full
+2026-11-09T10:00:06Z ERROR   payment failed: card declined
+broken line
+2026-11-09T10:00:07Z TRACE entering handler
+
+2026-11-09T10:00:08Z Error retry 3/3 failed, giving up
+2026-11-09T10:00:09Z INFO shutdown requested
+2026-11-09T10:00:10Z FATAL out of memory

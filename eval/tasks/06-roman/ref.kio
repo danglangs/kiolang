@@ -1,0 +1,44 @@
+fn to_roman(n: Int) -> Str {
+  let vals = [1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1];
+  let syms = ["M", "CM", "D", "CD", "C", "XC", "L", "XL", "X", "IX", "V", "IV", "I"];
+  let mut left = n;
+  let mut out = "";
+  for i in 0..vals.len() {
+    while left >= vals[i] { out = out + syms[i]; left -= vals[i]; }
+  }
+  out
+}
+
+fn digit(c: Str) -> Int {
+  match c { "I" => 1, "V" => 5, "X" => 10, "L" => 50, "C" => 100, "D" => 500, "M" => 1000, _ => 0 }
+}
+
+// Read any Roman numeral, then accept it only if it is the standard spelling of its value.
+fn from_roman(s: Str) -> Option<Int> {
+  let mut total = 0;
+  for i in 0..s.len() {
+    let d = digit(s.slice(i, i + 1));
+    if d == 0 { return None; }
+    let next = if i + 1 < s.len() { digit(s.slice(i + 1, i + 2)) } else { 0 };
+    total = if d < next { total - d } else { total + d };
+  }
+  if total >= 1 && total <= 3999 && to_roman(total) == s { Some(total) } else { None }
+}
+
+fn convert(v: Str) -> Str {
+  if let Some(n) = v.parse_int() {
+    return if n >= 1 && n <= 3999 { to_roman(n) } else { "invalid" };
+  }
+  match from_roman(v) { Some(n) => n.to_str(), None => "invalid" }
+}
+
+fn main(input: Dir) -> Result<Str, IoErr> {
+  let text = input.read("numbers.txt")?.to_str();
+  let mut out: List<Str> = [];
+  for line in text.lines() {
+    let v = line.trim();
+    if v == "" { continue; }
+    out.push(v + " = " + convert(v));
+  }
+  Ok(out.join("\n"))
+}

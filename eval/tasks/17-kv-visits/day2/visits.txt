@@ -1,0 +1,6 @@
+/docs/start
+/docs/start
+/docs/start
+/signup
+/pricing
+/docs/api

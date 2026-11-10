@@ -1,0 +1,51 @@
+enum Failed { Http(HttpErr), Json(Str), Status(Int) }
+
+fn field_int(o: Json, k: Str) -> Int { o.get(k).and_then(|v| v.as_int()).unwrap_or(0) }
+fn field_str(o: Json, k: Str) -> Str { o.get(k).and_then(|v| v.as_str()).unwrap_or("") }
+
+fn parse(b: Bytes) -> Result<Json, Failed> { b.to_str().parse_json().map_err(|e| Failed::Json(e)) }
+
+fn fetch_all(api: Http) -> Result<List<Json>, Failed> {
+  let mut orders: List<Json> = [];
+  let mut page = 1;
+  loop {
+    let doc = parse(api.get("/orders?page=" + page.to_str()).map_err(|e| Failed::Http(e))?)?;
+    for o in doc.get("orders").and_then(|v| v.as_list()).unwrap_or([]) { orders.push(o); }
+    let Some(next) = doc.get("next").and_then(|v| v.as_int()) else { break; };
+    page = next;
+  }
+  Ok(orders)
+}
+
+fn main(api: Http) -> Result<Str, Failed> {
+  let orders = fetch_all(api)?;
+  let mut cents: Map<Str, Json> = Map::new();
+  let mut refunded = 0;
+  let mut largest = Json::Null;
+  let mut largest_id = 0;
+  let mut best = -1;
+  for o in orders {
+    let status = field_str(o, "status");
+    if status == "refunded" { refunded += 1; }
+    if status != "paid" { continue; }
+    let c = field_int(o, "cents");
+    let cur = field_str(o, "currency");
+    let sum = cents.get(cur).and_then(|v| v.as_int()).unwrap_or(0);
+    cents.insert(cur, Json::Num(sum + c));
+    let id = field_int(o, "id");
+    if c > best || (c == best && id < largest_id) {
+      best = c;
+      largest_id = id;
+      largest = Json::Num(id);
+    }
+  }
+  let mut m: Map<Str, Json> = Map::new();
+  m.insert("orders", Json::Num(orders.len()));
+  m.insert("paid_cents", Json::Obj(cents));
+  m.insert("refunded", Json::Num(refunded));
+  m.insert("largest", largest);
+  let r = api.send("POST", "/summaries", ["content-type: application/json"], Json::Obj(m).to_json().to_bytes())
+    .map_err(|e| Failed::Http(e))?;
+  if r.status != 201 { return Err(Failed::Status(r.status)); }
+  Ok(field_str(parse(r.body)?, "id"))
+}

@@ -1,0 +1,10 @@
+order_id,customer,product,qty,unit_cents
+1001,acme,widget,3,1250
+1002,globex,gadget,1,4999
+1003,acme,sprocket,10,305
+1003,acme,sprocket,10,305
+1004,initech,widget,2,1250
+bad,row,here,1,1
+1005,initech,gizmo,1,999
+
+1006,acme,gizmo,1

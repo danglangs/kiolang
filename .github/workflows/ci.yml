@@ -15,6 +15,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      - run: cargo build -p kio && KIO=target/debug/kio eval/check_refs.sh
       - run: cargo clippy -p runtime --target wasm32-unknown-unknown --features test-heap -- -D warnings
       - run: cargo build -p runtime --target wasm32-unknown-unknown --release
       - run: cargo test -p codegen

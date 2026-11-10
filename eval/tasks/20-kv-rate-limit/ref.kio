@@ -1,0 +1,24 @@
+enum Failed { Io(IoErr), Kv(KvErr) }
+
+const LIMIT: Int = 3;
+
+fn allow(limits: Kv, key: Str) -> Result<Bool, KvErr> {
+  let n = limits.get(key)?.and_then(|b| b.to_str().parse_int()).unwrap_or(0);
+  if n >= LIMIT { return Ok(false); }
+  limits.add(key, 1)?;
+  Ok(true)
+}
+
+fn main(input: Dir, limits: Kv) -> Result<Str, Failed> {
+  let text = input.read("requests.txt").map_err(|e| Failed::Io(e))?.to_str();
+  let mut out: List<Str> = [];
+  for line in text.lines() {
+    let f = line.split(" ").filter(|s| s != "");
+    if f.len() != 2 { continue; }
+    let Some(ts) = f[0].parse_int() else { continue; };
+    let key = "rl:" + f[1] + ":" + (ts / 60).to_str();
+    let ok = allow(limits, key).map_err(|e| Failed::Kv(e))?;
+    out.push(ts.to_str() + " " + f[1] + (if ok { " allow" } else { " deny" }));
+  }
+  Ok(out.join("\n"))
+}

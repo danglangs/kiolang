@@ -1,0 +1,92 @@
+const SCHEMA: Str = "CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, body TEXT NOT NULL, tags TEXT NOT NULL)";
+
+struct Note { id: Int, title: Str, body: Str, tags: List<Str> }
+
+fn obj(pairs: List<Str>, vals: List<Json>) -> Json {
+  let mut m: Map<Str, Json> = Map::new();
+  for i in 0..pairs.len() { m.insert(pairs[i], vals[i]); }
+  Json::Obj(m)
+}
+
+fn reply(res: Outgoing, status: Int, body: Json) -> Result<(), WebErr> {
+  res.send(status, ["content-type"], ["application/json"], body.to_json().to_bytes())
+}
+
+fn error(res: Outgoing, status: Int, msg: Str) -> Result<(), WebErr> {
+  reply(res, status, obj(["error"], [Json::Str(msg)]))
+}
+
+fn strs(j: Json) -> Option<List<Str>> {
+  let mut out: List<Str> = [];
+  for t in j.as_list()? { out.push(t.as_str()?); }
+  Some(out)
+}
+
+fn row_note(r: List<SqlValue>) -> Note {
+  let text = |v: SqlValue| match v { SqlValue::Text(s) => s, _ => "" };
+  let id = match r[0] { SqlValue::Int(n) => n, _ => 0 };
+  let tags = text(r[3]).parse_json().ok().and_then(|j| strs(j)).unwrap_or([]);
+  Note { id: id, title: text(r[1]), body: text(r[2]), tags: tags }
+}
+
+fn parse(body: Bytes) -> Option<Note> {
+  let j = body.to_str().parse_json().ok()?;
+  j.as_map()?;
+  let title = j.get("title")?.as_str()?;
+  if title == "" { return None; }
+  let raw: List<Str> = match j.get("tags") { Some(t) => strs(t)?, None => [] };
+  let mut tags: List<Str> = [];
+  for t in raw { if !tags.contains(t.to_lowercase()) { tags.push(t.to_lowercase()); } }
+  Some(Note { id: 0, title: title, body: j.get("body")?.as_str()?, tags: tags })
+}
+
+fn param(query: Str, name: Str) -> Option<Str> {
+  for kv in query.split("&") {
+    if let Some(v) = kv.strip_prefix(name + "=") { return Some(v); }
+  }
+  None
+}
+
+fn list(res: Outgoing, db: Db, query: Str) -> Result<(), WebErr> {
+  let Ok(rows) = db.query("SELECT id, title, body, tags FROM notes ORDER BY id DESC", []) else { return error(res, 500, "db"); };
+  let tag = param(query, "tag").map(|t| t.to_lowercase());
+  let word = param(query, "q");
+  let mut out: List<Json> = [];
+  for r in rows {
+    let n = row_note(r);
+    if let Some(t) = tag { if !n.tags.contains(t) { continue; } }
+    if let Some(w) = word { if !n.title.contains(w) && !n.body.contains(w) { continue; } }
+    out.push(obj(["id", "title"], [Json::Num(n.id), Json::Str(n.title)]));
+  }
+  reply(res, 200, Json::Arr(out))
+}
+
+fn main(req: Incoming, res: Outgoing, db: Db) -> Result<(), WebErr> {
+  if db.exec(SCHEMA, []).is_err() { return error(res, 500, "db"); }
+  let method = req.method();
+  let target = req.target();
+  let path = target.split("?")[0];
+  let query = target.strip_prefix(path + "?").unwrap_or("");
+  if path == "/notes" && method == "GET" { return list(res, db, query); }
+  if path == "/notes" && method == "POST" {
+    let Some(n) = parse(req.body()) else { return error(res, 400, "invalid note"); };
+    let tags = Json::Arr(n.tags.map(|t| Json::Str(t))).to_json();
+    let Ok(rows) = db.query("INSERT INTO notes (title, body, tags) VALUES (?, ?, ?) RETURNING id",
+      [SqlValue::Text(n.title), SqlValue::Text(n.body), SqlValue::Text(tags)]) else { return error(res, 500, "db"); };
+    let id = match rows[0][0] { SqlValue::Int(n) => n, _ => 0 };
+    return reply(res, 201, obj(["id"], [Json::Num(id)]));
+  }
+  let Some(id) = path.strip_prefix("/notes/").and_then(|s| s.parse_int()) else { return error(res, 404, "not found"); };
+  let Ok(rows) = db.query("SELECT id, title, body, tags FROM notes WHERE id = ?", [SqlValue::Int(id)]) else { return error(res, 500, "db"); };
+  if rows.len() == 0 { return error(res, 404, "not found"); }
+  let n = row_note(rows[0]);
+  match method {
+    "GET" => reply(res, 200, obj(["id", "title", "body", "tags"],
+      [Json::Num(n.id), Json::Str(n.title), Json::Str(n.body), Json::Arr(n.tags.map(|t| Json::Str(t)))])),
+    "DELETE" => {
+      if db.exec("DELETE FROM notes WHERE id = ?", [SqlValue::Int(id)]).is_err() { return error(res, 500, "db"); }
+      reply(res, 200, obj(["deleted"], [Json::Num(id)]))
+    }
+    _ => error(res, 404, "not found"),
+  }
+}

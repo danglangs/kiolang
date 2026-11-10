@@ -1,0 +1,19 @@
+fn main(src: Dir, dst: Dir) -> Result<Str, IoErr> {
+  let names = src.list("")?;
+  let mut out: List<Str> = [];
+  for name in names {
+    let data = src.read(name)?;
+    if !dst.exists(name)? {
+      dst.write(name, data)?;
+      out.push("added " + name);
+    } else if dst.read(name)? != data {
+      dst.write(name, data)?;
+      out.push("updated " + name);
+    } else {
+      out.push("same " + name);
+    }
+  }
+  let kept = dst.list("")?.filter(|n| !names.contains(n)).len();
+  out.push("kept " + kept.to_str());
+  Ok(out.join("\n"))
+}

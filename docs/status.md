@@ -56,7 +56,7 @@ Compiled-only kio covers the whole language and every capability. What real apps
 
 ## Next
 
-Product direction A: approving AI-written code by its authority report ([product-todo.md](product-todo.md)): P1 (the authority diff) done; E1 (the models-writing-kio eval) and S1 (secrets as host-injected `Http` headers) next.
+Product direction A: approving AI-written code by its authority report ([product-todo.md](product-todo.md)): P1 (the authority diff) done; E1 (the models-writing-kio eval) built, its full runs next (eval/README.md); S1 (secrets as host-injected `Http` headers) in review.
 
 Also open: C8 (roadmap.md): tree's remaining freeing (free-list pushes, a `List`'s separate buffer); tree's 4-5% from the larger size classes (#117); borrowed match bindings of a borrowed scrutinee (tree). Pinned, not started: L18 `par_map` and L19 `scope`/`spawn` (concurrency stages 2 and 3, when a program needs them).
 

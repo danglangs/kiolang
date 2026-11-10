@@ -1,0 +1,25 @@
+fn normalize(line: Str) -> Option<Str> {
+  let parts = line.trim().to_lowercase().split("@");
+  if parts.len() != 2 || parts[0] == "" { return None; }
+  let domain = parts[1];
+  if !domain.contains(".") || domain.starts_with(".") || domain.ends_with(".") { return None; }
+  let mut local = parts[0];
+  if domain == "gmail.com" { local = local.split("+")[0].replace(".", ""); }
+  Some(local + "@" + domain)
+}
+
+fn main(input: Dir) -> Result<Str, IoErr> {
+  let text = input.read("emails.txt")?.to_str();
+  let mut seen: Map<Str, Bool> = Map::new();
+  let mut invalid = 0;
+  for line in text.lines() {
+    if line.trim() == "" { continue; }
+    match normalize(line) {
+      Some(e) => seen.insert(e, true),
+      None => { invalid += 1; }
+    }
+  }
+  let mut out = seen.keys();
+  out.push("invalid " + invalid.to_str());
+  Ok(out.join("\n"))
+}

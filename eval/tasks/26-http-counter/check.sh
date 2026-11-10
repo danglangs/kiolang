@@ -1,0 +1,20 @@
+#!/bin/bash
+. "$(dirname "$0")/../../lib/lib.sh"
+serve kv:counts="$T/counts.kv"
+check_req GET /count/home -- '200 {"name":"home","count":0}'
+check_req POST /hit/home -- '200 {"name":"home","count":1}'
+check_req POST /hit/home -- '200 {"name":"home","count":2}'
+check_req POST /hit/about-us -- '200 {"name":"about-us","count":1}'
+check_req POST /hit/blog -- '200 {"name":"blog","count":1}'
+check_req POST /hit/zz -- '200 {"name":"zz","count":1}'
+check_req POST /hit/zz -- '200 {"name":"zz","count":2}'
+check_req GET /count/home -- '200 {"name":"home","count":2}'
+check_req GET /top -- '200 [{"name":"home","count":2},{"name":"zz","count":2},{"name":"about-us","count":1}]'
+check_req POST /hit/Home -- '400 {"error":"bad name"}'
+check_req POST /hit/ -- '400 {"error":"bad name"}'
+check_req GET /count/a_b -- '400 {"error":"bad name"}'
+check_req POST /hit/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -- '400 {"error":"bad name"}'
+check_req GET /hit/home -- '404 {"error":"not found"}'
+check_req DELETE /count/home -- '404 {"error":"not found"}'
+check_req GET /nope -- '404 {"error":"not found"}'
+check_req GET /count/home -- '200 {"name":"home","count":2}'

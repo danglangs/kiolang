@@ -1,0 +1,18 @@
+{
+  "GET /orders?page=1": {"status": 200, "body": {"orders": [
+    {"id": 1, "status": "paid", "cents": 1250, "currency": "EUR"},
+    {"id": 2, "status": "refunded", "cents": 999, "currency": "USD"},
+    {"id": 3, "status": "paid", "cents": 4000, "currency": "USD"}
+  ], "next": 2}},
+  "GET /orders?page=2": {"status": 200, "body": {"orders": [
+    {"id": 4, "status": "pending", "cents": 99999, "currency": "EUR"},
+    {"id": 5, "status": "paid", "cents": 4000, "currency": "EUR"}
+  ], "next": 3}},
+  "GET /orders?page=3": {"status": 200, "body": {"orders": [], "next": 4}},
+  "GET /orders?page=4": {"status": 200, "body": {"orders": [
+    {"id": 6, "status": "refunded", "cents": 10, "currency": "EUR"},
+    {"id": 7, "status": "paid", "cents": 1, "currency": "GBP"},
+    {"id": 8, "status": "paid", "cents": 3999, "currency": "USD"}
+  ], "next": null}},
+  "POST /summaries": {"status": 201, "body": {"id": "sum-7f3a"}}
+}

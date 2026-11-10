@@ -1,0 +1,42 @@
+struct Sum { n: Int, cents: Int }
+
+enum Failed { Io(IoErr), Json(Str) }
+
+fn int(j: Json, k: Str) -> Int { j.get(k).and_then(|v| v.as_int()).unwrap_or(0) }
+
+fn total(order: Json) -> Int {
+  let mut t = 0;
+  for item in order.get("items").and_then(|v| v.as_list()).unwrap_or([]) {
+    t += int(item, "qty") * int(item, "price_cents");
+  }
+  t
+}
+
+fn main(input: Dir) -> Result<Str, Failed> {
+  let text = input.read("orders.json").map_err(|e| Failed::Io(e))?.to_str();
+  let orders = text.parse_json().map_err(|e| Failed::Json(e))?.as_list().unwrap_or([]);
+  let mut paid: Map<Str, Sum> = Map::new();
+  let mut refunded = Sum { n: 0, cents: 0 };
+  let mut pending = 0;
+  for o in orders {
+    let customer = o.get("customer").and_then(|v| v.as_str()).unwrap_or("");
+    let t = total(o);
+    match o.get("status").and_then(|v| v.as_str()).unwrap_or("") {
+      "paid" => {
+        let s = paid.get(customer).unwrap_or(Sum { n: 0, cents: 0 });
+        paid.insert(customer, Sum { n: s.n + 1, cents: s.cents + t });
+      }
+      "refunded" => { refunded = Sum { n: refunded.n + 1, cents: refunded.cents + t }; }
+      "pending" => { pending += 1; }
+      _ => {}
+    }
+  }
+  let mut out: List<Str> = [];
+  for c in paid.keys() {
+    let s = paid.get(c).unwrap_or(Sum { n: 0, cents: 0 });
+    out.push(c + " " + s.n.to_str() + " " + s.cents.to_str());
+  }
+  out.push("refunded " + refunded.n.to_str() + " " + refunded.cents.to_str());
+  out.push("pending " + pending.to_str());
+  Ok(out.join("\n"))
+}

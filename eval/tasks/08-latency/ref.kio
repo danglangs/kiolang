@@ -1,0 +1,25 @@
+fn rank(ts: List<Int>, pct: Int) -> Int {
+  ts[(pct * ts.len() + 99) / 100 - 1]
+}
+
+fn main(input: Dir) -> Result<Str, IoErr> {
+  let text = input.read("timings.log")?.to_str();
+  let mut groups: Map<Str, List<Int>> = Map::new();
+  for line in text.lines() {
+    let f = line.split(" ").filter(|s| s != "");
+    if f.len() != 3 { continue; }
+    let Some(ms) = f[2].parse_int() else { continue; };
+    let key = f[0] + " " + f[1];
+    let mut ts = groups.get(key).unwrap_or([]);
+    ts.push(ms);
+    groups.insert(key, ts);
+  }
+  let mut out: List<Str> = [];
+  for key in groups.keys() {
+    let mut ts = groups.get(key).unwrap_or([]);
+    ts.sort();
+    out.push(key + " count=" + ts.len().to_str() + " p50=" + rank(ts, 50).to_str()
+      + " p95=" + rank(ts, 95).to_str() + " max=" + ts[ts.len() - 1].to_str());
+  }
+  Ok(out.join("\n"))
+}

@@ -1,0 +1,13 @@
+f(a[1], {b: 2})
+f(a[1)]
+x)
+{[(
+
+let v = [[1, 2], [3, (4 + 5)]];
+if (a && (b || c) { run(); }
+}{
+map.get("k").unwrap_or([]).len()
+((((((((((x))))))))))
+[{(})]
+plain text, no brackets
+fn main() { loop { if x { break; } }

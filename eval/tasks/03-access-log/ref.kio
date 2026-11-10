@@ -1,0 +1,48 @@
+struct Entry { ip: Str, path: Str, status: Str, bytes: Int }
+
+fn parse(line: Str) -> Option<Entry> {
+  let q = line.split("\"");
+  if q.len() != 3 { return None; }
+  let head = q[0].split(" ");
+  let req = q[1].split(" ");
+  let tail = q[2].trim().split(" ");
+  if head.len() < 4 || req.len() != 3 || tail.len() != 2 || tail[0].len() != 3 { return None; }
+  tail[0].parse_int()?;
+  let bytes = if tail[1] == "-" { 0 } else { tail[1].parse_int()? };
+  Some(Entry { ip: head[0], path: req[1].split("?")[0], status: tail[0], bytes: bytes })
+}
+
+fn bump(m: Map<Str, Int>, k: Str) -> Map<Str, Int> {
+  let mut m2 = m;
+  m2.insert(k, m.get(k).unwrap_or(0) + 1);
+  m2
+}
+
+fn main(input: Dir) -> Result<Str, IoErr> {
+  let text = input.read("access.log")?.to_str();
+  let mut status: Map<Str, Int> = Map::new();
+  let mut paths: Map<Str, Int> = Map::new();
+  let mut errors: Map<Str, Int> = Map::new();
+  let mut total = 0;
+  for line in text.lines() {
+    let Some(e) = parse(line) else { continue; };
+    status = bump(status, e.status);
+    paths = bump(paths, e.path);
+    total += e.bytes;
+    if e.status.starts_with("5") { errors = bump(errors, e.ip); }
+  }
+  let mut out: List<Str> = [];
+  for k in status.keys() { out.push(k + " " + status.get(k).unwrap_or(0).to_str()); }
+  out.push("bytes " + total.to_str());
+  let mut top = "";
+  let mut best = 0;
+  for p in paths.keys() {
+    let n = paths.get(p).unwrap_or(0);
+    if n > best { top = p; best = n; }
+  }
+  out.push("top " + top + " " + best.to_str());
+  let mut ips = errors.keys();
+  ips.sort_by(|a, b| errors.get(a).unwrap_or(0) > errors.get(b).unwrap_or(0));
+  for ip in ips { out.push("errors " + ip + " " + errors.get(ip).unwrap_or(0).to_str()); }
+  Ok(out.join("\n"))
+}

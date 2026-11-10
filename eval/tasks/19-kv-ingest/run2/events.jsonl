@@ -1,0 +1,7 @@
+{"id": "e-2", "account": "globex", "cents": 500}
+{"id": "e-6", "account": "initech", "cents": 99}
+{"id": "e-7", "account": "globex", "cents": -1000}
+{"account": "umbrella", "cents": 10}
+{"id": "e-8", "account": "umbrella", "cents": 10}
+{"id": "e-8", "account": "umbrella", "cents": 10}
+[1, 2, 3]

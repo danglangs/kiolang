@@ -1,0 +1,32 @@
+fn is_letter(c: Int) -> Bool {
+  (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+}
+
+fn words(text: Str) -> List<Str> {
+  let b = text.to_bytes();
+  let mut out: List<Str> = [];
+  let mut start = -1;
+  for i in 0..b.len() + 1 {
+    let letter = i < b.len() && is_letter(b[i]);
+    if letter && start < 0 { start = i; }
+    if !letter && start >= 0 {
+      out.push(b.slice(start, i).to_str().to_lowercase());
+      start = -1;
+    }
+  }
+  out
+}
+
+struct Count { word: Str, n: Int }
+
+fn main(input: Dir) -> Result<Str, IoErr> {
+  let text = input.read("text.txt")?.to_str();
+  let mut counts: HashMap<Str, Int> = HashMap::new();
+  for w in words(text) { counts.insert(w, counts.get(w).unwrap_or(0) + 1); }
+  let mut rows: List<Count> = [];
+  for w in counts.keys() { rows.push(Count { word: w, n: counts.get(w).unwrap_or(0) }); }
+  rows.sort_by(|a, b| a.n > b.n || (a.n == b.n && a.word < b.word));
+  let mut lines: List<Str> = [];
+  for r in rows.slice(0, rows.len().min(5)) { lines.push(r.word + " " + r.n.to_str()); }
+  Ok(lines.join("\n"))
+}

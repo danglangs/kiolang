@@ -1,0 +1,5 @@
+DELETE /api/users count=81 p50=70 p95=163 max=218
+GET /api/orders count=70 p50=151 p95=409 max=531
+GET /api/users count=82 p50=70 p95=151 max=307
+GET /health count=83 p50=5 p95=15 max=30
+POST /api/orders count=84 p50=158 p95=494 max=632

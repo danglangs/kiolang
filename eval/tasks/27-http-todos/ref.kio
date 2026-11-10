@@ -1,0 +1,103 @@
+struct Todo { id: Int, title: Str, done: Bool }
+
+fn json(t: Todo) -> Json {
+  let mut m: Map<Str, Json> = Map::new();
+  m.insert("id", Json::Num(t.id));
+  m.insert("title", Json::Str(t.title));
+  m.insert("done", Json::Bool(t.done));
+  Json::Obj(m)
+}
+
+fn reply(res: Outgoing, status: Int, body: Json) -> Result<(), WebErr> {
+  res.send(status, ["content-type"], ["application/json"], body.to_json().to_bytes())
+}
+
+fn error(res: Outgoing, status: Int, msg: Str) -> Result<(), WebErr> {
+  let mut m: Map<Str, Json> = Map::new();
+  m.insert("error", Json::Str(msg));
+  reply(res, status, Json::Obj(m))
+}
+
+// Keys sort by id: "todo:" and the id padded to 12 digits.
+fn key(id: Int) -> Str {
+  let s = id.to_str();
+  let mut pad = "";
+  for _ in s.len()..12 { pad = pad + "0"; }
+  "todo:" + pad + s
+}
+
+fn decode(b: Bytes) -> Option<Todo> {
+  let j = b.to_str().parse_json().ok()?;
+  Some(Todo { id: j.get("id")?.as_int()?, title: j.get("title")?.as_str()?, done: j.get("done")?.as_bool()? })
+}
+
+fn load(store: Kv, id: Int) -> Option<Todo> {
+  decode(store.get(key(id)).ok()??)
+}
+
+fn save(store: Kv, t: Todo) -> Result<(), KvErr> {
+  store.set(key(t.id), json(t).to_json().to_bytes())
+}
+
+fn all(store: Kv) -> List<Todo> {
+  let mut out: List<Todo> = [];
+  let mut after: Option<Str> = None;
+  loop {
+    let page = store.scan("todo:", after, 1000).unwrap_or([]);
+    for e in page { if let Some(t) = decode(e.value) { out.push(t); } }
+    if page.len() < 1000 { break; }
+    after = Some(page[page.len() - 1].key);
+  }
+  out
+}
+
+fn title_of(body: Json) -> Option<Str> {
+  let t = body.get("title")?.as_str()?.trim();
+  if t == "" { None } else { Some(t) }
+}
+
+fn patch(t: Todo, body: Json) -> Option<Todo> {
+  let Json::Obj(m) = body else { return None; };
+  let mut out = t;
+  if m.get("title").is_some() { out.title = title_of(body)?; }
+  if let Some(d) = m.get("done") { out.done = d.as_bool()?; }
+  Some(out)
+}
+
+fn main(req: Incoming, res: Outgoing, store: Kv) -> Result<(), WebErr> {
+  let method = req.method();
+  let target = req.target();
+  let body = req.body().to_str().parse_json().unwrap_or(Json::Null);
+  let parts = match target.find("?") {
+    Some(i) => [target.slice(0, i), target.slice(i + 1, target.len())],
+    None => [target, ""],
+  };
+  let path = parts[0];
+  let query = parts[1];
+  if path == "/todos" && method == "GET" {
+    let todos = all(store).filter(|t| query == "" || (query == "done=true" && t.done) || (query == "done=false" && !t.done));
+    return reply(res, 200, Json::Arr(todos.map(json)));
+  }
+  if path == "/todos" && method == "POST" {
+    let Some(title) = title_of(body) else { return error(res, 400, "title required"); };
+    let Ok(id) = store.add("next", 1) else { return error(res, 500, "store failed"); };
+    let t = Todo { id: id, title: title, done: false };
+    if save(store, t).is_err() { return error(res, 500, "store failed"); }
+    return reply(res, 201, json(t));
+  }
+  let Some(id) = path.strip_prefix("/todos/").and_then(|s| s.parse_int()) else { return error(res, 404, "not found"); };
+  let Some(t) = load(store, id) else { return error(res, 404, "not found"); };
+  match method {
+    "GET" => reply(res, 200, json(t)),
+    "DELETE" => {
+      if store.delete(key(id)).is_err() { return error(res, 500, "store failed"); }
+      res.send(204, [], [], "".to_bytes())
+    }
+    "PATCH" => {
+      let Some(u) = patch(t, body) else { return error(res, 400, "bad update"); };
+      if save(store, u).is_err() { return error(res, 500, "store failed"); }
+      reply(res, 200, json(u))
+    }
+    _ => error(res, 404, "not found"),
+  }
+}

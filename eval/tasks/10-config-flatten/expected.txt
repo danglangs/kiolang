@@ -1,0 +1,16 @@
+db.pool.max=50
+db.pool.min=2
+db.replicas.0.host="r3"
+db.url="postgres://db/orders"
+features.beta=true
+features.new_ui={}
+features.tags.0="a b"
+features.tags.1="quote\"d"
+limits=5
+name="orders-service"
+region="eu-west-1"
+server.host="0.0.0.0"
+server.port=9090
+server.ports.0=9090
+server.tls.cert="/etc/tls/cert.pem"
+server.tls.enabled=true

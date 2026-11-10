@@ -1,0 +1,7 @@
+added Z-new.md
+same a.txt
+updated b.txt
+added c.txt
+updated d.cfg
+same empty
+kept 2

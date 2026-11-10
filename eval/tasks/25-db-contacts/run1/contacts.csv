@@ -1,0 +1,9 @@
+email,name,phone
+ann@example.com,Ann Lee,555-0101
+Bob@Example.com,Bob Ray,
+carol@example.com,Carol Diaz,555-0103
+ANN@example.com ,Ann Lee,555-0101
+dave-at-example.com,Dave,555-0104
+bob@example.com,Robert Ray,
+
+eve@example.com,Eve,555-0105,extra

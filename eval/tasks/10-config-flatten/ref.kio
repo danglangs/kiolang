@@ -1,0 +1,48 @@
+enum Failed { Io(IoErr), Json(Str) }
+
+fn merge(base: Map<Str, Json>, over: Map<Str, Json>) -> Map<Str, Json> {
+  let mut out = base;
+  for k in over.keys() {
+    let v = over.get(k).unwrap_or(Json::Null);
+    match v {
+      Json::Null => out.remove(k),
+      Json::Obj(o) => {
+        match out.get(k) {
+          Some(Json::Obj(b)) => out.insert(k, Json::Obj(merge(b, o))),
+          _ => out.insert(k, v),
+        }
+      }
+      _ => out.insert(k, v),
+    }
+  }
+  out
+}
+
+fn leaves(path: Str, v: Json, out: List<Str>) -> List<Str> {
+  let mut acc = out;
+  let sep = if path == "" { "" } else { "." };
+  match v {
+    Json::Obj(m) => {
+      if m.len() == 0 { acc.push(path + "={}"); }
+      for k in m.keys() { acc = leaves(path + sep + k, m.get(k).unwrap_or(Json::Null), acc); }
+    }
+    Json::Arr(xs) => {
+      if xs.len() == 0 { acc.push(path + "=[]"); }
+      for i in 0..xs.len() { acc = leaves(path + sep + i.to_str(), xs[i], acc); }
+    }
+    _ => acc.push(path + "=" + v.to_json()),
+  }
+  acc
+}
+
+fn load(input: Dir, name: Str) -> Result<Map<Str, Json>, Failed> {
+  let text = input.read(name).map_err(|e| Failed::Io(e))?.to_str();
+  Ok(text.parse_json().map_err(|e| Failed::Json(e))?.as_map().unwrap_or(Map::new()))
+}
+
+fn main(input: Dir) -> Result<Str, Failed> {
+  let merged = merge(load(input, "base.json")?, load(input, "override.json")?);
+  let mut out = leaves("", Json::Obj(merged), []);
+  out.sort_by_key(|l| l.slice(0, l.find("=").unwrap_or(0)));
+  Ok(out.join("\n"))
+}

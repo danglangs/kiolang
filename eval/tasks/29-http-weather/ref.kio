@@ -1,0 +1,36 @@
+struct Station { id: Str, name: Str }
+
+enum Failed { Http(HttpErr), Json(Str) }
+
+fn deg(v: Int) -> Str {
+  let a = if v < 0 { -v } else { v };
+  (if v < 0 { "-" } else { "" }) + (a / 10).to_str() + "." + (a % 10).to_str()
+}
+
+fn fetch(api: Http, path: Str) -> Result<Json, Failed> {
+  api.get(path).map_err(|e| Failed::Http(e))?.to_str().parse_json().map_err(|e| Failed::Json(e))
+}
+
+fn summary(api: Http, s: Station) -> Str {
+  let Ok(doc) = fetch(api, "/stations/" + s.id + "/readings") else { return s.name + " unavailable"; };
+  let temps = doc.get("readings").and_then(|r| r.as_list()).unwrap_or([])
+    .map(|r| r.get("temp").and_then(|t| t.as_int()).unwrap_or(0));
+  if temps.len() == 0 { return s.name + " no data"; }
+  let mut lo = temps[0];
+  let mut hi = temps[0];
+  let mut sum = 0;
+  for t in temps { lo = lo.min(t); hi = hi.max(t); sum += t; }
+  s.name + " min=" + deg(lo) + " max=" + deg(hi) + " avg=" + deg(sum / temps.len()) + " n=" + temps.len().to_str()
+}
+
+fn main(api: Http) -> Result<Str, Failed> {
+  let doc = fetch(api, "/stations")?;
+  let mut stations = doc.get("stations").and_then(|s| s.as_list()).unwrap_or([]).map(|j| Station {
+    id: j.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+    name: j.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+  });
+  stations.sort_by_key(|s| s.name);
+  let mut out: List<Str> = [];
+  for s in stations { out.push(summary(api, s)); }
+  Ok(out.join("\n"))
+}

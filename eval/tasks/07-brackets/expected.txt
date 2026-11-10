@@ -1,0 +1,13 @@
+ok
+col 6: expected ], found )
+col 2: unexpected )
+unclosed )
+ok
+ok
+unclosed )
+col 1: unexpected }
+ok
+ok
+col 4: expected ), found }
+ok
+unclosed }

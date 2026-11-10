@@ -1,0 +1,14 @@
+date,region,product,qty,unit_cents
+2026-10-01,west,widget,3,1250
+2026-10-01,east,gadget,1,999
+2026-10-02,west,gadget,x,999
+2026-10-02, north , widget , 10 , 1250
+
+2026-10-03,east,widget,4,1250
+2026-10-03,south,sprocket,7,305
+2026-10-04,east,sprocket,2
+2026-10-04,north,gadget,2,999
+2026-10-05,west,sprocket,100,305
+2026-10-05,south,widget,1,-50
+2026-10-06,east,gadget,3,1.5
+2026-10-06,central,widget,0,1250

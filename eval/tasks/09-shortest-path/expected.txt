@@ -1,0 +1,7 @@
+Ashby -> Corin -> Fenwick -> Eston 20
+Brill -> Corin -> Fenwick 12
+Fenwick -> Corin -> Ashby 11
+Ashby Holt unreachable
+Holt -> Gale 3
+Corin 0
+Kell -> Jory -> Moss 4

@@ -1,0 +1,8 @@
+{
+  "server": {"port": 9090, "ports": [9090], "tls": {"enabled": true}},
+  "db": {"pool": {"max": 50}, "replicas": [{"host": "r3"}]},
+  "features": {"legacy": null, "new_ui": {}, "tags": ["a b", "quote\"d"]},
+  "limits": 5,
+  "owner": null,
+  "region": "eu-west-1"
+}

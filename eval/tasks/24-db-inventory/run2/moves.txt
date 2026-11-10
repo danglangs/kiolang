@@ -1,0 +1,10 @@
+batch ship-10
+widget -27
+batch ship-11
+widget -27
+batch receive-18
+gizmo +7
+widget +1
+batch ship-12
+gizmo -7
+widget -28

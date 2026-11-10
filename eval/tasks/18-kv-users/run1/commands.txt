@@ -1,0 +1,12 @@
+put u1 ann ann@example.com
+put u2 bob bob@example.com
+get u1
+get u3
+rename u2 robert
+put u3 cy cy@example.com
+count
+del u3
+del u3
+frobnicate u1
+
+count

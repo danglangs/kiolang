@@ -1,0 +1,39 @@
+enum Failed { Io(IoErr), Kv(KvErr) }
+
+struct Player { name: Str, points: Int, played: Int }
+
+fn kv<T>(r: Result<T, KvErr>) -> Result<T, Failed> { r.map_err(|e| Failed::Kv(e)) }
+
+fn record(board: Kv, name: Str, points: Int) -> Result<(), Failed> {
+  kv(board.add("points:" + name, points))?;
+  kv(board.add("played:" + name, 1))?;
+  Ok(())
+}
+
+fn int(b: Option<Bytes>) -> Int { b.and_then(|v| v.to_str().parse_int()).unwrap_or(0) }
+
+fn main(input: Dir, board: Kv) -> Result<Str, Failed> {
+  let text = input.read("games.txt").map_err(|e| Failed::Io(e))?.to_str();
+  for line in text.lines() {
+    let f = line.split(" ").filter(|s| s != "");
+    if f.len() == 2 {
+      record(board, f[0], 3)?;
+      record(board, f[1], 0)?;
+    } else if f.len() == 3 && f[2] == "draw" {
+      record(board, f[0], 1)?;
+      record(board, f[1], 1)?;
+    }
+  }
+  let mut players: List<Player> = [];
+  for key in kv(board.keys("points:"))? {
+    let name = key.strip_prefix("points:").unwrap_or("");
+    players.push(Player { name: name, points: int(kv(board.get(key))?), played: int(kv(board.get("played:" + name))?) });
+  }
+  players.sort_by(|a, b| a.points > b.points || (a.points == b.points && a.played < b.played));
+  let mut out: List<Str> = [];
+  for i in 0..players.len().min(3) {
+    let p = players[i];
+    out.push((i + 1).to_str() + ". " + p.name + " " + p.points.to_str() + " " + p.played.to_str());
+  }
+  Ok(out.join("\n"))
+}

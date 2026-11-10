@@ -1,0 +1,9 @@
+{"id": "e-1", "account": "acme", "cents": 1250}
+{"id": "e-2", "account": "globex", "cents": 500}
+{"id": "e-1", "account": "acme", "cents": 1250}
+{"id": "e-3", "account": "acme", "cents": -250}
+not json at all
+{"id": 4, "account": "acme", "cents": 1}
+
+{"id": "e-5", "account": "initech", "cents": 2.5}
+{"id": "e-6", "account": "initech", "cents": 99}

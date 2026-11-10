@@ -1,0 +1,60 @@
+struct Counter { name: Str, count: Int }
+
+fn reply(res: Outgoing, status: Int, body: Json) -> Result<(), WebErr> {
+  res.send(status, ["content-type"], ["application/json"], body.to_json().to_bytes())
+}
+
+fn error(res: Outgoing, status: Int, msg: Str) -> Result<(), WebErr> {
+  let mut m: Map<Str, Json> = Map::new();
+  m.insert("error", Json::Str(msg));
+  reply(res, status, Json::Obj(m))
+}
+
+fn counter(c: Counter) -> Json {
+  let mut m: Map<Str, Json> = Map::new();
+  m.insert("name", Json::Str(c.name));
+  m.insert("count", Json::Num(c.count));
+  Json::Obj(m)
+}
+
+fn valid(name: Str) -> Bool {
+  let b = name.to_bytes();
+  if b.len() < 1 || b.len() > 32 { return false; }
+  for i in 0..b.len() {
+    let c = b[i];
+    if !((c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 45) { return false; }
+  }
+  true
+}
+
+fn get(counts: Kv, key: Str) -> Int {
+  match counts.get(key) { Ok(Some(b)) => b.to_str().parse_int().unwrap_or(0), _ => 0 }
+}
+
+fn top(counts: Kv) -> List<Counter> {
+  let keys = counts.keys("c:").unwrap_or([]);
+  let mut all = keys.map(|k| Counter { name: k.strip_prefix("c:").unwrap_or(""), count: 0 });
+  for i in 0..all.len() { all[i].count = get(counts, keys[i]); }
+  all.sort_by(|a, b| a.count > b.count);
+  all.slice(0, all.len().min(3))
+}
+
+fn main(req: Incoming, res: Outgoing, counts: Kv) -> Result<(), WebErr> {
+  let method = req.method();
+  let path = req.target();
+  if method == "GET" && path == "/top" {
+    return reply(res, 200, Json::Arr(top(counts).map(counter)));
+  }
+  let parts = path.split("/");
+  if parts.len() != 3 || parts[0] != "" { return error(res, 404, "not found"); }
+  let hit = method == "POST" && parts[1] == "hit";
+  if !hit && !(method == "GET" && parts[1] == "count") { return error(res, 404, "not found"); }
+  let name = parts[2];
+  if !valid(name) { return error(res, 400, "bad name"); }
+  let count = if hit {
+    match counts.add("c:" + name, 1) { Ok(n) => n, Err(_) => return error(res, 500, "store failed") }
+  } else {
+    get(counts, "c:" + name)
+  };
+  reply(res, 200, counter(Counter { name: name, count: count }))
+}

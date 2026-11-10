@@ -1,0 +1,36 @@
+struct Row { path: Str, bytes: Int, lines: Int }
+
+fn count_lines(b: Bytes) -> Int {
+  let mut n = 0;
+  for i in 0..b.len() { if b[i] == 10 { n += 1; } }
+  if b.len() > 0 && b[b.len() - 1] != 10 { n += 1; }
+  n
+}
+
+fn walk(input: Dir, prefix: Str, rows: List<Row>) -> Result<List<Row>, IoErr> {
+  let mut acc = rows;
+  for name in input.list(prefix)? {
+    let path = if prefix == "" { name } else { prefix + "/" + name };
+    match path.strip_suffix("/") {
+      Some(sub) => { acc = walk(input, sub, acc)?; }
+      None => {
+        let b = input.read(path)?;
+        acc.push(Row { path: path, bytes: b.len(), lines: count_lines(b) });
+      }
+    }
+  }
+  Ok(acc)
+}
+
+fn main(input: Dir, out: Dir) -> Result<Str, IoErr> {
+  let mut rows = walk(input, "", [])?;
+  rows.sort_by_key(|r| r.path);
+  let mut csv = "path,bytes,lines\n";
+  let mut total = 0;
+  for r in rows {
+    csv = csv + r.path + "," + r.bytes.to_str() + "," + r.lines.to_str() + "\n";
+    total += r.bytes;
+  }
+  out.write("index.csv", csv.to_bytes())?;
+  Ok("files " + rows.len().to_str() + " bytes " + total.to_str())
+}

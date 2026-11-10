@@ -1,0 +1,30 @@
+fn keep(c: Int) -> Bool { (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 46 }
+
+fn normalize(name: Str) -> Str {
+  let b = name.to_lowercase().to_bytes();
+  let mut out = "".to_bytes();
+  let mut dash = false;
+  for i in 0..b.len() {
+    if keep(b[i]) {
+      if dash && out.len() > 0 { out.push(45); }
+      dash = false;
+      out.push(b[i]);
+    } else {
+      dash = true;
+    }
+  }
+  out.to_str()
+}
+
+fn main(input: Dir, out: Dir) -> Result<Str, IoErr> {
+  let mut report: List<Str> = [];
+  let mut taken: List<Str> = [];
+  for name in input.list("")? {
+    let new = normalize(name);
+    if taken.contains(new) { report.push(name + " skipped"); continue; }
+    taken.push(new);
+    out.write(new, input.read(name)?)?;
+    report.push(name + " -> " + new);
+  }
+  Ok(report.join("\n"))
+}

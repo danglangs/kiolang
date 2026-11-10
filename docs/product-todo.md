@@ -18,6 +18,7 @@ operator runs it:  kio run app.kio --http stripe=… --http-header stripe=Author
   - Measures per task: checks on the first try (kio), passes on the first try, passes by round 5, rounds used, and the main parameters asked for beyond the task's grants (over-asked authority).
   - Output: `eval/results/<date>-<model>-<lang>.json`; a table in roadmap.md (Haiku, Sonnet and Opus 5.5, kio vs Python) and the ten diagnostics hit most, each becoming an L12-style task.
   - Done: the 30 tasks, each with a reference kio and Python solution that pass their checks (CI runs the references, not the models); one full run per model recorded.
+  - Built: 30 tasks with references (`eval/check_refs.sh`, 18 s on a debug kio, in CI), `eval/run.py`. Smoke run, Haiku on 01, 17, 26: kio 3/3 first try, Python 3/3. Left: the full runs and the roadmap table.
 
 - [x] **P1. `kio check NEW --base OLD`: the authority diff.** What a reviewer approves.
   - `lang::report_diff(old, new) -> Vec<String>`: per function, the capability methods added (`+ create: hook send`) and removed (`- ...`); `main`'s parameters first, as a new parameter is a new grant: `+ main: grant hook: Http`. Functions present in one side only count as all-added or all-removed. Unchanged functions are not shown; nothing changed prints `no change in authority`.

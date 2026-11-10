@@ -1,0 +1,37 @@
+enum Failed { Io(IoErr), Db(DbErr) }
+
+fn db<T>(r: Result<T, DbErr>) -> Result<T, Failed> { r.map_err(|e| Failed::Db(e)) }
+
+fn text(v: SqlValue) -> Str { match v { SqlValue::Text(s) => s, _ => "" } }
+
+// "inserted", "updated" or "unchanged".
+fn upsert(crm: Db, email: Str, name: Str, phone: Str) -> Result<Str, Failed> {
+  let rows = db(crm.query("SELECT name, phone FROM contacts WHERE email = ?", [SqlValue::Text(email)]))?;
+  if rows.len() == 0 {
+    db(crm.exec("INSERT INTO contacts VALUES (?, ?, ?)", [SqlValue::Text(email), SqlValue::Text(name), SqlValue::Text(phone)]))?;
+    return Ok("inserted");
+  }
+  if text(rows[0][0]) == name && text(rows[0][1]) == phone { return Ok("unchanged"); }
+  db(crm.exec("UPDATE contacts SET name = ?, phone = ? WHERE email = ?", [SqlValue::Text(name), SqlValue::Text(phone), SqlValue::Text(email)]))?;
+  Ok("updated")
+}
+
+fn main(input: Dir, crm: Db) -> Result<Str, Failed> {
+  let lines = input.read("contacts.csv").map_err(|e| Failed::Io(e))?.to_str().lines();
+  db(crm.exec("CREATE TABLE IF NOT EXISTS contacts (email TEXT PRIMARY KEY, name TEXT, phone TEXT)", []))?;
+  let mut counts: HashMap<Str, Int> = HashMap::new();
+  for k in ["inserted", "updated", "unchanged", "rejected"] { counts.insert(k, 0); }
+  for i in 1..lines.len() {
+    if lines[i].trim() == "" { continue; }
+    let f = lines[i].split(",").map(|s| s.trim());
+    let outcome = if f.len() != 3 || !f[0].contains("@") { "rejected" } else { upsert(crm, f[0].to_lowercase(), f[1], f[2])? };
+    counts.insert(outcome, counts.get(outcome).unwrap_or(0) + 1);
+  }
+  let mut out = [counts.keys().map(|k| k + " " + counts.get(k).unwrap_or(0).to_str()).join(" ")];
+  let total = db(crm.query("SELECT COUNT(*) FROM contacts", []))?;
+  out.push("contacts " + match total[0][0] { SqlValue::Int(n) => n.to_str(), _ => "?" });
+  for row in db(crm.query("SELECT email FROM contacts WHERE phone = '' ORDER BY email", []))? {
+    out.push("missing phone: " + text(row[0]));
+  }
+  Ok(out.join("\n"))
+}

@@ -1,0 +1,57 @@
+enum Failed { Io(IoErr), Kv(KvErr) }
+
+struct User { id: Str, name: Str, email: Str }
+
+fn kv<T>(r: Result<T, KvErr>) -> Result<T, Failed> { r.map_err(|e| Failed::Kv(e)) }
+
+fn encode(u: User) -> Str {
+  "{\"id\":" + Json::Str(u.id).to_json() + ",\"name\":" + Json::Str(u.name).to_json()
+    + ",\"email\":" + Json::Str(u.email).to_json() + "}"
+}
+
+fn load(users: Kv, id: Str) -> Result<Option<User>, Failed> {
+  let Some(b) = kv(users.get("user:" + id))? else { return Ok(None); };
+  let Ok(j) = b.to_str().parse_json() else { return Ok(None); };
+  let field = |k: Str| j.get(k).and_then(|v| v.as_str()).unwrap_or("");
+  Ok(Some(User { id: field("id"), name: field("name"), email: field("email") }))
+}
+
+fn save(users: Kv, u: User) -> Result<(), Failed> {
+  kv(users.set("user:" + u.id, encode(u).to_bytes()))
+}
+
+fn run(users: Kv, f: List<Str>) -> Result<Str, Failed> {
+  let cmd = f[0];
+  if cmd == "put" && f.len() == 4 {
+    save(users, User { id: f[1], name: f[2], email: f[3] })?;
+    return Ok("ok " + f[1]);
+  }
+  if cmd == "count" && f.len() == 1 {
+    return Ok("count " + kv(users.keys("user:"))?.len().to_str());
+  }
+  let arity = if cmd == "rename" { 3 } else { 2 };
+  if !(cmd == "rename" || cmd == "get" || cmd == "del") || f.len() != arity {
+    return Ok("bad " + f.join(" "));
+  }
+  let Some(u) = load(users, f[1])? else { return Ok("missing " + f[1]); };
+  if cmd == "rename" {
+    save(users, User { name: f[2], ..u })?;
+    Ok("ok " + f[1])
+  } else if cmd == "get" {
+    Ok(encode(u))
+  } else {
+    kv(users.delete("user:" + f[1]))?;
+    Ok("ok " + f[1])
+  }
+}
+
+fn main(input: Dir, users: Kv) -> Result<Str, Failed> {
+  let text = input.read("commands.txt").map_err(|e| Failed::Io(e))?.to_str();
+  let mut out: List<Str> = [];
+  for line in text.lines() {
+    let f = line.split(" ").filter(|s| s != "");
+    if f.len() == 0 { continue; }
+    out.push(run(users, f)?);
+  }
+  Ok(out.join("\n"))
+}

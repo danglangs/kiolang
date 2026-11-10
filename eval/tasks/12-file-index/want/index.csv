@@ -1,0 +1,11 @@
+path,bytes,lines
+README.md,28,3
+Zebra.txt,4,1
+docs/api/v1.md,15,2
+docs/api/v2.md,11,3
+docs/index.md,9,1
+empty-dir/inner/deep.txt,2,1
+empty.txt,0,0
+notes.txt,17,1
+src/main.kio,13,1
+src/util/strings.kio,19,2

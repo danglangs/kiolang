@@ -1,0 +1,17 @@
+ Bob@Example.com
+bob@example.com
+J.Doe+news@Gmail.com
+jdoe@gmail.com
+j.d.o.e@GMAIL.COM
+not-an-email
+alice@@example.com
+@example.com
+carol@localhost
+
+dave+tag@example.org
+dave@example.org
+eve@.example.com
+frank@example.com.
+  GRACE@Sub.Example.CO.UK
+heidi.x+1+2@gmail.com
+ivan@example.com@x.org

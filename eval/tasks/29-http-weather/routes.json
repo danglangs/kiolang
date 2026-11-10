@@ -1,0 +1,22 @@
+{
+  "GET /stations": {"status": 200, "body": {"stations": [
+    {"id": "s1", "name": "North Ridge"},
+    {"id": "s2", "name": "Harbor"},
+    {"id": "s3", "name": "Airport"},
+    {"id": "s4", "name": "Old Mill"},
+    {"id": "s5", "name": "Summit"}
+  ]}},
+  "GET /stations/s1/readings": {"status": 200, "body": {"station": "s1", "readings": [
+    {"t": "2026-11-09T06:00Z", "temp": -42}, {"t": "2026-11-09T09:00Z", "temp": -5},
+    {"t": "2026-11-09T12:00Z", "temp": 18}, {"t": "2026-11-09T15:00Z", "temp": 7}
+  ]}},
+  "GET /stations/s2/readings": {"status": 200, "body": {"station": "s2", "readings": [
+    {"t": "2026-11-09T06:00Z", "temp": 101}, {"t": "2026-11-09T12:00Z", "temp": 134},
+    {"t": "2026-11-09T18:00Z", "temp": 120}
+  ]}},
+  "GET /stations/s3/readings": {"status": 503, "body": {"error": "maintenance"}},
+  "GET /stations/s4/readings": {"status": 200, "body": {"station": "s4", "readings": []}},
+  "GET /stations/s5/readings": {"status": 200, "body": {"station": "s5", "readings": [
+    {"t": "2026-11-09T06:00Z", "temp": -3}, {"t": "2026-11-09T12:00Z", "temp": -4}
+  ]}}
+}

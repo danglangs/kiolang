@@ -1,0 +1,19 @@
+batch receive-17
+widget +40
+gadget +5
+batch ship-9
+widget -12
+gadget -6
+batch ship-10
+widget -12
+gadget -5
+
+batch receive-17
+widget +1000
+batch adjust-1
+sprocket +3
+sprocket -3
+widget -1
+batch typo-1
+widget +2
+widget minus 3

@@ -1,0 +1,2 @@
+2026-11-09T10:00:03Z WARN slow query: 812ms SELECT * FROM orders
+2026-11-09T10:00:05Z Warning disk 91% full

@@ -1,0 +1,66 @@
+struct Edge { to: Str, cost: Int }
+struct Route { cost: Int, path: List<Str> }
+
+// `a` before `b`: lower cost, then the smaller list of towns.
+fn better(a: Route, b: Route) -> Bool {
+  if a.cost != b.cost { return a.cost < b.cost; }
+  let n = a.path.len().min(b.path.len());
+  for i in 0..n {
+    if a.path[i] != b.path[i] { return a.path[i] < b.path[i]; }
+  }
+  a.path.len() < b.path.len()
+}
+
+fn cheapest(adj: Map<Str, List<Edge>>, from: Str, to: Str) -> Option<Route> {
+  let mut open: List<Route> = [Route { cost: 0, path: [from] }];
+  let mut done: Map<Str, Bool> = Map::new();
+  while open.len() > 0 {
+    let mut best = 0;
+    for i in 1..open.len() { if better(open[i], open[best]) { best = i; } }
+    let r = open[best];
+    let mut rest: List<Route> = [];
+    for i in 0..open.len() { if i != best { rest.push(open[i]); } }
+    open = rest;
+    let town = r.path[r.path.len() - 1];
+    if done.get(town).is_some() { continue; }
+    done.insert(town, true);
+    if town == to { return Some(r); }
+    for e in adj.get(town).unwrap_or([]) {
+      if done.get(e.to).is_none() {
+        let mut p = r.path;
+        p.push(e.to);
+        open.push(Route { cost: r.cost + e.cost, path: p });
+      }
+    }
+  }
+  None
+}
+
+fn main(input: Dir) -> Result<Str, IoErr> {
+  let text = input.read("routes.txt")?.to_str();
+  let mut adj: Map<Str, List<Edge>> = Map::new();
+  let mut trips: List<List<Str>> = [];
+  for line in text.lines() {
+    let f = line.split(" ").filter(|s| s != "");
+    if f.len() == 0 || f[0].starts_with("#") { continue; }
+    if f[0] == "road" && f.len() == 4 {
+      let cost = f[3].parse_int().unwrap_or(0);
+      let mut a = adj.get(f[1]).unwrap_or([]);
+      a.push(Edge { to: f[2], cost: cost });
+      adj.insert(f[1], a);
+      let mut b = adj.get(f[2]).unwrap_or([]);
+      b.push(Edge { to: f[1], cost: cost });
+      adj.insert(f[2], b);
+    } else if f[0] == "trip" && f.len() == 3 {
+      trips.push([f[1], f[2]]);
+    }
+  }
+  let mut out: List<Str> = [];
+  for t in trips {
+    match cheapest(adj, t[0], t[1]) {
+      Some(r) => out.push(r.path.join(" -> ") + " " + r.cost.to_str()),
+      None => out.push(t[0] + " " + t[1] + " unreachable"),
+    }
+  }
+  Ok(out.join("\n"))
+}

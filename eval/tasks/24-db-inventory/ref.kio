@@ -1,0 +1,64 @@
+enum Failed { Io(IoErr), Db(DbErr) }
+
+struct Batch { name: Str, moves: List<List<Str>> }
+
+fn db<T>(r: Result<T, DbErr>) -> Result<T, Failed> { r.map_err(|e| Failed::Db(e)) }
+
+fn amount(s: Str) -> Option<Int> {
+  let n = if let Some(r) = s.strip_prefix("+") { r.parse_int()? } else if let Some(r) = s.strip_prefix("-") { -r.parse_int()? } else { return None; };
+  if n == 0 || s.slice(1, 2) == "-" || s.slice(1, 2) == "+" { None } else { Some(n) }
+}
+
+fn current(stock: Db, sku: Str) -> Result<Int, Failed> {
+  let rows = db(stock.query("SELECT qty FROM stock WHERE sku = ?", [SqlValue::Text(sku)]))?;
+  if rows.len() == 0 { return Ok(0); }
+  Ok(match rows[0][0] { SqlValue::Int(n) => n, _ => 0 })
+}
+
+// "applied", "rejected" or "skipped".
+fn apply(stock: Db, b: Batch) -> Result<Str, Failed> {
+  if db(stock.query("SELECT 1 FROM batches WHERE name = ?", [SqlValue::Text(b.name)]))?.len() > 0 { return Ok("skipped"); }
+  let mut qty: HashMap<Str, Int> = HashMap::new();
+  for m in b.moves {
+    if m.len() != 2 { return Ok("rejected"); }
+    let Some(n) = amount(m[1]) else { return Ok("rejected"); };
+    let q = match qty.get(m[0]) { Some(q) => q, None => current(stock, m[0])? } + n;
+    if q < 0 { return Ok("rejected"); }
+    qty.insert(m[0], q);
+  }
+  let mut sqls: List<Str> = [];
+  let mut params: List<List<SqlValue>> = [];
+  for sku in qty.keys() {
+    sqls.push("INSERT INTO stock VALUES (?, ?) ON CONFLICT (sku) DO UPDATE SET qty = excluded.qty");
+    params.push([SqlValue::Text(sku), SqlValue::Int(qty.get(sku).unwrap_or(0))]);
+  }
+  sqls.push("INSERT INTO batches VALUES (?)");
+  params.push([SqlValue::Text(b.name)]);
+  db(stock.transaction(sqls, params))?;
+  Ok("applied")
+}
+
+fn main(input: Dir, stock: Db) -> Result<Str, Failed> {
+  let text = input.read("moves.txt").map_err(|e| Failed::Io(e))?.to_str();
+  db(stock.exec("CREATE TABLE IF NOT EXISTS stock (sku TEXT PRIMARY KEY, qty INTEGER NOT NULL)", []))?;
+  db(stock.exec("CREATE TABLE IF NOT EXISTS batches (name TEXT PRIMARY KEY)", []))?;
+  let mut batches: List<Batch> = [];
+  for line in text.lines() {
+    let f = line.split(" ").filter(|s| s != "");
+    if f.len() == 0 { continue; }
+    if f[0] == "batch" && f.len() == 2 {
+      batches.push(Batch { name: f[1], moves: [] });
+    } else if batches.len() > 0 {
+      let last = batches.len() - 1;
+      batches[last].moves.push(f);
+    }
+  }
+  let mut out: List<Str> = [];
+  for b in batches { out.push(b.name + " " + apply(stock, b)?); }
+  for row in db(stock.query("SELECT sku, qty FROM stock WHERE qty != 0 ORDER BY sku", []))? {
+    let sku = match row[0] { SqlValue::Text(s) => s, _ => "" };
+    let q = match row[1] { SqlValue::Int(n) => n, _ => 0 };
+    out.push(sku + " " + q.to_str());
+  }
+  Ok(out.join("\n"))
+}

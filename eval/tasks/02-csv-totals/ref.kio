@@ -1,0 +1,30 @@
+struct Total { region: Str, qty: Int, cents: Int }
+
+fn dollars(c: Int) -> Str {
+  let a = if c < 0 { -c } else { c };
+  let sign = if c < 0 { "-" } else { "" };
+  let frac = a % 100;
+  sign + (a / 100).to_str() + "." + (if frac < 10 { "0" } else { "" }) + frac.to_str()
+}
+
+fn main(input: Dir) -> Result<Str, IoErr> {
+  let text = input.read("sales.csv")?.to_str();
+  let lines = text.lines();
+  let mut totals: Map<Str, Total> = Map::new();
+  let mut skipped = 0;
+  for i in 1..lines.len() {
+    if lines[i].trim() == "" { continue; }
+    let f = lines[i].split(",").map(|s| s.trim());
+    if f.len() != 5 { skipped += 1; continue; }
+    let Some(q) = f[3].parse_int() else { skipped += 1; continue; };
+    let Some(c) = f[4].parse_int() else { skipped += 1; continue; };
+    let t = totals.get(f[1]).unwrap_or(Total { region: f[1], qty: 0, cents: 0 });
+    totals.insert(f[1], Total { qty: t.qty + q, cents: t.cents + q * c, ..t });
+  }
+  let mut rows: List<Total> = [];
+  for k in totals.keys() { if let Some(t) = totals.get(k) { rows.push(t); } }
+  rows.sort_by(|a, b| a.cents > b.cents || (a.cents == b.cents && a.region < b.region));
+  let mut out = rows.map(|t| t.region + " " + t.qty.to_str() + " " + dollars(t.cents));
+  out.push("skipped " + skipped.to_str());
+  Ok(out.join("\n"))
+}

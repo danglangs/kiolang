@@ -1,0 +1,24 @@
+fn main(input: Dir, out: Dir) -> Result<Str, IoErr> {
+  let text = input.read("app.log")?.to_str();
+  let names = ["error", "warn", "info"];
+  let mut files: Map<Str, Str> = Map::new();
+  let mut counts: Map<Str, Int> = Map::new();
+  for n in names { files.insert(n, ""); counts.insert(n, 0); }
+  let mut other = 0;
+  for line in text.lines() {
+    if line.trim() == "" { continue; }
+    let f = line.split(" ");
+    let mut level = if f.len() >= 3 { f[1].to_lowercase() } else { "" };
+    if level == "warning" { level = "warn"; }
+    let Some(body) = files.get(level) else { other += 1; continue; };
+    files.insert(level, body + line + "\n");
+    counts.insert(level, counts.get(level).unwrap_or(0) + 1);
+  }
+  let mut report: List<Str> = [];
+  for n in names {
+    out.write(n + ".log", files.get(n).unwrap_or("").to_bytes())?;
+    report.push(n + " " + counts.get(n).unwrap_or(0).to_str());
+  }
+  report.push("other " + other.to_str());
+  Ok(report.join("\n"))
+}

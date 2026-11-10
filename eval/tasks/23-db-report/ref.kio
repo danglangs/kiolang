@@ -1,0 +1,23 @@
+const PAID: Str = "o.status = 'paid' AND o.placed >= '2026-01-01' AND o.placed < '2027-01-01'";
+
+fn int(v: SqlValue) -> Int { match v { SqlValue::Int(n) => n, _ => 0 } }
+fn text(v: SqlValue) -> Str { match v { SqlValue::Text(s) => s, _ => "" } }
+
+fn main(shop: Db) -> Result<Str, DbErr> {
+  let rows = shop.query("SELECT c.country, COUNT(DISTINCT c.id), COUNT(*), SUM(o.total_cents) "
+    + "FROM orders o JOIN customers c ON c.id = o.customer_id WHERE " + PAID
+    + " GROUP BY c.country ORDER BY 4 DESC, 1", [])?;
+  let mut out: List<Str> = [];
+  let mut orders = 0;
+  let mut revenue = 0;
+  for r in rows {
+    let top = shop.query("SELECT c.name FROM orders o JOIN customers c ON c.id = o.customer_id WHERE " + PAID
+      + " AND c.country = ? GROUP BY c.id ORDER BY SUM(o.total_cents) DESC, c.id LIMIT 1", [r[0]])?;
+    out.push(text(r[0]) + " customers=" + int(r[1]).to_str() + " orders=" + int(r[2]).to_str()
+      + " revenue=" + int(r[3]).to_str() + " top=" + text(top[0][0]));
+    orders += int(r[2]);
+    revenue += int(r[3]);
+  }
+  out.push("total orders=" + orders.to_str() + " revenue=" + revenue.to_str());
+  Ok(out.join("\n"))
+}

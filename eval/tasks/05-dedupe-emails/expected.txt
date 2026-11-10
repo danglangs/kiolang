@@ -1,0 +1,7 @@
+bob@example.com
+dave+tag@example.org
+dave@example.org
+grace@sub.example.co.uk
+heidix@gmail.com
+jdoe@gmail.com
+invalid 7

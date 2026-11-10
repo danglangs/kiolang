@@ -1,0 +1,22 @@
+enum Failed { Io(IoErr), Kv(KvErr) }
+
+struct Total { page: Str, n: Int }
+
+const PREFIX: Str = "visits:";
+
+fn main(input: Dir, counts: Kv) -> Result<Str, Failed> {
+  let text = input.read("visits.txt").map_err(|e| Failed::Io(e))?.to_str();
+  for line in text.lines() {
+    let page = line.trim();
+    if page == "" { continue; }
+    counts.add(PREFIX + page, 1).map_err(|e| Failed::Kv(e))?;
+  }
+  let mut totals: List<Total> = [];
+  for key in counts.keys(PREFIX).map_err(|e| Failed::Kv(e))? {
+    let v = counts.get(key).map_err(|e| Failed::Kv(e))?;
+    let n = v.and_then(|b| b.to_str().parse_int()).unwrap_or(0);
+    totals.push(Total { page: key.strip_prefix(PREFIX).unwrap_or(key), n: n });
+  }
+  totals.sort_by(|a, b| a.n > b.n);
+  Ok(totals.map(|t| t.page + " " + t.n.to_str()).join("\n"))
+}

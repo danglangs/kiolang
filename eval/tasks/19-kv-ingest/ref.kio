@@ -1,0 +1,33 @@
+enum Failed { Io(IoErr), Kv(KvErr) }
+
+struct Event { id: Str, account: Str, cents: Int }
+
+fn kv<T>(r: Result<T, KvErr>) -> Result<T, Failed> { r.map_err(|e| Failed::Kv(e)) }
+
+fn parse(line: Str) -> Option<Event> {
+  let j = line.parse_json().ok()?;
+  let id = j.get("id")?.as_str()?;
+  let account = j.get("account")?.as_str()?;
+  let cents = match j.get("cents")? { Json::Num(n) => n, _ => return None };
+  Some(Event { id: id, account: account, cents: cents })
+}
+
+fn main(input: Dir, state: Kv) -> Result<Str, Failed> {
+  let text = input.read("events.jsonl").map_err(|e| Failed::Io(e))?.to_str();
+  let mut applied = 0;
+  let mut dup = 0;
+  let mut rejected = 0;
+  for line in text.lines() {
+    if line.trim() == "" { continue; }
+    let Some(e) = parse(line) else { rejected += 1; continue; };
+    // Claim the id atomically: only the first claim applies the event.
+    if !kv(state.swap("seen:" + e.id, None, Some("1".to_bytes())))? { dup += 1; continue; }
+    kv(state.add("balance:" + e.account, e.cents))?;
+    applied += 1;
+  }
+  let mut out = ["applied " + applied.to_str() + " duplicate " + dup.to_str() + " rejected " + rejected.to_str()];
+  for entry in kv(state.scan("balance:", None, 1000))? {
+    out.push(entry.key.strip_prefix("balance:").unwrap_or("") + " " + entry.value.to_str());
+  }
+  Ok(out.join("\n"))
+}

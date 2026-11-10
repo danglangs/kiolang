@@ -1,0 +1,8 @@
+--weird--name-- -> weird-name
+Meeting Notes (2026-11-09).md -> meeting-notes-2026-11-09-.md
+Menu (Draft) #2.txt -> menu-draft-2.txt
+Q3 Report_FINAL.TXT -> q3-report-final.txt
+README -> readme
+__init__.py -> init-.py
+data.tar.gz -> data.tar.gz
+q3 report final.txt skipped

@@ -1,0 +1,9 @@
+get u2
+get u3
+count
+rename u9 nobody
+put u1 ann ann@new.example
+get u1
+put u10 dee dee@example.com
+count
+get

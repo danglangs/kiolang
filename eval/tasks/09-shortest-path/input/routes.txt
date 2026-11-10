@@ -1,0 +1,24 @@
+# towns of the valley
+road Ashby Brill 7
+road Ashby Corin 9
+road Ashby Fenwick 14
+road Brill Corin 10
+road Brill Dunmore 15
+trip Ashby Eston
+road Corin Dunmore 11
+road Corin Fenwick 2
+road Dunmore Eston 6
+road Eston Fenwick 9
+
+trip Brill Fenwick
+trip Fenwick Ashby
+road Gale Holt 3
+trip Ashby Holt
+trip Holt Gale
+trip Corin Corin
+# ties: two routes of cost 4 from Kell to Moss
+road Kell Lyle 2
+road Lyle Moss 2
+road Kell Jory 1
+road Jory Moss 3
+trip Kell Moss

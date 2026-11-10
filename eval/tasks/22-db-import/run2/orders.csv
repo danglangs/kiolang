@@ -1,0 +1,7 @@
+order_id,customer,product,qty,unit_cents
+1004,initech,widget,2,1250
+1005,initech,gizmo,1,999
+1007,umbrella,gizmo,5,999
+1008,umbrella,widget,1,1250
+1009,acme,sprocket,1,x
+1010,hooli,gadget,1,4999

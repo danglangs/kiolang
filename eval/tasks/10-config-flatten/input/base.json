@@ -1,0 +1,8 @@
+{
+  "name": "orders-service",
+  "server": {"host": "0.0.0.0", "port": 8080, "ports": [8080, 8081], "tls": {"enabled": false, "cert": "/etc/tls/cert.pem"}},
+  "db": {"url": "postgres://db/orders", "pool": {"min": 2, "max": 10}, "replicas": [{"host": "r1", "weight": 1}, {"host": "r2", "weight": 2}]},
+  "features": {"beta": true, "legacy": true, "tags": []},
+  "limits": {"rps": 100, "burst": 20},
+  "owner": "team-a"
+}

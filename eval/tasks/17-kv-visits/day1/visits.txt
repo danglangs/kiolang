@@ -1,0 +1,8 @@
+/home
+/pricing
+/home
+/docs/start
+/home
+
+/pricing
+/blog/kio-1-0

@@ -1,0 +1,38 @@
+fn is_part(name: Str) -> Bool {
+  let Some(rest) = name.strip_prefix("part-") else { return false; };
+  let Some(num) = rest.strip_suffix(".txt") else { return false; };
+  num.len() == 4 && num.parse_int().is_some() && !num.starts_with("-") && !num.starts_with("+")
+}
+
+fn parse(text: Str) -> Option<List<Int>> {
+  let mut xs: List<Int> = [];
+  for line in text.lines() {
+    if line.trim() == "" { continue; }
+    xs.push(line.trim().parse_int()?);
+  }
+  Some(xs)
+}
+
+fn main(input: Dir, out: Dir) -> Result<Str, IoErr> {
+  let mut parts = 0;
+  let mut corrupt = 0;
+  let mut all: List<Int> = [];
+  for name in input.list("")? {
+    if !is_part(name) { continue; }
+    parts += 1;
+    match parse(input.read(name)?.to_str()) {
+      Some(xs) => { for x in xs { all.push(x); } }
+      None => { corrupt += 1; }
+    }
+  }
+  all.sort();
+  let mut text = "";
+  let mut n = 0;
+  for i in 0..all.len() {
+    if i > 0 && all[i] == all[i - 1] { continue; }
+    text = text + all[i].to_str() + "\n";
+    n += 1;
+  }
+  out.write("merged.txt", text.to_bytes())?;
+  Ok("parts " + parts.to_str() + " corrupt " + corrupt.to_str() + " values " + n.to_str())
+}

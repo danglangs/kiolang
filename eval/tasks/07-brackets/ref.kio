@@ -1,0 +1,23 @@
+fn closer(c: Str) -> Str {
+  match c { "(" => ")", "[" => "]", "{" => "}", _ => "" }
+}
+
+fn check(line: Str) -> Str {
+  let mut stack: List<Str> = [];
+  for i in 0..line.len() {
+    let c = line.slice(i, i + 1);
+    let col = (i + 1).to_str();
+    if closer(c) != "" {
+      stack.push(closer(c));
+    } else if c == ")" || c == "]" || c == "}" {
+      let Some(want) = stack.pop() else { return "col " + col + ": unexpected " + c; };
+      if want != c { return "col " + col + ": expected " + want + ", found " + c; }
+    }
+  }
+  match stack.pop() { Some(c) => "unclosed " + c, None => "ok" }
+}
+
+fn main(input: Dir) -> Result<Str, IoErr> {
+  let text = input.read("snippets.txt")?.to_str();
+  Ok(text.lines().map(check).join("\n"))
+}

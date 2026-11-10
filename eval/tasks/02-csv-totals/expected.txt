@@ -1,0 +1,6 @@
+west 103 342.50
+north 12 144.98
+east 5 59.99
+south 8 20.85
+central 0 0.00
+skipped 3

@@ -1,0 +1,49 @@
+// RFC 4180 fields of one line.
+fn fields(line: Str) -> List<Str> {
+  let b = line.to_bytes();
+  let mut out: List<Str> = [];
+  let mut cur = "".to_bytes();
+  let mut quoted = false;
+  let mut i = 0;
+  while i < b.len() {
+    let c = b[i];
+    if quoted {
+      if c == 34 && i + 1 < b.len() && b[i + 1] == 34 { cur.push(34); i += 1; }
+      else if c == 34 { quoted = false; }
+      else { cur.push(c); }
+    } else if c == 34 {
+      quoted = true;
+    } else if c == 44 {
+      out.push(cur.to_str());
+      cur = "".to_bytes();
+    } else {
+      cur.push(c);
+    }
+    i += 1;
+  }
+  out.push(cur.to_str());
+  out
+}
+
+fn main(input: Dir, out: Dir) -> Result<Str, IoErr> {
+  let lines = input.read("users.csv")?.to_str().lines();
+  let mut rows: List<Json> = [];
+  let mut skipped = 0;
+  for i in 1..lines.len() {
+    if lines[i].trim() == "" { continue; }
+    let f = fields(lines[i]);
+    if f.len() != 5 { skipped += 1; continue; }
+    let Some(id) = f[0].parse_int() else { skipped += 1; continue; };
+    let active = ["yes", "true", "1"].contains(f[3].to_lowercase());
+    let tags = f[4].split(";").map(|t| t.trim()).filter(|t| t != "").map(|t| Json::Str(t));
+    let mut o: Map<Str, Json> = Map::new();
+    o.insert("id", Json::Num(id));
+    o.insert("name", Json::Str(f[1]));
+    o.insert("email", Json::Str(f[2]));
+    o.insert("active", Json::Bool(active));
+    o.insert("tags", Json::Arr(tags));
+    rows.push(Json::Obj(o));
+  }
+  out.write("users.json", Json::Arr(rows).to_json().to_bytes())?;
+  Ok("rows " + rows.len().to_str() + " skipped " + skipped.to_str())
+}
