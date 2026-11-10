@@ -2200,3 +2200,13 @@ fn l12_text_plus_number_and_try_hints() {
         assert_eq!(d.hint.as_deref(), Some(h), "{src}");
     }
 }
+
+/// L24: an assignment arm is `()`, so mixing it with an `Int` arm is the usual mismatch.
+#[test]
+fn l24_assignment_arm_type() {
+    let (msg, at) = reject("fn main() -> Int { let mut n = 0; match n { 0 => n = 1, _ => 2 } }");
+    assert_eq!(
+        (msg.as_str(), at.as_str()),
+        ("`match` arms have different types: () and Int", "2")
+    );
+}

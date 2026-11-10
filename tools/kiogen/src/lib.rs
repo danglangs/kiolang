@@ -37,7 +37,7 @@ pub struct Features {
     pub lists: bool,
     /// The struct `S`, the enum `K` and `Option<Int>`: locals, construction (with `..base` too), copies, field
     /// reads and writes, `==`, `unwrap_or`, `is_some`, `match` with nested patterns and a
-    /// catch-all, `if let`, and helpers returning `Option<Int>` that use `?`.
+    /// catch-all (as a statement, with block or assignment arms), `if let`, and helpers returning `Option<Int>` that use `?`.
     pub adts: bool,
     /// `Float` locals, parameters and results: literals (NaN, infinities, `-0.0`, the
     /// extremes, halves), every operator, `+=` and `-=`, comparisons, `to_str`, `to_int`,
@@ -1238,7 +1238,8 @@ impl Gen<'_> {
         format!("(if let {p} = {scrut} {{ {then} }} else {{ {els} }})")
     }
 
-    /// A field write on a mutable `S`, a `let`-else, or a `match` statement whose arms are blocks.
+    /// A field write on a mutable `S`, a `let`-else, or a `match` statement whose arms are blocks
+    /// or assignments.
     fn adt_stmt(&mut self) -> Option<String> {
         let pad = self.pad();
         if self.rng.chance(20) {
@@ -1277,7 +1278,16 @@ impl Gen<'_> {
         for p in pats {
             self.scopes.push(Vec::new());
             let p = self.bind(&p);
-            arms.push(format!("{pad}    {p} => {},\n", self.block(2, Ty::Unit)));
+            // An assignment as the arm (L24), or a block.
+            let assign = match self.rng.chance(30) {
+                true => self.assign(),
+                false => None,
+            };
+            let body = match assign {
+                Some(a) => a.trim().strip_suffix(';').unwrap().to_string(),
+                None => self.block(2, Ty::Unit),
+            };
+            arms.push(format!("{pad}    {p} => {body},\n"));
             self.scopes.pop();
         }
         Some(format!("{pad}match {scrut} {{\n{}{pad}}}\n", arms.concat()))
@@ -1713,6 +1723,22 @@ impl Gen<'_> {
 
 #[cfg(test)]
 mod tests {
+    /// Assignment arms (L24), with each operator.
+    #[test]
+    fn assignment_arms_are_generated() {
+        let all: String = (0..250).map(|s| super::program(s, &Default::default())).collect();
+        let arms: Vec<&str> = all
+            .lines()
+            .filter(|l| l.ends_with(','))
+            .filter_map(|l| l.split_once(" => ").map(|(_, b)| b))
+            .filter(|b| !b.starts_with('{'))
+            .collect();
+        for op in [" = ", " += ", " -= "] {
+            let n = arms.iter().filter(|b| b.contains(op)).count();
+            assert!(n > 10, "{op}: {n}");
+        }
+    }
+
     /// Floats appear in a run of the default size, with their methods and tricky literals.
     #[test]
     fn floats_are_generated() {

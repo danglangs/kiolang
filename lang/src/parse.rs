@@ -735,15 +735,10 @@ impl Parser {
         } else {
             let block_like = self.at_kw("if") || self.at_kw("match") || self.at("{");
             let e = if block_like { self.primary()? } else { self.expr()? };
-            if let Some(&Kind::Sym(op @ ("=" | "+=" | "-="))) = self.peek() {
-                if !matches!(e.kind, ExprKind::Name(_) | ExprKind::Field(..) | ExprKind::Index(..)) {
-                    let hint = "assign to a name, field or index";
-                    return Err(err(e.span, "cannot assign to this expression", Some(hint)));
-                }
-                self.pos += 1;
-                let value = self.expr()?;
+            if let Some(op) = self.assign_op() {
+                let kind = self.assign(e, op)?;
                 self.expect(";")?;
-                StmtKind::Assign { target: e, op, value }
+                kind
             } else if self.eat(";") {
                 StmtKind::Expr(e)
             } else if self.at("}") {
@@ -755,6 +750,27 @@ impl Parser {
                 return Err(self.unexpected("`;` or `}`"));
             }
         }))
+    }
+
+    fn assign_op(&self) -> Option<&'static str> {
+        match self.peek() {
+            Some(&Kind::Sym(op @ ("=" | "+=" | "-="))) => Some(op),
+            _ => None,
+        }
+    }
+
+    /// `target op value`, at `op`.
+    fn assign(&mut self, target: Expr, op: &'static str) -> Result<StmtKind, Diag> {
+        if !matches!(
+            target.kind,
+            ExprKind::Name(_) | ExprKind::Field(..) | ExprKind::Index(..)
+        ) {
+            let hint = "assign to a name, field or index";
+            return Err(err(target.span, "cannot assign to this expression", Some(hint)));
+        }
+        self.pos += 1;
+        let value = self.expr()?;
+        Ok(StmtKind::Assign { target, op, value })
     }
 
     fn let_stmt(&mut self) -> Result<StmtKind, Diag> {
@@ -1252,17 +1268,22 @@ impl Parser {
                 self.arm_jump()?
             } else {
                 let e = self.expr()?;
-                if let Some(&Kind::Sym("=" | "+=" | "-=")) = self.peek() {
-                    self.pos += 1;
-                    self.expr()?;
-                    let hint = "wrap it in `{ }`";
-                    return Err(err(
-                        self.since(e.span.start),
-                        "an assignment cannot be a match arm",
-                        Some(hint),
-                    ));
+                if let Some(op) = self.assign_op() {
+                    // `pat => x = e,` is the block `{ x = e; }`, as in Rust.
+                    let start = e.span.start;
+                    let kind = self.assign(e, op)?;
+                    let span = self.since(start);
+                    Expr {
+                        kind: ExprKind::Block(Block {
+                            stmts: vec![Stmt { kind, span }],
+                            tail: None,
+                            span,
+                        }),
+                        span,
+                    }
+                } else {
+                    e
                 }
-                e
             };
             arms.push(Arm {
                 pat,

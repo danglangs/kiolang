@@ -913,12 +913,6 @@ fn l12_rust_forms_teach() {
             "kio has no macros; write a function call",
         ),
         (
-            "fn f() { match o { Some(x) => n += x, None => {} } }",
-            "n += x",
-            "an assignment cannot be a match arm",
-            "wrap it in `{ }`",
-        ),
-        (
             "fn f() { if let Some(x) = o && x > 1 { } }",
             "o && x > 1",
             "let-chains are not supported",
@@ -1000,4 +994,35 @@ fn l15_struct_update_parses() {
 fn l12_still_accepts_bool_pattern_on_and() {
     parse("fn f() { if let true = a && b { } }").unwrap();
     parse("fn f() { let x = a != b; }").unwrap();
+}
+
+/// L24: an assignment as a match arm is the block `{ x = e; }`.
+#[test]
+fn l24_assignment_arm() {
+    assert_eq!(
+        body("match o { Some(x) => n += x, None => n = 0 }"),
+        "{tail (match o ([Some x] {(+= n x)}) (None {(= n 0)}))}"
+    );
+    assert_eq!(
+        body("match b { true => n -= 1, _ => {} }"),
+        "{tail (match b (true {(-= n 1)}) (_ {}))}"
+    );
+    assert_eq!(
+        body("match b { _ => p.x = 1, }"),
+        "{tail (match b (_ {(= (. p x) 1)}))}"
+    );
+    assert_eq!(
+        body("match b { _ => xs[i] = f(i) }"),
+        "{tail (match b (_ {(= ([] xs i) (call f i))}))}"
+    );
+    assert_eq!(
+        body("let u = match b { _ => n = 1 };"),
+        "{(let u (match b (_ {(= n 1)})))}"
+    );
+    rejected_with(
+        "fn g() { match b { _ => f() = 1 } }",
+        "f()",
+        "cannot assign to this expression",
+        Some("assign to a name, field or index"),
+    );
 }

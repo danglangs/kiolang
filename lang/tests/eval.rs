@@ -1787,3 +1787,23 @@ fn functions_given_to_builtins_run_in_order_and_stop_early() {
                }";
     assert_eq!(int(src), Value::Int(21));
 }
+
+/// L24: assignment arms, in a statement `match` and as a `()`-valued one.
+#[test]
+fn l24_assignment_arms() {
+    let src = "struct P { x: Int }
+               fn main() -> Int {
+                   let mut n = 0;
+                   let mut p = P { x: 0 };
+                   let mut xs = [0, 0];
+                   for i in 0..6 {
+                       match i % 3 { 0 => n += i, 1 => n -= 1, _ => xs[1] = i }
+                       match i { 5 => p.x = 7, _ => {} }
+                   }
+                   let u: () = match n { 0 => n = 100, _ => n = n * 10 };
+                   u;
+                   n + p.x + xs[1]
+               }";
+    // n = 0 + 3 - 1 - 1 = 1, then * 10 = 10; p.x = 7; xs[1] = 5.
+    assert_eq!(int(src), Value::Int(22));
+}
