@@ -143,6 +143,10 @@ fn world(params: &[(String, String)]) -> World {
                 name.clone(),
                 Arc::new(kio_host::db::Db::memory(kio_host::db::DB_MB).unwrap()),
             )),
+            "Hmac" => w
+                .sources
+                .hmacs
+                .push((name.clone(), kio_host::HmacKey::new("key".into(), false).unwrap())),
             _ => {}
         }
     }

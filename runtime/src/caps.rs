@@ -18,6 +18,7 @@ use crate::desc::{self, Desc, Table};
 use crate::entry::kio::caps::clock::Clock;
 use crate::entry::kio::caps::db::{Db, DbErr, SqlValue};
 use crate::entry::kio::caps::fs::{Dir, IoErr};
+use crate::entry::kio::caps::hmac::{Hmac, HmacErr};
 use crate::entry::kio::caps::kv::{Kv, KvEntry, KvErr};
 use crate::entry::kio::caps::log::{Log, LogErr};
 use crate::entry::kio::caps::net::{Http, HttpErr, HttpRequest, HttpResponse};
@@ -684,6 +685,21 @@ pub unsafe extern "C" fn rt_cap_log_write(ret: u32, h: u32, line: u32) -> u32 {
     // SAFETY: the contract above.
     let (l, line) = unsafe { (handle(h, Log::from_handle), text(line)) };
     result(ret, in_place(|| l.write(line)), unit, |LogErr::TooLarge| "TooLarge")
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_cap_hmac_sign(ret: u32, h: u32, msg: u32) -> u32 {
+    // SAFETY: the contract above.
+    let (k, msg) = unsafe { (handle(h, Hmac::from_handle), bytes(msg)) };
+    let r = in_place(|| k.sign(msg));
+    result(ret, r, |_, b| to_slot(bytes_obj(b)), |HmacErr::Denied| "Denied")
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_cap_hmac_verify(_: u32, h: u32, msg: u32, mac: u32) -> u32 {
+    // SAFETY: the contract above.
+    let (k, msg, mac) = unsafe { (handle(h, Hmac::from_handle), bytes(msg), bytes(mac)) };
+    u32::from(k.verify(msg, mac))
 }
 
 fn database(h: u32) -> ManuallyDrop<Db> {

@@ -247,6 +247,17 @@ pub fn v0() -> CapTable {
                     ),
                 ],
             },
+            CapType {
+                name: "Hmac".into(),
+                methods: vec![
+                    method(
+                        "sign",
+                        vec![Ty::Bytes],
+                        Ty::Result(Box::new(Ty::Bytes), Box::new(Ty::Enum("HmacErr".into(), vec![]))),
+                    ),
+                    method("verify", vec![Ty::Bytes, Ty::Bytes], Ty::Bool),
+                ],
+            },
         ],
         enums: vec![
             Enum {
@@ -335,6 +346,13 @@ pub fn v0() -> CapTable {
                     case("TooLarge", vec![]),
                     case("Constraint", vec![ty("Str")]),
                 ],
+                span: at,
+                public: true,
+            },
+            Enum {
+                name: "HmacErr".into(),
+                tparams: vec![],
+                variants: vec![case("Denied", vec![])],
                 span: at,
                 public: true,
             },

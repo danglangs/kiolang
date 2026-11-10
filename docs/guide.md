@@ -28,6 +28,7 @@ examples/fx/report.kio:10: error: no grant for `fx: Http`
 | `Rng` | `--rng name`, `--rng name=seed:N` | random values from the OS, or a fixed stream |
 | `Clock` | `--clock name`, `--clock name=fixed:T` | the system clock, or one fixed time |
 | `Log` | `--log name=path`, `--log name=-` | an append-only log file, or stderr |
+| `Hmac` | `--hmac name=env:VAR`, `name=file:PATH`, either with `:verify` | HMAC-SHA256 under a key the program never holds: `sign`, `verify` |
 | `Incoming`, `Outgoing`, `WsMessage`, `WsSend` | `--listen addr` | a listening socket; bound by type, not name |
 
 ### Dir
@@ -103,6 +104,24 @@ None of the three is reachable without its grant, so a run with fixed values rep
 $ kio run examples/raffle.kio --dir input=examples/in --rng r=seed:1 --clock now=fixed:2026-11-09T12:00:00Z --log log=/tmp/raffle.log
 main : input read, r int, now now_ms, log write
 Ok("globex wins at 1794225600000")
+```
+
+### Hmac
+
+`--hmac stripe=env:STRIPE_WHSEC` (or `file:PATH`) grants `stripe: Hmac`: `stripe.sign(msg) -> Result<Bytes, HmacErr>` (32 bytes) and `stripe.verify(msg, mac) -> Bool` (constant time; a MAC of the wrong length is `false`). The key is the variable's or file's text as given (a provider's `whsec_..` string is the key), read once at start under `--http-header`'s rules (a missing, empty or whitespace-only value, a file that is not a regular file, inside a granted `--dir`, or the `--audit` or a `--log` file, is refused; a file's one trailing newline is dropped; at most 8 KB). It never reaches the program, the audit log, `--log`, an error or stderr. `:verify` at the end (`--hmac stripe=env:STRIPE_WHSEC:verify`) makes `sign` return `Err(HmacErr::Denied)`, so a webhook receiver cannot mint signatures. Under `--listen` every request uses the one key. The audit log records each call's method, the message length and, for `verify`, `"result":"true"` or `"false"`; a refused `sign` is `"denied"`.
+
+```
+fn signed(k: Hmac, header: Str, body: Bytes) -> Bool {   // stripe-signature: t=..,v1=<hex>
+  let mut t = "";
+  let mut sig = "";
+  for part in header.split(",") {
+    if let Some(v) = part.strip_prefix("t=") { t = v; }
+    if let Some(v) = part.strip_prefix("v1=") { sig = v; }
+  }
+  let mut msg = (t + ".").to_bytes();
+  msg.extend(body);
+  t != "" && k.verify(msg, unhex(sig))      // unhex: your own hex decoder
+}
 ```
 
 ### Db

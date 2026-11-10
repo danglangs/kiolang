@@ -141,6 +141,15 @@ interface db {
   }
 }
 
+interface hmac {
+  // HMAC-SHA256 under a key the host read at start (`--hmac name=env:VAR|file:PATH[:verify]`).
+  resource hmac {
+    sign: func(msg: list<u8>) -> result<list<u8>, hmac-err>;   // 32 bytes
+    verify: func(msg: list<u8>, mac: list<u8>) -> bool;        // constant time; any length
+  }
+  variant hmac-err { denied }                                  // `sign` under `:verify`
+}
+
 // Compiled kio (docs/codegen.md): the runtime with the program appended, one core module.
 world compiled {
   import fs;
@@ -152,6 +161,7 @@ world compiled {
   import clock;
   import log;
   import db;
+  import hmac;
   use fs.{dir};
   use net.{http};
   use web.{incoming, outgoing};
@@ -161,11 +171,12 @@ world compiled {
   use clock.{clock};
   use log.{log};
   use db.{db};
+  use hmac.{hmac};
 
   // One handle per capability parameter of `main`, in parameter order.
   variant grant {
     dir(dir), http(http), incoming(incoming), outgoing(outgoing), kv(kv), ws-message(ws-message), ws-send(ws-send),
-    rng(rng), clock(clock), log(log), db(db),
+    rng(rng), clock(clock), log(log), db(db), hmac(hmac),
   }
   // main's value printed, and whether main returned `Err`.
   record outcome { value: string, failed: bool }

@@ -1,9 +1,9 @@
 mod mcp;
 
-use kio_host::{listen, open_dir, ClockSpec, Diag, Kio, Limits, LogSink, Origin, RngSpec, Server, Sources};
+use kio_host::{listen, open_dir, ClockSpec, Diag, HmacKey, Kio, Limits, LogSink, Origin, RngSpec, Server, Sources};
 
 /// `kio run`'s flags.
-const USAGE: &str = "[--dir name=path]... [--http name=host]... [--http-methods name=POST,PUT,..]... [--http-header name=Header:env:VAR|file:path]... [--kv name=path[:ro]|:memory:]... [--kv-mb mb] [--db name=path[:ro]|:memory:]... [--db-mb mb] [--rng name[=seed:N]]... [--clock name[=fixed:T]]... [--log name=path|-]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]...";
+const USAGE: &str = "[--dir name=path]... [--http name=host]... [--http-methods name=POST,PUT,..]... [--http-header name=Header:env:VAR|file:path]... [--kv name=path[:ro]|:memory:]... [--kv-mb mb] [--db name=path[:ro]|:memory:]... [--db-mb mb] [--rng name[=seed:N]]... [--clock name[=fixed:T]]... [--log name=path|-]... [--hmac name=env:VAR|file:path[:verify]]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]...";
 
 fn main() {
     // The host checks and lowers programs natively, and compiled code runs on this thread's stack
@@ -119,6 +119,35 @@ fn http_header(
             "no `--http {name}=host` grant\n  hint: --http-header adds a header to an Http grant of that name"
         ));
     };
+    let value = secret(source, usage, "the header's value", dirs, files)?;
+    origin.inject(header, value)
+}
+
+/// Grant one `--hmac name=env:VAR` or `name=file:PATH`, either ending in `:verify` to refuse
+/// `sign`: the key is read now, once, with `--http-header`'s rules (`secret`). Errors never hold
+/// the key.
+fn hmac(spec: &str, dirs: &[(String, String)], files: &[(String, &str)]) -> Result<(String, HmacKey), String> {
+    let usage = "expected name=env:VAR or name=file:PATH, with `:verify` at the end to refuse sign";
+    let Some((name, source)) = spec.split_once('=').filter(|(n, _)| !n.is_empty()) else {
+        return Err(usage.into());
+    };
+    let (source, verify_only) = match source.strip_suffix(":verify") {
+        Some(s) => (s, true),
+        None => (source, false),
+    };
+    let value = secret(source, usage, "the key", dirs, files)?;
+    Ok((name.into(), HmacKey::new(value, verify_only)?))
+}
+
+/// The secret `source` names, `env:VAR` or `file:PATH` (`read_secret`), read once; `usage` for
+/// any other form; `what` names it in the hint for an empty one. Errors never hold the value.
+fn secret(
+    source: &str,
+    usage: &str,
+    what: &str,
+    dirs: &[(String, String)],
+    files: &[(String, &str)],
+) -> Result<String, String> {
     let value = match source.split_once(':') {
         Some(("env", var)) if !var.is_empty() && !var.contains(['=', '\0']) => match std::env::var(var) {
             Ok(v) => v,
@@ -134,18 +163,19 @@ fn http_header(
     };
     if value.trim().is_empty() {
         return Err(format!(
-            "{source} is empty or only whitespace\n  hint: set it to the header's value"
+            "{source} is empty or only whitespace\n  hint: set it to {what}"
         ));
     }
-    origin.inject(header, value)
+    Ok(value)
 }
 
-/// The value in the file `path` for `--http-header` (see `http_header`), its one trailing
-/// newline dropped. At most `HEADER_MAX` + 2 bytes are read: a longer value is refused by
-/// `Origin::inject`.
+/// The value in the file `path` for `--http-header` or `--hmac`, its one trailing newline
+/// dropped. The file must be a regular file outside every granted `dirs` (the program could
+/// read it) and not the file of a flag in `files` (`--audit`, `--log`). At most `SECRET_MAX` + 2
+/// bytes are read: a longer value is refused by `Origin::inject` and `HmacKey::new`.
 fn read_secret(path: &str, dirs: &[(String, String)], files: &[(String, &str)]) -> Result<String, String> {
     let cannot =
-        |e: &dyn std::fmt::Display| format!("cannot read {path}: {e}\n  hint: the file holds the header's value alone");
+        |e: &dyn std::fmt::Display| format!("cannot read {path}: {e}\n  hint: the file holds the secret alone");
     // A FIFO or device would block or never end: check before opening.
     match std::fs::metadata(path) {
         Ok(m) if m.is_file() => {}
@@ -167,14 +197,14 @@ fn read_secret(path: &str, dirs: &[(String, String)], files: &[(String, &str)]) 
     }
     let file = std::fs::File::open(path).map_err(|e| cannot(&e))?;
     let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut std::io::Read::take(file, HEADER_MAX + 2), &mut bytes).map_err(|e| cannot(&e))?;
+    std::io::Read::read_to_end(&mut std::io::Read::take(file, SECRET_MAX + 2), &mut bytes).map_err(|e| cannot(&e))?;
     let v = String::from_utf8(bytes).map_err(|_| cannot(&"not UTF-8"))?;
     let v = v.strip_suffix('\n').unwrap_or(&v);
     Ok(v.strip_suffix('\r').unwrap_or(v).to_string())
 }
 
-/// The most of a `--http-header` value read from a file (as `Origin::inject` allows).
-const HEADER_MAX: u64 = 8 << 10;
+/// The most of a secret read from a file (as `Origin::inject` and `HmacKey::new` allow).
+const SECRET_MAX: u64 = 8 << 10;
 
 /// `spec` of a `--http-header` as an error may show it: `name=Header`, never what follows the
 /// first `:` (or, without one, the `=`), where a value given inline by mistake would be.
@@ -196,6 +226,8 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     let mut http_methods: Vec<(String, String)> = Vec::new();
     // Each `--http-header` as given, read once every `--http` is known.
     let mut http_headers: Vec<&str> = Vec::new();
+    // Each `--hmac` as given, read once the `--dir`, `--audit` and `--log` paths are known.
+    let mut hmac_specs: Vec<&str> = Vec::new();
     let mut limits = if flags.contains(&"--listen") {
         Limits::web()
     } else {
@@ -236,6 +268,10 @@ fn run(path: &str, flags: &[&str]) -> i32 {
             }
             ["--http-header", spec] => {
                 http_headers.push(spec);
+                continue;
+            }
+            ["--hmac", spec] => {
+                hmac_specs.push(spec);
                 continue;
             }
             [flag @ ("--fuel" | "--timeout" | "--memory" | "--stack" | "--calls" | "--io"), n] => {
@@ -374,6 +410,13 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     for spec in http_headers {
         if let Err(e) = http_header(spec, &mut https, &dir_paths, &written) {
             return fail(format!("--http-header {}: {e}", header_label(spec)));
+        }
+    }
+    // An error names the grant only: a key given inline by mistake would follow the `=`.
+    for spec in hmac_specs {
+        match hmac(spec, &dir_paths, &written) {
+            Ok(grant) => sources.hmacs.push(grant),
+            Err(e) => return fail(format!("--hmac {}: {e}", spec.split('=').next().unwrap_or(""))),
         }
     }
     // A program that fails to check says so before any check of `main`'s shape (H20).

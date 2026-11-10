@@ -7,6 +7,7 @@
 use crate::kio::caps::clock::HostClock;
 use crate::kio::caps::db::{DbErr, HostDb, SqlValue};
 use crate::kio::caps::fs::{HostDir, IoErr};
+use crate::kio::caps::hmac::{HmacErr, HostHmac};
 use crate::kio::caps::kv::{HostKv, KvEntry, KvErr};
 use crate::kio::caps::log::{HostLog, LogErr};
 use crate::kio::caps::net::{HostHttp, HttpErr, HttpRequest, HttpResponse};
@@ -445,6 +446,15 @@ impl lang::Caps for Native<'_> {
                     .collect::<Result<Vec<_>, _>>()?;
                 let r = HostDb::transaction(s, own(rep), texts(sqls)?, lists).map_err(stop)?;
                 result(r.map(Value::Int).map_err(db_err))
+            }
+            ("Hmac", "sign", [Value::Bytes(m)]) => result(
+                HostHmac::sign(s, own(rep), m.to_vec())
+                    .map_err(stop)?
+                    .map(bytes)
+                    .map_err(|HmacErr::Denied| err_value("HmacErr", "Denied", vec![])),
+            ),
+            ("Hmac", "verify", [Value::Bytes(m), Value::Bytes(mac)]) => {
+                Value::Bool(HostHmac::verify(s, own(rep), m.to_vec(), mac.to_vec()).map_err(stop)?)
             }
             _ => {
                 return Err(format!(

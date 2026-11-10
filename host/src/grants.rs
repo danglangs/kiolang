@@ -69,6 +69,9 @@ fn hint(name: &str, ty: &str) -> String {
         "Db" => {
             format!("grant it: `--db {name}=path` (a SQLite file), `--db {name}=path:ro` or `--db {name}=:memory:`")
         }
+        "Hmac" => {
+            format!("grant it: `--hmac {name}=env:VAR` or `--hmac {name}=file:PATH` (add `:verify` to refuse `sign`)")
+        }
         "WsMessage" | "WsSend" => "`--listen` grants WsMessage and WsSend".into(),
         _ => "`--listen` grants Incoming and Outgoing".into(),
     }

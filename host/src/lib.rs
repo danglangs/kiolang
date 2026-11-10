@@ -4,7 +4,8 @@
 //! response; `kv` is a store shared across runs (kv.rs); `ws-message` and `ws-send` hold one
 //! WebSocket event and its sends (ws.rs); `rng`, `clock` and `log` are the OS's randomness (or a
 //! seeded stream), the system clock (or a fixed time) and an appended file (or stderr); `db` is
-//! a fenced SQLite connection shared across runs (db.rs). Every import is counted and, if asked,
+//! a fenced SQLite connection shared across runs (db.rs); `hmac` signs and verifies under a key
+//! the host read at start. Every import is counted and, if asked,
 //! written to an audit log.
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir as RealDir, OpenOptions, OpenOptionsExt};
@@ -149,8 +150,9 @@ pub struct Origin {
     inject: Vec<(String, Secret)>,
 }
 
-/// A header value from `--http-header`. It is only ever written to a request: it has no
-/// `Display`, and its `Debug` prints `<redacted>`, so no message or log can carry it.
+/// A header value from `--http-header` or an `--hmac` key. It is only ever written to a request
+/// or keyed into an HMAC: it has no `Display`, and its `Debug` prints `<redacted>`, so no message
+/// or log can carry it.
 #[derive(Clone)]
 pub struct Secret(Arc<str>);
 
@@ -1991,15 +1993,65 @@ impl LogSink {
     }
 }
 
-/// The `--rng`, `--clock`, `--log` and `--db` grants, by `main` parameter name. Every run (every
-/// request under `--listen`) gets fresh handles to them; a `Log`'s byte budget is per run; a
-/// `Db` outlives runs, so each run gets a handle to the same one (db.rs).
+/// The `--rng`, `--clock`, `--log`, `--db` and `--hmac` grants, by `main` parameter name. Every
+/// run (every request under `--listen`) gets fresh handles to them; a `Log`'s byte budget is per
+/// run; a `Db` outlives runs, so each run gets a handle to the same one (db.rs); an `Hmac` key is
+/// read once, at start.
 #[derive(Clone, Default)]
 pub struct Sources {
     pub rngs: Vec<(String, RngSpec)>,
     pub clocks: Vec<(String, ClockSpec)>,
     pub logs: Vec<(String, LogSink)>,
     pub dbs: Vec<(String, Arc<db::Db>)>,
+    pub hmacs: Vec<(String, HmacKey)>,
+}
+
+/// An `--hmac` grant: the key, and whether `sign` is refused (`:verify`). Its `Debug` never
+/// shows the key.
+#[derive(Clone, Debug)]
+pub struct HmacKey {
+    key: Secret,
+    verify_only: bool,
+}
+
+impl HmacKey {
+    /// A key of `value`'s bytes as given. Refused: empty, or over 8 KB (a file is read only that
+    /// far, so a longer key would be cut short). `kio run` also refuses one of only whitespace.
+    pub fn new(value: String, verify_only: bool) -> std::result::Result<Self, String> {
+        if value.is_empty() {
+            return Err("the key is empty\n  hint: set it to the key".into());
+        }
+        if value.len() > HEADER_MAX {
+            return Err(format!("the key is over {HEADER_MAX} bytes\n  hint: use a shorter key"));
+        }
+        Ok(HmacKey {
+            key: Secret(value.into()),
+            verify_only,
+        })
+    }
+
+    /// What the audit header shows: the methods the grant allows, never the key.
+    pub(crate) fn label(&self) -> String {
+        if self.verify_only { "verify" } else { "sign,verify" }.into()
+    }
+}
+
+/// HMAC-SHA256 (RFC 2104) of `msg` under `key`, over lang's SHA-256.
+fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+    use lang::digest::sha256;
+    let mut k = [0u8; 64];
+    if key.len() > 64 {
+        k[..32].copy_from_slice(&sha256(key));
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut inner = Vec::with_capacity(64 + msg.len());
+    inner.extend(k.iter().map(|b| b ^ 0x36));
+    inner.extend_from_slice(msg);
+    let mut outer = Vec::with_capacity(96);
+    outer.extend(k.iter().map(|b| b ^ 0x5c));
+    outer.extend_from_slice(&sha256(&inner));
+    sha256(&outer)
 }
 
 /// A granted `Rng` in the resource table.
@@ -2051,6 +2103,53 @@ const RNG_BYTES_MAX: u32 = 65_536;
 impl kio::caps::rng::Host for State {}
 impl kio::caps::clock::Host for State {}
 impl kio::caps::log::Host for State {}
+impl kio::caps::hmac::Host for State {}
+
+impl kio::caps::hmac::HostHmac for State {
+    /// `denied` under `:verify`. The message's bytes are charged to `--io`.
+    fn sign(
+        &mut self,
+        h: Resource<kio::caps::hmac::Hmac>,
+        msg: Vec<u8>,
+    ) -> Result<Result<Vec<u8>, kio::caps::hmac::HmacErr>> {
+        self.call(
+            h.rep(),
+            "sign",
+            "sign",
+            |s| {
+                s.audit_extra = format!(r#","len":{}"#, msg.len());
+                s.spend_io(msg.len())?;
+                let k = s.table.get(&Resource::<HmacKey>::new_borrow(h.rep()))?;
+                if k.verify_only {
+                    return Ok(Err(kio::caps::hmac::HmacErr::Denied));
+                }
+                Ok(Ok(hmac_sha256(k.key.0.as_bytes(), &msg).to_vec()))
+            },
+            outcome,
+        )
+    }
+
+    /// Whether `mac` is `msg`'s HMAC, compared in constant time; `false` for a wrong length.
+    fn verify(&mut self, h: Resource<kio::caps::hmac::Hmac>, msg: Vec<u8>, mac: Vec<u8>) -> Result<bool> {
+        self.call(
+            h.rep(),
+            "verify",
+            "verify",
+            |s| {
+                s.audit_extra = format!(r#","len":{}"#, msg.len());
+                s.spend_io(msg.len() + mac.len())?;
+                let k = s.table.get(&Resource::<HmacKey>::new_borrow(h.rep()))?;
+                Ok(lang::digest::ct_eq(&hmac_sha256(k.key.0.as_bytes(), &msg), &mac))
+            },
+            |v| v.to_string(),
+        )
+    }
+
+    fn drop(&mut self, h: Resource<kio::caps::hmac::Hmac>) -> Result<()> {
+        let _ = self.table.delete(Resource::<HmacKey>::new_own(h.rep()));
+        Ok(())
+    }
+}
 
 impl kio::caps::rng::HostRng for State {
     fn bytes(&mut self, r: Resource<kio::caps::rng::Rng>, n: u32) -> Result<Vec<u8>> {
@@ -2445,6 +2544,10 @@ fn push_grants(
         let target = Some(db.label());
         add(name, "Db", s.table.push(db)?.rep(), target);
     }
+    for (name, key) in sources.hmacs {
+        let target = Some(key.label());
+        add(name, "Hmac", s.table.push(key)?.rep(), target);
+    }
     for b in &bound {
         s.handles.insert(b.rep, (b.name.clone(), b.kind));
     }
@@ -2560,5 +2663,58 @@ mod tests {
         assert!(one(&mut s).is_err());
         assert!(s.timed_out);
         assert!(start.elapsed() >= Duration::from_millis(900));
+    }
+
+    /// RFC 4231's seven HMAC-SHA-256 test cases (case 5 truncated to 128 bits).
+    #[test]
+    fn hmac_sha256_matches_rfc_4231() {
+        let key4: Vec<u8> = (1..=25).collect();
+        let long = b"This is a test using a larger than block-size key and a larger than block-size data. The key needs to be hashed before being used by the HMAC algorithm.";
+        let cases: [(&[u8], &[u8], &str); 7] = [
+            (
+                &[0x0b; 20],
+                b"Hi There",
+                "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
+            ),
+            (
+                b"Jefe",
+                b"what do ya want for nothing?",
+                "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
+            ),
+            (
+                &[0xaa; 20],
+                &[0xdd; 50],
+                "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe",
+            ),
+            (
+                &key4,
+                &[0xcd; 50],
+                "82558a389a443c0ea4cc819899f2083a85f0faa3e578f8077a2e3ff46729665b",
+            ),
+            (&[0x0c; 20], b"Test With Truncation", "a3b6167473100ee06e0c796c2955552b"),
+            (
+                &[0xaa; 131],
+                b"Test Using Larger Than Block-Size Key - Hash Key First",
+                "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54",
+            ),
+            (
+                &[0xaa; 131],
+                long,
+                "9b09ffa71b942fcb27635fbcd5b0e944bfdc63644f0713938a7f51535c3a35e2",
+            ),
+        ];
+        for (i, (key, msg, want)) in cases.iter().enumerate() {
+            let got = lang::digest::to_hex(&hmac_sha256(key, msg));
+            assert!(got.starts_with(want), "case {}: {got}", i + 1);
+        }
+    }
+
+    #[test]
+    fn an_hmac_key_never_shows() {
+        let k = HmacKey::new("whsec_never_shown".into(), true).unwrap();
+        assert_eq!(format!("{k:?}"), "HmacKey { key: <redacted>, verify_only: true }");
+        assert!(HmacKey::new(String::new(), false).is_err());
+        assert!(HmacKey::new("k".repeat(HEADER_MAX + 1), false).is_err());
+        assert!(HmacKey::new("k".repeat(HEADER_MAX), false).is_ok());
     }
 }
