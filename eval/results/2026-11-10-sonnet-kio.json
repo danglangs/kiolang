@@ -1,0 +1,699 @@
+{
+ "model": "sonnet",
+ "lang": "kio",
+ "date": "2026-11-10",
+ "rounds": 5,
+ "commit": "8c957ac",
+ "tasks": [
+  {
+   "task": "01-word-freq",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "fn main(input: Dir) -> Result<Str, IoErr> {\n  let b = input.read(\"text.txt\")?;\n  let n = b.len();\n  let mut counts: Map<Str, Int> = Map::new();\n  let mut start = -1;\n  let mut i = 0;\n  while i <= n {\n    let mut letter = false;\n    if i < n {\n      let c = b[i];\n      letter = (c >= 65 && c <= 90) || (c >= 97 && c <= 122);\n    }\n    if letter {\n      if start < 0 {\n        start = i;\n      }\n    } else if start >= 0 {\n      let w = b.slice(start, i).to_str().to_lowercase();\n      counts.insert(w, counts.get(w).unwrap_or(0) + 1);\n      start = -1;\n    }\n    i += 1;\n  }\n  let mut keys = counts.keys();\n  keys.sort_by(|a, b| {\n    let ca = counts.get(a).unwrap_or(0);\n    let cb = counts.get(b).unwrap_or(0);\n    ca > cb || (ca == cb && a < b)\n  });\n  let mut out = \"\";\n  let mut idx = 0;\n  for k in keys {\n    if idx >= 5 {\n      break;\n    }\n    out = out + k + \" \" + counts.get(k).unwrap_or(0).to_str() + \"\\n\";\n    idx += 1;\n  }\n  Ok(out)\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "main : input read"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.07406,
+   "input_tokens": 15651,
+   "output_tokens": 1146,
+   "seconds": 9.4,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "02-csv-totals",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "struct Tot { region: Str, qty: Int, rev: Int }\n\nfn money(c: Int) -> Str {\n  let neg = c < 0;\n  let a = if neg { 0 - c } else { c };\n  let cents = a % 100;\n  let mut cs = cents.to_str();\n  if cents < 10 { cs = \"0\" + cs; }\n  let s = (a / 100).to_str() + \".\" + cs;\n  if neg { \"-\" + s } else { s }\n}\n\nfn main(input: Dir) -> Result<Str, IoErr> {\n  let text = input.read(\"sales.csv\")?.to_str();\n  let mut qty: Map<Str, Int> = Map::new();\n  let mut rev: Map<Str, Int> = Map::new();\n  let mut skipped = 0;\n  let mut first = true;\n  for line in text.lines() {\n    if first { first = false; continue; }\n    if line.trim() == \"\" { continue; }\n    let parts = line.split(\",\");\n    if parts.len() != 5 { skipped += 1; continue; }\n    let Some(q) = parts[3].trim().parse_int() else { skipped += 1; continue; };\n    let Some(u) = parts[4].trim().parse_int() else { skipped += 1; continue; };\n    let region = parts[1].trim();\n    qty.insert(region, qty.get(region).unwrap_or(0) + q);\n    rev.insert(region, rev.get(region).unwrap_or(0) + q * u);\n  }\n  let mut rows: List<Tot> = [];\n  for r in rev.keys() {\n    rows.push(Tot { region: r, qty: qty.get(r).unwrap_or(0), rev: rev.get(r).unwrap_or(0) });\n  }\n  rows.sort_by(|a, b| a.rev > b.rev || (a.rev == b.rev && a.region < b.region));\n  let mut out = \"\";\n  for t in rows {\n    out = out + t.region + \" \" + t.qty.to_str() + \" \" + money(t.rev) + \"\\n\";\n  }\n  out = out + \"skipped \" + skipped.to_str() + \"\\n\";\n  Ok(out)\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "main  : input read\nmoney : none"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.081316,
+   "input_tokens": 15825,
+   "output_tokens": 1802,
+   "seconds": 12.2,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "03-access-log",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "struct Entry { ip: Str, status: Int, size: Int, path: Str }\nstruct ErrCount { ip: Str, n: Int }\n\nfn parse_line(line: Str) -> Option<Entry> {\n  let sp = line.find(\" \")?;\n  if sp == 0 { return None; }\n  let ip = line.slice(0, sp);\n  let q1 = line.find(\"\\\"\")?;\n  if q1 < sp { return None; }\n  let rest = line.slice(q1 + 1, line.len());\n  let q2 = rest.find(\"\\\"\")?;\n  let req = rest.slice(0, q2).split(\" \");\n  if req.len() != 3 { return None; }\n  let after = rest.slice(q2 + 1, rest.len()).trim().split(\" \");\n  if after.len() != 2 { return None; }\n  let status = after[0].parse_int()?;\n  let size = if after[1] == \"-\" { 0 } else { after[1].parse_int()? };\n  let p = req[1];\n  let path = match p.find(\"?\") {\n    Some(i) => p.slice(0, i),\n    None => p,\n  };\n  Some(Entry { ip: ip, status: status, size: size, path: path })\n}\n\nfn main(input: Dir) -> Result<Str, IoErr> {\n  let text = input.read(\"access.log\")?.to_str();\n  let mut statuses: Map<Int, Int> = Map::new();\n  let mut paths: Map<Str, Int> = Map::new();\n  let mut errs: Map<Str, Int> = Map::new();\n  let mut total = 0;\n  for line in text.lines() {\n    let Some(e) = parse_line(line) else { continue; };\n    statuses.insert(e.status, statuses.get(e.status).unwrap_or(0) + 1);\n    total = total + e.size;\n    paths.insert(e.path, paths.get(e.path).unwrap_or(0) + 1);\n    if e.status >= 500 && e.status <= 599 {\n      errs.insert(e.ip, errs.get(e.ip).unwrap_or(0) + 1);\n    }\n  }\n  let mut out: List<Str> = [];\n  for k in statuses.keys() {\n    out.push(k.to_str() + \" \" + statuses.get(k).unwrap_or(0).to_str());\n  }\n  out.push(\"bytes \" + total.to_str());\n  let mut best = \"\";\n  let mut best_n = 0;\n  for p in paths.keys() {\n    let n = paths.get(p).unwrap_or(0);\n    if n > best_n {\n      best = p;\n      best_n = n;\n    }\n  }\n  if best_n > 0 {\n    out.push(\"top \" + best + \" \" + best_n.to_str());\n  }\n  let mut list: List<ErrCount> = [];\n  for ip in errs.keys() {\n    list.push(ErrCount { ip: ip, n: errs.get(ip).unwrap_or(0) });\n  }\n  list.sort_by(|a, b| a.n > b.n || (a.n == b.n && a.ip < b.ip));\n  for e in list {\n    out.push(\"errors \" + e.ip + \" \" + e.n.to_str());\n  }\n  Ok(out.join(\"\\n\"))\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "main       : input read\nparse_line : none"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.085998,
+   "input_tokens": 15923,
+   "output_tokens": 2231,
+   "seconds": 15.6,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "04-json-orders",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "fn order_total(o: Json) -> Int {\n  let mut t = 0;\n  let items = o.get(\"items\").and_then(|j| j.as_list()).unwrap_or([]);\n  for it in items {\n    let q = it.get(\"qty\").and_then(|j| j.as_int()).unwrap_or(0);\n    let p = it.get(\"price_cents\").and_then(|j| j.as_int()).unwrap_or(0);\n    t = t + q * p;\n  }\n  t\n}\n\nfn main(input: Dir) -> Result<Str, Str> {\n  let bytes = match input.read(\"orders.json\") {\n    Ok(b) => b,\n    Err(_) => return Err(\"cannot read orders.json\"),\n  };\n  let doc = match bytes.to_str().parse_json() {\n    Ok(j) => j,\n    Err(e) => return Err(e),\n  };\n  let orders = match doc.as_list() {\n    Some(l) => l,\n    None => return Err(\"orders.json is not an array\"),\n  };\n\n  let mut counts: Map<Str, Int> = Map::new();\n  let mut totals: Map<Str, Int> = Map::new();\n  let mut ref_n = 0;\n  let mut ref_total = 0;\n  let mut pend_n = 0;\n\n  for o in orders {\n    let status = o.get(\"status\").and_then(|j| j.as_str()).unwrap_or(\"\");\n    let customer = o.get(\"customer\").and_then(|j| j.as_str()).unwrap_or(\"\");\n    let total = order_total(o);\n    match status {\n      \"paid\" => {\n        counts.insert(customer, counts.get(customer).unwrap_or(0) + 1);\n        totals.insert(customer, totals.get(customer).unwrap_or(0) + total);\n      }\n      \"refunded\" => {\n        ref_n = ref_n + 1;\n        ref_total = ref_total + total;\n      }\n      \"pending\" => {\n        pend_n = pend_n + 1;\n      }\n      _ => {}\n    }\n  }\n\n  let mut out = \"\";\n  for c in counts.keys() {\n    out = out + c + \" \" + counts.get(c).unwrap_or(0).to_str() + \" \" + totals.get(c).unwrap_or(0).to_str() + \"\\n\";\n  }\n  out = out + \"refunded \" + ref_n.to_str() + \" \" + ref_total.to_str() + \"\\n\";\n  out = out + \"pending \" + pend_n.to_str() + \"\\n\";\n  Ok(out)\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "main        : input read\norder_total : none"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.080114,
+   "input_tokens": 15787,
+   "output_tokens": 1697,
+   "seconds": 12.1,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "05-dedupe-emails",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "fn norm(line: Str) -> Option<Str> {\n  let s = line.trim().to_lowercase();\n  let parts = s.split(\"@\");\n  if parts.len() != 2 { return None; }\n  let local = parts[0];\n  let domain = parts[1];\n  if local.len() == 0 { return None; }\n  if !domain.contains(\".\") || domain.starts_with(\".\") || domain.ends_with(\".\") {\n    return None;\n  }\n  if domain == \"gmail.com\" {\n    let mut l = local;\n    if let Some(i) = l.find(\"+\") {\n      l = l.slice(0, i);\n    }\n    l = l.replace(\".\", \"\");\n    return Some(l + \"@\" + domain);\n  }\n  Some(s)\n}\n\nfn main(input: Dir) -> Result<Str, IoErr> {\n  let text = input.read(\"emails.txt\")?.to_str();\n  let mut seen: Map<Str, Bool> = Map::new();\n  let mut invalid = 0;\n  for line in text.lines() {\n    if line.trim().len() == 0 { continue; }\n    match norm(line) {\n      Some(a) => { seen.insert(a, true); }\n      None => { invalid += 1; }\n    }\n  }\n  let mut out = \"\";\n  for k in seen.keys() {\n    out = out + k + \"\\n\";\n  }\n  out = out + \"invalid \" + invalid.to_str();\n  Ok(out)\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "main : input read\nnorm : none"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.018912699999999998,
+   "input_tokens": 15812,
+   "output_tokens": 1326,
+   "seconds": 10.7,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "06-roman",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "fn to_roman(n: Int) -> Str {\n  let vals: List<Int> = [1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1];\n  let syms: List<Str> = [\"M\", \"CM\", \"D\", \"CD\", \"C\", \"XC\", \"L\", \"XL\", \"X\", \"IX\", \"V\", \"IV\", \"I\"];\n  let mut r = \"\";\n  let mut m = n;\n  let mut i = 0;\n  while i < vals.len() {\n    while m >= vals[i] {\n      r = r + syms[i];\n      m -= vals[i];\n    }\n    i += 1;\n  }\n  r\n}\n\nfn sym_val(c: Str) -> Int {\n  match c {\n    \"I\" => 1,\n    \"V\" => 5,\n    \"X\" => 10,\n    \"L\" => 50,\n    \"C\" => 100,\n    \"D\" => 500,\n    \"M\" => 1000,\n    _ => 0,\n  }\n}\n\nfn from_roman(s: Str) -> Option<Int> {\n  let n = s.len();\n  if n == 0 { return None; }\n  let mut total = 0;\n  let mut i = 0;\n  while i < n {\n    let v = sym_val(s.slice(i, i + 1));\n    if v == 0 { return None; }\n    let next = if i + 1 < n { sym_val(s.slice(i + 1, i + 2)) } else { 0 };\n    if next > v { total -= v; } else { total += v; }\n    i += 1;\n  }\n  if total < 1 || total > 3999 { return None; }\n  if to_roman(total) == s { Some(total) } else { None }\n}\n\nfn convert(t: Str) -> Str {\n  match t.parse_int() {\n    Some(n) => {\n      if t.starts_with(\"+\") || n < 1 || n > 3999 { \"invalid\" } else { to_roman(n) }\n    },\n    None => {\n      match from_roman(t) {\n        Some(v) => v.to_str(),\n        None => \"invalid\",\n      }\n    },\n  }\n}\n\nfn main(input: Dir) -> Result<Str, IoErr> {\n  let text = input.read(\"numbers.txt\")?.to_str();\n  let mut out: List<Str> = [];\n  for line in text.lines() {\n    let t = line.trim();\n    if t.len() == 0 { continue; }\n    out.push(t + \" = \" + convert(t));\n  }\n  Ok(out.join(\"\\n\"))\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "convert    : none\nfrom_roman : none\nmain       : input read\nsym_val    : none\nto_roman   : none"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.0251487,
+   "input_tokens": 15771,
+   "output_tokens": 1966,
+   "seconds": 14.7,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "07-brackets",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "fn closer_str(c: Int) -> Str {\n  match c {\n    41 => \")\",\n    93 => \"]\",\n    _ => \"}\",\n  }\n}\n\nfn check(line: Str) -> Str {\n  let b = line.to_bytes();\n  let mut stack: List<Int> = [];\n  let mut i = 0;\n  while i < b.len() {\n    let c = b[i];\n    if c == 40 {\n      stack.push(41);\n    } else if c == 91 {\n      stack.push(93);\n    } else if c == 123 {\n      stack.push(125);\n    } else if c == 41 || c == 93 || c == 125 {\n      let Some(x) = stack.pop() else {\n        return \"col \" + (i + 1).to_str() + \": unexpected \" + closer_str(c);\n      };\n      if x != c {\n        return \"col \" + (i + 1).to_str() + \": expected \" + closer_str(x) + \", found \" + closer_str(c);\n      }\n    }\n    i += 1;\n  }\n  if stack.len() == 0 {\n    \"ok\"\n  } else {\n    \"unclosed \" + closer_str(stack[stack.len() - 1])\n  }\n}\n\nfn main(input: Dir) -> Result<Str, IoErr> {\n  let text = input.read(\"snippets.txt\")?.to_str();\n  let mut out = \"\";\n  for line in text.lines() {\n    out = out + check(line) + \"\\n\";\n  }\n  Ok(out)\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "check      : none\ncloser_str : none\nmain       : input read"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.0173267,
+   "input_tokens": 15798,
+   "output_tokens": 1173,
+   "seconds": 9.5,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "08-latency",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "fn pct(t: List<Int>, p: Int) -> Int {\n  let n = t.len();\n  let k = (p * n + 99) / 100;\n  t[k - 1]\n}\n\nfn main(input: Dir) -> Result<Str, IoErr> {\n  let text = input.read(\"timings.log\")?.to_str();\n  let mut groups: Map<Str, List<Int>> = Map::new();\n  for line in text.lines() {\n    let parts = line.split(\" \");\n    if parts.len() != 3 { continue; }\n    let Some(ms) = parts[2].parse_int() else { continue; };\n    let key = parts[0] + \" \" + parts[1];\n    let mut cur: List<Int> = groups.get(key).unwrap_or([]);\n    cur.push(ms);\n    groups.insert(key, cur);\n  }\n  let mut out = \"\";\n  for key in groups.keys() {\n    let mut t: List<Int> = groups.get(key).unwrap_or([]);\n    if t.len() == 0 { continue; }\n    t.sort();\n    out = out + key + \" count=\" + t.len().to_str()\n      + \" p50=\" + pct(t, 50).to_str()\n      + \" p95=\" + pct(t, 95).to_str()\n      + \" max=\" + t[t.len() - 1].to_str() + \"\\n\";\n  }\n  Ok(out)\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "main : input read\npct  : none"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.018410700000000002,
+   "input_tokens": 15779,
+   "output_tokens": 1289,
+   "seconds": 10.7,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "09-shortest-path",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "struct Edge { to: Str, cost: Int }\nstruct Trip { from: Str, to: Str }\n\nfn dijkstra(adj: Map<Str, List<Edge>>, src: Str) -> Map<Str, Int> {\n  let mut dist: Map<Str, Int> = Map::new();\n  dist.insert(src, 0);\n  let mut done: Map<Str, Bool> = Map::new();\n  loop {\n    let mut best: Option<Str> = None;\n    let mut bd = 0;\n    for k in dist.keys() {\n      if done.get(k).is_none() {\n        let d = dist.get(k).unwrap_or(0);\n        if best.is_none() || d < bd {\n          best = Some(k);\n          bd = d;\n        }\n      }\n    }\n    let Some(u) = best else { break; };\n    done.insert(u, true);\n    let edges: List<Edge> = adj.get(u).unwrap_or([]);\n    for e in edges {\n      let nd = bd + e.cost;\n      let cur = dist.get(e.to);\n      if cur.is_none() || nd < cur.unwrap_or(0) {\n        dist.insert(e.to, nd);\n      }\n    }\n  }\n  dist\n}\n\nfn route(adj: Map<Str, List<Edge>>, t: Trip) -> Str {\n  let dist = dijkstra(adj, t.to);\n  let Some(total) = dist.get(t.from) else {\n    return t.from + \" \" + t.to + \" unreachable\";\n  };\n  let mut names: List<Str> = [t.from];\n  let mut cur = t.from;\n  let mut dcur = total;\n  while cur != t.to {\n    let mut best: Option<Str> = None;\n    let mut bdv = 0;\n    let edges: List<Edge> = adj.get(cur).unwrap_or([]);\n    for e in edges {\n      if let Some(dv) = dist.get(e.to) {\n        if e.cost + dv == dcur {\n          if best.is_none() || e.to < best.unwrap_or(\"\") {\n            best = Some(e.to);\n            bdv = dv;\n          }\n        }\n      }\n    }\n    let Some(nx) = best else { break; };\n    names.push(nx);\n    cur = nx;\n    dcur = bdv;\n  }\n  names.join(\" -> \") + \" \" + total.to_str()\n}\n\nfn main(input: Dir) -> Result<Str, IoErr> {\n  let text = input.read(\"routes.txt\")?.to_str();\n  let mut adj: Map<Str, List<Edge>> = Map::new();\n  let mut trips: List<Trip> = [];\n  for raw in text.lines() {\n    let line = raw.replace(\"\\t\", \" \").trim();\n    if line.len() == 0 || line.starts_with(\"#\") { continue; }\n    let parts = line.split(\" \").filter(|p| p.len() > 0);\n    if parts.len() == 4 && parts[0] == \"road\" {\n      let Some(c) = parts[3].parse_int() else { continue; };\n      if c <= 0 { continue; }\n      let a = parts[1];\n      let b = parts[2];\n      let mut la: List<Edge> = adj.get(a).unwrap_or([]);\n      la.push(Edge { to: b, cost: c });\n      adj.insert(a, la);\n      let mut lb: List<Edge> = adj.get(b).unwrap_or([]);\n      lb.push(Edge { to: a, cost: c });\n      adj.insert(b, lb);\n    } else if parts.len() == 3 && parts[0] == \"trip\" {\n      trips.push(Trip { from: parts[1], to: parts[2] });\n    }\n  }\n  let mut out: List<Str> = [];\n  for t in trips {\n    out.push(route(adj, t));\n  }\n  Ok(out.join(\"\\n\"))\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "dijkstra : none\nmain     : input read\nroute    : none"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.034406700000000005,
+   "input_tokens": 15768,
+   "output_tokens": 2893,
+   "seconds": 20.0,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "10-config-flatten",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "struct Entry { path: Str, line: Str }\n\nfn merge(base: Json, over: Json) -> Json {\n  let Json::Obj(om) = over else { return over; };\n  let mut r: Map<Str, Json> = Map::new();\n  if let Json::Obj(bm) = base { r = bm; }\n  for k in om.keys() {\n    let v = om.get(k).unwrap_or(Json::Null);\n    match v {\n      Json::Null => { r.remove(k); }\n      Json::Obj(_) => {\n        let b = r.get(k).unwrap_or(Json::Null);\n        r.insert(k, merge(b, v));\n      }\n      _ => { r.insert(k, v); }\n    }\n  }\n  Json::Obj(r)\n}\n\nfn flatten(path: Str, j: Json, acc: List<Entry>) -> List<Entry> {\n  let mut out = acc;\n  match j {\n    Json::Obj(m) => {\n      if m.len() == 0 {\n        out.push(Entry { path: path, line: path + \"={}\" });\n      } else {\n        for k in m.keys() {\n          let child = if path == \"\" { k } else { path + \".\" + k };\n          out = flatten(child, m.get(k).unwrap_or(Json::Null), out);\n        }\n      }\n    }\n    Json::Arr(l) => {\n      if l.len() == 0 {\n        out.push(Entry { path: path, line: path + \"=[]\" });\n      } else {\n        for i in 0..l.len() {\n          let child = if path == \"\" { i.to_str() } else { path + \".\" + i.to_str() };\n          out = flatten(child, l[i], out);\n        }\n      }\n    }\n    _ => {\n      out.push(Entry { path: path, line: path + \"=\" + j.to_json() });\n    }\n  }\n  out\n}\n\nfn main(input: Dir) -> Result<Str, Str> {\n  let bt = input.read(\"base.json\").map_err(|e| \"cannot read base.json\")?;\n  let ot = input.read(\"override.json\").map_err(|e| \"cannot read override.json\")?;\n  let base = bt.to_str().parse_json()?;\n  let over = ot.to_str().parse_json()?;\n  let merged = merge(base, over);\n  let mut entries: List<Entry> = [];\n  entries = flatten(\"\", merged, entries);\n  entries.sort_by_key(|e| e.path);\n  let lines = entries.map(|e| e.line);\n  Ok(lines.join(\"\\n\"))\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "flatten : none\nmain    : input read\nmerge   : none"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.028382700000000004,
+   "input_tokens": 15817,
+   "output_tokens": 2271,
+   "seconds": 17.8,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "11-split-log",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "fn main(input: Dir, out: Dir) -> Result<Str, IoErr> {\n  let text = input.read(\"app.log\")?.to_str();\n  let mut e = \"\";\n  let mut w = \"\";\n  let mut i = \"\";\n  let mut ne = 0;\n  let mut nw = 0;\n  let mut ni = 0;\n  let mut other = 0;\n  for line in text.lines() {\n    if line.trim().len() == 0 { continue; }\n    let parts = line.split(\" \");\n    if parts.len() < 3 {\n      other += 1;\n      continue;\n    }\n    let lv = parts[1].to_uppercase();\n    if lv == \"ERROR\" {\n      e = e + line + \"\\n\";\n      ne += 1;\n    } else if lv == \"WARN\" || lv == \"WARNING\" {\n      w = w + line + \"\\n\";\n      nw += 1;\n    } else if lv == \"INFO\" {\n      i = i + line + \"\\n\";\n      ni += 1;\n    } else {\n      other += 1;\n    }\n  }\n  out.write(\"error.log\", e.to_bytes())?;\n  out.write(\"warn.log\", w.to_bytes())?;\n  out.write(\"info.log\", i.to_bytes())?;\n  Ok(\"error \" + ne.to_str() + \"\\nwarn \" + nw.to_str() + \"\\ninfo \" + ni.to_str() + \"\\nother \" + other.to_str())\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "main : input read, out write"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.0163947,
+   "input_tokens": 15895,
+   "output_tokens": 1041,
+   "seconds": 8.1,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "12-file-index",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "struct Entry { path: Str, bytes: Int, lines: Int }\n\nfn join(dir: Str, name: Str) -> Str {\n  if dir == \"\" { name } else { dir + \"/\" + name }\n}\n\nfn count_lines(b: Bytes) -> Int {\n  let n = b.len();\n  let mut c = 0;\n  for i in 0..n {\n    if b[i] == 10 { c += 1; }\n  }\n  if n > 0 && b[n - 1] != 10 { c += 1; }\n  c\n}\n\nfn walk(d: Dir, dir: Str, acc: List<Entry>) -> Result<List<Entry>, IoErr> {\n  let mut res = acc;\n  let names = d.list(dir)?;\n  for name in names {\n    if let Some(sub) = name.strip_suffix(\"/\") {\n      res = walk(d, join(dir, sub), res)?;\n    } else {\n      let p = join(dir, name);\n      let b = d.read(p)?;\n      res.push(Entry { path: p, bytes: b.len(), lines: count_lines(b) });\n    }\n  }\n  Ok(res)\n}\n\nfn main(input: Dir, out: Dir) -> Result<Str, IoErr> {\n  let start: List<Entry> = [];\n  let mut entries = walk(input, \"\", start)?;\n  entries.sort_by_key(|e| e.path);\n  let mut text = \"path,bytes,lines\\n\";\n  let mut total = 0;\n  for e in entries {\n    text = text + e.path + \",\" + e.bytes.to_str() + \",\" + e.lines.to_str() + \"\\n\";\n    total += e.bytes;\n  }\n  out.create(\"index.csv\", text.to_bytes())?;\n  Ok(\"files \" + entries.len().to_str() + \" bytes \" + total.to_str())\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "count_lines : none\njoin        : none\nmain        : input list read, out create\nwalk        : d list read"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.018054700000000003,
+   "input_tokens": 15705,
+   "output_tokens": 1283,
+   "seconds": 9.9,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "13-csv-to-json",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "fn parse_line(line: Str) -> List<Str> {\n  let b = line.to_bytes();\n  let n = b.len();\n  let mut fields: List<Str> = [];\n  let mut cur = \"\".to_bytes();\n  let mut in_q = false;\n  let mut i = 0;\n  while i < n {\n    let c = b[i];\n    if in_q {\n      if c == 34 {\n        if i + 1 < n && b[i + 1] == 34 {\n          cur.push(34);\n          i += 1;\n        } else {\n          in_q = false;\n        }\n      } else {\n        cur.push(c);\n      }\n    } else if c == 34 {\n      in_q = true;\n    } else if c == 44 {\n      fields.push(cur.to_str());\n      cur = \"\".to_bytes();\n    } else {\n      cur.push(c);\n    }\n    i += 1;\n  }\n  fields.push(cur.to_str());\n  fields\n}\n\nfn is_active(s: Str) -> Bool {\n  match s.to_lowercase() {\n    \"yes\" | \"true\" | \"1\" => true,\n    _ => false,\n  }\n}\n\nfn tags_json(s: Str) -> Json {\n  let mut out: List<Json> = [];\n  for t in s.split(\";\") {\n    let tt = t.trim();\n    if tt.len() > 0 {\n      out.push(Json::Str(tt));\n    }\n  }\n  Json::Arr(out)\n}\n\nfn main(input: Dir, out: Dir) -> Result<Str, IoErr> {\n  let text = input.read(\"users.csv\")?.to_str();\n  let mut rows: List<Json> = [];\n  let mut skipped = 0;\n  let mut first = true;\n  for raw in text.lines() {\n    let line = raw.strip_suffix(\"\\r\").unwrap_or(raw);\n    if line.trim().len() == 0 {\n      continue;\n    }\n    if first {\n      first = false;\n      continue;\n    }\n    let f = parse_line(line);\n    if f.len() != 5 {\n      skipped += 1;\n      continue;\n    }\n    let Some(id) = f[0].parse_int() else {\n      skipped += 1;\n      continue;\n    };\n    let mut m: Map<Str, Json> = Map::new();\n    m.insert(\"id\", Json::Num(id));\n    m.insert(\"name\", Json::Str(f[1]));\n    m.insert(\"email\", Json::Str(f[2]));\n    m.insert(\"active\", Json::Bool(is_active(f[3])));\n    m.insert(\"tags\", tags_json(f[4]));\n    rows.push(Json::Obj(m));\n  }\n  let n = rows.len();\n  out.create(\"users.json\", Json::Arr(rows).to_json().to_bytes())?;\n  Ok(\"rows \" + n.to_str() + \" skipped \" + skipped.to_str())\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "is_active  : none\nmain       : input read, out create\nparse_line : none\ntags_json  : none"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.025996700000000005,
+   "input_tokens": 15838,
+   "output_tokens": 2024,
+   "seconds": 14.3,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "14-rename-files",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "fn norm(s: Str) -> Str {\n  let b = s.to_bytes();\n  let mut o = \"\".to_bytes();\n  for i in 0..b.len() {\n    let mut c = b[i];\n    if c >= 65 && c <= 90 { c += 32; }\n    if (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 46 {\n      o.push(c);\n    } else if o.len() > 0 && o[o.len() - 1] != 45 {\n      o.push(45);\n    }\n  }\n  if o.len() > 0 && o[o.len() - 1] == 45 {\n    o = o.slice(0, o.len() - 1);\n  }\n  o.to_str()\n}\n\nfn main(input: Dir, out: Dir) -> Result<Str, IoErr> {\n  let mut names = input.list(\"\")?;\n  names.sort();\n  let mut taken: HashMap<Str, Bool> = HashMap::new();\n  let mut lines: List<Str> = [];\n  for name in names {\n    let n = norm(name);\n    if n.len() == 0 || taken.get(n).is_some() {\n      lines.push(name + \" skipped\");\n    } else {\n      taken.insert(n, true);\n      let data = input.read(name)?;\n      out.create(n, data)?;\n      lines.push(name + \" -> \" + n);\n    }\n  }\n  Ok(lines.join(\"\\n\"))\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "main : input list read, out create\nnorm : none"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.0185487,
+   "input_tokens": 15801,
+   "output_tokens": 1294,
+   "seconds": 10.3,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "15-merge-parts",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "fn is_part(name: Str) -> Bool {\n  if !name.starts_with(\"part-\") || !name.ends_with(\".txt\") { return false; }\n  if name.len() != 13 { return false; }\n  let mut mid = name.slice(5, 9);\n  let digits = [\"0\", \"1\", \"2\", \"3\", \"4\", \"5\", \"6\", \"7\", \"8\", \"9\"];\n  for d in digits { mid = mid.replace(d, \"\"); }\n  mid.len() == 0\n}\n\nfn parse_part(text: Str) -> Option<List<Int>> {\n  let mut vals: List<Int> = [];\n  for raw in text.lines() {\n    let line = raw.trim();\n    if line.len() == 0 { continue; }\n    let v = line.parse_int()?;\n    vals.push(v);\n  }\n  Some(vals)\n}\n\nfn main(input: Dir, out: Dir) -> Result<Str, IoErr> {\n  let names = input.list(\"\")?;\n  let mut parts = 0;\n  let mut corrupt = 0;\n  let mut all: List<Int> = [];\n  for name in names {\n    if !is_part(name) { continue; }\n    parts += 1;\n    let text = input.read(name)?.to_str();\n    match parse_part(text) {\n      Some(vals) => {\n        for v in vals { all.push(v); }\n      }\n      None => { corrupt += 1; }\n    }\n  }\n  all.sort();\n  let mut lines: List<Str> = [];\n  let mut last = 0;\n  let mut have = false;\n  for x in all {\n    if have && x == last { continue; }\n    have = true;\n    last = x;\n    lines.push(x.to_str());\n  }\n  let count = lines.len();\n  let mut body = lines.join(\"\\n\");\n  if count > 0 { body = body + \"\\n\"; }\n  out.write(\"merged.txt\", body.to_bytes())?;\n  Ok(\"parts \" + parts.to_str() + \" corrupt \" + corrupt.to_str() + \" values \" + count.to_str())\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "is_part    : none\nmain       : input list read, out write\nparse_part : none"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.026860700000000005,
+   "input_tokens": 15719,
+   "output_tokens": 2158,
+   "seconds": 16.8,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "16-sync-dirs",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "fn main(src: Dir, dst: Dir) -> Result<Str, IoErr> {\n  let mut names = src.list(\"\")?;\n  names.sort();\n  let dst_names = dst.list(\"\")?;\n  let mut out = \"\";\n  for name in names {\n    let data = src.read(name)?;\n    if dst.exists(name)? {\n      let old = dst.read(name)?;\n      if old == data {\n        out = out + \"same \" + name + \"\\n\";\n      } else {\n        dst.write(name, data)?;\n        out = out + \"updated \" + name + \"\\n\";\n      }\n    } else {\n      dst.write(name, data)?;\n      out = out + \"added \" + name + \"\\n\";\n    }\n  }\n  let src_names = src.list(\"\")?;\n  let mut kept = 0;\n  for n in dst_names {\n    if !src_names.contains(n) { kept += 1; }\n  }\n  out = out + \"kept \" + kept.to_str() + \"\\n\";\n  Ok(out)\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "main : src list read, dst exists list read write"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.0105927,
+   "input_tokens": 15667,
+   "output_tokens": 552,
+   "seconds": 5.9,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "17-kv-visits",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "struct Entry { page: Str, total: Int }\n\nfn main(input: Dir, counts: Kv) -> Result<Str, Str> {\n  let text = match input.read(\"visits.txt\") {\n    Ok(b) => b.to_str(),\n    Err(_) => return Err(\"cannot read visits.txt\"),\n  };\n  let mut local: Map<Str, Int> = Map::new();\n  for line in text.lines() {\n    let p = line.trim();\n    if p.len() == 0 { continue; }\n    let cur = local.get(p).unwrap_or(0);\n    local.insert(p, cur + 1);\n  }\n  for p in local.keys() {\n    let n = local.get(p).unwrap_or(0);\n    match counts.add(\"page:\" + p, n) {\n      Ok(_) => {},\n      Err(_) => return Err(\"kv add failed\"),\n    }\n  }\n  let keys = match counts.keys(\"page:\") {\n    Ok(ks) => ks,\n    Err(_) => return Err(\"kv keys failed\"),\n  };\n  let mut entries: List<Entry> = [];\n  for k in keys {\n    match counts.get(k) {\n      Ok(Some(b)) => {\n        let total = b.to_str().parse_int().unwrap_or(0);\n        entries.push(Entry { page: k.slice(5, k.len()), total: total });\n      },\n      Ok(None) => {},\n      Err(_) => return Err(\"kv get failed\"),\n    }\n  }\n  entries.sort_by(|a, b| a.total > b.total || (a.total == b.total && a.page < b.page));\n  let mut lines: List<Str> = [];\n  for e in entries {\n    lines.push(e.page + \" \" + e.total.to_str());\n  }\n  Ok(lines.join(\"\\n\"))\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "main : input read, counts add get keys"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.020030700000000002,
+   "input_tokens": 15729,
+   "output_tokens": 1471,
+   "seconds": 11.1,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "18-kv-users",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "fn key(id: Str) -> Str {\n  \"user:\" + id\n}\n\nfn count_users(users: Kv) -> Result<Int, KvErr> {\n  let mut after: Option<Str> = None;\n  let mut n = 0;\n  loop {\n    let page = users.scan(\"user:\", after, 1000)?;\n    n += page.len();\n    if page.len() < 1000 { break; }\n    after = Some(page[page.len() - 1].key);\n  }\n  Ok(n)\n}\n\nfn exec(users: Kv, line: Str) -> Result<Str, KvErr> {\n  let mut p: List<Str> = [];\n  for s in line.split(\" \") {\n    if s.len() > 0 { p.push(s); }\n  }\n  let bad = \"bad \" + line;\n  let cmd = p[0];\n  if cmd == \"put\" && p.len() == 4 {\n    users.set(key(p[1]), (p[2] + \" \" + p[3]).to_bytes())?;\n    return Ok(\"ok \" + p[1]);\n  }\n  if cmd == \"rename\" && p.len() == 3 {\n    let id = p[1];\n    let Some(b) = users.get(key(id))? else { return Ok(\"missing \" + id); };\n    let parts = b.to_str().split(\" \");\n    users.set(key(id), (p[2] + \" \" + parts[1]).to_bytes())?;\n    return Ok(\"ok \" + id);\n  }\n  if cmd == \"get\" && p.len() == 2 {\n    let id = p[1];\n    let Some(b) = users.get(key(id))? else { return Ok(\"missing \" + id); };\n    let parts = b.to_str().split(\" \");\n    return Ok(\"{\\\"id\\\":\" + Json::Str(id).to_json() + \",\\\"name\\\":\" + Json::Str(parts[0]).to_json() + \",\\\"email\\\":\" + Json::Str(parts[1]).to_json() + \"}\");\n  }\n  if cmd == \"del\" && p.len() == 2 {\n    let id = p[1];\n    let Some(_b) = users.get(key(id))? else { return Ok(\"missing \" + id); };\n    users.delete(key(id))?;\n    return Ok(\"ok \" + id);\n  }\n  if cmd == \"count\" && p.len() == 1 {\n    let n = count_users(users)?;\n    return Ok(\"count \" + n.to_str());\n  }\n  Ok(bad)\n}\n\nfn main(input: Dir, users: Kv) -> Str {\n  let text = match input.read(\"commands.txt\") {\n    Ok(b) => b.to_str(),\n    Err(_) => return \"\",\n  };\n  let mut outl: List<Str> = [];\n  for raw in text.lines() {\n    let line = raw.trim();\n    if line.len() == 0 { continue; }\n    match exec(users, line) {\n      Ok(s) => outl.push(s),\n      Err(_) => return outl.join(\"\\n\") + \"\\nkv error\",\n    }\n  }\n  outl.join(\"\\n\")\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "count_users : users scan\nexec        : users delete get scan set\nkey         : none\nmain        : input read, users delete get scan set"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.0301087,
+   "input_tokens": 15826,
+   "output_tokens": 2440,
+   "seconds": 17.6,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "19-kv-ingest",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "struct Event { id: Str, account: Str, cents: Int }\n\nfn parse_event(line: Str) -> Option<Event> {\n  let j = match line.parse_json() {\n    Ok(v) => v,\n    Err(_) => return None,\n  };\n  if j.as_map().is_none() { return None; }\n  let id = j.get(\"id\").and_then(|x| x.as_str())?;\n  let account = j.get(\"account\").and_then(|x| x.as_str())?;\n  let cents = j.get(\"cents\").and_then(|x| x.as_int())?;\n  if id.len() > 1000 || account.len() > 1000 { return None; }\n  Some(Event { id: id, account: account, cents: cents })\n}\n\nfn apply(state: Kv, ev: Event) -> Result<Bool, KvErr> {\n  let claimed = state.swap(\"id:\" + ev.id, None, Some(\"1\".to_bytes()))?;\n  if !claimed { return Ok(false); }\n  state.add(\"bal:\" + ev.account, ev.cents)?;\n  Ok(true)\n}\n\nfn balances(state: Kv) -> Result<Str, KvErr> {\n  let keys = state.keys(\"bal:\")?;\n  let mut out = \"\";\n  for k in keys {\n    let name = k.strip_prefix(\"bal:\").unwrap_or(k);\n    let v = state.get(k)?.unwrap_or(\"0\".to_bytes()).to_str();\n    out = out + name + \" \" + v + \"\\n\";\n  }\n  Ok(out)\n}\n\nfn main(input: Dir, state: Kv) -> Result<Str, Str> {\n  let text = match input.read(\"events.jsonl\") {\n    Ok(b) => b.to_str(),\n    Err(_) => return Err(\"cannot read events.jsonl\"),\n  };\n  let mut applied = 0;\n  let mut dup = 0;\n  let mut rejected = 0;\n  for raw in text.lines() {\n    let line = raw.trim();\n    if line.len() == 0 { continue; }\n    let Some(ev) = parse_event(line) else {\n      rejected += 1;\n      continue;\n    };\n    match apply(state, ev) {\n      Ok(true) => { applied += 1; }\n      Ok(false) => { dup += 1; }\n      Err(_) => return Err(\"state error\"),\n    }\n  }\n  let bal = match balances(state) {\n    Ok(s) => s,\n    Err(_) => return Err(\"state error\"),\n  };\n  Ok(\"applied \" + applied.to_str() + \" duplicate \" + dup.to_str() + \" rejected \" + rejected.to_str() + \"\\n\" + bal)\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "apply       : state add swap\nbalances    : state get keys\nmain        : input read, state add get keys swap\nparse_event : none"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.030070700000000006,
+   "input_tokens": 15779,
+   "output_tokens": 2455,
+   "seconds": 18.8,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "20-kv-rate-limit",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "fn process(limits: Kv, text: Str) -> Result<Str, KvErr> {\n  let mut out = \"\";\n  for line in text.lines() {\n    let parts = line.trim().split(\" \");\n    if parts.len() != 2 { continue; }\n    let Some(t) = parts[0].parse_int() else { continue; };\n    let client = parts[1];\n    let key = \"rl:\" + (t / 60).to_str() + \":\" + client;\n    let cur = match limits.get(key)? {\n      Some(b) => b.to_str().parse_int().unwrap_or(0),\n      None => 0,\n    };\n    if cur < 3 {\n      limits.add(key, 1)?;\n      out = out + parts[0] + \" \" + client + \" allow\\n\";\n    } else {\n      out = out + parts[0] + \" \" + client + \" deny\\n\";\n    }\n  }\n  Ok(out)\n}\n\nfn main(input: Dir, limits: Kv) -> Result<Str, Str> {\n  let bytes = match input.read(\"requests.txt\") {\n    Ok(b) => b,\n    Err(_) => return Err(\"cannot read requests.txt\"),\n  };\n  match process(limits, bytes.to_str()) {\n    Ok(s) => Ok(s),\n    Err(_) => Err(\"kv error\"),\n  }\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "main    : input read, limits add get\nprocess : limits add get"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.0186367,
+   "input_tokens": 15753,
+   "output_tokens": 1322,
+   "seconds": 10.9,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "21-kv-leaderboard",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "struct Player { name: Str, points: Int, played: Int }\n\nfn bump(b: Kv, name: Str, pts: Int) -> Result<(), KvErr> {\n  b.add(\"pts:\" + name, pts)?;\n  b.add(\"gp:\" + name, 1)?;\n  Ok(())\n}\n\nfn apply(b: Kv, text: Str) -> Result<(), KvErr> {\n  for raw in text.lines() {\n    let parts = raw.trim().split(\" \");\n    let n = parts.len();\n    let mut draw = false;\n    if n == 3 {\n      if parts[2] == \"draw\" { draw = true; } else { continue; }\n    } else if n != 2 {\n      continue;\n    }\n    let w = parts[0];\n    let l = parts[1];\n    if w.len() == 0 || l.len() == 0 { continue; }\n    if draw {\n      bump(b, w, 1)?;\n      bump(b, l, 1)?;\n    } else {\n      bump(b, w, 3)?;\n      bump(b, l, 0)?;\n    }\n  }\n  Ok(())\n}\n\nfn before(a: Player, b: Player) -> Bool {\n  if a.points != b.points { return a.points > b.points; }\n  if a.played != b.played { return a.played < b.played; }\n  a.name < b.name\n}\n\nfn run(b: Kv, text: Str) -> Result<Str, KvErr> {\n  apply(b, text)?;\n  let keys = b.keys(\"pts:\")?;\n  let mut players: List<Player> = [];\n  for k in keys {\n    let name = k.slice(4, k.len());\n    let pts = b.add(\"pts:\" + name, 0)?;\n    let gp = b.add(\"gp:\" + name, 0)?;\n    players.push(Player { name: name, points: pts, played: gp });\n  }\n  players.sort_by(before);\n  let mut top = players.len();\n  if top > 3 { top = 3; }\n  let mut lines: List<Str> = [];\n  for i in 0..top {\n    let p = players[i];\n    lines.push((i + 1).to_str() + \". \" + p.name + \" \" + p.points.to_str() + \" \" + p.played.to_str());\n  }\n  Ok(lines.join(\"\\n\"))\n}\n\nfn main(input: Dir, board: Kv) -> Result<Str, Str> {\n  let text = match input.read(\"games.txt\") {\n    Ok(b) => b.to_str(),\n    Err(_) => return Err(\"cannot read games.txt\"),\n  };\n  match run(board, text) {\n    Ok(s) => Ok(s),\n    Err(_) => Err(\"kv error\"),\n  }\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "apply  : b add\nbefore : none\nbump   : b add\nmain   : input read, board add keys\nrun    : b add keys"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.0255247,
+   "input_tokens": 15755,
+   "output_tokens": 2010,
+   "seconds": 15.7,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "22-db-import",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "fn text_of(v: SqlValue) -> Str {\n  match v {\n    SqlValue::Text(s) => s,\n    _ => \"\",\n  }\n}\n\nfn int_of(v: SqlValue) -> Int {\n  match v {\n    SqlValue::Int(n) => n,\n    _ => 0,\n  }\n}\n\nfn main(input: Dir, shop: Db) -> Result<Str, Str> {\n  shop.exec(\"CREATE TABLE IF NOT EXISTS orders (order_id INTEGER PRIMARY KEY, customer TEXT NOT NULL, product TEXT NOT NULL, qty INTEGER NOT NULL, unit_cents INTEGER NOT NULL)\", []).map_err(|e| \"db error creating schema\")?;\n  let bytes = input.read(\"orders.csv\").map_err(|e| \"cannot read orders.csv\")?;\n  let text = bytes.to_str();\n  let mut imported = 0;\n  let mut skipped = 0;\n  let mut rejected = 0;\n  let mut seen_header = false;\n  for line in text.lines() {\n    let l = line.trim();\n    if l.len() == 0 { continue; }\n    if !seen_header {\n      seen_header = true;\n      continue;\n    }\n    let parts = l.split(\",\");\n    if parts.len() != 5 {\n      rejected += 1;\n      continue;\n    }\n    let Some(oid) = parts[0].parse_int() else { rejected += 1; continue; };\n    let Some(qty) = parts[3].parse_int() else { rejected += 1; continue; };\n    let Some(cents) = parts[4].parse_int() else { rejected += 1; continue; };\n    let n = shop.exec(\"INSERT OR IGNORE INTO orders (order_id, customer, product, qty, unit_cents) VALUES (?, ?, ?, ?, ?)\", [SqlValue::Int(oid), SqlValue::Text(parts[1]), SqlValue::Text(parts[2]), SqlValue::Int(qty), SqlValue::Int(cents)]).map_err(|e| \"db error inserting\")?;\n    if n > 0 { imported += 1; } else { skipped += 1; }\n  }\n  let mut out = \"imported \" + imported.to_str() + \" skipped \" + skipped.to_str() + \" rejected \" + rejected.to_str();\n  let rows = shop.query(\"SELECT product, SUM(qty * unit_cents) AS rev, COUNT(*) FROM orders GROUP BY product ORDER BY rev DESC, product ASC LIMIT 3\", []).map_err(|e| \"db error querying\")?;\n  for r in rows {\n    out = out + \"\\n\" + text_of(r[0]) + \" \" + int_of(r[1]).to_str() + \" \" + int_of(r[2]).to_str();\n  }\n  Ok(out)\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "int_of  : none\nmain    : input read, shop exec query\ntext_of : none"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.028256700000000003,
+   "input_tokens": 15778,
+   "output_tokens": 2274,
+   "seconds": 15.6,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "23-db-report",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "struct Country {\n  name: Str,\n  customers: Int,\n  orders: Int,\n  revenue: Int,\n  top_name: Str,\n  top_rev: Int,\n}\n\nfn int_of(v: SqlValue) -> Int {\n  match v {\n    SqlValue::Int(n) => n,\n    _ => 0,\n  }\n}\n\nfn text_of(v: SqlValue) -> Str {\n  match v {\n    SqlValue::Text(s) => s,\n    _ => \"\",\n  }\n}\n\nfn main(shop: Db) -> Result<Str, DbErr> {\n  let rows = shop.query(\n    \"SELECT c.id, c.name, c.country, COUNT(*), SUM(o.total_cents) FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.status = 'paid' AND o.placed >= '2026-01-01' AND o.placed < '2027-01-01' GROUP BY c.id, c.name, c.country ORDER BY c.id\",\n    [],\n  )?;\n  let mut m: Map<Str, Country> = Map::new();\n  let mut total_orders = 0;\n  let mut total_rev = 0;\n  for row in rows {\n    let name = text_of(row[1]);\n    let country = text_of(row[2]);\n    let n = int_of(row[3]);\n    let rev = int_of(row[4]);\n    total_orders += n;\n    total_rev += rev;\n    match m.get(country) {\n      Some(c) => {\n        let better = rev > c.top_rev;\n        let tn = if better { name } else { c.top_name };\n        let tr = if better { rev } else { c.top_rev };\n        m.insert(country, Country {\n          customers: c.customers + 1,\n          orders: c.orders + n,\n          revenue: c.revenue + rev,\n          top_name: tn,\n          top_rev: tr,\n          ..c\n        });\n      }\n      None => {\n        m.insert(country, Country {\n          name: country,\n          customers: 1,\n          orders: n,\n          revenue: rev,\n          top_name: name,\n          top_rev: rev,\n        });\n      }\n    }\n  }\n  let mut list: List<Country> = [];\n  for k in m.keys() {\n    if let Some(c) = m.get(k) {\n      list.push(c);\n    }\n  }\n  list.sort_by(|a, b| a.revenue > b.revenue || (a.revenue == b.revenue && a.name < b.name));\n  let mut out = \"\";\n  for c in list {\n    out = out + c.name + \" customers=\" + c.customers.to_str() + \" orders=\" + c.orders.to_str()\n      + \" revenue=\" + c.revenue.to_str() + \" top=\" + c.top_name + \"\\n\";\n  }\n  out = out + \"total orders=\" + total_orders.to_str() + \" revenue=\" + total_rev.to_str();\n  Ok(out)\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "int_of  : none\nmain    : shop query\ntext_of : none"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.025608700000000005,
+   "input_tokens": 15896,
+   "output_tokens": 1962,
+   "seconds": 14.0,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "24-db-inventory",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "struct Move { sku: Str, delta: Int }\nstruct Batch { name: Str, moves: List<Move>, bad: Bool }\n\nfn parse_move(line: Str) -> Option<Move> {\n  let parts = line.split(\" \");\n  if parts.len() != 2 { return None; }\n  let sku = parts[0];\n  let amt = parts[1];\n  if sku.len() == 0 { return None; }\n  let mut sign = 0;\n  if amt.starts_with(\"+\") { sign = 1; }\n  if amt.starts_with(\"-\") { sign = -1; }\n  if sign == 0 { return None; }\n  let rest = amt.slice(1, amt.len());\n  if rest.starts_with(\"+\") || rest.starts_with(\"-\") { return None; }\n  let n = rest.parse_int()?;\n  if n <= 0 { return None; }\n  Some(Move { sku: sku, delta: sign * n })\n}\n\nfn get_qty(db: Db, sku: Str) -> Result<Int, DbErr> {\n  let rows = db.query(\"SELECT qty FROM stock WHERE sku = ?\", [SqlValue::Text(sku)])?;\n  if rows.len() == 0 { return Ok(0); }\n  let row = rows[0];\n  if row.len() == 0 { return Ok(0); }\n  match row[0] {\n    SqlValue::Int(n) => Ok(n),\n    _ => Ok(0),\n  }\n}\n\nfn is_applied(db: Db, name: Str) -> Result<Bool, DbErr> {\n  let rows = db.query(\"SELECT 1 FROM applied WHERE name = ?\", [SqlValue::Text(name)])?;\n  Ok(rows.len() > 0)\n}\n\nfn apply_batch(db: Db, b: Batch) -> Result<Bool, DbErr> {\n  let mut cur: Map<Str, Int> = Map::new();\n  for m in b.moves {\n    let base = match cur.get(m.sku) {\n      Some(q) => q,\n      None => get_qty(db, m.sku)?,\n    };\n    let nq = base + m.delta;\n    if nq < 0 { return Ok(false); }\n    cur.insert(m.sku, nq);\n  }\n  let mut stmts: List<Str> = [\"INSERT INTO applied(name) VALUES(?)\"];\n  let mut params: List<List<SqlValue>> = [[SqlValue::Text(b.name)]];\n  for sku in cur.keys() {\n    let q = cur.get(sku).unwrap_or(0);\n    stmts.push(\"INSERT OR REPLACE INTO stock(sku, qty) VALUES(?, ?)\");\n    params.push([SqlValue::Text(sku), SqlValue::Int(q)]);\n  }\n  db.transaction(stmts, params)?;\n  Ok(true)\n}\n\nfn main(input: Dir, stock: Db) -> Result<Str, DbErr> {\n  stock.exec(\"CREATE TABLE IF NOT EXISTS applied(name TEXT PRIMARY KEY)\", [])?;\n  stock.exec(\"CREATE TABLE IF NOT EXISTS stock(sku TEXT PRIMARY KEY, qty INTEGER NOT NULL)\", [])?;\n  let Ok(bytes) = input.read(\"moves.txt\") else { return Ok(\"cannot read moves.txt\"); };\n  let text = bytes.to_str();\n  let mut batches: List<Batch> = [];\n  for raw in text.lines() {\n    let line = raw.trim();\n    if line.len() == 0 { continue; }\n    if let Some(nm) = line.strip_prefix(\"batch \") {\n      batches.push(Batch { name: nm.trim(), moves: [], bad: false });\n      continue;\n    }\n    if batches.len() == 0 { continue; }\n    let idx = batches.len() - 1;\n    match parse_move(line) {\n      Some(m) => { batches[idx].moves.push(m); },\n      None => { batches[idx].bad = true; },\n    }\n  }\n  let mut out: List<Str> = [];\n  for b in batches {\n    if is_applied(stock, b.name)? {\n      out.push(b.name + \" skipped\");\n      continue;\n    }\n    if b.bad {\n      out.push(b.name + \" rejected\");\n      continue;\n    }\n    if apply_batch(stock, b)? {\n      out.push(b.name + \" applied\");\n    } else {\n      out.push(b.name + \" rejected\");\n    }\n  }\n  let rows = stock.query(\"SELECT sku, qty FROM stock WHERE qty != 0 ORDER BY sku\", [])?;\n  for row in rows {\n    if row.len() < 2 { continue; }\n    let mut sku = \"\";\n    let mut q = 0;\n    match row[0] {\n      SqlValue::Text(s) => { sku = s; },\n      _ => {},\n    }\n    match row[1] {\n      SqlValue::Int(n) => { q = n; },\n      _ => {},\n    }\n    out.push(sku + \" \" + q.to_str());\n  }\n  Ok(out.join(\"\\n\"))\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "apply_batch : db query transaction\nget_qty     : db query\nis_applied  : db query\nmain        : input read, stock exec query transaction\nparse_move  : none"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.043638699999999996,
+   "input_tokens": 15836,
+   "output_tokens": 3789,
+   "seconds": 25.8,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "25-db-contacts",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "fn sync_row(crm: Db, email: Str, name: Str, phone: Str) -> Result<Int, Str> {\n  let rows = crm.query(\"SELECT name, phone FROM contacts WHERE email = ?\", [SqlValue::Text(email)]).map_err(|e| \"db error\")?;\n  if rows.len() == 0 {\n    crm.exec(\"INSERT INTO contacts(email, name, phone) VALUES (?, ?, ?)\", [SqlValue::Text(email), SqlValue::Text(name), SqlValue::Text(phone)]).map_err(|e| \"db error\")?;\n    return Ok(0);\n  }\n  let r = rows[0];\n  if r[0] == SqlValue::Text(name) && r[1] == SqlValue::Text(phone) {\n    return Ok(2);\n  }\n  crm.exec(\"UPDATE contacts SET name = ?, phone = ? WHERE email = ?\", [SqlValue::Text(name), SqlValue::Text(phone), SqlValue::Text(email)]).map_err(|e| \"db error\")?;\n  Ok(1)\n}\n\nfn main(input: Dir, crm: Db) -> Result<Str, Str> {\n  crm.exec(\"CREATE TABLE IF NOT EXISTS contacts(email TEXT PRIMARY KEY, name TEXT NOT NULL, phone TEXT NOT NULL)\", []).map_err(|e| \"db error\")?;\n  let text = input.read(\"contacts.csv\").map_err(|e| \"cannot read contacts.csv\")?.to_str();\n  let mut ins = 0;\n  let mut upd = 0;\n  let mut same = 0;\n  let mut rej = 0;\n  let mut idx = 0;\n  for line in text.lines() {\n    idx += 1;\n    if idx == 1 { continue; }\n    if line.trim() == \"\" { continue; }\n    let parts = line.split(\",\");\n    if parts.len() != 3 {\n      rej += 1;\n      continue;\n    }\n    let email = parts[0].trim().to_lowercase();\n    if !email.contains(\"@\") {\n      rej += 1;\n      continue;\n    }\n    let k = sync_row(crm, email, parts[1].trim(), parts[2].trim())?;\n    if k == 0 { ins += 1; } else if k == 1 { upd += 1; } else { same += 1; }\n  }\n  let cnt = crm.query(\"SELECT COUNT(*) FROM contacts\", []).map_err(|e| \"db error\")?;\n  let total = match cnt[0][0] {\n    SqlValue::Int(n) => n,\n    _ => 0,\n  };\n  let mut out = \"inserted \" + ins.to_str() + \" updated \" + upd.to_str() + \" unchanged \" + same.to_str() + \" rejected \" + rej.to_str() + \"\\n\";\n  out = out + \"contacts \" + total.to_str();\n  let missing = crm.query(\"SELECT email FROM contacts WHERE phone = '' ORDER BY email\", []).map_err(|e| \"db error\")?;\n  let mut emails: List<Str> = [];\n  for r in missing {\n    if let SqlValue::Text(e) = r[0] {\n      emails.push(e);\n    }\n  }\n  emails.sort();\n  for e in emails {\n    out = out + \"\\nmissing phone: \" + e;\n  }\n  Ok(out)\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "main     : input read, crm exec query\nsync_row : crm exec query"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.028912700000000003,
+   "input_tokens": 15802,
+   "output_tokens": 2330,
+   "seconds": 16.2,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "26-http-counter",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "struct Resp { status: Int, body: Str }\nstruct Entry { name: Str, count: Int }\n\nfn err_body(msg: Str) -> Str {\n  \"{\\\"error\\\":\\\"\" + msg + \"\\\"}\"\n}\n\nfn counter_json(name: Str, count: Int) -> Str {\n  \"{\\\"name\\\":\\\"\" + name + \"\\\",\\\"count\\\":\" + count.to_str() + \"}\"\n}\n\nfn valid_name(name: Str) -> Bool {\n  let n = name.len();\n  if n < 1 || n > 32 { return false; }\n  let b = name.to_bytes();\n  for i in 0..n {\n    let c = b[i];\n    let ok = (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 45;\n    if !ok { return false; }\n  }\n  true\n}\n\nfn less(a: Entry, b: Entry) -> Bool {\n  a.count > b.count || (a.count == b.count && a.name < b.name)\n}\n\nfn top(counts: Kv) -> Result<Str, KvErr> {\n  let mut entries: List<Entry> = [];\n  let mut after: Option<Str> = None;\n  loop {\n    let page = counts.scan(\"c/\", after, 1000)?;\n    for e in page {\n      let count = e.value.to_str().parse_int().unwrap_or(0);\n      entries.push(Entry { name: e.key.slice(2, e.key.len()), count: count });\n    }\n    if page.len() < 1000 { break; }\n    after = Some(page[page.len() - 1].key);\n  }\n  entries.sort_by(less);\n  let mut parts: List<Str> = [];\n  let mut i = 0;\n  while i < entries.len() && i < 3 {\n    parts.push(counter_json(entries[i].name, entries[i].count));\n    i += 1;\n  }\n  Ok(\"[\" + parts.join(\",\") + \"]\")\n}\n\nfn route(method: Str, target: Str, counts: Kv) -> Result<Resp, KvErr> {\n  if method == \"POST\" {\n    if let Some(name) = target.strip_prefix(\"/hit/\") {\n      if !valid_name(name) {\n        return Ok(Resp { status: 400, body: err_body(\"bad name\") });\n      }\n      let n = counts.add(\"c/\" + name, 1)?;\n      return Ok(Resp { status: 200, body: counter_json(name, n) });\n    }\n  }\n  if method == \"GET\" {\n    if let Some(name) = target.strip_prefix(\"/count/\") {\n      if !valid_name(name) {\n        return Ok(Resp { status: 400, body: err_body(\"bad name\") });\n      }\n      let v = counts.get(\"c/\" + name)?;\n      let n = match v {\n        Some(b) => b.to_str().parse_int().unwrap_or(0),\n        None => 0,\n      };\n      return Ok(Resp { status: 200, body: counter_json(name, n) });\n    }\n    if target == \"/top\" {\n      let body = top(counts)?;\n      return Ok(Resp { status: 200, body: body });\n    }\n  }\n  Ok(Resp { status: 404, body: err_body(\"not found\") })\n}\n\nfn main(req: Incoming, res: Outgoing, counts: Kv) -> Result<Str, WebErr> {\n  let resp = match route(req.method(), req.target(), counts) {\n    Ok(r) => r,\n    Err(_) => Resp { status: 500, body: err_body(\"store error\") },\n  };\n  res.send(resp.status, [\"content-type\"], [\"application/json\"], resp.body.to_bytes())?;\n  Ok(\"\")\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "counter_json : none\nerr_body     : none\nless         : none\nmain         : req method target, res send, counts add get scan\nroute        : counts add get scan\ntop          : counts scan\nvalid_name   : none"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.0316527,
+   "input_tokens": 15827,
+   "output_tokens": 2594,
+   "seconds": 18.4,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "27-http-todos",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "struct Resp { status: Int, body: Str }\n\nfn key(id: Int) -> Str {\n  let mut p = id.to_str();\n  while p.len() < 12 { p = \"0\" + p; }\n  \"t:\" + p\n}\n\nfn jerr(status: Int, msg: Str) -> Resp {\n  let mut m: Map<Str, Json> = Map::new();\n  m.insert(\"error\", Json::Str(msg));\n  Resp { status: status, body: Json::Obj(m).to_json() }\n}\n\nfn not_found() -> Resp { jerr(404, \"not found\") }\n\nfn todo_json(id: Int, title: Str, done: Bool) -> Json {\n  let mut m: Map<Str, Json> = Map::new();\n  m.insert(\"id\", Json::Num(id));\n  m.insert(\"title\", Json::Str(title));\n  m.insert(\"done\", Json::Bool(done));\n  Json::Obj(m)\n}\n\nfn parse_id(s: Str) -> Option<Int> {\n  match s.parse_int() {\n    Some(n) => { if n >= 1 && n.to_str() == s { Some(n) } else { None } },\n    None => None,\n  }\n}\n\nfn create(body: Bytes, store: Kv) -> Result<Resp, KvErr> {\n  let j = match body.to_str().parse_json() {\n    Ok(j) => j,\n    Err(_) => { return Ok(jerr(400, \"title required\")); },\n  };\n  let t = match j.get(\"title\").and_then(|t| t.as_str()) {\n    Some(t) => t.trim(),\n    None => { return Ok(jerr(400, \"title required\")); },\n  };\n  if j.as_map().is_none() || t.len() == 0 { return Ok(jerr(400, \"title required\")); }\n  let id = store.add(\"meta:next\", 1)?;\n  let todo = todo_json(id, t, false);\n  store.set(key(id), todo.to_json().to_bytes())?;\n  Ok(Resp { status: 201, body: todo.to_json() })\n}\n\nfn list(query: Str, store: Kv) -> Result<Resp, KvErr> {\n  let mut filter: Option<Bool> = None;\n  for part in query.split(\"&\") {\n    if part == \"done=true\" { filter = Some(true); }\n    else if part == \"done=false\" { filter = Some(false); }\n  }\n  let mut items: List<Json> = [];\n  let mut after: Option<Str> = None;\n  loop {\n    let page = store.scan(\"t:\", after, 1000)?;\n    let n = page.len();\n    for e in page {\n      if let Ok(j) = e.value.to_str().parse_json() {\n        let d = j.get(\"done\").and_then(|x| x.as_bool()).unwrap_or(false);\n        let keep = match filter {\n          Some(f) => f == d,\n          None => true,\n        };\n        if keep { items.push(j); }\n      }\n    }\n    if n < 1000 { break; }\n    after = Some(page[n - 1].key);\n  }\n  Ok(Resp { status: 200, body: Json::Arr(items).to_json() })\n}\n\nfn get_one(id: Int, store: Kv) -> Result<Resp, KvErr> {\n  match store.get(key(id))? {\n    None => Ok(not_found()),\n    Some(b) => Ok(Resp { status: 200, body: b.to_str() }),\n  }\n}\n\nfn patch(id: Int, body: Bytes, store: Kv) -> Result<Resp, KvErr> {\n  let k = key(id);\n  loop {\n    let ob = match store.get(k)? {\n      None => { return Ok(not_found()); },\n      Some(b) => b,\n    };\n    let old = match ob.to_str().parse_json() {\n      Ok(o) => o,\n      Err(_) => { return Ok(not_found()); },\n    };\n    let j = match body.to_str().parse_json() {\n      Ok(j) => j,\n      Err(_) => { return Ok(jerr(400, \"bad update\")); },\n    };\n    if j.as_map().is_none() { return Ok(jerr(400, \"bad update\")); }\n    let mut title = old.get(\"title\").and_then(|x| x.as_str()).unwrap_or(\"\");\n    let mut done = old.get(\"done\").and_then(|x| x.as_bool()).unwrap_or(false);\n    let mut bad = false;\n    if let Some(t) = j.get(\"title\") {\n      match t.as_str() {\n        Some(s) => {\n          let s2 = s.trim();\n          if s2.len() == 0 { bad = true; } else { title = s2; }\n        },\n        None => { bad = true; },\n      }\n    }\n    if let Some(d) = j.get(\"done\") {\n      match d.as_bool() {\n        Some(b) => { done = b; },\n        None => { bad = true; },\n      }\n    }\n    if bad { return Ok(jerr(400, \"bad update\")); }\n    let todo = todo_json(id, title, done);\n    if store.swap(k, Some(ob), Some(todo.to_json().to_bytes()))? {\n      return Ok(Resp { status: 200, body: todo.to_json() });\n    }\n  }\n  Ok(not_found())\n}\n\nfn delete_one(id: Int, store: Kv) -> Result<Resp, KvErr> {\n  let k = key(id);\n  match store.get(k)? {\n    None => Ok(not_found()),\n    Some(_) => {\n      store.delete(k)?;\n      Ok(Resp { status: 204, body: \"\" })\n    },\n  }\n}\n\nfn handle(method: Str, path: Str, query: Str, body: Bytes, store: Kv) -> Result<Resp, KvErr> {\n  let segs = path.split(\"/\");\n  let n = segs.len();\n  if n == 2 && segs[0] == \"\" && segs[1] == \"todos\" {\n    match method {\n      \"POST\" => create(body, store),\n      \"GET\" => list(query, store),\n      _ => Ok(not_found()),\n    }\n  } else if n == 3 && segs[0] == \"\" && segs[1] == \"todos\" {\n    match parse_id(segs[2]) {\n      None => Ok(not_found()),\n      Some(id) => {\n        match method {\n          \"GET\" => get_one(id, store),\n          \"PATCH\" => patch(id, body, store),\n          \"DELETE\" => delete_one(id, store),\n          _ => Ok(not_found()),\n        }\n      },\n    }\n  } else {\n    Ok(not_found())\n  }\n}\n\nfn main(req: Incoming, res: Outgoing, store: Kv) -> Result<Str, WebErr> {\n  let target = req.target();\n  let mut path = target;\n  let mut query = \"\";\n  if let Some(i) = target.find(\"?\") {\n    path = target.slice(0, i);\n    query = target.slice(i + 1, target.len());\n  }\n  let r = match handle(req.method(), path, query, req.body(), store) {\n    Ok(r) => r,\n    Err(_) => jerr(500, \"internal error\"),\n  };\n  if r.body.len() == 0 {\n    res.send(r.status, [], [], \"\".to_bytes())?;\n  } else {\n    res.send(r.status, [\"content-type\"], [\"application/json\"], r.body.to_bytes())?;\n  }\n  Ok(\"\")\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "create     : store add set\ndelete_one : store delete get\nget_one    : store get\nhandle     : store add delete get scan set swap\njerr       : none\nkey        : none\nlist       : store scan\nmain       : req body method target, res send, store add delete get scan set swap\nnot_found  : none\nparse_id   : none\npatch      : store get swap\ntodo_json  : none"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.061816699999999995,
+   "input_tokens": 15968,
+   "output_tokens": 5554,
+   "seconds": 38.8,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "28-http-notes-db",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "struct Resp { status: Int, body: Json }\n\nfn obj1(k: Str, v: Json) -> Json {\n  let mut m: Map<Str, Json> = Map::new();\n  m.insert(k, v);\n  Json::Obj(m)\n}\n\nfn err_resp(status: Int, msg: Str) -> Resp {\n  Resp { status: status, body: obj1(\"error\", Json::Str(msg)) }\n}\n\nfn not_found() -> Resp { err_resp(404, \"not found\") }\nfn bad_note() -> Resp { err_resp(400, \"invalid note\") }\nfn internal() -> Resp { err_resp(500, \"internal error\") }\n\nfn int_of(v: SqlValue) -> Int {\n  match v {\n    SqlValue::Int(n) => n,\n    _ => 0,\n  }\n}\n\nfn text_of(v: SqlValue) -> Str {\n  match v {\n    SqlValue::Text(s) => s,\n    _ => \"\",\n  }\n}\n\nfn tags_of(v: SqlValue) -> List<Str> {\n  let j = text_of(v).parse_json().unwrap_or(Json::Arr([]));\n  let items = j.as_list().unwrap_or([]);\n  let mut out: List<Str> = [];\n  for it in items {\n    if let Some(s) = it.as_str() { out.push(s); }\n  }\n  out\n}\n\nfn note_json(row: List<SqlValue>) -> Json {\n  let mut m: Map<Str, Json> = Map::new();\n  m.insert(\"id\", Json::Num(int_of(row[0])));\n  m.insert(\"title\", Json::Str(text_of(row[1])));\n  m.insert(\"body\", Json::Str(text_of(row[2])));\n  let mut tj: List<Json> = [];\n  for t in tags_of(row[3]) { tj.push(Json::Str(t)); }\n  m.insert(\"tags\", Json::Arr(tj));\n  Json::Obj(m)\n}\n\nfn parse_tags(j: Option<Json>) -> Option<List<Str>> {\n  let Some(t) = j else {\n    let empty: List<Str> = [];\n    return Some(empty);\n  };\n  let Some(items) = t.as_list() else { return None; };\n  let mut out: List<Str> = [];\n  for it in items {\n    let Some(s) = it.as_str() else { return None; };\n    let l = s.to_lowercase();\n    if !out.contains(l) { out.push(l); }\n  }\n  Some(out)\n}\n\nfn create(req: Incoming, db: Db) -> Resp {\n  let text = req.body().to_str();\n  let j = match text.parse_json() {\n    Ok(v) => v,\n    Err(_) => return bad_note(),\n  };\n  if j.as_map().is_none() { return bad_note(); }\n  let Some(title) = j.get(\"title\").and_then(|x| x.as_str()) else { return bad_note(); };\n  if title.len() == 0 { return bad_note(); }\n  let Some(body) = j.get(\"body\").and_then(|x| x.as_str()) else { return bad_note(); };\n  let Some(tags) = parse_tags(j.get(\"tags\")) else { return bad_note(); };\n  let mut tj: List<Json> = [];\n  for t in tags { tj.push(Json::Str(t)); }\n  let tagtext = Json::Arr(tj).to_json();\n  let rows = match db.query(\n    \"INSERT INTO notes (title, body, tags) VALUES (?, ?, ?) RETURNING id\",\n    [SqlValue::Text(title), SqlValue::Text(body), SqlValue::Text(tagtext)]) {\n    Ok(r) => r,\n    Err(_) => return internal(),\n  };\n  if rows.len() == 0 { return internal(); }\n  Resp { status: 201, body: obj1(\"id\", Json::Num(int_of(rows[0][0]))) }\n}\n\nfn get_note(id: Int, db: Db) -> Resp {\n  let rows = match db.query(\"SELECT id, title, body, tags FROM notes WHERE id = ?\", [SqlValue::Int(id)]) {\n    Ok(r) => r,\n    Err(_) => return internal(),\n  };\n  if rows.len() == 0 { return not_found(); }\n  Resp { status: 200, body: note_json(rows[0]) }\n}\n\nfn delete_note(id: Int, db: Db) -> Resp {\n  let rows = match db.query(\"SELECT id FROM notes WHERE id = ?\", [SqlValue::Int(id)]) {\n    Ok(r) => r,\n    Err(_) => return internal(),\n  };\n  if rows.len() == 0 { return not_found(); }\n  match db.exec(\"DELETE FROM notes WHERE id = ?\", [SqlValue::Int(id)]) {\n    Ok(_) => {},\n    Err(_) => return internal(),\n  }\n  Resp { status: 200, body: obj1(\"deleted\", Json::Num(id)) }\n}\n\nfn list(query: Str, db: Db) -> Resp {\n  let mut tag: Option<Str> = None;\n  let mut q: Option<Str> = None;\n  for pair in query.split(\"&\") {\n    if let Some(v) = pair.strip_prefix(\"tag=\") {\n      tag = Some(v.to_lowercase());\n    } else if let Some(v) = pair.strip_prefix(\"q=\") {\n      q = Some(v);\n    }\n  }\n  let rows = match db.query(\"SELECT id, title, body, tags FROM notes ORDER BY id DESC\", []) {\n    Ok(r) => r,\n    Err(_) => return internal(),\n  };\n  let mut out: List<Json> = [];\n  for row in rows {\n    let title = text_of(row[1]);\n    let body = text_of(row[2]);\n    let mut ok = true;\n    if let Some(t) = tag {\n      if !tags_of(row[3]).contains(t) { ok = false; }\n    }\n    if let Some(w) = q {\n      if !(title.contains(w) || body.contains(w)) { ok = false; }\n    }\n    if ok {\n      let mut m: Map<Str, Json> = Map::new();\n      m.insert(\"id\", Json::Num(int_of(row[0])));\n      m.insert(\"title\", Json::Str(title));\n      out.push(Json::Obj(m));\n    }\n  }\n  Resp { status: 200, body: Json::Arr(out) }\n}\n\nfn handle(req: Incoming, db: Db) -> Resp {\n  if db.exec(\"CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, body TEXT NOT NULL, tags TEXT NOT NULL)\", []).is_err() {\n    return internal();\n  }\n  let method = req.method();\n  let t = req.target();\n  let mut path = t;\n  let mut query = \"\";\n  if let Some(i) = t.find(\"?\") {\n    path = t.slice(0, i);\n    query = t.slice(i + 1, t.len());\n  }\n  if path == \"/notes\" {\n    if method == \"POST\" { return create(req, db); }\n    if method == \"GET\" { return list(query, db); }\n    return not_found();\n  }\n  let Some(idstr) = path.strip_prefix(\"/notes/\") else { return not_found(); };\n  let Some(id) = idstr.parse_int() else { return not_found(); };\n  if id.to_str() != idstr { return not_found(); }\n  if method == \"GET\" { return get_note(id, db); }\n  if method == \"DELETE\" { return delete_note(id, db); }\n  not_found()\n}\n\nfn main(req: Incoming, res: Outgoing, db: Db) -> Result<Str, WebErr> {\n  let r = handle(req, db);\n  res.send(r.status, [\"content-type\"], [\"application/json\"], r.body.to_json().to_bytes())?;\n  Ok(\"\")\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "bad_note    : none\ncreate      : req body, db query\ndelete_note : db exec query\nerr_resp    : none\nget_note    : db query\nhandle      : req body method target, db exec query\nint_of      : none\ninternal    : none\nlist        : db query\nmain        : req body method target, res send, db exec query\nnot_found   : none\nnote_json   : none\nobj1        : none\nparse_tags  : none\ntags_of     : none\ntext_of     : none"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.06916270000000001,
+   "input_tokens": 16032,
+   "output_tokens": 6263,
+   "seconds": 40.3,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "29-http-weather",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "struct Station { name: Str, id: Str }\n\nfn fmt(t: Int) -> Str {\n  let sign = if t < 0 { \"-\" } else { \"\" };\n  let a = if t < 0 { 0 - t } else { t };\n  sign + (a / 10).to_str() + \".\" + (a % 10).to_str()\n}\n\nfn temps(b: Bytes) -> Option<List<Int>> {\n  let doc = b.to_str().parse_json().ok()?;\n  let rs = doc.get(\"readings\").and_then(|j| j.as_list())?;\n  let mut out: List<Int> = [];\n  for r in rs {\n    if let Some(t) = r.get(\"temp\").and_then(|j| j.as_int()) {\n      out.push(t);\n    }\n  }\n  Some(out)\n}\n\nfn line(api: Http, s: Station) -> Str {\n  let path = \"/stations/\" + s.id + \"/readings\";\n  match api.get(path) {\n    Err(_) => s.name + \" unavailable\",\n    Ok(b) => match temps(b) {\n      None => s.name + \" unavailable\",\n      Some(ts) => {\n        if ts.len() == 0 {\n          s.name + \" no data\"\n        } else {\n          let mut mn = ts[0];\n          let mut mx = ts[0];\n          let mut sum = 0;\n          for t in ts {\n            if t < mn { mn = t; }\n            if t > mx { mx = t; }\n            sum = sum + t;\n          }\n          let n = ts.len();\n          let avg = sum / n;\n          s.name + \" min=\" + fmt(mn) + \" max=\" + fmt(mx) + \" avg=\" + fmt(avg) + \" n=\" + n.to_str()\n        }\n      }\n    },\n  }\n}\n\nfn main(api: Http) -> Result<Str, Str> {\n  let b = match api.get(\"/stations\") {\n    Ok(b) => b,\n    Err(_) => return Err(\"stations unavailable\"),\n  };\n  let doc = match b.to_str().parse_json() {\n    Ok(d) => d,\n    Err(e) => return Err(e),\n  };\n  let items = doc.get(\"stations\").and_then(|j| j.as_list()).unwrap_or([]);\n  let mut stations: List<Station> = [];\n  for it in items {\n    let Some(id) = it.get(\"id\").and_then(|j| j.as_str()) else { continue; };\n    let Some(name) = it.get(\"name\").and_then(|j| j.as_str()) else { continue; };\n    stations.push(Station { name: name, id: id });\n  }\n  stations.sort_by_key(|s| s.name);\n  let mut lines: List<Str> = [];\n  for s in stations {\n    lines.push(line(api, s));\n  }\n  Ok(lines.join(\"\\n\"))\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "fmt   : none\nline  : api get\nmain  : api get\ntemps : none"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.025806700000000002,
+   "input_tokens": 15858,
+   "output_tokens": 1997,
+   "seconds": 14.1,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "30-http-paginate",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "fn fetch(api: Http, page: Int) -> Result<Json, Str> {\n  let bytes = api.get(\"/orders?page=\" + page.to_str()).map_err(|e| \"GET /orders failed\")?;\n  bytes.to_str().parse_json()\n}\n\nfn main(api: Http) -> Result<Str, Str> {\n  let mut count = 0;\n  let mut refunded = 0;\n  let mut paid: Map<Str, Int> = Map::new();\n  let mut has_best = false;\n  let mut best_id = 0;\n  let mut best_cents = 0;\n  let mut page = 1;\n  loop {\n    let doc = fetch(api, page)?;\n    let orders = doc.get(\"orders\").and_then(|j| j.as_list()).unwrap_or([]);\n    for o in orders {\n      count += 1;\n      let status = o.get(\"status\").and_then(|j| j.as_str()).unwrap_or(\"\");\n      let cents = o.get(\"cents\").and_then(|j| j.as_int()).unwrap_or(0);\n      let id = o.get(\"id\").and_then(|j| j.as_int()).unwrap_or(0);\n      let cur = o.get(\"currency\").and_then(|j| j.as_str()).unwrap_or(\"\");\n      if status == \"refunded\" {\n        refunded += 1;\n      }\n      if status == \"paid\" {\n        let prev = paid.get(cur).unwrap_or(0);\n        paid.insert(cur, prev + cents);\n        if !has_best || cents > best_cents || (cents == best_cents && id < best_id) {\n          has_best = true;\n          best_id = id;\n          best_cents = cents;\n        }\n      }\n    }\n    let next = doc.get(\"next\").and_then(|j| j.as_int());\n    match next {\n      Some(n) => { page = n; }\n      None => break,\n    }\n  }\n  let mut pj: Map<Str, Json> = Map::new();\n  for k in paid.keys() {\n    pj.insert(k, Json::Num(paid.get(k).unwrap_or(0)));\n  }\n  let mut body: Map<Str, Json> = Map::new();\n  body.insert(\"orders\", Json::Num(count));\n  body.insert(\"paid_cents\", Json::Obj(pj));\n  body.insert(\"refunded\", Json::Num(refunded));\n  if has_best {\n    body.insert(\"largest\", Json::Num(best_id));\n  } else {\n    body.insert(\"largest\", Json::Null);\n  }\n  let payload = Json::Obj(body).to_json().to_bytes();\n  let r = api.send(\"POST\", \"/summaries\", [\"content-type: application/json\"], payload).map_err(|e| \"POST /summaries failed\")?;\n  if r.status != 201 {\n    return Err(\"unexpected status \" + r.status.to_str());\n  }\n  let resp = r.body.to_str().parse_json()?;\n  let id = resp.get(\"id\").and_then(|j| j.as_str()).unwrap_or(\"\");\n  Ok(id)\n}\n",
+     "checked": true,
+     "passed": true,
+     "feedback": "",
+     "over_asked": [],
+     "report": "fetch : api get\nmain  : api get send"
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.025488700000000003,
+   "input_tokens": 15866,
+   "output_tokens": 1962,
+   "seconds": 14.1,
+   "checks_first": true,
+   "pass_first": true,
+   "over_asked": []
+  }
+ ]
+}

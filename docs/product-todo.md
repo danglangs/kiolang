@@ -11,14 +11,14 @@ operator runs it:  kio run app.kio --http stripe=… --http-header stripe=Author
 
 ## Tasks
 
-- [ ] **E1. Eval: can models write kio?** The first question for anything built on kio.
+- [x] **E1. Eval: can models write kio?** The first question for anything built on kio.
   - `eval/tasks/NN-name/`: `task.md` (what to build, the grants it gets, sample I/O), `check.sh PROGRAM` (runs it with those grants and exits 0 when the output is right; HTTP tasks start `--listen` and curl it), and `check_py.sh PROGRAM` for the Python baseline (same checks, same inputs; network and files are open to Python).
   - 30 tasks: 10 compute (input from a granted `Dir`), 6 `Dir`, 5 `Kv`, 4 `Db`, 3 HTTP handlers, 2 `Http` clients (against a local server the check starts).
   - `eval/run.py --model M --lang kio|py` (stdlib only): the system prompt is docs/language.md (kio) or nothing (Python); the model returns one program; up to 5 rounds, each feeding back `kio check`'s diagnostics, then the check's failure output; Python gets its errors and the check's output. Models are called through `claude -p --model M` (no tools), so the eval needs no API key.
   - Measures per task: checks on the first try (kio), passes on the first try, passes by round 5, rounds used, and the main parameters asked for beyond the task's grants (over-asked authority).
   - Output: `eval/results/<date>-<model>-<lang>.json`; a table in roadmap.md (Haiku, Sonnet and Opus 5.5, kio vs Python) and the ten diagnostics hit most, each becoming an L12-style task.
   - Done: the 30 tasks, each with a reference kio and Python solution that pass their checks (CI runs the references, not the models); one full run per model recorded.
-  - Built: 30 tasks with references (`eval/check_refs.sh`, 18 s on a debug kio, in CI), `eval/run.py`. Smoke run, Haiku on 01, 17, 26: kio 3/3 first try, Python 3/3. Left: the full runs and the roadmap table.
+  - Built: 30 tasks with references (`eval/check_refs.sh`, 18 s on a debug kio, in CI), `eval/run.py`. Smoke run, Haiku on 01, 17, 26: kio 3/3 first try, Python 3/3. Full run 2026-11-10 (roadmap.md "Can models write kio?"): by round 5 every model passes 30/30 in kio and Python; first try kio 24/28/30 (Haiku/Opus/Sonnet) vs Python 28/30/30; no over-asked grant.
 
 - [x] **P1. `kio check NEW --base OLD`: the authority diff.** What a reviewer approves.
   - `lang::report_diff(old, new) -> Vec<String>`: per function, the capability methods added (`+ create: hook send`) and removed (`- ...`); `main`'s parameters first, as a new parameter is a new grant: `+ main: grant hook: Http`. Functions present in one side only count as all-added or all-removed. Unchanged functions are not shown; nothing changed prints `no change in authority`.

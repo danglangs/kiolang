@@ -155,6 +155,16 @@ v0, working end to end.
 { "mcpServers": { "kio": { "command": "kio", "args": ["mcp"] } } }
 ```
 
+Models write kio about as well as Python. Given only the language reference, on 30 backend tasks ([eval/](eval/)):
+
+| | kio, first try | kio, by try 5 | Python, first try |
+|---|---|---|---|
+| Haiku 5.5 | 24/30 | 30/30 | 28/30 |
+| Sonnet 5.5 | 30/30 | 30/30 | 30/30 |
+| Opus 5.5 | 28/30 | 30/30 | 30/30 |
+
+kio is a Rust subset on purpose, and its errors name the fix: every miss was solved by the next try.
+
 ## Why not containers or static analysis
 
 | Approach | Where it falls short |
@@ -181,7 +191,7 @@ The cost is the ecosystem: few libraries, no package manager yet. Agents write m
 
 ## Roadmap
 
-- **Now:** an eval of how well models write kio.
+- **Now:** harder eval tasks, and what models reached for: `Str.chars()`, `for` over `Bytes`.
 - **Next:** allocation speed (escape analysis).
 - **Later:** `par_map` and tasks (pinned), packages.
 

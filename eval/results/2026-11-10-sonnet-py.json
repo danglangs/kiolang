@@ -1,0 +1,639 @@
+{
+ "model": "sonnet",
+ "lang": "py",
+ "date": "2026-11-10",
+ "rounds": 5,
+ "commit": "8c957ac",
+ "tasks": [
+  {
+   "task": "01-word-freq",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import os\nimport re\nfrom collections import Counter\n\n\ndef main():\n    d = os.environ[\"input\"] if \"input\" in os.environ else os.environ[\"INPUT\"]\n    with open(os.path.join(d, \"text.txt\"), \"rb\") as f:\n        data = f.read().decode(\"latin-1\")\n    words = re.findall(r\"[A-Za-z]+\", data)\n    c = Counter(w.lower() for w in words)\n    items = sorted(c.items(), key=lambda x: (-x[1], x[0]))[:5]\n    for w, n in items:\n        print(f\"{w} {n}\")\n\n\nmain()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.005922,
+   "input_tokens": 979,
+   "output_tokens": 201,
+   "seconds": 3.1,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "02-csv-totals",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import os\nimport re\nimport sys\n\nINT_RE = re.compile(r'[+-]?[0-9]+\\Z')\n\n\ndef fmt(cents):\n    sign = '-' if cents < 0 else ''\n    c = abs(cents)\n    return f\"{sign}{c // 100}.{c % 100:02d}\"\n\n\ndef main():\n    base = os.environ[\"INPUT\"]\n    path = os.path.join(base, \"sales.csv\")\n    with open(path, encoding=\"utf-8-sig\", errors=\"replace\", newline=\"\") as f:\n        text = f.read()\n\n    totals = {}\n    skipped = 0\n    header_seen = False\n    for line in text.split(\"\\n\"):\n        if not line.strip():\n            continue\n        if not header_seen:\n            header_seen = True\n            continue\n        parts = [p.strip() for p in line.split(\",\")]\n        if len(parts) != 5:\n            skipped += 1\n            continue\n        _, region, _, qty, unit = parts\n        if not INT_RE.match(qty) or not INT_RE.match(unit):\n            skipped += 1\n            continue\n        q = int(qty)\n        u = int(unit)\n        entry = totals.setdefault(region, [0, 0])\n        entry[0] += q\n        entry[1] += q * u\n\n    for region, (q, rev) in sorted(totals.items(), key=lambda kv: (-kv[1][1], kv[0])):\n        print(f\"{region} {q} {fmt(rev)}\")\n    print(f\"skipped {skipped}\")\n\n\nif __name__ == \"__main__\":\n    main()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.013028000000000001,
+   "input_tokens": 1153,
+   "output_tokens": 842,
+   "seconds": 7.1,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "03-access-log",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import os\nimport re\nfrom collections import Counter\n\nLINE = re.compile(r'^(\\S+) \\S+ \\S+ \\[[^\\]]*\\] \"([^\"]*)\" (\\d{3}) (\\d+|-)\\s*$')\n\n\ndef main():\n    base = os.environ[\"INPUT\"]\n    path = os.path.join(base, \"access.log\")\n    statuses = Counter()\n    paths = Counter()\n    errors = Counter()\n    total = 0\n    with open(path, \"r\", encoding=\"utf-8\", errors=\"replace\") as f:\n        for raw in f:\n            line = raw.rstrip(\"\\r\\n\")\n            m = LINE.match(line)\n            if not m:\n                continue\n            ip, req, status, size = m.groups()\n            parts = req.split()\n            if len(parts) < 2:\n                continue\n            p = parts[1].split(\"?\", 1)[0]\n            st = int(status)\n            statuses[st] += 1\n            total += 0 if size == \"-\" else int(size)\n            paths[p] += 1\n            if 500 <= st <= 599:\n                errors[ip] += 1\n\n    out = []\n    for st in sorted(statuses):\n        out.append(f\"{st} {statuses[st]}\")\n    out.append(f\"bytes {total}\")\n    if paths:\n        best = min(paths.items(), key=lambda kv: (-kv[1], kv[0]))\n        out.append(f\"top {best[0]} {best[1]}\")\n    for ip, c in sorted(errors.items(), key=lambda kv: (-kv[1], kv[0])):\n        out.append(f\"errors {ip} {c}\")\n    print(\"\\n\".join(out))\n\n\nmain()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.013066000000000001,
+   "input_tokens": 1250,
+   "output_tokens": 807,
+   "seconds": 6.5,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "04-json-orders",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import os\nimport json\n\n\ndef main():\n    d = os.environ[\"INPUT\"]\n    with open(os.path.join(d, \"orders.json\"), encoding=\"utf-8\") as f:\n        orders = json.load(f)\n\n    paid = {}\n    ref_n = 0\n    ref_total = 0\n    pend = 0\n\n    for o in orders:\n        status = o.get(\"status\")\n        total = 0\n        for it in (o.get(\"items\") or []):\n            total += it[\"qty\"] * it[\"price_cents\"]\n        if status == \"paid\":\n            c = o[\"customer\"]\n            cnt, tot = paid.get(c, (0, 0))\n            paid[c] = (cnt + 1, tot + total)\n        elif status == \"refunded\":\n            ref_n += 1\n            ref_total += total\n        elif status == \"pending\":\n            pend += 1\n\n    out = []\n    for c in sorted(paid, key=lambda s: s.encode(\"utf-8\")):\n        n, t = paid[c]\n        out.append(f\"{c} {n} {t}\")\n    out.append(f\"refunded {ref_n} {ref_total}\")\n    out.append(f\"pending {pend}\")\n    print(\"\\n\".join(out))\n\n\nmain()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.009026,
+   "input_tokens": 1115,
+   "output_tokens": 457,
+   "seconds": 4.7,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "05-dedupe-emails",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import os\n\n\ndef main():\n    base = os.environ[\"INPUT\"]\n    path = os.path.join(base, \"emails.txt\")\n    with open(path, \"rb\") as f:\n        text = f.read().decode(\"utf-8\", errors=\"replace\")\n\n    seen = set()\n    invalid = 0\n    for line in text.split(\"\\n\"):\n        s = line.strip().lower()\n        if not s:\n            continue\n        if s.count(\"@\") != 1:\n            invalid += 1\n            continue\n        local, domain = s.split(\"@\")\n        if (not local or \".\" not in domain\n                or domain.startswith(\".\") or domain.endswith(\".\")):\n            invalid += 1\n            continue\n        if domain == \"gmail.com\":\n            p = local.find(\"+\")\n            if p != -1:\n                local = local[:p]\n            local = local.replace(\".\", \"\")\n        seen.add(local + \"@\" + domain)\n\n    out = sorted(seen, key=lambda x: x.encode(\"utf-8\"))\n    lines = out + [\"invalid %d\" % invalid]\n    os.write(1, (\"\\n\".join(lines) + \"\\n\").encode(\"utf-8\"))\n\n\nmain()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.012390000000000002,
+   "input_tokens": 1141,
+   "output_tokens": 783,
+   "seconds": 7.2,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "06-roman",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import os\nimport re\n\nVALS = [(1000, \"M\"), (900, \"CM\"), (500, \"D\"), (400, \"CD\"), (100, \"C\"),\n        (90, \"XC\"), (50, \"L\"), (40, \"XL\"), (10, \"X\"), (9, \"IX\"),\n        (5, \"V\"), (4, \"IV\"), (1, \"I\")]\n\n\ndef to_roman(n):\n    out = []\n    for v, s in VALS:\n        while n >= v:\n            out.append(s)\n            n -= v\n    return \"\".join(out)\n\n\ndef from_roman(s):\n    m = {\"I\": 1, \"V\": 5, \"X\": 10, \"L\": 50, \"C\": 100, \"D\": 500, \"M\": 1000}\n    total = 0\n    for i, ch in enumerate(s):\n        v = m[ch]\n        if i + 1 < len(s) and m[s[i + 1]] > v:\n            total -= v\n        else:\n            total += v\n    return total\n\n\ndef convert(v):\n    if re.fullmatch(r\"[0-9]+\", v):\n        n = int(v)\n        if 1 <= n <= 3999:\n            return to_roman(n)\n        return \"invalid\"\n    if re.fullmatch(r\"[IVXLCDM]+\", v):\n        n = from_roman(v)\n        if 1 <= n <= 3999 and to_roman(n) == v:\n            return str(n)\n    return \"invalid\"\n\n\ndef main():\n    d = os.environ[\"INPUT\"]\n    with open(os.path.join(d, \"numbers.txt\"), encoding=\"utf-8\", errors=\"replace\") as f:\n        text = f.read()\n    for line in text.splitlines():\n        v = line.strip()\n        if not v:\n            continue\n        print(f\"{v} = {convert(v)}\")\n\n\nmain()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.012643999999999999,
+   "input_tokens": 1102,
+   "output_tokens": 824,
+   "seconds": 7.0,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "07-brackets",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import os\n\n\ndef check(line):\n    pairs = {')': '(', ']': '[', '}': '{'}\n    closers = {'(': ')', '[': ']', '{': '}'}\n    stack = []\n    for i, ch in enumerate(line, 1):\n        if ch in closers:\n            stack.append(ch)\n        elif ch in pairs:\n            if not stack:\n                return f\"col {i}: unexpected {ch}\"\n            top = stack[-1]\n            if top != pairs[ch]:\n                return f\"col {i}: expected {closers[top]}, found {ch}\"\n            stack.pop()\n    if stack:\n        return f\"unclosed {closers[stack[-1]]}\"\n    return \"ok\"\n\n\ndef main():\n    base = os.environ[\"INPUT\"]\n    with open(os.path.join(base, \"snippets.txt\"), \"r\", newline=\"\") as f:\n        data = f.read()\n    lines = data.split(\"\\n\")\n    if lines and lines[-1] == \"\":\n        lines.pop()\n    out = []\n    for line in lines:\n        if line.endswith(\"\\r\"):\n            line = line[:-1]\n        out.append(check(line))\n    if out:\n        print(\"\\n\".join(out))\n\n\nmain()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.010464,
+   "input_tokens": 1127,
+   "output_tokens": 596,
+   "seconds": 5.7,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "08-latency",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import os\nimport re\nimport sys\n\ndef main():\n    path = os.path.join(os.environ[\"INPUT\"], \"timings.log\")\n    with open(path, \"rb\") as f:\n        data = f.read()\n    num = re.compile(rb\"[+-]?[0-9]+\\Z\")\n    groups = {}\n    for line in data.split(b\"\\n\"):\n        parts = line.split()\n        if len(parts) != 3:\n            continue\n        m, p, t = parts\n        if not num.match(t):\n            continue\n        groups.setdefault((m, p), []).append(int(t))\n    out = []\n    for key in sorted(groups):\n        ts = sorted(groups[key])\n        n = len(ts)\n\n        def pct(P):\n            k = (P * n + 99) // 100\n            k = max(1, min(n, k))\n            return ts[k - 1]\n\n        out.append(key[0] + b\" \" + key[1] +\n                   b\" count=%d p50=%d p95=%d max=%d\" % (n, pct(50), pct(95), ts[-1]))\n    if out:\n        sys.stdout.buffer.write(b\"\\n\".join(out) + b\"\\n\")\n        sys.stdout.buffer.flush()\n\nmain()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.012322,
+   "input_tokens": 1109,
+   "output_tokens": 789,
+   "seconds": 7.3,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "09-shortest-path",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import os\nimport heapq\n\n\ndef main():\n    base = os.environ[\"INPUT\"]\n    path = os.path.join(base, \"routes.txt\")\n    with open(path, \"r\", encoding=\"utf-8\", errors=\"surrogateescape\") as f:\n        lines = f.read().splitlines()\n\n    adj = {}\n    trips = []\n    for line in lines:\n        s = line.strip()\n        if not s or s.startswith(\"#\"):\n            continue\n        p = s.split()\n        if p[0] == \"road\" and len(p) >= 4:\n            x, y, c = p[1], p[2], int(p[3])\n            adj.setdefault(x, []).append((y, c))\n            adj.setdefault(y, []).append((x, c))\n        elif p[0] == \"trip\" and len(p) >= 3:\n            trips.append((p[1], p[2]))\n\n    cache = {}\n\n    def dists(target):\n        if target in cache:\n            return cache[target]\n        d = {target: 0}\n        pq = [(0, target)]\n        while pq:\n            du, u = heapq.heappop(pq)\n            if du > d.get(u, float(\"inf\")):\n                continue\n            for v, c in adj.get(u, ()):\n                nd = du + c\n                if nd < d.get(v, float(\"inf\")):\n                    d[v] = nd\n                    heapq.heappush(pq, (nd, v))\n        cache[target] = d\n        return d\n\n    out = []\n    for x, y in trips:\n        if x == y:\n            out.append(f\"{x} 0\")\n            continue\n        d = dists(y)\n        if x not in d:\n            out.append(f\"{x} {y} unreachable\")\n            continue\n        path_nodes = [x]\n        u = x\n        while u != y:\n            best = None\n            for v, c in adj[u]:\n                if v in d and c + d[v] == d[u]:\n                    if best is None or v.encode(\"utf-8\", \"surrogateescape\") < best.encode(\"utf-8\", \"surrogateescape\"):\n                        best = v\n            u = best\n            path_nodes.append(u)\n        out.append(\" -> \".join(path_nodes) + f\" {d[x]}\")\n\n    print(\"\\n\".join(out))\n\n\nmain()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.01522,
+   "input_tokens": 1096,
+   "output_tokens": 1084,
+   "seconds": 8.1,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "10-config-flatten",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import json\nimport os\n\n\ndef strip_nulls(v):\n    if isinstance(v, dict):\n        return {k: strip_nulls(x) for k, x in v.items() if x is not None}\n    return v\n\n\ndef merge(base, over):\n    result = dict(base)\n    for k, v in over.items():\n        if v is None:\n            result.pop(k, None)\n        elif isinstance(v, dict) and isinstance(result.get(k), dict):\n            result[k] = merge(result[k], v)\n        else:\n            result[k] = strip_nulls(v)\n    return result\n\n\ndef flatten(v, path, out):\n    if isinstance(v, dict):\n        if not v and path:\n            out.append((path, \"{}\"))\n        for k, x in v.items():\n            flatten(x, path + \".\" + k if path else k, out)\n    elif isinstance(v, list):\n        if not v and path:\n            out.append((path, \"[]\"))\n        for i, x in enumerate(v):\n            flatten(x, path + \".\" + str(i) if path else str(i), out)\n    else:\n        out.append((path, json.dumps(v, ensure_ascii=False)))\n\n\ndef main():\n    d = os.environ[\"INPUT\"]\n    with open(os.path.join(d, \"base.json\"), encoding=\"utf-8\") as f:\n        base = json.load(f)\n    with open(os.path.join(d, \"override.json\"), encoding=\"utf-8\") as f:\n        over = json.load(f)\n    merged = merge(base, over)\n    out = []\n    flatten(merged, \"\", out)\n    out.sort(key=lambda t: t[0].encode(\"utf-8\"))\n    lines = [p + \"=\" + v for p, v in out]\n    if lines:\n        print(\"\\n\".join(lines))\n\n\nmain()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.014106,
+   "input_tokens": 1145,
+   "output_tokens": 953,
+   "seconds": 8.1,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "11-split-log",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import os\n\n\ndef main():\n    inp = os.environ[\"INPUT\"]\n    out = os.environ[\"OUT\"]\n    buckets = {\"error\": [], \"warn\": [], \"info\": []}\n    other = 0\n    with open(os.path.join(inp, \"app.log\"), \"r\", encoding=\"utf-8\",\n              errors=\"surrogateescape\", newline=\"\") as f:\n        data = f.read()\n    for line in data.split(\"\\n\"):\n        if line.strip() == \"\":\n            continue\n        parts = line.split(None, 2)\n        if len(parts) < 3:\n            other += 1\n            continue\n        lv = parts[1].upper()\n        if lv == \"ERROR\":\n            buckets[\"error\"].append(line)\n        elif lv in (\"WARN\", \"WARNING\"):\n            buckets[\"warn\"].append(line)\n        elif lv == \"INFO\":\n            buckets[\"info\"].append(line)\n        else:\n            other += 1\n    for name, lines in buckets.items():\n        with open(os.path.join(out, name + \".log\"), \"w\", encoding=\"utf-8\",\n                  errors=\"surrogateescape\", newline=\"\") as f:\n            for l in lines:\n                f.write(l + \"\\n\")\n    print(\"error %d\" % len(buckets[\"error\"]))\n    print(\"warn %d\" % len(buckets[\"warn\"]))\n    print(\"info %d\" % len(buckets[\"info\"]))\n    print(\"other %d\" % other)\n\n\nmain()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.013240000000000002,
+   "input_tokens": 1226,
+   "output_tokens": 834,
+   "seconds": 7.5,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "12-file-index",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import os\nimport sys\n\n\ndef q(b):\n    if any(c in b for c in (b\",\", b'\"', b\"\\n\", b\"\\r\")):\n        return b'\"' + b.replace(b'\"', b'\"\"') + b'\"'\n    return b\n\n\ndef main():\n    inp = os.environ[\"INPUT\"]\n    out = os.environ[\"OUT\"]\n    out_real = os.path.realpath(out)\n    rows = []\n    total = 0\n    for root, dirs, files in os.walk(inp, followlinks=False):\n        dirs[:] = [d for d in dirs if os.path.realpath(os.path.join(root, d)) != out_real]\n        for name in files:\n            full = os.path.join(root, name)\n            if not os.path.isfile(full):\n                continue\n            rel = os.path.relpath(full, inp).replace(os.sep, \"/\")\n            with open(full, \"rb\") as f:\n                data = f.read()\n            n = len(data)\n            lines = data.count(b\"\\n\")\n            if n and not data.endswith(b\"\\n\"):\n                lines += 1\n            rows.append((os.fsencode(rel), n, lines))\n            total += n\n    rows.sort(key=lambda r: r[0])\n    with open(os.path.join(out, \"index.csv\"), \"wb\") as f:\n        f.write(b\"path,bytes,lines\\n\")\n        for p, n, l in rows:\n            f.write(q(p) + b\",\" + str(n).encode() + b\",\" + str(l).encode() + b\"\\n\")\n    sys.stdout.write(\"files %d bytes %d\\n\" % (len(rows), total))\n\n\nmain()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.01258,
+   "input_tokens": 1031,
+   "output_tokens": 846,
+   "seconds": 7.3,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "13-csv-to-json",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import csv\nimport json\nimport os\nimport re\n\n\ndef main():\n    inp = os.environ[\"INPUT\"]\n    out = os.environ[\"OUT\"]\n    result = []\n    skipped = 0\n    int_re = re.compile(r\"^[+-]?[0-9]+$\")\n\n    with open(os.path.join(inp, \"users.csv\"), \"r\", encoding=\"utf-8-sig\", newline=\"\") as f:\n        reader = csv.reader(f)\n        header_seen = False\n        for row in reader:\n            if not header_seen:\n                header_seen = True\n                continue\n            if not row or (len(row) == 1 and not row[0].strip()):\n                continue\n            if len(row) != 5:\n                skipped += 1\n                continue\n            id_s = row[0].strip()\n            if not int_re.match(id_s):\n                skipped += 1\n                continue\n            tags = [t.strip() for t in row[4].split(\";\")]\n            tags = [t for t in tags if t]\n            result.append({\n                \"id\": int(id_s),\n                \"name\": row[1],\n                \"email\": row[2],\n                \"active\": row[3].strip().lower() in (\"yes\", \"true\", \"1\"),\n                \"tags\": tags,\n            })\n\n    with open(os.path.join(out, \"users.json\"), \"w\", encoding=\"utf-8\") as f:\n        json.dump(result, f, ensure_ascii=False)\n\n    print(\"rows %d skipped %d\" % (len(result), skipped))\n\n\nmain()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.014158,
+   "input_tokens": 1168,
+   "output_tokens": 949,
+   "seconds": 8.6,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "14-rename-files",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import os\nimport re\nimport shutil\nimport sys\n\n\ndef normalize(name):\n    s = name.lower()\n    s = re.sub(r\"[^a-z0-9.]+\", \"-\", s)\n    return s.strip(\"-\")\n\n\ndef main():\n    src = os.environ[\"INPUT\"]\n    dst = os.environ[\"OUT\"]\n    names = sorted(os.listdir(os.fsencode(src)))\n    used = set()\n    outbuf = sys.stdout.buffer\n    for raw in names:\n        orig = os.fsdecode(raw)\n        path = os.path.join(src, orig)\n        if not os.path.isfile(path):\n            continue\n        new = normalize(orig)\n        if new in (\"\", \".\", \"..\") or new in used:\n            line = orig + \" skipped\"\n        else:\n            used.add(new)\n            shutil.copyfile(path, os.path.join(dst, new))\n            line = orig + \" -> \" + new\n        outbuf.write(os.fsencode(line) + b\"\\n\")\n    outbuf.flush()\n\n\nmain()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.01236,
+   "input_tokens": 1131,
+   "output_tokens": 784,
+   "seconds": 7.4,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "15-merge-parts",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import os\nimport re\nimport sys\n\nPART_RE = re.compile(r\"part-\\d{4}\\.txt\")\nINT_RE = re.compile(r\"[+-]?\\d+\", re.ASCII)\n\n\ndef read_part(path):\n    try:\n        with open(path, \"rb\") as f:\n            text = f.read().decode(\"utf-8\")\n    except (OSError, UnicodeDecodeError):\n        return None\n    vals = []\n    for line in text.splitlines():\n        s = line.strip()\n        if not s:\n            continue\n        if not INT_RE.fullmatch(s):\n            return None\n        vals.append(int(s))\n    return vals\n\n\ndef main():\n    inp = os.environ[\"INPUT\"]\n    out = os.environ[\"OUT\"]\n    parts = 0\n    corrupt = 0\n    seen = set()\n    for name in sorted(os.listdir(inp)):\n        if not PART_RE.fullmatch(name):\n            continue\n        path = os.path.join(inp, name)\n        if not os.path.isfile(path):\n            continue\n        parts += 1\n        vals = read_part(path)\n        if vals is None:\n            corrupt += 1\n            continue\n        seen.update(vals)\n    result = sorted(seen)\n    with open(os.path.join(out, \"merged.txt\"), \"w\", encoding=\"utf-8\", newline=\"\\n\") as f:\n        for v in result:\n            f.write(str(v) + \"\\n\")\n    print(f\"parts {parts} corrupt {corrupt} values {len(result)}\")\n\n\nmain()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.012558,
+   "input_tokens": 1048,
+   "output_tokens": 837,
+   "seconds": 6.5,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "16-sync-dirs",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import os\nimport sys\n\n\ndef main():\n    src = os.environ[\"SRC\"]\n    dst = os.environ[\"DST\"]\n\n    def files(d):\n        return sorted(\n            n.encode(\"utf-8\", \"surrogateescape\")\n            for n in os.listdir(d)\n            if os.path.isfile(os.path.join(d, n))\n        )\n\n    src_files = files(src)\n    dst_files = set(files(dst))\n    out = []\n    for nb in src_files:\n        name = os.fsdecode(nb)\n        sp = os.path.join(src, name)\n        dp = os.path.join(dst, name)\n        with open(sp, \"rb\") as f:\n            data = f.read()\n        if nb in dst_files:\n            with open(dp, \"rb\") as f:\n                old = f.read()\n            if old == data:\n                status = \"same\"\n            else:\n                status = \"updated\"\n        else:\n            status = \"added\"\n        if status != \"same\":\n            with open(dp, \"wb\") as f:\n                f.write(data)\n        out.append((status, name))\n    src_set = set(src_files)\n    kept = len([n for n in dst_files if n not in src_set])\n    w = sys.stdout.buffer\n    for status, name in out:\n        w.write(status.encode() + b\" \" + os.fsencode(name) + b\"\\n\")\n    w.write(b\"kept \" + str(kept).encode() + b\"\\n\")\n    w.flush()\n\n\nmain()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.00859,
+   "input_tokens": 996,
+   "output_tokens": 461,
+   "seconds": 4.5,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "17-kv-visits",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import os\nimport sys\nimport json\nimport tempfile\n\n\ndef main():\n    input_dir = os.environ[\"INPUT\"]\n    kv_path = os.environ[\"COUNTS\"]\n\n    counts = {}\n    if os.path.exists(kv_path):\n        try:\n            with open(kv_path, \"r\", encoding=\"utf-8\") as f:\n                data = json.load(f)\n            if isinstance(data, dict):\n                counts = {str(k): int(v) for k, v in data.items()}\n        except (ValueError, OSError):\n            counts = {}\n\n    with open(os.path.join(input_dir, \"visits.txt\"), \"rb\") as f:\n        raw = f.read()\n\n    for line in raw.split(b\"\\n\"):\n        line = line.strip()\n        if not line:\n            continue\n        page = line.decode(\"utf-8\", errors=\"surrogateescape\")\n        counts[page] = counts.get(page, 0) + 1\n\n    directory = os.path.dirname(os.path.abspath(kv_path))\n    fd, tmp = tempfile.mkstemp(dir=directory, prefix=\".kv-\")\n    try:\n        with os.fdopen(fd, \"w\", encoding=\"utf-8\") as f:\n            json.dump(counts, f)\n            f.flush()\n            os.fsync(f.fileno())\n        os.replace(tmp, kv_path)\n    except BaseException:\n        if os.path.exists(tmp):\n            os.unlink(tmp)\n        raise\n\n    items = sorted(\n        counts.items(),\n        key=lambda kv: (-kv[1], kv[0].encode(\"utf-8\", errors=\"surrogateescape\")),\n    )\n    out = sys.stdout.buffer\n    for page, total in items:\n        out.write(page.encode(\"utf-8\", errors=\"surrogateescape\") + b\" \" + str(total).encode() + b\"\\n\")\n    out.flush()\n\n\nmain()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.012820000000000002,
+   "input_tokens": 1056,
+   "output_tokens": 860,
+   "seconds": 6.9,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "18-kv-users",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import os\nimport json\n\n\ndef main():\n    input_dir = os.environ[\"INPUT\"]\n    kv_path = os.environ[\"USERS\"]\n\n    users = {}\n    if os.path.exists(kv_path):\n        try:\n            with open(kv_path, \"r\", encoding=\"utf-8\") as f:\n                data = json.load(f)\n            if isinstance(data, dict):\n                users = data\n        except (ValueError, OSError):\n            users = {}\n\n    with open(os.path.join(input_dir, \"commands.txt\"), \"r\", encoding=\"utf-8\") as f:\n        text = f.read()\n\n    out = []\n    for raw in text.split(\"\\n\"):\n        line = raw.strip()\n        if not line:\n            continue\n        parts = line.split()\n        cmd = parts[0]\n        n = len(parts)\n        if cmd == \"put\" and n == 4:\n            users[parts[1]] = {\"id\": parts[1], \"name\": parts[2], \"email\": parts[3]}\n            out.append(\"ok \" + parts[1])\n        elif cmd == \"rename\" and n == 3:\n            if parts[1] in users:\n                users[parts[1]][\"name\"] = parts[2]\n                out.append(\"ok \" + parts[1])\n            else:\n                out.append(\"missing \" + parts[1])\n        elif cmd == \"get\" and n == 2:\n            u = users.get(parts[1])\n            if u is None:\n                out.append(\"missing \" + parts[1])\n            else:\n                out.append(json.dumps(\n                    {\"id\": u[\"id\"], \"name\": u[\"name\"], \"email\": u[\"email\"]},\n                    separators=(\",\", \":\"), ensure_ascii=False))\n        elif cmd == \"del\" and n == 2:\n            if parts[1] in users:\n                del users[parts[1]]\n                out.append(\"ok \" + parts[1])\n            else:\n                out.append(\"missing \" + parts[1])\n        elif cmd == \"count\" and n == 1:\n            out.append(\"count %d\" % len(users))\n        else:\n            out.append(\"bad \" + line)\n\n    tmp = kv_path + \".tmp\"\n    with open(tmp, \"w\", encoding=\"utf-8\") as f:\n        json.dump(users, f, ensure_ascii=False)\n    os.replace(tmp, kv_path)\n\n    if out:\n        import sys\n        sys.stdout.write(\"\\n\".join(out) + \"\\n\")\n\n\nmain()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.015514,
+   "input_tokens": 1157,
+   "output_tokens": 1089,
+   "seconds": 8.0,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "19-kv-ingest",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import os\nimport sys\nimport json\n\n\ndef main():\n    input_dir = os.environ[\"INPUT\"]\n    state_path = os.environ[\"STATE\"]\n\n    applied = set()\n    balances = {}\n    if os.path.exists(state_path):\n        try:\n            with open(state_path, \"r\", encoding=\"utf-8\") as f:\n                data = json.load(f)\n            applied = set(data.get(\"applied\", []))\n            balances = dict(data.get(\"balances\", {}))\n        except (ValueError, OSError):\n            applied = set()\n            balances = {}\n\n    n_applied = 0\n    n_dup = 0\n    n_rej = 0\n\n    path = os.path.join(input_dir, \"events.jsonl\")\n    raw = b\"\"\n    if os.path.exists(path):\n        with open(path, \"rb\") as f:\n            raw = f.read()\n\n    for bline in raw.split(b\"\\n\"):\n        if not bline.strip():\n            continue\n        try:\n            obj = json.loads(bline.decode(\"utf-8\"))\n        except (ValueError, UnicodeDecodeError, RecursionError):\n            n_rej += 1\n            continue\n        if not isinstance(obj, dict):\n            n_rej += 1\n            continue\n        eid = obj.get(\"id\")\n        acct = obj.get(\"account\")\n        cents = obj.get(\"cents\")\n        if (not isinstance(eid, str) or not isinstance(acct, str)\n                or not isinstance(cents, int) or isinstance(cents, bool)):\n            n_rej += 1\n            continue\n        if eid in applied:\n            n_dup += 1\n            continue\n        applied.add(eid)\n        balances[acct] = balances.get(acct, 0) + cents\n        n_applied += 1\n\n    tmp = state_path + \".tmp\"\n    with open(tmp, \"w\", encoding=\"utf-8\") as f:\n        json.dump({\"applied\": sorted(applied), \"balances\": balances}, f)\n        f.flush()\n        os.fsync(f.fileno())\n    os.replace(tmp, state_path)\n\n    out = [\"applied %d duplicate %d rejected %d\" % (n_applied, n_dup, n_rej)]\n    for acct in sorted(balances, key=lambda a: a.encode(\"utf-8\", \"surrogatepass\")):\n        out.append(\"%s %d\" % (acct, balances[acct]))\n    sys.stdout.buffer.write((\"\\n\".join(out) + \"\\n\").encode(\"utf-8\", \"surrogatepass\"))\n\n\nmain()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.01684,
+   "input_tokens": 1106,
+   "output_tokens": 1242,
+   "seconds": 9.7,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "20-kv-rate-limit",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import os\nimport json\n\n\ndef main():\n    input_dir = os.environ.get(\"INPUT\", \".\")\n    kv_path = os.environ.get(\"LIMITS\")\n\n    state = {}\n    if kv_path and os.path.exists(kv_path):\n        try:\n            with open(kv_path, \"r\", encoding=\"utf-8\") as f:\n                loaded = json.load(f)\n            if isinstance(loaded, dict):\n                state = loaded\n        except (OSError, ValueError):\n            state = {}\n\n    # state: {\"window\": {\"client\": count}}\n    out = []\n    path = os.path.join(input_dir, \"requests.txt\")\n    try:\n        with open(path, \"r\", encoding=\"utf-8\", errors=\"replace\") as f:\n            lines = f.read().splitlines()\n    except OSError:\n        lines = []\n\n    max_w = None\n    for line in lines:\n        parts = line.split()\n        if len(parts) != 2:\n            continue\n        try:\n            ts = int(parts[0])\n        except ValueError:\n            continue\n        client = parts[1]\n        w = str(ts // 60)\n        if max_w is None or ts // 60 > max_w:\n            max_w = ts // 60\n        bucket = state.setdefault(w, {})\n        c = bucket.get(client, 0)\n        if c < 3:\n            bucket[client] = c + 1\n            out.append(\"%s %s allow\" % (parts[0], client))\n        else:\n            out.append(\"%s %s deny\" % (parts[0], client))\n\n    if out:\n        print(\"\\n\".join(out))\n\n    if kv_path:\n        # prune windows older than the newest known window\n        try:\n            newest = max(int(k) for k in state)\n            state = {k: v for k, v in state.items() if int(k) >= newest}\n        except ValueError:\n            pass\n        tmp = kv_path + \".tmp\"\n        with open(tmp, \"w\", encoding=\"utf-8\") as f:\n            json.dump(state, f)\n        os.replace(tmp, kv_path)\n\n\nmain()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.014082,
+   "input_tokens": 1084,
+   "output_tokens": 975,
+   "seconds": 8.3,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "21-kv-leaderboard",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import os\nimport sys\nimport json\n\n\ndef main():\n    input_dir = os.environ[\"INPUT\"]\n    board_path = os.environ[\"BOARD\"]\n\n    data = {}\n    try:\n        with open(board_path, \"r\") as f:\n            txt = f.read()\n        if txt.strip():\n            data = json.loads(txt)\n    except FileNotFoundError:\n        pass\n\n    # data: name -> [points, played]\n    with open(os.path.join(input_dir, \"games.txt\"), \"rb\") as f:\n        raw = f.read()\n    text = raw.decode(\"utf-8\", errors=\"surrogateescape\")\n\n    for line in text.split(\"\\n\"):\n        parts = line.split()\n        if len(parts) == 2:\n            w, l = parts\n            wp, lp = 3, 0\n        elif len(parts) == 3 and parts[2] == \"draw\":\n            w, l = parts[0], parts[1]\n            wp, lp = 1, 1\n        else:\n            continue\n        a = data.setdefault(w, [0, 0])\n        a[0] += wp\n        a[1] += 1\n        b = data.setdefault(l, [0, 0])\n        b[0] += lp\n        b[1] += 1\n\n    tmp = board_path + \".tmp\"\n    with open(tmp, \"w\") as f:\n        json.dump(data, f)\n    os.replace(tmp, board_path)\n\n    def key(item):\n        name, (pts, played) = item\n        return (-pts, played, name.encode(\"utf-8\", errors=\"surrogateescape\"))\n\n    ranked = sorted(data.items(), key=key)[:3]\n    out = sys.stdout.buffer\n    for i, (name, (pts, played)) in enumerate(ranked, 1):\n        line = \"%d. %s %d %d\\n\" % (i, name, pts, played)\n        out.write(line.encode(\"utf-8\", errors=\"surrogateescape\"))\n    out.flush()\n\n\nmain()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.014476,
+   "input_tokens": 1085,
+   "output_tokens": 1014,
+   "seconds": 8.1,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "22-db-import",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import os\nimport re\nimport csv\nimport sqlite3\n\nINT_RE = re.compile(r'^[+-]?[0-9]+$')\nLIM = 2 ** 63\n\n\ndef parse_int(s):\n    s = s.strip()\n    if not INT_RE.match(s):\n        return None\n    v = int(s)\n    if v < -LIM or v >= LIM:\n        return None\n    return v\n\n\ndef main():\n    input_dir = os.environ[\"INPUT\"]\n    db_path = os.environ[\"SHOP\"]\n\n    with open(os.path.join(input_dir, \"orders.csv\"), \"rb\") as f:\n        text = f.read().decode(\"utf-8\", errors=\"replace\")\n    if text.startswith(\"\\ufeff\"):\n        text = text[1:]\n    lines = text.split(\"\\n\")\n\n    conn = sqlite3.connect(db_path)\n    conn.execute(\n        \"CREATE TABLE IF NOT EXISTS orders (\"\n        \"order_id INTEGER PRIMARY KEY, customer TEXT NOT NULL, \"\n        \"product TEXT NOT NULL, qty INTEGER NOT NULL, unit_cents INTEGER NOT NULL)\"\n    )\n    conn.commit()\n\n    imported = skipped = rejected = 0\n    for line in lines[1:]:\n        line = line.rstrip(\"\\r\")\n        if line.strip() == \"\":\n            continue\n        try:\n            rows = list(csv.reader([line]))\n        except csv.Error:\n            rejected += 1\n            continue\n        if not rows or len(rows[0]) != 5:\n            rejected += 1\n            continue\n        oid_s, customer, product, qty_s, unit_s = rows[0]\n        oid = parse_int(oid_s)\n        qty = parse_int(qty_s)\n        unit = parse_int(unit_s)\n        if oid is None or qty is None or unit is None:\n            rejected += 1\n            continue\n        cur = conn.execute(\n            \"INSERT OR IGNORE INTO orders VALUES (?,?,?,?,?)\",\n            (oid, customer, product, qty, unit),\n        )\n        if cur.rowcount == 1:\n            imported += 1\n        else:\n            skipped += 1\n    conn.commit()\n\n    print(\"imported %d skipped %d rejected %d\" % (imported, skipped, rejected))\n    for product, rev, n in conn.execute(\n        \"SELECT product, SUM(qty * unit_cents) AS rev, COUNT(*) FROM orders \"\n        \"GROUP BY product ORDER BY rev DESC, product ASC LIMIT 3\"\n    ):\n        print(\"%s %d %d\" % (product, rev, n))\n    conn.close()\n\n\nmain()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.018998,
+   "input_tokens": 1108,
+   "output_tokens": 1457,
+   "seconds": 11.1,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "23-db-report",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import os\nimport sqlite3\nimport urllib.parse\n\n\ndef main():\n    path = os.path.abspath(os.environ[\"SHOP\"])\n    uri = \"file:\" + urllib.parse.quote(path) + \"?mode=ro\"\n    con = sqlite3.connect(uri, uri=True)\n    rows = con.execute(\n        \"\"\"\n        SELECT c.country, c.id, c.name, COUNT(*), SUM(o.total_cents)\n        FROM orders o JOIN customers c ON c.id = o.customer_id\n        WHERE o.status = 'paid' AND o.placed >= '2026-01-01' AND o.placed < '2027-01-01'\n        GROUP BY c.id\n        \"\"\"\n    ).fetchall()\n    con.close()\n\n    countries = {}\n    for country, cid, name, n, rev in rows:\n        d = countries.setdefault(country, {\"customers\": 0, \"orders\": 0, \"revenue\": 0, \"top\": None})\n        d[\"customers\"] += 1\n        d[\"orders\"] += n\n        d[\"revenue\"] += rev\n        best = d[\"top\"]\n        if best is None or rev > best[0] or (rev == best[0] and cid < best[1]):\n            d[\"top\"] = (rev, cid, name)\n\n    total_orders = 0\n    total_rev = 0\n    for country in sorted(countries, key=lambda k: (-countries[k][\"revenue\"], k)):\n        d = countries[country]\n        print(f\"{country} customers={d['customers']} orders={d['orders']} revenue={d['revenue']} top={d['top'][2]}\")\n        total_orders += d[\"orders\"]\n        total_rev += d[\"revenue\"]\n    print(f\"total orders={total_orders} revenue={total_rev}\")\n\n\nmain()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.013234000000000001,
+   "input_tokens": 1227,
+   "output_tokens": 833,
+   "seconds": 6.7,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "24-db-inventory",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import os\nimport re\nimport sqlite3\n\nMOVE_RE = re.compile(r'^([+-])([0-9]+)$')\n\n\ndef main():\n    input_dir = os.environ[\"INPUT\"]\n    db_path = os.environ[\"STOCK\"]\n\n    conn = sqlite3.connect(db_path)\n    conn.execute(\"CREATE TABLE IF NOT EXISTS stock (sku TEXT PRIMARY KEY, qty INTEGER NOT NULL)\")\n    conn.execute(\"CREATE TABLE IF NOT EXISTS applied (name TEXT PRIMARY KEY)\")\n    conn.commit()\n\n    with open(os.path.join(input_dir, \"moves.txt\"), \"rb\") as f:\n        text = f.read().decode(\"utf-8\", errors=\"replace\")\n\n    # Parse into batches: (name, [lines])\n    batches = []\n    cur = None\n    for raw in text.split(\"\\n\"):\n        line = raw.strip()\n        if not line:\n            continue\n        parts = line.split()\n        if parts[0] == \"batch\" and len(parts) >= 2:\n            cur = (\" \".join(parts[1:]), [])\n            batches.append(cur)\n        elif cur is not None:\n            cur[1].append(line)\n\n    applied = {r[0] for r in conn.execute(\"SELECT name FROM applied\")}\n    out = []\n\n    for name, lines in batches:\n        if name in applied:\n            out.append(f\"{name} skipped\")\n            continue\n        deltas = {}\n        ok = True\n        for line in lines:\n            p = line.split()\n            if len(p) != 2:\n                ok = False\n                break\n            m = MOVE_RE.match(p[1])\n            if not m or int(m.group(2)) == 0:\n                ok = False\n                break\n            n = int(m.group(2))\n            if m.group(1) == \"-\":\n                n = -n\n            deltas[p[0]] = deltas.get(p[0], 0) + n\n        if ok:\n            # Net-based check: intermediate order matters, so simulate sequentially\n            qty = {}\n            for line in lines:\n                p = line.split()\n                sku = p[0]\n                if sku not in qty:\n                    row = conn.execute(\"SELECT qty FROM stock WHERE sku=?\", (sku,)).fetchone()\n                    qty[sku] = row[0] if row else 0\n                qty[sku] += int(p[1])\n                if qty[sku] < 0:\n                    ok = False\n                    break\n        if not ok:\n            out.append(f\"{name} rejected\")\n            continue\n        with conn:\n            for sku, q in qty.items():\n                conn.execute(\n                    \"INSERT INTO stock(sku, qty) VALUES(?, ?) \"\n                    \"ON CONFLICT(sku) DO UPDATE SET qty=excluded.qty\",\n                    (sku, q),\n                )\n            conn.execute(\"INSERT INTO applied(name) VALUES(?)\", (name,))\n        applied.add(name)\n        out.append(f\"{name} applied\")\n\n    rows = [(s, q) for s, q in conn.execute(\"SELECT sku, qty FROM stock\") if q != 0]\n    rows.sort(key=lambda r: r[0].encode(\"utf-8\", errors=\"surrogateescape\"))\n    for s, q in rows:\n        out.append(f\"{s} {q}\")\n    conn.close()\n    print(\"\\n\".join(out))\n\n\nmain()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.021364,
+   "input_tokens": 1167,
+   "output_tokens": 1670,
+   "seconds": 11.8,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "25-db-contacts",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import csv\nimport os\nimport sqlite3\n\n\ndef main():\n    input_dir = os.environ[\"INPUT\"]\n    db_path = os.environ[\"CRM\"]\n\n    conn = sqlite3.connect(db_path)\n    conn.execute(\n        \"CREATE TABLE IF NOT EXISTS contacts (\"\n        \"email TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', phone TEXT NOT NULL DEFAULT '')\"\n    )\n\n    inserted = updated = unchanged = rejected = 0\n\n    path = os.path.join(input_dir, \"contacts.csv\")\n    with open(path, newline=\"\", encoding=\"utf-8-sig\") as f:\n        reader = csv.reader(f)\n        first = True\n        for row in reader:\n            if first:\n                first = False\n                continue\n            if not row or (len(row) == 1 and row[0].strip() == \"\"):\n                continue\n            if len(row) != 3:\n                rejected += 1\n                continue\n            email = row[0].strip().lower()\n            name = row[1].strip()\n            phone = row[2].strip()\n            if \"@\" not in email:\n                rejected += 1\n                continue\n            cur = conn.execute(\n                \"SELECT name, phone FROM contacts WHERE email = ?\", (email,)\n            ).fetchone()\n            if cur is None:\n                conn.execute(\n                    \"INSERT INTO contacts (email, name, phone) VALUES (?, ?, ?)\",\n                    (email, name, phone),\n                )\n                inserted += 1\n            elif cur[0] != name or cur[1] != phone:\n                conn.execute(\n                    \"UPDATE contacts SET name = ?, phone = ? WHERE email = ?\",\n                    (name, phone, email),\n                )\n                updated += 1\n            else:\n                unchanged += 1\n    conn.commit()\n\n    total = conn.execute(\"SELECT COUNT(*) FROM contacts\").fetchone()[0]\n    missing = [\n        r[0]\n        for r in conn.execute(\n            \"SELECT email FROM contacts WHERE phone = '' ORDER BY email\"\n        )\n    ]\n    conn.close()\n\n    print(f\"inserted {inserted} updated {updated} unchanged {unchanged} rejected {rejected}\")\n    print(f\"contacts {total}\")\n    for e in missing:\n        print(f\"missing phone: {e}\")\n\n\nmain()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.016244,
+   "input_tokens": 1132,
+   "output_tokens": 1172,
+   "seconds": 8.9,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "26-http-counter",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import os\nimport re\nimport json\nimport threading\nimport fcntl\nfrom http.server import BaseHTTPRequestHandler, ThreadingHTTPServer\n\nKV_PATH = os.environ.get(\"COUNTS\", \"counts.json\")\nLOCK = threading.Lock()\nNAME_RE = re.compile(r\"[a-z0-9-]{1,32}\")\n\n\ndef load():\n    try:\n        with open(KV_PATH, \"r\", encoding=\"utf-8\") as f:\n            data = json.load(f)\n            if isinstance(data, dict):\n                return data\n    except (FileNotFoundError, ValueError, OSError):\n        pass\n    return {}\n\n\ndef save(data):\n    tmp = KV_PATH + \".tmp.%d.%d\" % (os.getpid(), threading.get_ident())\n    with open(tmp, \"w\", encoding=\"utf-8\") as f:\n        json.dump(data, f)\n        f.flush()\n        os.fsync(f.fileno())\n    os.replace(tmp, KV_PATH)\n\n\nclass FileLock:\n    def __enter__(self):\n        LOCK.acquire()\n        self.fd = os.open(KV_PATH + \".lock\", os.O_CREAT | os.O_RDWR, 0o644)\n        fcntl.flock(self.fd, fcntl.LOCK_EX)\n        return self\n\n    def __exit__(self, *a):\n        try:\n            fcntl.flock(self.fd, fcntl.LOCK_UN)\n            os.close(self.fd)\n        finally:\n            LOCK.release()\n\n\nclass Handler(BaseHTTPRequestHandler):\n    protocol_version = \"HTTP/1.1\"\n\n    def log_message(self, *a):\n        pass\n\n    def send_json(self, status, obj):\n        body = json.dumps(obj).encode(\"utf-8\")\n        self.send_response(status)\n        self.send_header(\"content-type\", \"application/json\")\n        self.send_header(\"content-length\", str(len(body)))\n        self.end_headers()\n        if self.command != \"HEAD\":\n            self.wfile.write(body)\n\n    def handle_any(self):\n        try:\n            n = int(self.headers.get(\"content-length\") or 0)\n        except ValueError:\n            n = 0\n        if n > 0:\n            self.rfile.read(n)\n\n        method = self.command\n        path = self.path\n        if \"?\" in path:\n            path = path.split(\"?\", 1)[0]\n\n        if method == \"POST\" and path.startswith(\"/hit/\"):\n            name = path[5:]\n            if not NAME_RE.fullmatch(name):\n                return self.send_json(400, {\"error\": \"bad name\"})\n            with FileLock():\n                data = load()\n                data[name] = int(data.get(name, 0)) + 1\n                save(data)\n                count = data[name]\n            return self.send_json(200, {\"name\": name, \"count\": count})\n\n        if method == \"GET\" and path.startswith(\"/count/\"):\n            name = path[7:]\n            if not NAME_RE.fullmatch(name):\n                return self.send_json(400, {\"error\": \"bad name\"})\n            with FileLock():\n                data = load()\n            return self.send_json(200, {\"name\": name, \"count\": int(data.get(name, 0))})\n\n        if method == \"GET\" and path == \"/top\":\n            with FileLock():\n                data = load()\n            items = sorted(data.items(), key=lambda kv: (-int(kv[1]), kv[0].encode(\"utf-8\")))[:3]\n            return self.send_json(200, [{\"name\": k, \"count\": int(v)} for k, v in items])\n\n        return self.send_json(404, {\"error\": \"not found\"})\n\n    do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = handle_any\n\n\ndef main():\n    port = int(os.environ.get(\"PORT\", \"8000\"))\n    server = ThreadingHTTPServer((\"127.0.0.1\", port), Handler)\n    server.daemon_threads = True\n    server.serve_forever()\n\n\nif __name__ == \"__main__\":\n    main()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.022609999999999998,
+   "input_tokens": 1156,
+   "output_tokens": 1799,
+   "seconds": 13.0,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "27-http-todos",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import json\nimport os\nimport threading\nfrom http.server import BaseHTTPRequestHandler, ThreadingHTTPServer\nfrom urllib.parse import urlsplit, parse_qs\n\nSTORE = os.environ.get(\"STORE\")\nLOCK = threading.Lock()\nSTATE = {\"next_id\": 1, \"todos\": []}\n\n\ndef load():\n    try:\n        with open(STORE, \"r\", encoding=\"utf-8\") as f:\n            d = json.load(f)\n        if isinstance(d, dict) and isinstance(d.get(\"todos\"), list):\n            STATE[\"todos\"] = d[\"todos\"]\n            STATE[\"next_id\"] = int(d.get(\"next_id\", 1))\n            for t in STATE[\"todos\"]:\n                if t[\"id\"] >= STATE[\"next_id\"]:\n                    STATE[\"next_id\"] = t[\"id\"] + 1\n    except Exception:\n        pass\n\n\ndef save():\n    if not STORE:\n        return\n    tmp = STORE + \".tmp\"\n    with open(tmp, \"w\", encoding=\"utf-8\") as f:\n        json.dump(STATE, f)\n    os.replace(tmp, STORE)\n\n\ndef parse_id(seg):\n    if seg.isascii() and seg.isdigit() and str(int(seg)) == seg:\n        return int(seg)\n    return None\n\n\nclass H(BaseHTTPRequestHandler):\n    protocol_version = \"HTTP/1.1\"\n\n    def log_message(self, *a):\n        pass\n\n    def send(self, code, obj=None):\n        body = b\"\" if obj is None else json.dumps(obj).encode()\n        self.send_response(code)\n        if obj is not None:\n            self.send_header(\"Content-Type\", \"application/json\")\n        self.send_header(\"Content-Length\", str(len(body)))\n        self.end_headers()\n        if body:\n            self.wfile.write(body)\n\n    def body(self):\n        n = int(self.headers.get(\"Content-Length\") or 0)\n        raw = self.rfile.read(n) if n > 0 else b\"\"\n        try:\n            return json.loads(raw.decode(\"utf-8\"))\n        except Exception:\n            return None\n\n    def nf(self):\n        self.send(404, {\"error\": \"not found\"})\n\n    def handle_any(self):\n        method = self.command\n        data = self.body() if method in (\"POST\", \"PATCH\") else None\n        if method not in (\"POST\", \"PATCH\"):\n            n = int(self.headers.get(\"Content-Length\") or 0)\n            if n > 0:\n                self.rfile.read(n)\n        u = urlsplit(self.path)\n        parts = u.path.split(\"/\")\n        with LOCK:\n            if u.path == \"/todos\":\n                if method == \"POST\":\n                    t = data.get(\"title\") if isinstance(data, dict) else None\n                    if not isinstance(t, str) or not t.strip():\n                        return self.send(400, {\"error\": \"title required\"})\n                    todo = {\"id\": STATE[\"next_id\"], \"title\": t.strip(), \"done\": False}\n                    STATE[\"next_id\"] += 1\n                    STATE[\"todos\"].append(todo)\n                    save()\n                    return self.send(201, todo)\n                if method == \"GET\":\n                    items = STATE[\"todos\"]\n                    q = parse_qs(u.query).get(\"done\")\n                    if q:\n                        if q[-1] == \"true\":\n                            items = [t for t in items if t[\"done\"] is True]\n                        elif q[-1] == \"false\":\n                            items = [t for t in items if t[\"done\"] is False]\n                    return self.send(200, sorted(items, key=lambda t: t[\"id\"]))\n                return self.nf()\n            if len(parts) == 3 and parts[0] == \"\" and parts[1] == \"todos\":\n                tid = parse_id(parts[2])\n                todo = None\n                if tid is not None:\n                    for t in STATE[\"todos\"]:\n                        if t[\"id\"] == tid:\n                            todo = t\n                            break\n                if todo is None or method not in (\"GET\", \"PATCH\", \"DELETE\"):\n                    return self.nf()\n                if method == \"GET\":\n                    return self.send(200, todo)\n                if method == \"DELETE\":\n                    STATE[\"todos\"].remove(todo)\n                    save()\n                    return self.send(204)\n                bad = {\"error\": \"bad update\"}\n                if not isinstance(data, dict):\n                    return self.send(400, bad)\n                upd = {}\n                if \"title\" in data:\n                    t = data[\"title\"]\n                    if not isinstance(t, str) or not t.strip():\n                        return self.send(400, bad)\n                    upd[\"title\"] = t.strip()\n                if \"done\" in data:\n                    if not isinstance(data[\"done\"], bool):\n                        return self.send(400, bad)\n                    upd[\"done\"] = data[\"done\"]\n                todo.update(upd)\n                save()\n                return self.send(200, todo)\n            return self.nf()\n\n    do_GET = do_POST = do_PATCH = do_DELETE = do_PUT = do_HEAD = do_OPTIONS = handle_any\n\n\nif __name__ == \"__main__\":\n    load()\n    srv = ThreadingHTTPServer((\"127.0.0.1\", int(os.environ[\"PORT\"])), H)\n    srv.daemon_threads = True\n    srv.serve_forever()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.027552,
+   "input_tokens": 1299,
+   "output_tokens": 2236,
+   "seconds": 16.3,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "28-http-notes-db",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import json\nimport os\nimport re\nimport sqlite3\nimport threading\nfrom http.server import BaseHTTPRequestHandler, ThreadingHTTPServer\nfrom urllib.parse import urlsplit, parse_qs\n\nconn = sqlite3.connect(os.environ[\"DB\"], check_same_thread=False, isolation_level=None)\nconn.execute(\n    \"CREATE TABLE IF NOT EXISTS notes (\"\n    \"id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, \"\n    \"body TEXT NOT NULL, tags TEXT NOT NULL)\"\n)\nlock = threading.Lock()\n\nID_RE = re.compile(r\"^/notes/([0-9]+)$\")\n\n\nclass H(BaseHTTPRequestHandler):\n    protocol_version = \"HTTP/1.1\"\n\n    def log_message(self, *a):\n        pass\n\n    def send(self, code, obj):\n        data = json.dumps(obj).encode()\n        self.send_response(code)\n        self.send_header(\"content-type\", \"application/json\")\n        self.send_header(\"content-length\", str(len(data)))\n        self.end_headers()\n        if self.command != \"HEAD\":\n            self.wfile.write(data)\n\n    def nf(self):\n        self.send(404, {\"error\": \"not found\"})\n\n    def read_body(self):\n        try:\n            n = int(self.headers.get(\"content-length\") or 0)\n        except ValueError:\n            n = 0\n        return self.rfile.read(n) if n > 0 else b\"\"\n\n    def handle_any(self):\n        raw = self.read_body()\n        method = self.command\n        u = urlsplit(self.path)\n        path = u.path\n        if method == \"POST\" and path == \"/notes\":\n            return self.create(raw)\n        if method == \"GET\" and path == \"/notes\":\n            return self.list(u.query)\n        m = ID_RE.match(path)\n        if m and method in (\"GET\", \"DELETE\"):\n            nid = int(m.group(1))\n            with lock:\n                row = conn.execute(\n                    \"SELECT id,title,body,tags FROM notes WHERE id=?\", (nid,)\n                ).fetchone()\n                if row is None:\n                    return self.nf()\n                if method == \"GET\":\n                    return self.send(\n                        200,\n                        {\"id\": row[0], \"title\": row[1], \"body\": row[2],\n                         \"tags\": json.loads(row[3])},\n                    )\n                conn.execute(\"DELETE FROM notes WHERE id=?\", (nid,))\n            return self.send(200, {\"deleted\": nid})\n        return self.nf()\n\n    def create(self, raw):\n        bad = lambda: self.send(400, {\"error\": \"invalid note\"})\n        try:\n            d = json.loads(raw.decode(\"utf-8\"))\n        except Exception:\n            return bad()\n        if not isinstance(d, dict):\n            return bad()\n        title = d.get(\"title\")\n        body = d.get(\"body\")\n        tags = d.get(\"tags\", [])\n        if not isinstance(title, str) or not title:\n            return bad()\n        if not isinstance(body, str):\n            return bad()\n        if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):\n            return bad()\n        out = []\n        for t in tags:\n            t = t.lower()\n            if t not in out:\n                out.append(t)\n        with lock:\n            cur = conn.execute(\n                \"INSERT INTO notes(title,body,tags) VALUES(?,?,?)\",\n                (title, body, json.dumps(out)),\n            )\n            nid = cur.lastrowid\n        self.send(201, {\"id\": nid})\n\n    def list(self, query):\n        qs = parse_qs(query, keep_blank_values=True)\n        tag = qs[\"tag\"][0].lower() if \"tag\" in qs else None\n        q = qs[\"q\"][0] if \"q\" in qs else None\n        with lock:\n            rows = conn.execute(\n                \"SELECT id,title,body,tags FROM notes ORDER BY id DESC\"\n            ).fetchall()\n        res = []\n        for i, t, b, tg in rows:\n            if tag is not None and tag not in json.loads(tg):\n                continue\n            if q is not None and q not in t and q not in b:\n                continue\n            res.append({\"id\": i, \"title\": t})\n        self.send(200, res)\n\n    do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = handle_any\n\n\nThreadingHTTPServer.daemon_threads = True\nThreadingHTTPServer((\"127.0.0.1\", int(os.environ[\"PORT\"])), H).serve_forever()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.02691,
+   "input_tokens": 1361,
+   "output_tokens": 2147,
+   "seconds": 15.2,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "29-http-weather",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import json\nimport os\nimport sys\nimport urllib.request\nimport urllib.parse\n\n\nBASE = os.environ[\"API\"].rstrip(\"/\")\n\n\ndef get(path):\n    with urllib.request.urlopen(BASE + path, timeout=30) as r:\n        if not (200 <= r.status < 300):\n            raise RuntimeError(\"status\")\n        return json.loads(r.read().decode(\"utf-8\"))\n\n\ndef fmt(v):\n    sign = \"-\" if v < 0 else \"\"\n    q, r = divmod(abs(v), 10)\n    return \"%s%d.%d\" % (sign, q, r)\n\n\ndef summarize(name, sid):\n    try:\n        data = get(\"/stations/%s/readings\" % urllib.parse.quote(str(sid), safe=\"\"))\n        temps = [\n            x[\"temp\"]\n            for x in data.get(\"readings\", [])\n            if isinstance(x.get(\"temp\"), int) and not isinstance(x.get(\"temp\"), bool)\n        ]\n    except Exception:\n        return \"%s unavailable\" % name\n    if not temps:\n        return \"%s no data\" % name\n    n = len(temps)\n    s = sum(temps)\n    avg = abs(s) // n\n    if s < 0:\n        avg = -avg\n    return \"%s min=%s max=%s avg=%s n=%d\" % (name, fmt(min(temps)), fmt(max(temps)), fmt(avg), n)\n\n\ndef main():\n    stations = get(\"/stations\")[\"stations\"]\n    stations = sorted(stations, key=lambda s: s[\"name\"].encode(\"utf-8\"))\n    out = [summarize(s[\"name\"], s[\"id\"]) for s in stations]\n    sys.stdout.buffer.write((\"\\n\".join(out) + (\"\\n\" if out else \"\")).encode(\"utf-8\"))\n\n\nmain()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.014116,
+   "input_tokens": 1185,
+   "output_tokens": 938,
+   "seconds": 8.0,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  },
+  {
+   "task": "30-http-paginate",
+   "rounds": [
+    {
+     "round": 1,
+     "program": "import json\nimport os\nimport sys\nimport urllib.request\nimport urllib.error\n\n\ndef main():\n    base = os.environ[\"API\"].rstrip(\"/\")\n\n    def get(path):\n        with urllib.request.urlopen(base + path) as r:\n            return json.loads(r.read().decode(\"utf-8\"))\n\n    orders = []\n    page = 1\n    seen = set()\n    while page is not None:\n        if page in seen:\n            break\n        seen.add(page)\n        data = get(\"/orders?page=%d\" % page)\n        orders.extend(data.get(\"orders\") or [])\n        page = data.get(\"next\")\n\n    paid_cents = {}\n    refunded = 0\n    largest = None  # (cents, id)\n    for o in orders:\n        st = o.get(\"status\")\n        if st == \"paid\":\n            cur = o[\"currency\"]\n            paid_cents[cur] = paid_cents.get(cur, 0) + o[\"cents\"]\n            if (largest is None or o[\"cents\"] > largest[0]\n                    or (o[\"cents\"] == largest[0] and o[\"id\"] < largest[1])):\n                largest = (o[\"cents\"], o[\"id\"])\n        elif st == \"refunded\":\n            refunded += 1\n\n    body = {\n        \"orders\": len(orders),\n        \"paid_cents\": paid_cents,\n        \"refunded\": refunded,\n        \"largest\": largest[1] if largest else None,\n    }\n\n    req = urllib.request.Request(\n        base + \"/summaries\",\n        data=json.dumps(body).encode(\"utf-8\"),\n        headers={\"content-type\": \"application/json\"},\n        method=\"POST\",\n    )\n    try:\n        with urllib.request.urlopen(req) as r:\n            status = r.status\n            resp = r.read().decode(\"utf-8\")\n    except urllib.error.HTTPError as e:\n        print(\"POST failed with status %d\" % e.code, file=sys.stderr)\n        sys.exit(1)\n\n    if status != 201:\n        print(\"POST failed with status %d\" % status, file=sys.stderr)\n        sys.exit(1)\n\n    print(json.loads(resp)[\"id\"])\n\n\nmain()\n",
+     "checked": null,
+     "passed": true,
+     "feedback": ""
+    }
+   ],
+   "passed": true,
+   "rounds_used": 1,
+   "cost_usd": 0.013212,
+   "input_tokens": 1194,
+   "output_tokens": 844,
+   "seconds": 6.5,
+   "checks_first": null,
+   "pass_first": true,
+   "over_asked": []
+  }
+ ]
+}

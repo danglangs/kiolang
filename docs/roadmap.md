@@ -105,4 +105,12 @@ A CRUD app over a `Dir` (W9a) proves the language. A target app proves the ecosy
 
 The design bets that models write kio from language.md and the checker's hints. Evidence so far is agents with the docs in context (the links app). Unmeasured: a cold or smaller model.
 
-Eval (next): about 30 tasks (pure compute, `Dir`, `Kv`, `Db`, HTTP handlers and clients), a model given only language.md. Measure per task: `kio check` passing on the first try, and check-and-fix rounds to pass (cap 5); the same tasks in Python as the baseline; two or three model sizes. Output: the rates, and the diagnostics models hit most, which feed the next L12-style round.
+Eval (E1, eval/, 2026-11-10): 30 tasks (compute, `Dir`, `Kv`, `Db`, HTTP handlers and clients), the model given only language.md (kio) or nothing (Python), up to 5 rounds with `kio check` and test feedback, through `claude -p`.
+
+| Model | kio: checks first try | kio: passes first try | kio: by round 5 | Python: first try | Python: by round 5 | Cost kio / Python |
+|---|---|---|---|---|---|---|
+| Haiku 5.5 | 28/30 | 24/30 | 30/30 | 28/30 | 30/30 | $0.13 / $0.05 |
+| Sonnet 5.5 | 30/30 | 30/30 | 30/30 | 30/30 | 30/30 | $1.05 / $0.44 |
+| Opus 5.5 | 28/30 | 28/30 | 30/30 | 30/30 | 30/30 | $2.04 / $0.87 |
+
+No model asked for a grant the task did not give. What cost a round in kio: `split("")` to get characters (Haiku, 2 tasks: kio has no `chars()`), `for` over `Bytes` (Haiku), `bool` for `Bool` (Haiku), tuples (Opus, 2 tasks; the L20 hint fixed each in one round). kio costs about 2.3x Python per task: language.md (~9k tokens) rides in every prompt. Sonnet and Opus pass every task in both languages, so the next round needs harder tasks to tell them apart.
