@@ -376,15 +376,18 @@ fn run(path: &str, flags: &[&str]) -> i32 {
             return fail(format!("--http-header {}: {e}", header_label(spec)));
         }
     }
-    // A program that fails to check is reported by the run below.
-    let checked = lang::check_files(
+    // A program that fails to check says so before any check of `main`'s shape (H20).
+    let checked = match lang::check_files(
         &files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect::<Vec<_>>(),
         &lang::CapTable::v0(),
-    );
-    let params = checked.as_ref().map(|p| p.main_params()).unwrap_or_default();
+    ) {
+        Ok(p) => p,
+        Err(diags) => return print_diags(&files, diags.into_iter().map(Diag::from).collect()),
+    };
+    let params = checked.main_params();
     // A read-only store or database is refused to a program that can write it (H12, H17); the
     // host also stops any write that reaches it.
-    let report = checked.as_ref().map(lang::report).unwrap_or_default();
+    let report = lang::report(&checked);
     type WriteIn = fn(&str, &str) -> Option<&'static str>;
     let readers = (kv_specs
         .iter()

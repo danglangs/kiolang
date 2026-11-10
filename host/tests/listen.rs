@@ -853,6 +853,33 @@ fn host_without_listen_is_refused() {
     assert!(err.contains("--host without --listen\n  hint: "), "{err}");
 }
 
+/// `kio run` on `src` with `args`; the exit code and stderr.
+fn run_src(src: &str, args: &[&str]) -> (Option<i32>, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app.kio");
+    std::fs::write(&app, src).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_kio"))
+        .arg("run")
+        .arg(&app)
+        .args(args)
+        .output()
+        .unwrap();
+    (out.status.code(), String::from_utf8_lossy(&out.stderr).into())
+}
+
+/// H20: a program that fails to parse says so under `--listen`, not that `main` has the wrong shape.
+#[test]
+fn listen_reports_a_parse_error_first() {
+    let src = "fn main(req: Incoming, res: Outgoing) -> Result<(), WebErr> {\n    res.send(200, [], [], \"x\".to_bytes()\n}\n";
+    let (code, err) = run_src(src, &["--listen", "127.0.0.1:0"]);
+    assert_eq!(code, Some(1));
+    assert!(
+        err.contains("app.kio:3: error: expected `)`\n  hint: a `(` is not closed"),
+        "{err}"
+    );
+    assert!(!err.contains("--listen needs"), "{err}");
+}
+
 /// H18: `send` hands the response over at once and `main` runs on. `/slow` sends, then loops
 /// until the 2 s deadline; `/count` sends, then adds 1 to `hits`; `/trap` sends, then traps;
 /// `/none` never sends.
