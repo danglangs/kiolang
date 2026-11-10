@@ -650,3 +650,198 @@ fn host_without_listen_is_refused() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("--host without --listen\n  hint: "), "{err}");
 }
+
+/// H18: `send` hands the response over at once and `main` runs on. `/slow` sends, then loops
+/// until the 2 s deadline; `/count` sends, then adds 1 to `hits`; `/trap` sends, then traps;
+/// `/none` never sends.
+mod after_send {
+    use super::*;
+    use kio_host::listen::{serve_with, ListenLimits};
+    use kio_host::{kv, open_dir, Limits, Server};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    const APP: &str = r#"fn main(req: Incoming, res: Outgoing, public: Dir, store: Kv) -> Result<(), WebErr> {
+        let t = req.target();
+        if t == "/none" { return Ok(()); }
+        if t == "/hits" {
+            let n = match store.get("hits") { Ok(Some(b)) => b.to_str(), _ => "0" };
+            return res.send(200, [], [], n.to_bytes());
+        }
+        res.send(200, [], [], "ok".to_bytes())?;
+        if t == "/slow" { while true {} }
+        if t == "/trap" { let xs: List<Int> = []; let x = xs[t.len()]; }
+        if t == "/count" { let _n = store.add("hits", 1); }
+        Ok(())
+    }"#;
+
+    /// Serve `APP` with `--audit`, a 2 s deadline and fuel enough to reach it; returns the server
+    /// and the log's path.
+    pub fn start(dir: &std::path::Path) -> (Kio, std::path::PathBuf) {
+        let app = dir.join("app.kio");
+        std::fs::write(&app, APP).unwrap();
+        let log = dir.join("audit.log");
+        // The log may not lie inside a granted Dir.
+        let public = dir.join("public");
+        std::fs::create_dir(&public).unwrap();
+        let kio = start_with(
+            app.to_str().unwrap(),
+            &public,
+            &[
+                "--kv",
+                "store=:memory:",
+                "--timeout",
+                "2",
+                "--fuel",
+                "1000000000000",
+                "--audit",
+                log.to_str().unwrap(),
+            ],
+        );
+        (kio, log)
+    }
+
+    /// The trailer of request `req`, if it is in the log yet.
+    pub fn end(log: &std::path::Path, req: u64) -> Option<serde_json::Value> {
+        let text = std::fs::read_to_string(log).unwrap();
+        text.lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .find(|l| l["event"] == "end" && l["req"] == req)
+    }
+
+    /// `f()` once it is `Some`, polling for up to 10 s.
+    pub fn eventually<T>(mut f: impl FnMut() -> Option<T>) -> T {
+        let start = Instant::now();
+        loop {
+            if let Some(v) = f() {
+                return v;
+            }
+            assert!(start.elapsed() < Duration::from_secs(10), "timed out");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Wait until `/hits` reads `want`.
+    pub fn hits_reach(port: u16, want: &str) {
+        eventually(|| (send(port, "GET", "/hits", b"").1 == want.as_bytes()).then_some(()));
+    }
+
+    /// `APP` in this process with `workers` workers; returns the port.
+    pub fn serve_in_process(workers: usize) -> u16 {
+        let limits = Limits {
+            timeout_secs: 2,
+            fuel: 1_000_000_000_000,
+            ..Limits::web()
+        };
+        let mut server = Server::new(vec![("app.kio".into(), APP.into())], limits)
+            .unwrap()
+            .unwrap();
+        server.grant_kvs(vec![("store".into(), Arc::new(kv::Store::memory(1 << 20)))]);
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = vec![("public".to_string(), open_dir(dir.path()).unwrap())];
+        let (tx, rx) = std::sync::mpsc::channel();
+        let limits = ListenLimits {
+            workers,
+            ..Default::default()
+        };
+        std::thread::spawn(move || {
+            let _dir = dir;
+            let _ = serve_with(server, dirs, "127.0.0.1:0".parse().unwrap(), limits, |a| {
+                tx.send(a.port()).unwrap()
+            });
+        });
+        rx.recv().unwrap()
+    }
+}
+
+/// The response arrives while `main` still runs: its trailer is written only at the 2 s deadline.
+#[test]
+fn send_answers_before_main_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    let (kio, log) = after_send::start(dir.path());
+    let start = std::time::Instant::now();
+    assert_eq!(send(kio.port, "GET", "/slow", b""), (200, b"ok".to_vec()));
+    let answered = start.elapsed();
+    assert!(
+        after_send::end(&log, 1).is_none(),
+        "main ended before the response arrived"
+    );
+    let end = after_send::eventually(|| after_send::end(&log, 1));
+    let ended = start.elapsed();
+    println!("response after {answered:?}, main ended after {ended:?}");
+    assert!(answered < std::time::Duration::from_millis(500), "{answered:?}");
+    assert!(ended >= std::time::Duration::from_millis(1500), "{ended:?}");
+    // Stopped by the deadline after the send: audited; the client already has its answer.
+    assert_eq!(
+        (end["outcome"].as_str(), end["after_send"].as_u64()),
+        (Some("error"), Some(0))
+    );
+}
+
+/// Work done after `send` reaches a `Kv` a later request reads; the trailer counts that call.
+#[test]
+fn work_after_send_is_visible_to_a_later_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let (kio, log) = after_send::start(dir.path());
+    assert_eq!(send(kio.port, "GET", "/count", b""), (200, b"ok".to_vec()));
+    after_send::hits_reach(kio.port, "1");
+    let end = after_send::eventually(|| after_send::end(&log, 1));
+    assert_eq!(end["outcome"], "ok");
+    assert_eq!((end["calls"].as_u64(), end["after_send"].as_u64()), (Some(3), Some(1)));
+    // `/hits` sends last: nothing after it.
+    let end = after_send::eventually(|| after_send::end(&log, 2));
+    assert_eq!(end["after_send"], 0);
+}
+
+/// A trap after `send`: the client has its 200, and the audit log has the error.
+#[test]
+fn trap_after_send_is_audited_and_the_client_got_200() {
+    let dir = tempfile::tempdir().unwrap();
+    let (kio, log) = after_send::start(dir.path());
+    assert_eq!(send(kio.port, "GET", "/trap", b""), (200, b"ok".to_vec()));
+    let end = after_send::eventually(|| after_send::end(&log, 1));
+    assert_eq!(
+        (end["outcome"].as_str(), end["after_send"].as_u64()),
+        (Some("error"), Some(0))
+    );
+    assert_eq!(send(kio.port, "GET", "/", b"").0, 200);
+}
+
+/// A request that never sends is a 500 once `main` ends, as before H18, with no `after_send`.
+#[test]
+fn never_sent_is_a_500() {
+    let dir = tempfile::tempdir().unwrap();
+    let (kio, log) = after_send::start(dir.path());
+    assert_eq!(send(kio.port, "GET", "/none", b""), (500, vec![]));
+    let end = after_send::end(&log, 1).expect("the trailer is written before the 500");
+    assert_eq!(end["outcome"], "ok");
+    assert!(end.get("after_send").is_none());
+}
+
+/// Keep-alive: the next request on a connection does not wait for the last one's background
+/// work, and 200 counting requests in turn on one connection all count.
+#[test]
+fn keep_alive_does_not_wait_for_background_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let (kio, log) = after_send::start(dir.path());
+    let start = std::time::Instant::now();
+    assert_eq!(send_keep_alive(kio.port, &["/slow".into(), "/".into()]), [200, 200]);
+    assert!(start.elapsed() < std::time::Duration::from_millis(1000));
+    assert!(after_send::end(&log, 1).is_none());
+    let paths: Vec<String> = (0..200).map(|_| "/count".into()).collect();
+    assert!(send_keep_alive(kio.port, &paths).iter().all(|&s| s == 200));
+    after_send::hits_reach(kio.port, "200");
+}
+
+/// Background work holds its worker: with the only worker busy after `send`, the next request
+/// waits and is 503 after the 1 s queue wait; once `main` ends, requests are served again.
+#[test]
+fn background_work_holds_its_worker() {
+    let port = after_send::serve_in_process(1);
+    let start = std::time::Instant::now();
+    assert_eq!(send(port, "GET", "/slow", b""), (200, b"ok".to_vec()));
+    assert_eq!(send(port, "GET", "/", b"").0, 503);
+    assert!(start.elapsed() < std::time::Duration::from_millis(1800));
+    std::thread::sleep(std::time::Duration::from_millis(2300).saturating_sub(start.elapsed()));
+    assert_eq!(send(port, "GET", "/", b""), (200, b"ok".to_vec()));
+}

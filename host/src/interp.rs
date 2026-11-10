@@ -106,14 +106,11 @@ impl Interp {
         dirs: Vec<(String, RealDir)>,
         request: Request,
     ) -> Result<(RunResult, Option<Response>)> {
-        let mut sent = None;
+        let (deliver, mut response) = tokio::sync::oneshot::channel();
         let r = self.run_inner(&[single(source)], dirs, vec![], |s| {
-            let (slot, handles) = web_grants(s, request, ("req", "res"))?;
-            sent = Some(slot);
-            Ok(handles)
+            Ok(web_grants(s, request, deliver, ("req", "res"))?.1)
         })?;
-        let response = sent.and_then(|s| s.lock().unwrap_or_else(PoisonError::into_inner).take());
-        Ok((r, response))
+        Ok((r, response.try_recv().ok()))
     }
 
     pub fn run_ws(

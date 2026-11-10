@@ -276,9 +276,27 @@ async fn read_request(req: hyper::Request<Incoming>, deadline: Duration) -> Resu
     })
 }
 
-/// Run the guest on a blocking thread, once a worker permit is free.
+/// Run the guest on a blocking thread, once a worker permit is free, and return its response as
+/// soon as it sends one (H18). The run keeps its thread and permit until `main` ends.
 async fn run(ctx: Arc<Ctx>, request: Request) -> Result<Response, StatusCode> {
-    on_worker(ctx, move |server, dirs| server.handle(request, dirs)).await
+    let (deliver, mut response) = tokio::sync::oneshot::channel();
+    let work = on_worker(ctx, move |server, dirs| server.handle_sending(request, dirs, deliver));
+    tokio::pin!(work);
+    let busy = StatusCode::SERVICE_UNAVAILABLE;
+    // Dropping `work` once the response is in leaves the blocking task running. A sender
+    // dropped unsent means the run never started: `work` is ending with the 503 and its log line.
+    tokio::select! {
+        biased;
+        sent = &mut response => match sent {
+            Ok(r) => Ok(r),
+            Err(_) => Err(work.await.err().unwrap_or(busy)),
+        },
+        // A run that ended without a 503 sent its response before the sender was dropped.
+        done = &mut work => {
+            done?;
+            response.await.map_err(|_| busy)
+        }
+    }
 }
 
 /// Run `work` on a blocking thread with clones of the granted dirs, once a worker permit is

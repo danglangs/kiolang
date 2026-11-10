@@ -441,20 +441,15 @@ impl Kio {
         dirs: Vec<(String, RealDir)>,
         request: Request,
     ) -> Result<(RunResult, Option<Response>)> {
-        let mut sent = None;
+        let (deliver, mut response) = tokio::sync::oneshot::channel();
         let r = self.run_inner(
             &[single(source)],
             dirs,
             vec![],
-            |s| {
-                let (slot, handles) = web_grants(s, request, ("req", "res"))?;
-                sent = Some(slot);
-                Ok(handles)
-            },
+            |s| Ok(web_grants(s, request, deliver, ("req", "res"))?.1),
             |_| {},
         )?;
-        let response = sent.and_then(|s| s.lock().unwrap_or_else(PoisonError::into_inner).take());
-        Ok((r, response))
+        Ok((r, response.try_recv().ok()))
     }
 
     /// Run `main(m: WsMessage, w: WsSend, ..)` for one event, with the two named `names` and
@@ -702,28 +697,43 @@ impl Server {
         &self.program.report
     }
 
-    /// Run `main` on `request` in a fresh instance, with `dirs` granted by name. A program that
-    /// sends no response, or traps, gets a 500 with an empty body and the cause on stderr. `Err`
-    /// means no instance could be made (for example the pool is full).
+    /// Run `main` on `request` in a fresh instance, with `dirs` granted by name, and return the
+    /// response once `main` ends; see `handle_sending`. `Err` means no instance could be made
+    /// (for example the pool is full).
     pub fn handle(&self, request: Request, dirs: Vec<(String, RealDir)>) -> std::result::Result<Response, String> {
+        let (deliver, mut response) = tokio::sync::oneshot::channel();
+        self.handle_sending(request, dirs, deliver)?;
+        response.try_recv().map_err(|_| "the response was lost".into())
+    }
+
+    /// Run `main` on `request` as `handle` does, sending the response down `deliver` as soon as
+    /// `main` sends it; `main` then runs on under the request's limits (H18). A program that
+    /// traps before sending, or never sends, gets a 500 with an empty body when the run ends,
+    /// and the cause on stderr. A trap after the send reaches only stderr and the audit log.
+    /// `Err` means no instance could be made, and nothing was sent.
+    pub fn handle_sending(
+        &self,
+        request: Request,
+        dirs: Vec<(String, RealDir)>,
+        deliver: crate::Deliver,
+    ) -> std::result::Result<(), String> {
         let mut sent = None;
         let result = self.run_fresh(dirs, None, |s| {
-            let (slot, handles) = web_grants(s, request, (&self.http.0, &self.http.1))?;
+            let (slot, handles) = web_grants(s, request, deliver, (&self.http.0, &self.http.1))?;
             sent = Some(slot);
             Ok(handles)
         })?;
-        let response = sent.and_then(|s| s.lock().unwrap_or_else(PoisonError::into_inner).take());
-        match (result, response) {
-            (Ok(_), Some(r)) => Ok(r),
-            (Err(why), _) => {
+        let unsent = sent.and_then(|s| s.lock().unwrap_or_else(PoisonError::into_inner).take());
+        match (result, unsent) {
+            (Ok(_), None) => {}
+            (Err(why), None) => eprintln!("request failed after its response was sent: {why}"),
+            (result, Some(deliver)) => {
+                let why = result.err().unwrap_or("no response sent".into());
                 eprintln!("request failed: {why}");
-                Ok(Response::internal_error())
-            }
-            _ => {
-                eprintln!("request failed: no response sent");
-                Ok(Response::internal_error())
+                let _ = deliver.send(Response::internal_error());
             }
         }
+        Ok(())
     }
 
     /// The names of `main`'s `WsMessage` and `WsSend` parameters, if it takes both: the program

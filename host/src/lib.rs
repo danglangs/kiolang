@@ -403,6 +403,8 @@ pub struct State {
     audit_extra: String,
     /// Compiled code: the third value of the next runtime error's message (compiled.rs).
     trap_c: i64,
+    /// `calls` when `Outgoing.send` handed over the response; the trailer counts the calls after.
+    sent_at: Option<u32>,
     table: ResourceTable,
 }
 
@@ -437,6 +439,7 @@ impl State {
             audit_msg: String::new(),
             audit_extra: String::new(),
             trap_c: 0,
+            sent_at: None,
             table: ResourceTable::new(),
         }
     }
@@ -1028,10 +1031,10 @@ pub struct Response {
     pub body: Vec<u8>,
 }
 
-/// The `Incoming` and `Outgoing` grants for one request, named `names`, and the slot the
-/// `Outgoing` fills.
-fn web_grants(s: &mut State, request: Request, names: (&str, &str)) -> Result<(Sent, Handles)> {
-    let sent = Sent::default();
+/// The `Incoming` and `Outgoing` grants for one request, named `names`, and the slot holding
+/// `deliver` until `Outgoing.send` sends the response down it.
+fn web_grants(s: &mut State, request: Request, deliver: Deliver, names: (&str, &str)) -> Result<(Sent, Handles)> {
+    let sent: Sent = Arc::new(Mutex::new(Some(deliver)));
     let req = s.table.push(request)?;
     let res = s.table.push(sent.clone())?;
     let handles = Handles {
@@ -1071,8 +1074,12 @@ struct Handles {
     senders: Vec<(String, Resource<kio::caps::ws::WsSend>)>,
 }
 
-/// Where `outgoing.send` records the response; shared so the host can read it after the run.
-type Sent = Arc<Mutex<Option<Response>>>;
+/// Where the first valid `outgoing.send` sends its response, at once (H18).
+pub type Deliver = tokio::sync::oneshot::Sender<Response>;
+
+/// The sender until the response is sent, then `None`; shared so the host can answer after the
+/// run when `main` never sent.
+type Sent = Arc<Mutex<Option<Deliver>>>;
 
 /// Whether `s` could split a header line.
 fn has_crlf(s: &str) -> bool {
@@ -1165,7 +1172,7 @@ impl State {
         self.spend_io(body.len())?;
         let sent = self.table.get(&Resource::<Sent>::new_borrow(r.rep()))?.clone();
         let mut slot = sent.lock().unwrap_or_else(PoisonError::into_inner);
-        if slot.is_some() {
+        if slot.is_none() {
             return Ok(Err(WebErr::AlreadySent));
         }
         // An invalid response is not recorded, so the guest may send a valid one.
@@ -1176,7 +1183,11 @@ impl State {
             return Ok(Err(WebErr::Invalid));
         }
         let headers = header_names.into_iter().zip(header_values).collect();
-        *slot = Some(Response { status, headers, body });
+        // The receiver may be gone (the client left); `main` runs on either way.
+        if let Some(deliver) = slot.take() {
+            let _ = deliver.send(Response { status, headers, body });
+        }
+        self.sent_at = Some(self.calls);
         Ok(Ok(()))
     }
 }
@@ -1811,10 +1822,13 @@ fn audit_header(files: &[(String, String)], l: &Limits, grants: &[(String, &str,
 }
 
 /// Write the audit trailer, even when the run stopped. `outcome` is `ok`, `failed` or `error`.
+/// Once a response was sent, `after_send` counts the calls made after it: the last that many
+/// `seq` numbers (H18).
 fn end_audit(d: &mut State, fuel_used: u64, outcome: &str) -> Result<()> {
     let Some(a) = d.audit.as_mut() else { return Ok(()) };
+    let after = (d.sent_at).map_or(String::new(), |n| format!(r#","after_send":{}"#, d.calls - n));
     let line = format!(
-        r#"{{"event":"end","outcome":"{outcome}","calls":{},"io":{},"peak_memory":{},"fuel_used":{fuel_used}}}"#,
+        r#"{{"event":"end","outcome":"{outcome}","calls":{},"io":{},"peak_memory":{},"fuel_used":{fuel_used}{after}}}"#,
         d.calls, d.io, d.peak_memory
     );
     a.line(&line)?;
