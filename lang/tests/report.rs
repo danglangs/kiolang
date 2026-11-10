@@ -28,6 +28,16 @@ fn readme_example() {
 }
 
 #[test]
+fn readme_fx_reports() {
+    // The README's pitch and catch show these files and these exact reports.
+    let report_kio = include_str!("../../examples/fx/report.kio");
+    let leak_kio = include_str!("../../examples/fx/leak.kio");
+    let main = "main      : input read, fx get, out write";
+    assert_eq!(rep(report_kio), format!("{main}\nsummarize : none"));
+    assert_eq!(rep(leak_kio), format!("{main}\nsummarize : fx get"));
+}
+
+#[test]
 fn two_level_helper_chain() {
     let src = format!(
         "{LOAD}

@@ -1,0 +1,9 @@
+// Draw a winner among the customers, stamp the time, and log the draw.
+// kio run examples/raffle.kio --dir input=examples/in --rng r=seed:1 --clock now=fixed:2026-11-09T12:00:00Z --log log=-
+fn main(input: Dir, r: Rng, now: Clock, log: Log) -> Result<Str, Str> {
+  let csv = input.read("invoices.csv").map_err(|_| "no invoices")?.to_str();
+  let names = csv.lines().map(|row| row.split(",")[0]);
+  let draw = names[r.int(0, names.len())] + " wins at " + now.now_ms().to_str();
+  log.write(draw).map_err(|_| "log full")?;
+  Ok(draw)
+}

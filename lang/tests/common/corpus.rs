@@ -13,7 +13,7 @@ pub fn sources(root: &Path) -> Vec<Vec<(String, String)>> {
             sources.extend(programs(&src).into_iter().map(|p| vec![("main".into(), p)]));
         }
     }
-    for dir in ["examples", "examples/tour"] {
+    for dir in ["examples", "examples/tour", "examples/fx"] {
         for e in std::fs::read_dir(root.join(dir)).unwrap() {
             let path = e.unwrap().path();
             if path.extension().is_some_and(|x| x == "kio") {

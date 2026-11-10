@@ -9,6 +9,7 @@ kio is a capability-typed language for code AI agents write: the code names what
 | Question | File |
 |---|---|
 | The language | docs/language.md |
+| Every flag and grant, by example | docs/guide.md |
 | Architecture, trust boundary, state, memory model | docs/design.md |
 | The sandbox interface (the one hand-written contract) | caps.wit |
 | Tasks: language, host, web, compiler | docs/{lang,guest-host,web-support,compiler}-todo.md |
