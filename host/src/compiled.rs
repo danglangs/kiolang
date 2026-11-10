@@ -653,8 +653,32 @@ impl Server {
     /// WebSocket event, its connection (`"conn":N`). Grant the `Kv` stores first: the header lists
     /// them. `dir_paths` gives each `Dir` grant's path.
     pub fn audit(&mut self, out: impl Write + Send + 'static, dir_paths: DirPaths) -> std::io::Result<()> {
-        let mut grants: Vec<(String, &str, Option<String>)> = Vec::new();
-        grants.extend(dir_paths.into_iter().map(|(n, p)| (n, "Dir", Some(p))));
+        let grants = self.grant_list(dir_paths.into_iter().map(|(n, p)| (n, Some(p))));
+        let out: SharedLog = Arc::new(Mutex::new(Box::new(out)));
+        write_line(&out, &audit_header(&self.program.files, &self.limits, &grants))?;
+        self.audit = Some(out);
+        Ok(())
+    }
+
+    /// Bind every grant, with `dirs` named, to `main`'s parameters as each request will, so
+    /// `--listen` refuses a grant `main` does not take before it binds an address (H21).
+    pub fn check_grants(&self, dirs: &[String]) -> std::result::Result<(), Vec<Diag>> {
+        let grants = self.grant_list(dirs.iter().map(|n| (n.clone(), None)));
+        let named: Vec<(String, &str)> = grants.into_iter().map(|(n, k, _)| (n, k)).collect();
+        match grants::bind(&self.program.params, &named) {
+            Ok(_) => Ok(()),
+            Err(diags) => Err(diags.into_iter().map(Diag::from).collect()),
+        }
+    }
+
+    /// `(name, kind, target)` of every grant a request gets, `dirs` first, in the order the
+    /// audit header lists them.
+    fn grant_list(
+        &self,
+        dirs: impl Iterator<Item = (String, Option<String>)>,
+    ) -> Vec<(String, &'static str, Option<String>)> {
+        let mut grants: Vec<(String, &'static str, Option<String>)> = Vec::new();
+        grants.extend(dirs.map(|(n, p)| (n, "Dir", p)));
         let handles = match &self.ws {
             Some((m, w)) => [(m, "WsMessage"), (w, "WsSend")],
             None => [(&self.http.0, "Incoming"), (&self.http.1, "Outgoing")],
@@ -667,10 +691,7 @@ impl Server {
         grants.extend(src.clocks.iter().map(|(n, c)| (n.clone(), "Clock", Some(c.label()))));
         grants.extend(src.logs.iter().map(|(n, l)| (n.clone(), "Log", Some(l.label.clone()))));
         grants.extend(src.dbs.iter().map(|(n, d)| (n.clone(), "Db", Some(d.label()))));
-        let out: SharedLog = Arc::new(Mutex::new(Box::new(out)));
-        write_line(&out, &audit_header(&self.program.files, &self.limits, &grants))?;
-        self.audit = Some(out);
-        Ok(())
+        grants
     }
 
     /// Grant `kvs` by name to every request; all requests share each store. Panics after

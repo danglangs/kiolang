@@ -880,6 +880,21 @@ fn listen_reports_a_parse_error_first() {
     assert!(!err.contains("--listen needs"), "{err}");
 }
 
+/// H21: a grant `main` does not take is refused at startup, as plain `kio run` refuses it.
+#[test]
+fn listen_refuses_an_unused_grant_before_binding() {
+    let src = "fn main(req: Incoming, res: Outgoing) -> Result<(), WebErr> {\n    res.send(200, [], [], \"x\".to_bytes())\n}\n";
+    let (code, err) = run_src(src, &["--listen", "127.0.0.1:0", "--kv", "counts=:memory:"]);
+    assert_eq!(code, Some(2));
+    assert!(
+        err.contains(
+            "error: grant `counts` is not a parameter of `main`\n  hint: grant only `main`'s parameters: req, res"
+        ),
+        "{err}"
+    );
+    assert!(!err.contains("listening on"), "{err}");
+}
+
 /// H18: `send` hands the response over at once and `main` runs on. `/slow` sends, then loops
 /// until the 2 s deadline; `/count` sends, then adds 1 to `hits`; `/trap` sends, then traps;
 /// `/none` never sends.
