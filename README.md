@@ -173,8 +173,8 @@ The cost is the ecosystem: few libraries, no package manager yet. Agents write m
 
 ## Roadmap
 
-- **Now:** the SQLite security review; `Http` under `--listen`.
-- **Next:** allocation speed (escape analysis); an eval of models writing kio.
+- **Now:** an eval of how well models write kio.
+- **Next:** allocation speed (escape analysis); a report diff for pull requests; a secrets grant.
 - **Later:** `par_map` and tasks (pinned), packages.
 
 Where work stands: [docs/status.md](docs/status.md); concurrency: [docs/proposals/concurrency.md](docs/proposals/concurrency.md).

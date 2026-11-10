@@ -79,7 +79,7 @@ Most-used Rust crates, and kio's answer to each:
 
 | Need | Rust | kio today | Gap |
 |---|---|---|---|
-| HTTP server | axum, hyper, tokio | `--listen` plus kio-web | Done for buffered request/response, and WebSockets with a fresh sandbox per message (WS1). WebSocket programs see the upgrade's path and headers (WS1b). `send` answers the client at once and `main` runs on (H18). No streaming or HTTP/2; `Http` is refused under `--listen` for now (H19). |
+| HTTP server | axum, hyper, tokio | `--listen` plus kio-web | Done for buffered request/response, and WebSockets with a fresh sandbox per message (WS1). WebSocket programs see the upgrade's path and headers (WS1b). `send` answers the client at once and `main` runs on (H18). No streaming or HTTP/2; `Http` works under `--listen` (H19): DNS pinned per request, at most 64 outbound calls in flight per request, 1,000 calls per request by default. |
 | HTTP client | reqwest | `Http.get`, `send`, `send_all` | Any method the operator grants, headers, bodies, parallel batches (H16, H16b). No streaming bodies. |
 | Async | tokio | none in the language: a sandbox per request (decided: no async/await, no Wasm threads) | Fine per request. Concurrent upstream calls: `send_all` (H16b); work after the response: `send` flushes at once (H18). CPU fan-out `List.par_map` (L18) and `scope`/`spawn` (L19) are pinned for when a program needs them ([proposal](proposals/concurrency.md)). |
 | Serialization | serde, serde_json | built-in `Json` (L9, C12), an untyped tree: `parse_json`, `to_json`, accessors; 1.5x `serde_json`, 1.4x faster than Python's `json` | Typed decode into structs needs a derive or traits; generics alone do not give it. |
