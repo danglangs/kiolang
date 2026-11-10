@@ -4,7 +4,7 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 
 ## Now
 
-Compiled-only kio covers the whole language and every capability. What real apps needed is built, and so are the review and eval layers of direction A (P1 authority diff, S1 host-injected headers, E1 models-writing-kio eval): the HTTP client (H16, H16b), SQLite (H17) and `send` answering at once (H18), from the concurrency proposal (decided). H16-H19 and H17b are built and reviewed (fixes merged); speed work (C8) is paused after C8b7. Compiled code is 1.1-2.3x Rust on compute and 2.3-8x where it allocates (roadmap.md "Speed today"). The differential harness runs 506 programs both ways (503 agree, 3 excluded by limits, 0 leaked) and the generator 250 more per CI run.
+Compiled-only kio covers the whole language and every capability. What real apps needed is built, and so are the review and eval layers of direction A (P1 authority diff, S1 host-injected headers, E1 and E2 models-writing-kio evals: 45 tasks): the HTTP client (H16, H16b), SQLite (H17) and `send` answering at once (H18), from the concurrency proposal (decided). H16-H19 and H17b are built and reviewed (fixes merged); speed work (C8) is paused after C8b7. Compiled code is 1.1-2.3x Rust on compute and 2.3-8x where it allocates (roadmap.md "Speed today"). The differential harness runs 506 programs both ways (503 agree, 3 excluded by limits, 0 leaked) and the generator 250 more per CI run.
 
 | Done | Result |
 |---|---|
@@ -63,13 +63,13 @@ Compiled-only kio covers the whole language and every capability. What real apps
 
 ## Next
 
-Direction A ([product-todo.md](product-todo.md)): P1, S1 and E1 are done. Next: harder eval tasks (Sonnet and Opus pass all 30, so they cannot be told apart), and the last gap models hit in E1: tuples (proposal, below).
+Direction A ([product-todo.md](product-todo.md)): P1, S1, E1 and E2 are done. Next, in parallel: a pilot app built end to end by an agent (to find what real use still lacks), and allocation speed (C8, escape analysis). Packages after. Tuples (proposal, below) if the pilot or the eval shows models still reach for them.
 
 Also open: C8 (roadmap.md): tree's remaining freeing (free-list pushes, a `List`'s separate buffer); tree's 4-5% from the larger size classes (#117); borrowed match bindings of a borrowed scrutinee (tree). Pinned, not started: L18 `par_map` and L19 `scope`/`spawn` (concurrency stages 2 and 3, when a program needs them).
 
 ## Waiting on the maintainer
 
-Nothing blocks work. Language additions from E1, to be proposed with an example before any code: tuples (Opus; today a hint, L20). `Str.chars()` (L21) and `for` over `Bytes` (L22) were approved 2026-11-10.
+Nothing blocks work. Language additions from the evals, to be proposed with an example before any code: tuples (Opus; today a hint, L20). `Str.chars()` (L21) and `for` over `Bytes` (L22), and L24 and L25 (E2) were approved 2026-11-10.
 
 ## Speed (C8b5 with C8b6 and C8b7 marked, 2026-11-09, release, run time; all in [roadmap.md](roadmap.md))
 

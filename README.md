@@ -191,7 +191,7 @@ The cost is the ecosystem: few libraries, no package manager yet. Agents write m
 
 ## Roadmap
 
-- **Now:** allocation speed (escape analysis).
+- **Now:** a pilot app built end to end by an agent; allocation speed (escape analysis), in parallel.
 - **Next:** packages (a module from another directory); `par_map` and tasks (pinned).
 - **Later:** tuples, if the eval shows models still reach for them.
 
