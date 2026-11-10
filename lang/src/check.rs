@@ -1,7 +1,7 @@
 use crate::ast::*;
 use crate::eval::{Key, Value};
 use crate::ir::{self, EnumRef};
-use crate::parse::parse_file;
+use crate::parse::{parse_all, rust_type_hint};
 use crate::{Diag, Span};
 use std::borrow::Cow;
 use std::cell::Cell;
@@ -1240,19 +1240,10 @@ fn unknown_type(t: &Type) -> Diag {
         unreachable!("only named types can be unknown");
     };
     // Rust names agents reach for, mapped to the kio type.
-    let hint = match name.as_str() {
-        "String" | "str" | "char" => "use `Str`".to_string(),
-        "Vec" => "use `List<T>`".to_string(),
-        "BTreeMap" => "use `Map<K, V>`".to_string(),
-        "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" => "use `Int`".to_string(),
-        "f32" | "f64" => "use `Float`".to_string(),
-        "bool" => "use `Bool`".to_string(),
-        _ => {
-            "types are Int, Float, Bool, Str, Bytes, (), Option, Result, List, Map, HashMap and your structs and enums"
-                .to_string()
-        }
-    };
-    err(t.span, format!("unknown type `{name}`"), Some(&hint))
+    let hint = rust_type_hint(name).unwrap_or(
+        "types are Int, Float, Bool, Str, Bytes, (), Option, Result, List, Map, HashMap and your structs and enums",
+    );
+    err(t.span, format!("unknown type `{name}`"), Some(hint))
 }
 
 /// Where a type is written, for the type-level half of rule 1.
@@ -1829,6 +1820,19 @@ fn no_fn_equality(span: Span, ty: &Ty) -> Diag {
 
 /// At most this many diagnostics are reported, so a hostile source cannot make output unbounded.
 pub const MAX_DIAGS: usize = 100;
+/// Parse errors reported at most; past a few, later ones are often the same mistake again.
+pub const MAX_PARSE_DIAGS: usize = 20;
+
+/// Keeps the first `max` of `diags` and a last line counting the rest.
+fn cap_diags(mut diags: Vec<Diag>, max: usize) -> Vec<Diag> {
+    if diags.len() > max {
+        let more = diags.len() - max;
+        diags.truncate(max);
+        let msg = format!("{more} more errors not shown");
+        diags.push(err(Span::default(), msg, Some("fix the errors above first")));
+    }
+    diags
+}
 
 /// Checks `src` as a one-file program.
 pub fn check(src: &str, caps: &CapTable) -> Result<Program, Vec<Diag>> {
@@ -1839,15 +1843,7 @@ pub fn check(src: &str, caps: &CapTable) -> Result<Program, Vec<Diag>> {
 /// module named by its name without `.kio`, which the root must declare once with `mod name;`.
 /// Reports at most one `Diag` per function, in source order.
 pub fn check_files(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Diag>> {
-    check_all(files, caps).map_err(|mut diags| {
-        if diags.len() > MAX_DIAGS {
-            let more = diags.len() - MAX_DIAGS;
-            diags.truncate(MAX_DIAGS);
-            let msg = format!("{more} more errors not shown");
-            diags.push(err(Span::default(), msg, Some("fix the errors above first")));
-        }
-        diags
-    })
+    check_all(files, caps).map_err(|diags| cap_diags(diags, MAX_DIAGS))
 }
 
 /// Checks that `mod` appears only in the root and that modules and files match one to one.
@@ -1955,14 +1951,18 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
     let names: Vec<&str> = files.iter().map(|(n, _)| n.strip_suffix(".kio").unwrap_or(n)).collect();
     let mut parsed = Vec::new();
     let mut diags = Vec::new();
+    let mut rust_types = Vec::new();
     for (i, (_, src)) in files.iter().enumerate() {
-        match parse_file(src, i as u32) {
-            Ok(items) => parsed.push(items),
-            Err(d) => diags.push(d),
-        }
+        let p = parse_all(src, i as u32);
+        parsed.push(p.items);
+        diags.extend(p.errors);
+        rust_types.extend(p.rust_types);
     }
+    // The checker runs only on a program that parses: its errors would be cascades.
     if !diags.is_empty() {
-        return Err(diags);
+        diags.extend(rust_types);
+        diags.sort_by_key(|d| (d.span.file, d.span.start));
+        return Err(cap_diags(diags, MAX_PARSE_DIAGS));
     }
     let mods = declared_modules(&names, &parsed)?;
 

@@ -57,6 +57,7 @@ Compiled-only kio covers the whole language and every capability. What real apps
 | E1 | `eval/`: 30 backend tasks, kio and Python, `eval/run.py` through `claude -p`. Full run 2026-11-10 (roadmap.md "Can models write kio?"): kio first try 24-30/30 (Haiku, Opus, Sonnet), 30/30 by round 5 for all three; Python first try 28-30/30; no over-asked grant. References run in CI (`eval/check_refs.sh`) |
 | H20, H21, L20 | usability gaps from E1: `--listen` prints a failed check's diagnostics before judging `main`'s shape, and refuses a grant `main` does not take before binding (plain `kio run`'s message and exit 1); `let (a, b) = ..` is "kio has no tuples" with a hint |
 | L21, L22 | `Str.chars() -> List<Str>`, interpreted and compiled (`rt_str_chars`); `split("")`'s error names `s.chars()`; `for b in bytes`, lowered to an index loop (no codegen change) |
+| L23 | every parse error reported, up to 20: the lexer and parser step over Rust forms (`&`, lifetimes, `#[..]`, macros, tuples, `as`) and resume at the next statement or item; Rust type names in signatures reported beside them. A Rust-flavoured sample: 1 error before, 18 after; no cascades (each item alone is the test oracle) |
 
 ## Next
 

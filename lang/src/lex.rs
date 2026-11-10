@@ -46,6 +46,18 @@ fn err(start: usize, end: usize, msg: &str, hint: Option<&str>) -> Diag {
     }
 }
 
+/// Errors `lex_all` steps over at most; the next one ends lexing, so hostile input cannot make
+/// the error list large.
+const MAX_STEPPED: usize = 100;
+
+fn step_over(errs: &mut Vec<Diag>, d: Diag) -> Result<(), Diag> {
+    if errs.len() >= MAX_STEPPED {
+        return Err(d);
+    }
+    errs.push(d);
+    Ok(())
+}
+
 /// The index after the run of digits at `i`.
 fn digits(bytes: &[u8], mut i: usize) -> usize {
     while i < bytes.len() && bytes[i].is_ascii_digit() {
@@ -65,6 +77,18 @@ fn ends_operand(t: &Token) -> bool {
 }
 
 pub fn lex(src: &str) -> Result<Vec<Token>, Diag> {
+    let mut errs = Vec::new();
+    let toks = lex_all(src, &mut errs);
+    match errs.into_iter().next() {
+        Some(d) => Err(d),
+        None => toks,
+    }
+}
+
+/// Like `lex`, stepping over the errors it can: `&` and `&mut` (dropped), a char literal (read
+/// as a `Str`), a lifetime (dropped), a block comment and an attribute `#[..]` (skipped). Those
+/// are pushed to `errs`; any other error ends lexing as `Err`.
+pub fn lex_all(src: &str, errs: &mut Vec<Diag>) -> Result<Vec<Token>, Diag> {
     let bytes = src.as_bytes();
     let mut tokens = Vec::new();
     let mut i = 0;
@@ -83,18 +107,50 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diag> {
                 continue;
             }
             b'/' if bytes.get(i + 1) == Some(&b'*') => {
-                return Err(err(i, i + 2, "kio has no block comments", Some("use `//`")));
+                step_over(errs, err(i, i + 2, "kio has no block comments", Some("use `//`")))?;
+                i = src[i + 2..].find("*/").map_or(src.len(), |j| i + 2 + j + 2);
+                continue;
             }
             b'&' if bytes.get(i + 1) != Some(&b'&') => {
-                return Err(err(
-                    i,
-                    i + 1,
-                    "kio has no references",
-                    Some("pass by value; use `Str` instead of `&str`"),
-                ));
+                step_over(
+                    errs,
+                    err(
+                        i,
+                        i + 1,
+                        "kio has no references",
+                        Some("pass by value; use `Str` instead of `&str`"),
+                    ),
+                )?;
+                i += 1;
+                // `&mut x` reads on as `x`.
+                let j = src.len() - src[i..].trim_start().len();
+                let word_end = bytes
+                    .get(j + 3)
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_');
+                if src[j..].starts_with("mut") && !word_end {
+                    i = j + 3;
+                }
+                continue;
             }
             b'\'' => {
-                return Err(err(i, i + 1, "kio has no chars or lifetimes", Some("use `Str`")));
+                step_over(errs, err(i, i + 1, "kio has no chars or lifetimes", Some("use `Str`")))?;
+                let mut cs = src[i + 1..].chars();
+                let lit = match (cs.next(), cs.next(), cs.next()) {
+                    (Some('\\'), Some(c), Some('\'')) => Some(2 + c.len_utf8()),
+                    (Some(c), Some('\''), _) if c != '\\' && c != '\'' => Some(c.len_utf8() + 1),
+                    _ => None,
+                };
+                i += 1;
+                let Some(n) = lit else {
+                    // A lifetime `'a` is dropped.
+                    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                        i += 1;
+                    }
+                    continue;
+                };
+                // A char literal reads on as a `Str`.
+                i += n;
+                Kind::Str(String::new())
             }
             b'.' if bytes.get(i + 1).is_some_and(u8::is_ascii_digit) && !tokens.last().is_some_and(ends_operand) => {
                 let end = digits(bytes, i + 1);
@@ -213,7 +269,23 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diag> {
                     let ch = src[i..].chars().next().unwrap_or(' ');
                     let msg = format!("unexpected character `{ch}`");
                     let hint = "remove it, or put it inside a string";
-                    return Err(err(i, i + ch.len_utf8(), &msg, Some(hint)));
+                    let d = err(i, i + ch.len_utf8(), &msg, Some(hint));
+                    // An attribute `#[..]` or `#![..]` is skipped to its `]`.
+                    let open = i + 1 + usize::from(bytes.get(i + 1) == Some(&b'!'));
+                    if ch != '#' || bytes.get(open) != Some(&b'[') {
+                        return Err(d);
+                    }
+                    step_over(errs, d)?;
+                    let mut depth = 0;
+                    i = open;
+                    while i < bytes.len() {
+                        depth += i32::from(bytes[i] == b'[') - i32::from(bytes[i] == b']');
+                        i += 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    continue;
                 }
             },
         };

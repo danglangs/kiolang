@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::lex::{lex, Kind, Token};
+use crate::lex::{lex_all, Kind, Token};
 use crate::{Diag, Span};
 
 const MAX_DEPTH: usize = 64;
@@ -58,6 +58,7 @@ fn reserved_hint(word: &str) -> &'static str {
         "static" => "kio has no globals; use `const` for a fixed value, or pass values as arguments",
         "where" => "write the bound on the parameter: `<T: Ord>`",
         "move" => "closures always capture by copy; remove `move`",
+        "as" => "kio has one integer type, `Int`; convert to and from `Float` with `.to_float()` and `.to_int()`",
         _ => "this Rust keyword is reserved in kio",
     }
 }
@@ -81,30 +82,42 @@ struct Parser {
     no_struct: bool,
     /// Index of the source file, stamped on every span.
     file: u32,
+    /// Per token: whether only spaces precede it on its line, and whether it is in column 0.
+    line_start: Vec<(bool, bool)>,
+    /// Set by `parse_all`: errors are recorded and parsing goes on.
+    recover: bool,
+    /// Errors recorded by the recovery, and where the lexer's errors start.
+    errs: Vec<Diag>,
+    lexed: Vec<usize>,
+}
+
+/// A file parsed with recovery (`parse_all`).
+pub struct Parsed {
+    /// The items that parsed; an item with a statement skipped is kept.
+    pub items: Vec<Item>,
+    /// Every lexer and parser error, in source order.
+    pub errors: Vec<Diag>,
+    /// The checker's error for each Rust type name in a signature (`i64`, `Vec`): to report
+    /// beside parse errors, since the checker does not run then.
+    pub rust_types: Vec<Diag>,
 }
 
 pub fn parse(src: &str) -> Result<Vec<Item>, Diag> {
     parse_file(src, 0)
 }
 
-/// Like `parse`, for source file number `file`.
+/// Like `parse`, for source file number `file`. Stops at the first error.
 pub fn parse_file(src: &str, file: u32) -> Result<Vec<Item>, Diag> {
-    let at = |mut s: Span| {
-        s.file = file;
-        s
+    let mut lexed = Vec::new();
+    let toks = lex_all(src, &mut lexed);
+    let toks = match lexed.into_iter().next().map_or(toks, Err) {
+        Ok(toks) => toks,
+        Err(mut d) => {
+            d.span.file = file;
+            return Err(d);
+        }
     };
-    let mut toks = lex(src).map_err(|mut d| {
-        d.span = at(d.span);
-        d
-    })?;
-    toks.iter_mut().for_each(|t| t.span = at(t.span));
-    let mut p = Parser {
-        toks,
-        pos: 0,
-        depth: 0,
-        no_struct: false,
-        file,
-    };
+    let mut p = Parser::new(src, toks, file);
     let mut items = Vec::new();
     while p.pos < p.toks.len() {
         items.push(p.item()?);
@@ -112,7 +125,230 @@ pub fn parse_file(src: &str, file: u32) -> Result<Vec<Item>, Diag> {
     Ok(items)
 }
 
+/// Like `parse_file`, going on after an error. After a lexer error it steps over (see
+/// `lex_all`) lexing goes on; after an error in an item, parsing resumes at the next item
+/// start; after a Rust form inside a block (`rust_form`), at the next statement. A parse error
+/// in the same statement or item as, and after, a lexer error is not reported: it may be the
+/// lexer's recovery speaking.
+pub fn parse_all(src: &str, file: u32) -> Parsed {
+    let mut lexed = Vec::new();
+    let toks = lex_all(src, &mut lexed);
+    let errors = |extra: Option<Diag>| {
+        let mut all: Vec<Diag> = lexed.iter().cloned().chain(extra).collect();
+        all.iter_mut().for_each(|d| d.span.file = file);
+        all
+    };
+    let toks = match toks {
+        Ok(toks) => toks,
+        Err(d) => {
+            return Parsed {
+                items: Vec::new(),
+                errors: errors(Some(d)),
+                rust_types: Vec::new(),
+            }
+        }
+    };
+    let mut p = Parser::new(src, toks, file);
+    p.recover = true;
+    p.lexed = lexed.iter().map(|d| d.span.start).collect();
+    let mut items = Vec::new();
+    while p.pos < p.toks.len() {
+        let (from, start) = (p.pos, p.span().start);
+        match p.item() {
+            Ok(item) => items.push(item),
+            Err(d) => {
+                p.depth = 0;
+                p.no_struct = false;
+                p.record(d, start);
+                p.skip_item(from);
+            }
+        }
+    }
+    let mut all = errors(None);
+    all.append(&mut p.errs);
+    all.sort_by_key(|d| d.span.start);
+    Parsed {
+        rust_types: rust_types(src, &p.toks, &items),
+        items,
+        errors: all,
+    }
+}
+
+/// Errors with an L12-style hint for a Rust form, after which the parser resumes at the next
+/// statement: the form is recognized, so the rest of the statement is not misread.
+fn rust_form(d: &Diag) -> bool {
+    matches!(
+        d.msg.as_str(),
+        "macros are not supported" | "kio has no tuples" | "kio has no tuple types"
+    ) || d.msg.ends_with("` is not supported in kio")
+}
+
+/// The hint for a Rust type name, as the checker gives it; `None` for any other name.
+pub(crate) fn rust_type_hint(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "String" | "str" | "char" => "use `Str`",
+        "Vec" => "use `List<T>`",
+        "BTreeMap" => "use `Map<K, V>`",
+        "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" => "use `Int`",
+        "f32" | "f64" => "use `Float`",
+        "bool" => "use `Bool`",
+        _ => return None,
+    })
+}
+
+/// The checker's "unknown type" error for each Rust type name in an item signature, unless
+/// the file declares that name or it is a type parameter. `str` right after `&` or a lifetime
+/// is left to the lexer's error.
+fn rust_types(src: &str, toks: &[Token], items: &[Item]) -> Vec<Diag> {
+    let declared: Vec<&str> = toks
+        .windows(2)
+        .filter_map(|w| match (&w[0].kind, &w[1].kind) {
+            (Kind::Keyword(k), Kind::Ident(n)) if k == "struct" || k == "enum" => Some(n.as_str()),
+            _ => None,
+        })
+        .collect();
+    /// The named types in `t`, outermost first.
+    fn names<'a>(t: &'a Type, out: &mut Vec<(&'a str, Span)>) {
+        match &t.kind {
+            TypeKind::Named(n, args) => {
+                out.push((n, t.span));
+                args.iter().for_each(|a| names(a, out));
+            }
+            TypeKind::Fn(ps, r) => ps.iter().chain([&**r]).for_each(|a| names(a, out)),
+            TypeKind::Unit | TypeKind::Module(..) => {}
+        }
+    }
+    let mut out = Vec::new();
+    for item in items {
+        let (tparams, types): (&[TParam], Vec<&Type>) = match item {
+            Item::Fn(f) => (&f.tparams, f.params.iter().map(|p| &p.ty).chain([&f.ret]).collect()),
+            Item::Struct(s) => (&s.tparams, s.fields.iter().map(|p| &p.ty).collect()),
+            Item::Enum(e) => (&e.tparams, e.variants.iter().flat_map(|v| &v.fields).collect()),
+            Item::Const(c) => (&[], vec![&c.ty]),
+            Item::Mod(..) => continue,
+        };
+        let mut found = Vec::new();
+        types.into_iter().for_each(|t| names(t, &mut found));
+        // Each name once per item: `fn f(a: i64, b: i64)` needs one fix, said once.
+        let mut said = Vec::new();
+        for (n, span) in found {
+            let before = src[..span.start].trim_end();
+            let after_ref = before.ends_with('&')
+                || before
+                    .trim_end_matches(|c: char| c.is_ascii_alphanumeric() || c == '_')
+                    .ends_with('\'');
+            let skip = declared.contains(&n) || tparams.iter().any(|p| p.name == n) || (n == "str" && after_ref);
+            match rust_type_hint(n) {
+                Some(hint) if !skip && !said.contains(&n) => {
+                    said.push(n);
+                    out.push(err(span, &format!("unknown type `{n}`"), Some(hint)));
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
 impl Parser {
+    fn new(src: &str, mut toks: Vec<Token>, file: u32) -> Parser {
+        toks.iter_mut().for_each(|t| t.span.file = file);
+        let (mut begin, mut seen) = (0, 0);
+        let line_start = toks
+            .iter()
+            .map(|t| {
+                if let Some(j) = src[seen..t.span.start].rfind('\n') {
+                    begin = seen + j + 1;
+                }
+                seen = t.span.start;
+                let line = &src[begin..t.span.start];
+                (line.trim_start_matches([' ', '\t', '\r']).is_empty(), line.is_empty())
+            })
+            .collect();
+        Parser {
+            toks,
+            pos: 0,
+            depth: 0,
+            no_struct: false,
+            file,
+            line_start,
+            errs: Vec::new(),
+            recover: false,
+            lexed: Vec::new(),
+        }
+    }
+
+    /// Records `d`, raised in the statement or item starting at byte `start`, unless a lexer
+    /// error lies between the two.
+    fn record(&mut self, d: Diag, start: usize) {
+        let next = self.lexed.partition_point(|&l| l < start);
+        if self.lexed.get(next).is_none_or(|&l| l > d.span.start) {
+            self.errs.push(d);
+        }
+    }
+
+    /// After an error in the item starting at token `from`: moves to the next `fn`, `struct`,
+    /// `enum`, `const`, `mod`, `use` or `pub` that starts a line or follows a `}`, outside the
+    /// item's braces; or, braces unbalanced, one in column 0. The end of the file otherwise.
+    fn skip_item(&mut self, from: usize) {
+        let resume = self.pos.min(self.toks.len()).max(from + 1);
+        let mut depth = 0usize;
+        let mut i = from;
+        while i < self.toks.len() {
+            let item = match &self.toks[i].kind {
+                Kind::Keyword(k) => matches!(k.as_str(), "fn" | "struct" | "enum" | "const" | "mod" | "pub"),
+                Kind::Reserved(w) => w == "use",
+                _ => false,
+            };
+            let (line, col0) = self.line_start[i];
+            let after_brace = i > 0 && self.toks[i - 1].kind == Kind::Sym("}");
+            if i >= resume && item && (col0 || depth == 0 && (line || after_brace)) {
+                break;
+            }
+            match self.toks[i].kind {
+                Kind::Sym("{") => depth += 1,
+                Kind::Sym("}") => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            i += 1;
+        }
+        self.pos = i;
+    }
+
+    /// After an error in the statement starting at token `from`: moves past its `;`, or to the
+    /// `}` closing the block. False, moving nothing, when brackets do not match first.
+    fn skip_stmt(&mut self, from: usize) -> bool {
+        let mut open = Vec::new();
+        for i in from..self.toks.len() {
+            let Kind::Sym(s) = self.toks[i].kind else {
+                continue;
+            };
+            match s {
+                "(" | "[" | "{" => open.push(s),
+                ";" if open.is_empty() => {
+                    self.pos = i + 1;
+                    return true;
+                }
+                "}" if open.is_empty() => {
+                    self.pos = i;
+                    return true;
+                }
+                ")" | "]" | "}" => {
+                    let want = match s {
+                        ")" => "(",
+                        "]" => "[",
+                        _ => "{",
+                    };
+                    if open.pop() != Some(want) {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
     fn peek(&self) -> Option<&Kind> {
         self.toks.get(self.pos).map(|t| &t.kind)
     }
@@ -454,50 +690,20 @@ impl Parser {
             if self.peek().is_none() {
                 return Err(self.unexpected("`}`"));
             }
-            let start = self.span().start;
-            let kind = if self.at_kw("let") {
-                self.let_stmt()?
-            } else if self.at_kw("return") {
-                let k = self.return_stmt()?;
-                self.expect(";")?;
-                k
-            } else if self.at_kw("while") {
-                self.while_stmt()?
-            } else if self.at_kw("loop") {
-                self.loop_stmt()?
-            } else if self.at_kw("for") {
-                self.for_stmt()?
-            } else if self.at_kw("break") || self.at_kw("continue") {
-                let k = self.jump_stmt()?;
-                self.expect(";")?;
-                k
-            } else {
-                let block_like = self.at_kw("if") || self.at_kw("match") || self.at("{");
-                let e = if block_like { self.primary()? } else { self.expr()? };
-                if let Some(&Kind::Sym(op @ ("=" | "+=" | "-="))) = self.peek() {
-                    if !matches!(e.kind, ExprKind::Name(_) | ExprKind::Field(..) | ExprKind::Index(..)) {
-                        let hint = "assign to a name, field or index";
-                        return Err(err(e.span, "cannot assign to this expression", Some(hint)));
-                    }
-                    self.pos += 1;
-                    let value = self.expr()?;
-                    self.expect(";")?;
-                    StmtKind::Assign { target: e, op, value }
-                } else if self.eat(";") {
-                    StmtKind::Expr(e)
-                } else if self.at("}") {
-                    tail = Some(Box::new(e));
-                    continue;
-                } else if block_like {
-                    StmtKind::Expr(e)
-                } else {
-                    return Err(self.unexpected("`;` or `}`"));
+            let (from, start) = (self.pos, self.span().start);
+            match self.stmt(&mut tail) {
+                Ok(Some(kind)) => stmts.push(Stmt {
+                    kind,
+                    span: self.since(start),
+                }),
+                Ok(None) => {}
+                Err(d) if self.recover && rust_form(&d) && self.skip_stmt(from) => {
+                    self.depth = depth + 1;
+                    self.no_struct = false;
+                    self.record(d, start);
                 }
-            };
-            stmts.push(Stmt {
-                kind,
-                span: self.since(start),
-            });
+                Err(d) => return Err(d),
+            }
         }
         self.depth = depth;
         self.no_struct = outer;
@@ -506,6 +712,49 @@ impl Parser {
             tail,
             span: self.since(start),
         })
+    }
+
+    /// One statement of a block, or `None` with `tail` set for the value before its `}`.
+    fn stmt(&mut self, tail: &mut Option<Box<Expr>>) -> Result<Option<StmtKind>, Diag> {
+        Ok(Some(if self.at_kw("let") {
+            self.let_stmt()?
+        } else if self.at_kw("return") {
+            let k = self.return_stmt()?;
+            self.expect(";")?;
+            k
+        } else if self.at_kw("while") {
+            self.while_stmt()?
+        } else if self.at_kw("loop") {
+            self.loop_stmt()?
+        } else if self.at_kw("for") {
+            self.for_stmt()?
+        } else if self.at_kw("break") || self.at_kw("continue") {
+            let k = self.jump_stmt()?;
+            self.expect(";")?;
+            k
+        } else {
+            let block_like = self.at_kw("if") || self.at_kw("match") || self.at("{");
+            let e = if block_like { self.primary()? } else { self.expr()? };
+            if let Some(&Kind::Sym(op @ ("=" | "+=" | "-="))) = self.peek() {
+                if !matches!(e.kind, ExprKind::Name(_) | ExprKind::Field(..) | ExprKind::Index(..)) {
+                    let hint = "assign to a name, field or index";
+                    return Err(err(e.span, "cannot assign to this expression", Some(hint)));
+                }
+                self.pos += 1;
+                let value = self.expr()?;
+                self.expect(";")?;
+                StmtKind::Assign { target: e, op, value }
+            } else if self.eat(";") {
+                StmtKind::Expr(e)
+            } else if self.at("}") {
+                *tail = Some(Box::new(e));
+                return Ok(None);
+            } else if block_like {
+                StmtKind::Expr(e)
+            } else {
+                return Err(self.unexpected("`;` or `}`"));
+            }
+        }))
     }
 
     fn let_stmt(&mut self) -> Result<StmtKind, Diag> {

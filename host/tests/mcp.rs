@@ -100,3 +100,19 @@ fn kio_check_refuses_over_a_megabyte() {
     );
     assert_eq!(replies[1]["result"]["isError"], false, "{}", replies[1]);
 }
+
+/// L23: every parse error comes back, each with its line.
+#[test]
+fn kio_check_returns_every_parse_error() {
+    let src = "fn f(s: &str) {}\nfn g() {\n    println!(\"a\");\n}\n";
+    let replies = session(&[check_call(1, src)]);
+    let diags: Value = serde_json::from_str(text(&replies[0])).unwrap();
+    let got: Vec<_> = diags
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| (d["line"].clone(), d["message"].clone()))
+        .collect();
+    let want = [(1, "kio has no references"), (3, "macros are not supported")];
+    assert_eq!(got, want.map(|(l, m)| (json!(l), json!(m))));
+}
