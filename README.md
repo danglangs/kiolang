@@ -103,6 +103,17 @@ listening on http://127.0.0.1:8080
 
 A redirect (`follow`) can only read links and the clock; auth can only read the token hash; nothing can write the token hash or write files, and only `notify` reaches the network: one host, POST only, with a key the host adds and the program never sees. With 301 links it serves 15,500 redirects/s and 13,200 listings/s (`ab -c 20`, Apple silicon), a fresh sandbox per request.
 
+**Built by an agent, reviewed by authority.** [payhook](https://github.com/danglangs/kio-web/tree/main/examples/payhook) takes signed Stripe-style webhooks, drops replays in SQLite, and posts to a chat webhook with retries. A coding agent that read only kio's docs wrote it in five steps with no kio error; a reviewer approved each step from its diff, without reading the code:
+
+```
+step 2   + main: grant stripe: Hmac      + check_signature: stripe verify     (verify only, never sign)
+step 3   + main: grant db: Db            + main: grant log: Log
+step 4   + main: grant slack: Http       + deliver: slack send_all           (one host, key injected)
+step 5   + retry_pending: db exec query, slack send_all, log write
+```
+
+The diffs say what the code can reach; the tests (124 checks) say what it does there.
+
 ## Replay
 
 Time and randomness are grants too, so fixing them makes a run reproducible:
