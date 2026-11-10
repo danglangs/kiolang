@@ -113,4 +113,4 @@ Eval (E1, eval/, 2026-11-10): 30 tasks (compute, `Dir`, `Kv`, `Db`, HTTP handler
 | Sonnet 5.5 | 30/30 | 30/30 | 30/30 | 30/30 | 30/30 | $1.05 / $0.44 |
 | Opus 5.5 | 28/30 | 28/30 | 30/30 | 30/30 | 30/30 | $2.04 / $0.87 |
 
-No model asked for a grant the task did not give. What cost a round in kio: `split("")` to get characters (Haiku, 2 tasks: kio has no `chars()`), `for` over `Bytes` (Haiku), `bool` for `Bool` (Haiku), tuples (Opus, 2 tasks; the L20 hint fixed each in one round). kio costs about 2.3x Python per task: language.md (~9k tokens) rides in every prompt. Sonnet and Opus pass every task in both languages, so the next round needs harder tasks to tell them apart.
+No model asked for a grant the task did not give. What cost a round in kio: `split("")` to get characters (Haiku, 2 tasks: kio had no `chars()`, added in L21), `for` over `Bytes` (Haiku; added in L22), `bool` for `Bool` (Haiku), tuples (Opus, 2 tasks; the L20 hint fixed each in one round). kio costs about 2.3x Python per task: language.md (~9k tokens) rides in every prompt. Sonnet and Opus pass every task in both languages, so the next round needs harder tasks to tell them apart.

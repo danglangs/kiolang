@@ -600,3 +600,48 @@ fn main() -> Str {
     );
     assert_eq!(at, r#""abc".split("")"#);
 }
+
+/// L22: `for b in bytes`, each byte as an `Int` in order, over the value as the loop started.
+#[test]
+fn for_over_bytes() {
+    let src = r#"
+fn main() -> List<Int> {
+    let mut out: List<Int> = [];
+    for b in "".to_bytes() { out.push(b); }
+    let mut bs = "".to_bytes();
+    bs.push(0);
+    bs.push(255);
+    bs.push(7);
+    for b in bs { out.push(b); }
+    out
+}"#;
+    assert_eq!(shows(src), "[0, 255, 7]");
+    // Other variables change inside the loop; the bytes themselves change too, but the loop
+    // runs over the value it started with.
+    let src = r#"
+fn main() -> Str {
+    let mut b = "aé".to_bytes();
+    let mut sum = 0;
+    let mut n = 0;
+    for x in b {
+        sum += x;
+        n = n + 1;
+        b.push(x);
+    }
+    sum.to_str() + "," + n.to_str() + "," + b.len().to_str()
+}"#;
+    assert_eq!(shows(src), "461,3,6");
+    // `break`, `continue`, nesting, and an expression evaluated once.
+    let src = r#"
+fn bytes(n: Int) -> Bytes { let mut b = "".to_bytes(); for i in 0..n { b.push(i * 10); } b }
+fn main() -> Str {
+    let mut s = "";
+    for x in bytes(6) {
+        if x == 10 { continue; }
+        if x == 40 { break; }
+        for y in bytes(2) { s = s + (x + y).to_str() + " "; }
+    }
+    s
+}"#;
+    assert_eq!(shows(src), "0 10 20 30 30 40 ");
+}

@@ -4,7 +4,7 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 
 ## Now
 
-Compiled-only kio covers the whole language and every capability. What real apps needed is built, and so are the review and eval layers of direction A (P1 authority diff, S1 host-injected headers, E1 models-writing-kio eval): the HTTP client (H16, H16b), SQLite (H17) and `send` answering at once (H18), from the concurrency proposal (decided). H16-H19 and H17b are built and reviewed (fixes merged); speed work (C8) is paused after C8b7. Compiled code is 1.1-2.3x Rust on compute and 2.3-8x where it allocates (roadmap.md "Speed today"). The differential harness runs 502 programs both ways (499 agree, 3 excluded by limits, 0 leaked) and the generator 250 more per CI run.
+Compiled-only kio covers the whole language and every capability. What real apps needed is built, and so are the review and eval layers of direction A (P1 authority diff, S1 host-injected headers, E1 models-writing-kio eval): the HTTP client (H16, H16b), SQLite (H17) and `send` answering at once (H18), from the concurrency proposal (decided). H16-H19 and H17b are built and reviewed (fixes merged); speed work (C8) is paused after C8b7. Compiled code is 1.1-2.3x Rust on compute and 2.3-8x where it allocates (roadmap.md "Speed today"). The differential harness runs 506 programs both ways (503 agree, 3 excluded by limits, 0 leaked) and the generator 250 more per CI run.
 
 | Done | Result |
 |---|---|
@@ -56,11 +56,11 @@ Compiled-only kio covers the whole language and every capability. What real apps
 | S1 | `--http-header api=Authorization:env:VAR\|file:PATH`: the host adds a secret header to every request and redirect hop on the grant; the program, audit, `--log`, errors and stderr never see the value; a program header of the same name is `invalid`; cleartext non-loopback origins refused. kio-web links authorizes its webhook this way. Security-reviewed, fixes in |
 | E1 | `eval/`: 30 backend tasks, kio and Python, `eval/run.py` through `claude -p`. Full run 2026-11-10 (roadmap.md "Can models write kio?"): kio first try 24-30/30 (Haiku, Opus, Sonnet), 30/30 by round 5 for all three; Python first try 28-30/30; no over-asked grant. References run in CI (`eval/check_refs.sh`) |
 | H20, H21, L20 | usability gaps from E1: `--listen` prints a failed check's diagnostics before judging `main`'s shape, and refuses a grant `main` does not take before binding (plain `kio run`'s message and exit 1); `let (a, b) = ..` is "kio has no tuples" with a hint |
-| L21 | `Str.chars() -> List<Str>`, interpreted and compiled (`rt_str_chars`); `split("")`'s error names `s.chars()` |
+| L21, L22 | `Str.chars() -> List<Str>`, interpreted and compiled (`rt_str_chars`); `split("")`'s error names `s.chars()`; `for b in bytes`, lowered to an index loop (no codegen change) |
 
 ## Next
 
-Direction A ([product-todo.md](product-todo.md)): P1, S1 and E1 are done. Next: harder eval tasks (Sonnet and Opus pass all 30, so they cannot be told apart), and the gaps models hit in E1: `for` over `Bytes` (L22), tuples (proposal, below).
+Direction A ([product-todo.md](product-todo.md)): P1, S1 and E1 are done. Next: harder eval tasks (Sonnet and Opus pass all 30, so they cannot be told apart), and the last gap models hit in E1: tuples (proposal, below).
 
 Also open: C8 (roadmap.md): tree's remaining freeing (free-list pushes, a `List`'s separate buffer); tree's 4-5% from the larger size classes (#117); borrowed match bindings of a borrowed scrutinee (tree). Pinned, not started: L18 `par_map` and L19 `scope`/`spawn` (concurrency stages 2 and 3, when a program needs them).
 

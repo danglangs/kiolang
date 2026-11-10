@@ -2690,8 +2690,9 @@ impl<'a> Checker<'a> {
                 let ty = match iter {
                     Iter::List(e) => match self.expr(e, None)? {
                         Ty::List(t) => *t,
+                        Ty::Bytes => Ty::Int,
                         found => {
-                            let hint = "`for` runs over a List or a range `a..b`";
+                            let hint = "`for` runs over a List, a range `a..b` or Bytes";
                             return Err(err(e.span, format!("cannot iterate over {found}"), Some(hint)));
                         }
                     },

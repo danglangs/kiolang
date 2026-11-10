@@ -191,7 +191,7 @@ The cost is the ecosystem: few libraries, no package manager yet. Agents write m
 
 ## Roadmap
 
-- **Now:** harder eval tasks, and what models reached for: `Str.chars()`, `for` over `Bytes`.
+- **Now:** harder eval tasks (E2).
 - **Next:** allocation speed (escape analysis).
 - **Later:** `par_map` and tasks (pinned), packages.
 

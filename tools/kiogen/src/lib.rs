@@ -50,7 +50,7 @@ pub struct Features {
     /// `Str` locals, parameters and results: literals, `+`, `+=`, `s = s + a + b` (the
     /// compiler's in-place append) and `s = s + s`, `to_str`, `trim`, `len`, `==`, `contains`,
     /// `match` on literals, and `split`, `lines` and `chars` into `List<Str>` locals, indexed, counted,
-    /// searched and iterated with `for`.
+    /// searched and iterated with `for`; `for b in (s).to_bytes()`.
     pub strings: bool,
     /// `HashMap<Int, Int>` and `HashMap<Str, Int>` locals, helper parameters and `main`
     /// results: `HashMap::new()`, copies, `insert`, `remove`, `get`, `len`, `keys`, `==`, and
@@ -1446,8 +1446,33 @@ impl Gen<'_> {
                 (v.min, v.max, v.smax) = (min, max + 1, max);
                 Some(format!("{pad}let {name} = {src};\n"))
             }
+            8 if self.rng.chance(40) => self.bytes_for(),
             _ => self.str_for(),
         }
+    }
+
+    /// `for b in (s).to_bytes()`, `b` an `Int`; its passes are bounded by the length.
+    fn bytes_for(&mut self) -> Option<String> {
+        if !self.features.loops || self.loops >= MAX_LOOPS || self.nest >= MAX_NEST || self.cost > BUDGET / 2 {
+            return None;
+        }
+        let (s, runs) = self.str_expr(1);
+        let cap = if self.loops > 0 { 65 } else { MAX_STR + 1 };
+        if runs > cap {
+            return None;
+        }
+        let runs = runs.max(1);
+        let pad = self.pad();
+        let b = self.name("b");
+        self.mult *= runs;
+        self.loops += 1;
+        self.scopes.push(vec![]);
+        self.declare(b.clone(), Ty::Int, false, true);
+        let body = self.block(3, Ty::Unit);
+        self.scopes.pop();
+        self.loops -= 1;
+        self.mult /= runs;
+        Some(format!("{pad}for {b} in ({s}).to_bytes() {body}\n"))
     }
 
     /// An assignment to a mutable `Str`. Inside a loop, only an append of small parts to an
@@ -1796,6 +1821,7 @@ mod tests {
             "-> Str",
             ": Str",
             "for w",
+            ").to_bytes() {",
             // `<` on two `Str`s (L7e), here with a literal on the left.
             "\" < ",
             "\" >= ",

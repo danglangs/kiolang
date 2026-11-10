@@ -75,6 +75,16 @@ fn loops() {
     reject("fn main() { for x in [1] { f(); } } fn f() { break; }");
     let (msg, at) = reject("fn main() { for x in 5 { } }");
     assert_eq!((msg.as_str(), at.as_str()), ("cannot iterate over Int", "5"));
+    let diags = check("fn main() { for x in 5 { } }", &CapTable::default()).unwrap_err();
+    assert_eq!(
+        diags[0].hint.as_deref(),
+        Some("`for` runs over a List, a range `a..b` or Bytes")
+    );
+    ok("fn main() { for b in \"ab\".to_bytes() { let _n: Int = b; } }");
+    let (msg, at) = reject("fn main() { for b in \"ab\".to_bytes() { let _s: Str = b; } }");
+    assert_eq!((msg.as_str(), at.as_str()), ("expected Str, found Int", "b"));
+    let (msg, _) = reject("fn main() { for b in \"ab\".to_bytes() { b = 2; } }");
+    assert!(msg.contains("mut"), "{msg}");
     let (msg, at) = reject("fn main() { for i in 0..\"a\" { } }");
     assert_eq!((msg.as_str(), at.as_str()), ("expected Int, found Str", "\"a\""));
     let (msg, _) = reject("fn main() { for x in [1] { x = 2; } }");

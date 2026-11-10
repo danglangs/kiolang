@@ -45,7 +45,7 @@ fn main(input: Dir, out: Dir) -> Result<(), IoErr> {
 | JSON | `Json`, built in: `enum Json { Null, Bool(Bool), Num(Int), Float(Float), Str(Str), Arr(List<Json>), Obj(Map<Str, Json>) }` |
 | User types | `struct`, and `enum` with payloads, generic or not (`struct Page<T>`); a type may contain itself only through `List`, `Map` or `HashMap`; struct update `P { x: 1, ..p }` |
 | Constants | `const MAX: Int = 64;` at the top level: an `Int`, `Float`, `Bool` or `Str` literal |
-| Control | `if`, `if let`, `let`-else, `while`, `loop`, `for x in list`, `for i in 0..n`, `match`, `break`, `continue`, `return` |
+| Control | `if`, `if let`, `let`-else, `while`, `loop`, `for x in list`, `for i in 0..n`, `for b in bytes` (each byte an `Int` 0..=255), `match`, `break`, `continue`, `return` |
 | Functions | free functions, recursion, generic functions `fn f<T>(..)`, function values of type `fn(T, ..) -> R`, closures |
 | Capabilities | `Dir`, `Http`, `Kv`, `Incoming`, `Outgoing`, `WsMessage`, `WsSend`, `Rng`, `Clock`, `Log`, `Db`, generated from `caps.wit` |
 
@@ -53,7 +53,7 @@ Everything else is rejected with a message that names the kio alternative, for e
 
 ## Semantics
 
-- **Values are copied.** Assignment and argument passing never share state. Only `let mut` locals change: `x = v`, `x += v`, `x -= v`, `x.f = v`, `xs[i] = v`, `m.insert(k, v)`, `xs.push(v)`, `m.remove(k)`. A function changes its caller's data only by returning a new value. `for x in xs` iterates over `xs` as it was when the loop started.
+- **Values are copied.** Assignment and argument passing never share state. Only `let mut` locals change: `x = v`, `x += v`, `x -= v`, `x.f = v`, `xs[i] = v`, `m.insert(k, v)`, `xs.push(v)`, `m.remove(k)`. A function changes its caller's data only by returning a new value. `for x in xs` (a `List` or `Bytes`) iterates over `xs` as it was when the loop started.
 - **`loop { .. }`** repeats until `break`; `continue` and `return` work as in Rust. A `loop` with no `break` never finishes normally, so `fn f() -> Int { loop { return 1; } }` needs no tail. `break` takes no value: use a `let mut` and `break`.
 - **Statements end in `;`**, as in Rust. A block's last expression has no `;` and is the block's value. `if`, `while`, `loop`, `for` and `match` used as statements need no `;`. `if` chains with `else if`.
 - **Types are explicit where they cannot be read off the value.** `[]`, `Map::new()`, `HashMap::new()` and `None` need a declared or expected type: `let mut rows: List<Row> = [];`.

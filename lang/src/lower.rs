@@ -401,6 +401,9 @@ impl<'a> Lowerer<'a> {
             StmtKind::For { name, iter, body } => {
                 let mark = self.scope.len();
                 let kind = match iter {
+                    ast::Iter::List(xs) if matches!(self.checked(xs.span), check::Ty::Bytes) => {
+                        self.for_bytes(name, xs, body)
+                    }
                     ast::Iter::List(xs) => {
                         let xs = self.expr(xs);
                         let check::Ty::List(t) = self.checked(xs.span) else {
@@ -423,6 +426,61 @@ impl<'a> Lowerer<'a> {
             StmtKind::Expr(e) => ir::StmtKind::Expr(self.expr(e)),
         };
         Stmt { kind, span: s.span }
+    }
+
+    /// `for b in bytes` as `{ let t = bytes; for i in 0..t.len() { let b = t[i]; body } }`:
+    /// `bytes` is evaluated once, and the loop sees it as it was when the loop started.
+    fn for_bytes(&mut self, name: &'a str, bytes: &'a ast::Expr, body: &'a ast::Block) -> ir::StmtKind {
+        let span = bytes.span;
+        let (int, bytes_ty) = (self.ids.ty(&check::Ty::Int), self.ids.ty(&check::Ty::Bytes));
+        let value = self.expr(bytes);
+        let t = self.bind_ty("{for bytes}", bytes_ty.clone(), span);
+        let i = self.bind_ty("{for index}", int.clone(), span);
+        let read = |x: LocalId, ty: &Ty| Expr {
+            kind: ir::ExprKind::Local(x),
+            ty: ty.clone(),
+            span,
+        };
+        let len = Expr {
+            kind: ir::ExprKind::Builtin(Builtin::BytesLen, Box::new(read(t, &bytes_ty)), Vec::new()),
+            ty: int.clone(),
+            span,
+        };
+        let get = Expr {
+            kind: ir::ExprKind::Index(Box::new(read(t, &bytes_ty)), Box::new(read(i, &int))),
+            ty: int.clone(),
+            span,
+        };
+        let b = self.bind(name, &check::Ty::Int, span);
+        let mut inner = self.block(body);
+        inner.stmts.insert(
+            0,
+            Stmt {
+                kind: ir::StmtKind::Let(b, get),
+                span,
+            },
+        );
+        let zero = Expr {
+            kind: ir::ExprKind::Int(0),
+            ty: int,
+            span,
+        };
+        let stmts = vec![
+            Stmt {
+                kind: ir::StmtKind::Let(t, value),
+                span,
+            },
+            Stmt {
+                kind: ir::StmtKind::ForRange(i, zero, len, inner),
+                span,
+            },
+        ];
+        let block = Expr {
+            kind: ir::ExprKind::Block(Block { stmts, tail: None }),
+            ty: self.ids.ty(&check::Ty::Unit),
+            span,
+        };
+        ir::StmtKind::Expr(block)
     }
 
     /// An assignment target or a mutating method's receiver: a local, then fields and indexes.
