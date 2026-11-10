@@ -98,9 +98,15 @@ fn check_base(path: &str, base: &str) -> i32 {
 }
 
 /// Apply one `--http-header name=Header:env:VAR` or `name=Header:file:PATH` to the grant `name`:
-/// the value is read now, once. A file's one trailing newline is dropped. Errors never hold the
-/// value (`spec` names only where it comes from).
-fn http_header(spec: &str, https: &mut [(String, Origin)]) -> Result<(), String> {
+/// the value is read now, once. A file's one trailing newline is dropped. The file must be a
+/// regular file outside every granted `dirs` (the program could read it) and not the file of a
+/// flag in `files` (`--audit`, `--log`). Errors never hold the value.
+fn http_header(
+    spec: &str,
+    https: &mut [(String, Origin)],
+    dirs: &[(String, String)],
+    files: &[(String, &str)],
+) -> Result<(), String> {
     let usage = "expected name=Header:env:VAR or name=Header:file:PATH";
     let Some((name, rest)) = spec.split_once('=') else {
         return Err(usage.into());
@@ -114,7 +120,7 @@ fn http_header(spec: &str, https: &mut [(String, Origin)]) -> Result<(), String>
         ));
     };
     let value = match source.split_once(':') {
-        Some(("env", var)) if !var.is_empty() => match std::env::var(var) {
+        Some(("env", var)) if !var.is_empty() && !var.contains(['=', '\0']) => match std::env::var(var) {
             Ok(v) => v,
             Err(std::env::VarError::NotPresent) => {
                 return Err(format!(
@@ -123,23 +129,60 @@ fn http_header(spec: &str, https: &mut [(String, Origin)]) -> Result<(), String>
             }
             Err(std::env::VarError::NotUnicode(_)) => return Err(format!("`{var}` is not UTF-8")),
         },
-        Some(("file", path)) if !path.is_empty() => match std::fs::read_to_string(path) {
-            Ok(v) => {
-                let v = v.strip_suffix('\n').unwrap_or(&v);
-                v.strip_suffix('\r').unwrap_or(v).to_string()
-            }
-            Err(e) => {
-                return Err(format!(
-                    "cannot read {path}: {e}\n  hint: the file holds the header's value alone"
-                ))
-            }
-        },
+        Some(("file", path)) if !path.is_empty() => read_secret(path, dirs, files)?,
         _ => return Err(usage.into()),
     };
-    if value.is_empty() {
-        return Err(format!("{source} is empty\n  hint: set it to the header's value"));
+    if value.trim().is_empty() {
+        return Err(format!(
+            "{source} is empty or only whitespace\n  hint: set it to the header's value"
+        ));
     }
     origin.inject(header, value)
+}
+
+/// The value in the file `path` for `--http-header` (see `http_header`), its one trailing
+/// newline dropped. At most `HEADER_MAX` + 2 bytes are read: a longer value is refused by
+/// `Origin::inject`.
+fn read_secret(path: &str, dirs: &[(String, String)], files: &[(String, &str)]) -> Result<String, String> {
+    let cannot =
+        |e: &dyn std::fmt::Display| format!("cannot read {path}: {e}\n  hint: the file holds the header's value alone");
+    // A FIFO or device would block or never end: check before opening.
+    match std::fs::metadata(path) {
+        Ok(m) if m.is_file() => {}
+        Ok(_) => return Err(cannot(&"not a regular file")),
+        Err(e) => return Err(cannot(&e)),
+    }
+    let real = std::fs::canonicalize(path).map_err(|e| cannot(&e))?;
+    for (d, dir) in dirs {
+        if std::fs::canonicalize(dir).is_ok_and(|root| real.starts_with(root)) {
+            return Err(format!(
+                "`{path}` is inside `--dir {d}={dir}`; the program could read it\n  hint: keep the key outside every granted directory"
+            ));
+        }
+    }
+    if let Some((flag, _)) = files.iter().find(|(_, f)| same_file(path, f)) {
+        return Err(format!(
+            "`{path}` is the `{flag}` file\n  hint: keep the key in a file of its own"
+        ));
+    }
+    let file = std::fs::File::open(path).map_err(|e| cannot(&e))?;
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(file, HEADER_MAX + 2), &mut bytes).map_err(|e| cannot(&e))?;
+    let v = String::from_utf8(bytes).map_err(|_| cannot(&"not UTF-8"))?;
+    let v = v.strip_suffix('\n').unwrap_or(&v);
+    Ok(v.strip_suffix('\r').unwrap_or(v).to_string())
+}
+
+/// The most of a `--http-header` value read from a file (as `Origin::inject` allows).
+const HEADER_MAX: u64 = 8 << 10;
+
+/// `spec` of a `--http-header` as an error may show it: `name=Header`, never what follows the
+/// first `:` (or, without one, the `=`), where a value given inline by mistake would be.
+fn header_label(spec: &str) -> &str {
+    match spec.split_once(':') {
+        Some((label, _)) => label,
+        None => spec.split('=').next().unwrap_or(""),
+    }
 }
 
 fn run(path: &str, flags: &[&str]) -> i32 {
@@ -325,9 +368,12 @@ fn run(path: &str, flags: &[&str]) -> i32 {
             return fail(format!("--http-methods {name}={list}: {e}"));
         }
     }
+    let mut written: Vec<(String, &str)> = Vec::new();
+    written.extend(audit.as_deref().map(|p| ("--audit".to_string(), p)));
+    written.extend(log_paths.iter().map(|(n, p)| (format!("--log {n}"), p.as_str())));
     for spec in http_headers {
-        if let Err(e) = http_header(spec, &mut https) {
-            return fail(format!("--http-header {spec}: {e}"));
+        if let Err(e) = http_header(spec, &mut https, &dir_paths, &written) {
+            return fail(format!("--http-header {}: {e}", header_label(spec)));
         }
     }
     // A program that fails to check is reported by the run below.

@@ -142,8 +142,13 @@ fn the_header_reaches_every_request_and_hop_and_nothing_else() {
     let calls: Vec<&serde_json::Value> = parsed.iter().filter(|l| l["kind"] == "Http").collect();
     // get, get, send, 2 + 1 batch requests, send, send, 1 + 1 batch.
     assert_eq!(calls.len(), 10, "{audit}");
+    // Each request sent lists the injected names; one refused before sending does not.
     for c in calls.iter().filter(|c| c["method"] != "send_all") {
-        assert_eq!(c["injected"], serde_json::json!(["authorization", "x-api-key"]), "{c}");
+        let want = match c["result"] == "invalid" {
+            true => serde_json::Value::Null,
+            false => serde_json::json!(["authorization", "x-api-key"]),
+        };
+        assert_eq!(c["injected"], want, "{c}");
     }
     let refused: Vec<_> = calls.iter().filter(|c| c["result"] == "invalid").collect();
     assert_eq!(refused.len(), 3, "{audit}");
@@ -162,6 +167,16 @@ fn bad_flags_are_refused_with_a_hint() {
     let empty = write(t.path(), "empty", "\n");
     let two_lines = write(t.path(), "two", &format!("{SECRET}\n{FILE_SECRET}\n"));
     let good = write(t.path(), "good", FILE_SECRET);
+    let long = write(t.path(), "long", &"k".repeat(9000));
+    let fifo = t.path().join("fifo");
+    assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+    let fifo = fifo.to_str().unwrap();
+    let conf = t.path().join("conf");
+    std::fs::create_dir(&conf).unwrap();
+    let in_dir = write(&conf, "key", FILE_SECRET);
+    let dir_grant = format!("d={}", conf.display());
+    let inline = format!("up=Authorization:Bearer {SECRET}");
+    let inline_no_colon = format!("up=Bearer{SECRET}");
     let loopback = "up=http://127.0.0.1:1";
     let cases: &[(&[&str], &str)] = &[
         (
@@ -170,7 +185,7 @@ fn bad_flags_are_refused_with_a_hint() {
         ),
         (
             &["--http", loopback, "--http-header", "up=Authorization:env:S1_EMPTY"],
-            "env:S1_EMPTY is empty\n  hint:",
+            "env:S1_EMPTY is empty or only whitespace\n  hint:",
         ),
         (
             &[
@@ -179,7 +194,7 @@ fn bad_flags_are_refused_with_a_hint() {
                 "--http-header",
                 &format!("up=Authorization:file:{empty}"),
             ],
-            "is empty\n  hint:",
+            "is empty or only whitespace\n  hint:",
         ),
         (
             &[
@@ -238,20 +253,45 @@ fn bad_flags_are_refused_with_a_hint() {
                 "--http-header",
                 &format!("up=Authorization:file:{good}"),
             ],
-            "`http://example.com` would carry the header in clear\n  hint: grant `https://example.com`",
+            "`http://example.com:80` would carry the header in clear\n  hint: grant `https://example.com`",
         ),
+        // A name never connects to loopback (only an IP literal does), so it would only carry
+        // the header if it resolved to a public address.
+        (
+            &["--http", "up=http://localhost:1", "--http-header", &format!("up=Authorization:file:{good}")],
+            "`http://localhost:1` would carry the header in clear\n  hint: grant `https://localhost`, or `http://127.0.0.1:PORT`",
+        ),
+        (&["--http", loopback, "--http-header", "up=Authorization:env:A=B"], "expected name=Header:env:VAR"),
+        (&["--http", loopback, "--http-header", &format!("up=Authorization:file:{long}")], "over 8192 bytes"),
+        (&["--http", loopback, "--http-header", &format!("up=Authorization:file:{fifo}")], "not a regular file"),
+        (&["--http", loopback, "--http-header", &format!("up=Authorization:file:{}", t.path().display())], "not a regular file"),
+        (
+            &["--http", loopback, "--dir", &dir_grant, "--http-header", &format!("up=Authorization:file:{in_dir}")],
+            "the program could read it\n  hint: keep the key outside every granted directory",
+        ),
+        (
+            &["--http", loopback, "--audit", &good, "--http-header", &format!("up=Authorization:file:{good}")],
+            "is the `--audit` file\n  hint: keep the key in a file of its own",
+        ),
+        (
+            &["--http", loopback, "--log", &format!("l={good}"), "--http-header", &format!("up=Authorization:file:{good}")],
+            "is the `--log l` file\n  hint:",
+        ),
+        // A value given inline by mistake is not echoed: only `name=Header`.
+        (&["--http", loopback, "--http-header", &inline], "--http-header up=Authorization: expected"),
+        (&["--http", loopback, "--http-header", &inline_no_colon], "--http-header up: expected"),
     ];
     for (flags, want) in cases {
         let mut args = vec![prog.as_str()];
         args.extend_from_slice(flags);
-        let out = kio(&args, &[("S1_EMPTY", "")]);
+        let out = kio(&args, &[("S1_EMPTY", " \t ")]);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert_eq!(out.status.code(), Some(2), "{flags:?}: {stderr}");
         assert!(stderr.contains(want), "{flags:?}: {stderr}");
         assert_clean("stderr", &stderr);
     }
-    // Loopback over http and any https origin are fine.
-    for grant in ["up=http://localhost:1", "up=http://[::1]:1", "up=example.com"] {
+    // A loopback IP literal over http and any https origin are fine.
+    for grant in ["up=http://127.0.0.1:1", "up=http://[::1]:1", "up=example.com"] {
         let out = kio(
             &[
                 &prog,
@@ -359,6 +399,7 @@ fn under_listen_every_run_gets_the_header() {
         .collect();
     assert_eq!(calls.len(), 6, "{audit}");
     for c in &calls {
-        assert_eq!(c["injected"], serde_json::json!(["authorization"]), "{c}");
+        let sent = c["result"] != "invalid";
+        assert_eq!(c["injected"] == serde_json::json!(["authorization"]), sent, "{c}");
     }
 }

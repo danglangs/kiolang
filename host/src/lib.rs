@@ -267,12 +267,12 @@ impl Origin {
             ));
         }
         let host = self.host.trim_matches(['[', ']']);
-        let loopback =
-            host.eq_ignore_ascii_case("localhost") || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
-        if !self.https && !loopback {
+        // Only a loopback IP literal: a name like `localhost` connects only if it resolves to a
+        // public address (`Pinned`), which would carry the header in clear.
+        if !self.https && !host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback()) {
             return Err(format!(
-                "`http://{}` would carry the header in clear\n  hint: grant `https://{}`; plain http is only for loopback",
-                self.host, self.host
+                "`http://{}:{}` would carry the header in clear\n  hint: grant `https://{}`, or `http://127.0.0.1:PORT` for a local server",
+                self.host, self.port, self.host
             ));
         }
         self.inject.push((name, Secret(value.into())));
@@ -1561,7 +1561,6 @@ impl State {
         };
         let names: Vec<String> = headers.iter().map(|(n, _)| json(n)).collect();
         *extra += &format!(r#","headers":[{}]"#, names.join(","));
-        *extra += &origin.injected();
         // The host sets this header; the program may not replace or repeat it.
         if headers.iter().any(|(n, _)| origin.injects(n)) {
             return Ok(Err(HttpErr::Invalid));
@@ -1569,6 +1568,7 @@ impl State {
         if body.len() > BODY_CAP {
             return Ok(Err(HttpErr::TooLarge));
         }
+        *extra += &origin.injected();
         self.spend_io(body.len())?;
         *extra += &format!(r#","sent":{}"#, body.len());
         Ok(Ok(Outbound {
