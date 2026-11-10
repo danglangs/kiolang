@@ -70,27 +70,30 @@ Reaching `collect.example` takes a grant only the operator can give (`--http`). 
 
 ## A real app
 
-[links](https://github.com/danglangs/kio-web/tree/main/examples/links) is a link shortener in [kio-web](https://github.com/danglangs/kio-web): bearer-token auth (hashed, compared in constant time), links in a `Kv` that survives restarts, expiry, random slugs, a log of creates and deletes, an HTML page and static files, in 357 lines.
+[links](https://github.com/danglangs/kio-web/tree/main/examples/links) is a link shortener in [kio-web](https://github.com/danglangs/kio-web): bearer-token auth (hashed, compared in constant time), links in a `Kv` that survives restarts, expiry, random slugs, a log of creates and deletes, a webhook after each create, an HTML page and static files, in 379 lines.
 
 ```rust
-fn main(req: Incoming, res: Outgoing, links: Kv, auth: Kv, assets: Dir, links_rng: Rng, now: Clock, log: Log) -> Result<(), WebErr>
+fn main(req: Incoming, res: Outgoing, links: Kv, auth: Kv, assets: Dir, links_rng: Rng, now: Clock, log: Log, hook: Http) -> Result<(), WebErr>
 ```
 
 ```
 $ kio check app.kio | grep -v ': none' | grep -v '^web::\|^api::'
-all_links         : links scan
-authorized        : auth get
-claim             : links delete swap
-create            : links delete swap, rng int, clock now_ms, log write
-delete            : links delete get, log write
-follow            : links get, clock now_ms
+all_links           : links scan
+authorized          : auth get
+claim               : links delete swap
+create              : links delete swap, rng int, clock now_ms, log write
+delete              : links delete get, log write
+follow              : links get, clock now_ms
 ...
-$ kio run app.kio --kv links=links.kv --kv auth=auth.kv --dir assets=./static --rng links_rng --clock now --log log=links.log --listen 127.0.0.1:8080
+notify              : hook send, log write
+...
+$ kio run app.kio --kv links=links.kv --kv auth=auth.kv --dir assets=./static --rng links_rng --clock now --log log=links.log \
+    --http hook=hooks.example --http-methods hook=POST --listen 127.0.0.1:8080
 ...
 listening on http://127.0.0.1:8080
 ```
 
-A redirect (`follow`) can only read links and the clock; auth can only read the token hash; nothing can write the token hash, write files or make requests. With 301 links it serves 15,500 redirects/s and 13,200 listings/s (`ab -c 20`, Apple silicon), a fresh sandbox per request.
+A redirect (`follow`) can only read links and the clock; auth can only read the token hash; nothing can write the token hash or write files, and only `notify` reaches the network: one host, POST only. With 301 links it serves 15,500 redirects/s and 13,200 listings/s (`ab -c 20`, Apple silicon), a fresh sandbox per request.
 
 ## Replay
 

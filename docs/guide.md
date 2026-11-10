@@ -50,6 +50,8 @@ error: IoErr::InvalidPath
 
 A path, not a URL: `get(path)` takes a path on the granted host; anything else (`https://other.example/..`, `//other.example`) is `HttpErr::Denied` without a request. Redirects are rechecked against the grant, IP literals and private addresses are refused, DNS is pinned per run.
 
+Under `--listen` each request gets its own `Http` handle (its own DNS lookup, pinned for that request) with the same grant, methods and limits; its audit lines carry `"req":N`. A request holds at most 64 HTTP requests in flight; the process at most 1,024. Past that a new `get`, `send` or `send_all` is `Err(Timeout)` at once, nothing sent (audited `"busy":true`); other calls, a `Dir` read for one, are unaffected. A path built from request input is the program's to check: the host keeps it on the granted host, but `?`, `/` and `..` inside it reach that host as given.
+
 ```
 $ kio run examples/fx/report.kio --dir input=examples/in --http fx=api.frankfurter.dev --dir out=examples/tour/out
 main      : input read, fx get, out write
@@ -124,7 +126,7 @@ The audit log has a line per call with the SQL (cut at 256 characters), the para
 
 ### --listen: HTTP and WebSockets
 
-A listening socket is a grant too. Each request runs in a fresh sandbox; `main` takes `req: Incoming, res: Outgoing` (any names) plus its other grants. `send` answers the client at once, and `main` may go on working under the request's limits.
+A listening socket is a grant too. Each request runs in a fresh sandbox; `main` takes `req: Incoming, res: Outgoing` (any names) plus its other grants, `Http` included. `send` answers the client at once, and `main` may go on working under the request's limits (a webhook after the response, say).
 
 ```
 $ kio run examples/serve/app.kio --dir public=examples/tour/in --listen 127.0.0.1:8080

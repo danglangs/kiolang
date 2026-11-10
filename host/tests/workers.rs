@@ -1,4 +1,5 @@
-//! H5/W8: detached host-call workers are capped. Own test binary: the cap is process-wide.
+//! H5/W8: detached file, store and database workers are capped (HTTP workers have their own pool,
+//! http_workers.rs). Own test binary: the cap is process-wide.
 
 use kio_host::{open_dir, Kio, Limits, MAX_WORKERS};
 

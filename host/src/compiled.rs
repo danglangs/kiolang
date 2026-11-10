@@ -570,6 +570,8 @@ pub struct Server {
     /// `Rng`, `Clock` and `Log` grants; every request gets fresh handles (a seeded `Rng`'s
     /// stream and a `Log` line's prefix carry the request number).
     sources: Sources,
+    /// `Http` grants; every request gets its own, with its own DNS answer (H19).
+    https: Vec<(String, Origin)>,
     /// `main`'s `WsMessage` and `WsSend` parameter names, for a WebSocket server.
     ws: Option<(String, String)>,
     /// `main`'s `Incoming` and `Outgoing` parameter names, for an HTTP server.
@@ -638,6 +640,7 @@ impl Server {
             _ticker: ticker,
             kvs: vec![],
             sources: Sources::default(),
+            https: vec![],
             ws,
             http,
             audit: None,
@@ -657,6 +660,7 @@ impl Server {
             None => [(&self.http.0, "Incoming"), (&self.http.1, "Outgoing")],
         };
         grants.extend(handles.into_iter().map(|(n, k)| (n.clone(), k, None)));
+        grants.extend(self.https.iter().map(|(n, o)| (n.clone(), "Http", Some(o.target()))));
         grants.extend(self.kvs.iter().map(|(n, s)| (n.clone(), "Kv", Some(s.label()))));
         let src = &self.sources;
         grants.extend(src.rngs.iter().map(|(n, r)| (n.clone(), "Rng", Some(r.label()))));
@@ -687,6 +691,16 @@ impl Server {
             "Server::grant_sources after Server::audit: the audit header lists the grants"
         );
         self.sources = sources;
+    }
+
+    /// Grant `https` by name to every request, each request its own handle (DNS pinned per
+    /// request). Panics after `audit`, as `grant_kvs`.
+    pub fn grant_https(&mut self, https: Vec<(String, Origin)>) {
+        assert!(
+            self.audit.is_none(),
+            "Server::grant_https after Server::audit: the audit header lists the grants"
+        );
+        self.https = https;
     }
 
     /// The program's files, root first.
@@ -794,7 +808,8 @@ impl Server {
         // audit log then lacks.
         let req = self.requests.fetch_add(1, Relaxed) + 1;
         let (kvs, sources) = (self.kvs.clone(), self.sources.clone());
-        let bound = push_grants(store.data_mut(), dirs, vec![], handles, kvs, sources, Some(req)).map_err(start)?;
+        let https = self.https.clone();
+        let bound = push_grants(store.data_mut(), dirs, https, handles, kvs, sources, Some(req)).map_err(start)?;
         let diags = |d: Vec<Diag>| d.iter().map(|d| d.message.as_str()).collect::<Vec<_>>().join("; ");
         let started = instantiate(&mut store, &self.program, &bound).map_err(start)?;
         if let Some(out) = &self.audit {

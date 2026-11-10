@@ -217,7 +217,7 @@ Each changes `caps.wit` or the language. Recommendation first, then the alternat
 - [x] **W11b. Fix the review's findings.** Host only.
   1. Connection lifetime: a hard 60 s cap per connection (`ListenLimits::lifetime`), enforced by dropping the connection future, so a client that never reads its responses cannot hold a slot or buffered response forever.
   2. `--audit` with `--listen`: refused at startup, before the log file is created, with hint "per-request audit logging is not supported yet; drop --audit". (Lifted by H12.)
-  3. `--http` with `--listen`: refused at startup the same way (hint "Http grants under --listen are not supported yet").
+  3. `--http` with `--listen`: refused at startup the same way (hint "Http grants under --listen are not supported yet"). (Lifted by H19.)
   4. `Outgoing.send` accepts status 200..=599 only; 1xx is `invalid`.
   5. `Dir.read` and `Dir.create` refuse anything that is not a regular file: open with `O_NONBLOCK` (cap-std `OpenOptionsExt::custom_flags`), then check `metadata().is_file()`, else `denied`. A FIFO in a granted dir then cannot block a worker, which closes the worse-than-stated part of #19.
   Done: one test per item (a non-reading client's connection is closed at the lifetime cap with a small test value; both flag combinations exit 2 with their hint and leave no file; status 101 is `invalid`; reading a FIFO is `denied` at once); all existing tests pass.

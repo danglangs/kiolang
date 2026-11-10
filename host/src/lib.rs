@@ -114,7 +114,7 @@ const READ_CAP: u64 = 10 << 20;
 struct Granted(RealDir);
 
 /// The one scheme, host and port an `Http` grant reaches. Guest input never changes it. It also
-/// holds the run's pinned DNS answer; clones share it.
+/// holds the run's pinned DNS answer; clones share it, and `for_run` gives a run its own.
 #[derive(Clone, Debug)]
 pub struct Origin {
     https: bool,
@@ -122,7 +122,7 @@ pub struct Origin {
     port: u16,
     /// The host's addresses from its first resolution; every later request and hop reuses them.
     pinned: Arc<Mutex<Option<Vec<SocketAddr>>>>,
-    /// Real lookups made (at most one per run).
+    /// Real lookups made, by every run of this grant (at most one per run).
     lookups: Arc<AtomicU32>,
     /// Response body bytes read through this grant, cut-off reads included.
     read: Arc<AtomicU64>,
@@ -179,6 +179,15 @@ impl Origin {
             any_addr,
             methods: Vec::new(),
         })
+    }
+
+    /// This grant for one run: the same origin and methods with nothing resolved yet, so no run
+    /// connects to an address another run's lookup returned (each `--listen` request too).
+    fn for_run(&self) -> Origin {
+        Origin {
+            pinned: Arc::default(),
+            ..self.clone()
+        }
     }
 
     /// Allow the methods in `list` (`POST,PUT`, any case) besides GET: `--http-methods`.
@@ -272,10 +281,79 @@ impl Origin {
     }
 }
 
-/// Most detached host-call workers alive at once, process-wide: room for a full `send_all` batch
-/// (`BATCH_MAX`) beside the timed-out workers that linger. Past it every host call is refused as
-/// a timeout until a worker ends.
+/// Most detached workers for file, store and database calls alive at once, process-wide (only
+/// calls the deadline cut off linger). Past it such a call stops its run as a timeout until a
+/// worker ends. HTTP workers have their own pool, so requests never fill this one.
 pub const MAX_WORKERS: usize = 256;
+/// Most HTTP workers alive at once, process-wide: 16 runs each with a full `send_all`. Past it a
+/// new `get`, `send` or batch is `timeout` at once, with nothing sent (audited `"busy":true`).
+pub const MAX_HTTP_WORKERS: usize = 1024;
+
+/// A process-wide count of live workers and its ceiling.
+struct Pool {
+    live: AtomicUsize,
+    max: AtomicUsize,
+}
+
+static HOST_POOL: Pool = Pool {
+    live: AtomicUsize::new(0),
+    max: AtomicUsize::new(MAX_WORKERS),
+};
+static HTTP_POOL: Pool = Pool {
+    live: AtomicUsize::new(0),
+    max: AtomicUsize::new(MAX_HTTP_WORKERS),
+};
+
+/// One worker's place in a pool, given back when the worker ends, even if it panics.
+struct Slot(&'static Pool);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.live.fetch_sub(1, Relaxed);
+    }
+}
+
+impl Pool {
+    /// `n` places at once, or none if they would take the pool past its ceiling.
+    fn take(&'static self, n: usize) -> Option<Vec<Slot>> {
+        let had = self.live.fetch_add(n, Relaxed);
+        if had + n > self.max.load(Relaxed) {
+            self.live.fetch_sub(n, Relaxed);
+            return None;
+        }
+        Some((0..n).map(|_| Slot(self)).collect())
+    }
+}
+
+/// Lower the HTTP worker ceiling, so a test can reach it.
+#[cfg(feature = "test-hooks")]
+pub fn set_http_worker_ceiling(n: usize) {
+    HTTP_POOL.max.store(n, Relaxed);
+}
+
+/// HTTP workers alive now, process-wide.
+#[cfg(feature = "test-hooks")]
+pub fn http_workers() -> usize {
+    HTTP_POOL.live.load(Relaxed)
+}
+
+/// The workers one run has alive; `State::within_all` keeps it at most `BATCH_MAX`.
+#[derive(Default)]
+struct RunWorkers {
+    live: Mutex<usize>,
+    freed: std::sync::Condvar,
+}
+
+/// One worker's place in its run, given back when the worker ends.
+struct RunSlot(Arc<RunWorkers>);
+
+impl Drop for RunSlot {
+    fn drop(&mut self) {
+        *self.0.live.lock().unwrap_or_else(PoisonError::into_inner) -= 1;
+        self.0.freed.notify_all();
+    }
+}
+
 /// The longest wait for one request; the run deadline can cut it shorter.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -355,19 +433,19 @@ impl ureq::unversioned::resolver::Resolver for Pinned {
             return Err(ureq::Error::HostNotFound);
         }
         let mut pinned = o.pinned.lock().unwrap_or_else(PoisonError::into_inner);
-        let addrs = match &*pinned {
-            Some(addrs) => addrs,
-            None => {
-                o.lookups.fetch_add(1, Relaxed);
-                let found = ureq::unversioned::resolver::DefaultResolver::default().resolve(uri, config, timeout)?;
-                let kept: Vec<_> = found
-                    .iter()
-                    .copied()
-                    .filter(|a| o.any_addr || is_public(a.ip()))
-                    .collect();
-                pinned.insert(kept) // an all-refused answer is pinned too
-            }
-        };
+        if pinned.is_none() {
+            o.lookups.fetch_add(1, Relaxed);
+            let found = ureq::unversioned::resolver::DefaultResolver::default().resolve(uri, config, timeout);
+            let kept = (found.iter().flat_map(|f| f.iter()))
+                .copied()
+                .filter(|a| o.any_addr || is_public(a.ip()))
+                .collect();
+            // An all-refused answer is pinned too, and a failed lookup pins no address (its first
+            // request gets the error): a run looks the name up once whatever happens.
+            *pinned = Some(kept);
+            found?;
+        }
+        let addrs = pinned.as_deref().unwrap_or_default();
         if addrs.is_empty() {
             return Err(ureq::Error::HostNotFound);
         }
@@ -404,6 +482,8 @@ struct Performed {
     hops: usize,
     read: usize,
     ms: f64,
+    /// Not sent: the process had `MAX_HTTP_WORKERS` HTTP workers alive.
+    busy: bool,
     result: std::result::Result<Inbound, kio::caps::net::HttpErr>,
 }
 
@@ -470,6 +550,7 @@ fn perform(origin: &Origin, req: &Outbound, deadline: Instant, budget: &AtomicI6
         hops: 0,
         read: 0,
         ms: 0.0,
+        busy: false,
         result: Err(HttpErr::Denied),
     };
     let mut url = req.url.clone();
@@ -582,6 +663,8 @@ pub struct State {
     audit_extra: String,
     /// `send_all` calls so far: the next batch's id in the audit log.
     batches: u64,
+    /// This run's live workers.
+    workers: Arc<RunWorkers>,
     /// Compiled code: the third value of the next runtime error's message (compiled.rs).
     trap_c: i64,
     /// `calls` when `Outgoing.send` handed over the response; the trailer counts the calls after.
@@ -620,6 +703,7 @@ impl State {
             audit_msg: String::new(),
             audit_extra: String::new(),
             batches: 0,
+            workers: Arc::default(),
             trap_c: 0,
             sent_at: None,
             table: ResourceTable::new(),
@@ -905,38 +989,54 @@ impl State {
     }
 
     /// Run `work` on a detached thread and wait for it until the run's deadline; past it, stop the
-    /// run. The thread finishes in the background and its result is dropped.
+    /// run. The thread finishes in the background and its result is dropped. Past `MAX_WORKERS`
+    /// such threads alive in the process, the run stops as a timeout.
     fn within<T: Send + 'static>(&mut self, work: impl FnOnce() -> T + Send + 'static) -> Result<T> {
-        let mut done = self.within_all(vec![Box::new(work)])?;
+        let Some(slots) = HOST_POOL.take(1) else {
+            return Err(self.stop_timed_out());
+        };
+        let mut done = self.within_all(vec![Box::new(work)], slots)?;
         Ok(done.pop().expect("one worker, one result"))
     }
 
-    /// Run each of `works` on its own worker thread at once and wait for all of them, in order,
-    /// until the run's deadline; past it, the run stops as `within`'s does.
-    fn within_all<T: Send + 'static>(&mut self, works: Vec<Box<dyn FnOnce() -> T + Send>>) -> Result<Vec<T>> {
-        // Timed-out workers linger; past MAX_WORKERS live ones, refuse as a timeout.
-        static LIVE: AtomicUsize = AtomicUsize::new(0);
-        let timeout = |s: &mut Self| {
-            s.timed_out = true;
-            wasmtime::Error::msg("host call timed out")
-        };
-        // Releases the slot when the worker ends, even if `work` panics.
-        struct Slot;
-        impl Drop for Slot {
-            fn drop(&mut self) {
-                LIVE.fetch_sub(1, Relaxed);
-            }
-        }
+    /// The run stops: a host call reached the deadline.
+    fn stop_timed_out(&mut self) -> wasmtime::Error {
+        self.timed_out = true;
+        wasmtime::Error::msg("host call timed out")
+    }
+
+    /// Run each of `works` on its own worker thread, holding one of `slots` (its place in a
+    /// process-wide pool), and wait for all of them, in order, until the run's deadline; past it,
+    /// the run stops as `within`'s does. A run has at most `BATCH_MAX` workers alive: past that
+    /// this waits for its own to end, until the deadline.
+    fn within_all<T: Send + 'static>(
+        &mut self,
+        works: Vec<Box<dyn FnOnce() -> T + Send>>,
+        slots: Vec<Slot>,
+    ) -> Result<Vec<T>> {
         let n = works.len();
-        let (tx, rx) = std::sync::mpsc::channel();
-        for (i, work) in works.into_iter().enumerate() {
-            if LIVE.fetch_add(1, Relaxed) >= MAX_WORKERS {
-                LIVE.fetch_sub(1, Relaxed);
-                return Err(timeout(self));
+        assert_eq!(slots.len(), n, "a pool slot per worker");
+        let run = self.workers.clone();
+        let mut live = run.live.lock().unwrap_or_else(PoisonError::into_inner);
+        while *live + n > BATCH_MAX {
+            let left = self.deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                drop(live);
+                return Err(self.stop_timed_out());
             }
-            let tx = tx.clone();
+            live = run
+                .freed
+                .wait_timeout(live, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        *live += n;
+        drop(live);
+        let (tx, rx) = std::sync::mpsc::channel();
+        for ((i, work), slot) in works.into_iter().enumerate().zip(slots) {
+            let (tx, held) = (tx.clone(), RunSlot(run.clone()));
             std::thread::spawn(move || {
-                let _slot = Slot;
+                let _slots = (slot, held);
                 let _ = tx.send((i, work()));
             });
         }
@@ -945,7 +1045,7 @@ impl State {
             let (i, v) = rx
                 .recv_timeout(self.deadline.saturating_duration_since(Instant::now()))
                 .map_err(|e| match e {
-                    RecvTimeoutError::Timeout => timeout(self),
+                    RecvTimeoutError::Timeout => self.stop_timed_out(),
                     RecvTimeoutError::Disconnected => wasmtime::Error::msg("host call failed"),
                 })?;
             done[i] = Some(v);
@@ -1229,8 +1329,23 @@ use kio::caps::net::{HttpRequest, HttpResponse};
 /// The audit fields a finished request adds: its status if it got one, and the body bytes read.
 fn received(done: &Performed) -> String {
     match &done.result {
+        _ if done.busy => BUSY.into(),
         Ok(r) => format!(r#","status":{},"received":{}"#, r.status, done.read),
         Err(_) => format!(r#","received":{}"#, done.read),
+    }
+}
+
+/// The audit field of a request not sent because the process had `MAX_HTTP_WORKERS` alive.
+const BUSY: &str = r#","busy":true"#;
+
+/// A request not sent: no HTTP worker was free.
+fn busy() -> Performed {
+    Performed {
+        hops: 0,
+        read: 0,
+        ms: 0.0,
+        busy: true,
+        result: Err(kio::caps::net::HttpErr::Timeout),
     }
 }
 
@@ -1265,16 +1380,25 @@ impl State {
             as_get: true,
         };
         let done = self.finish(&origin, req)?;
+        if done.busy {
+            self.audit_extra = BUSY.into();
+        }
         Ok(done.result.map(|r| r.body))
     }
 
-    /// Do `req` on a worker, then count its hops and charge what it read.
+    /// Do `req` on an HTTP worker, then count its hops and charge what it read; `busy` if the
+    /// process has no HTTP worker free.
     fn finish(&mut self, origin: &Origin, req: Outbound) -> Result<Performed> {
+        let Some(slots) = HTTP_POOL.take(1) else {
+            return Ok(busy());
+        };
         let (o, deadline) = (origin.clone(), self.deadline);
         let budget = Arc::new(AtomicI64::new(self.io_left()));
         let b = budget.clone();
+        let work: Box<dyn FnOnce() -> Performed + Send> = Box::new(move || perform(&o, &req, deadline, &b));
         // A worker the deadline left behind stops reading at its next chunk.
-        let done = (self.within(move || perform(&o, &req, deadline, &b))).inspect_err(|_| budget.store(0, Relaxed))?;
+        let mut done = (self.within_all(vec![work], slots)).inspect_err(|_| budget.store(0, Relaxed))?;
+        let done = done.pop().expect("one worker, one result");
         self.settle(&done)?;
         Ok(done)
     }
@@ -1411,8 +1535,12 @@ impl State {
             checked.push((r.path, sent, extra, refused));
         }
         budget.store(self.io_left(), Relaxed);
-        // Workers the deadline left behind stop reading at their next chunk.
-        let done = (self.within_all(works)).inspect_err(|_| budget.store(0, Relaxed))?;
+        // The batch is sent whole or, with too few HTTP workers free in the process, not at all.
+        let done = match HTTP_POOL.take(works.len()) {
+            None => works.iter().map(|_| busy()).collect(),
+            // Workers the deadline left behind stop reading at their next chunk.
+            Some(slots) => (self.within_all(works, slots)).inspect_err(|_| budget.store(0, Relaxed))?,
+        };
         let mut done = done.into_iter();
         let mut results = Vec::with_capacity(n);
         for (path, sent, mut extra, refused) in checked {
@@ -2168,7 +2296,7 @@ fn push_grants(
     }
     for (name, origin) in https {
         let target = Some(origin.target());
-        add(name, "Http", s.table.push(origin)?.rep(), target);
+        add(name, "Http", s.table.push(origin.for_run())?.rep(), target);
     }
     for (name, kind, rep) in handles.each() {
         add(name, kind, rep, None);
@@ -2282,5 +2410,36 @@ impl Response {
             headers: vec![],
             body: vec![],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A run with `BATCH_MAX` workers alive waits for one of them to end before it starts
+    /// another, and stops as a timeout if none ends before its deadline.
+    #[test]
+    fn a_run_past_its_worker_cap_waits() {
+        let limits = Limits {
+            timeout_secs: 1,
+            ..Limits::default()
+        };
+        let mut s = State::limited(&limits);
+        *s.workers.live.lock().unwrap() = BATCH_MAX;
+        let held = RunSlot(s.workers.clone());
+        let freed = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(held);
+        });
+        let start = Instant::now();
+        let one = |s: &mut State| s.within_all(vec![Box::new(|| 7)], HOST_POOL.take(1).unwrap());
+        assert_eq!(one(&mut s).unwrap(), [7]);
+        assert!(start.elapsed() >= Duration::from_millis(150), "{:?}", start.elapsed());
+        freed.join().unwrap();
+        *s.workers.live.lock().unwrap() = BATCH_MAX;
+        assert!(one(&mut s).is_err());
+        assert!(s.timed_out);
+        assert!(start.elapsed() >= Duration::from_millis(900));
     }
 }

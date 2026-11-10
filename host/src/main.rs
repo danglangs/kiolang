@@ -218,9 +218,6 @@ fn run(path: &str, flags: &[&str]) -> i32 {
             Err(e) => return fail(format!("--dir {name}={dir}: {e}")),
         }
     }
-    if listen.is_some() && !https.is_empty() {
-        return fail("--http with --listen\n  hint: Http grants under --listen are not supported yet".into());
-    }
     for (i, (name, list)) in http_methods.iter().enumerate() {
         if http_methods[..i].iter().any(|(n, _)| n == name) {
             return fail(format!(
@@ -373,7 +370,7 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     }
     if let Some(addr) = listen {
         let audit = audit.map(|path| (path, dir_paths));
-        return serve(files, dirs, kvs, sources, addr, limits, ws_origins, hosts, audit);
+        return serve(files, dirs, https, kvs, sources, addr, limits, ws_origins, hosts, audit);
     }
     let mut kio = match Kio::new(limits) {
         Ok(k) => k,
@@ -421,6 +418,7 @@ fn run(path: &str, flags: &[&str]) -> i32 {
 fn serve(
     files: Vec<(String, String)>,
     dirs: Vec<(String, cap_std::fs::Dir)>,
+    https: Vec<(String, kio_host::Origin)>,
     kvs: kio_host::KvGrants,
     sources: Sources,
     addr: std::net::SocketAddr,
@@ -434,6 +432,7 @@ fn serve(
         Ok(Err(diags)) => return print_diags(&files, diags),
         Ok(Ok(s)) => s,
     };
+    server.grant_https(https);
     server.grant_kvs(kvs);
     server.grant_sources(sources);
     if let Some((path, dir_paths)) = audit {

@@ -1,4 +1,6 @@
 use kio_host::listen::ListenLimits;
+
+mod upstream;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
@@ -409,22 +411,135 @@ fn connection_is_closed_at_the_lifetime_cap() {
     assert!(start.elapsed() < limits::ms(2000));
 }
 
-/// W11b: `--http` conflicts with `--listen`: exit 2 and a hint.
+/// H19: a handler that calls an upstream API: `/batch..` sends 8 GETs at once and answers with
+/// their bodies in order; any other target is POSTed upstream with the request's body.
+mod http {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    const APP: &str = r#"fn main(req: Incoming, res: Outgoing, public: Dir, up: Http) -> Result<(), WebErr> {
+        let t = req.target();
+        if t.starts_with("/batch") {
+            let mut rs: List<HttpRequest> = [];
+            for i in 0..8 {
+                rs.push(HttpRequest { method: "GET", path: t + "/" + i.to_str(), headers: [], body: "".to_bytes(), timeout_ms: 0 });
+            }
+            let mut out = "";
+            for r in up.send_all(rs) {
+                out = out + match r { Ok(r) => r.body.to_str(), Err(_) => "!" } + ";";
+            }
+            return res.send(200, [], [], out.to_bytes());
+        }
+        match up.send("POST", t, ["x-key: k"], req.body()) {
+            Ok(r) => res.send(r.status, [], [], r.body),
+            Err(_) => res.send(502, [], [], "upstream failed".to_bytes()),
+        }
+    }"#;
+
+    /// Serve `APP` granted `up` with POST, and `extra` flags; returns the server and its temp dir.
+    pub fn start(up: &crate::upstream::Upstream, extra: &[&str]) -> (Kio, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("app.kio");
+        std::fs::write(&app, APP).unwrap();
+        let public = dir.path().join("public");
+        std::fs::create_dir(&public).unwrap();
+        let grant = format!("up={}", up.grant);
+        let mut flags = vec!["--http", grant.as_str(), "--http-methods", "up=POST"];
+        flags.extend_from_slice(extra);
+        (start_with(app.to_str().unwrap(), &public, &flags), dir)
+    }
+
+    pub fn timed(port: u16, target: &str) -> (u16, Vec<u8>, Duration) {
+        let start = Instant::now();
+        let (status, body) = send(port, "GET", target, b"");
+        (status, body, start.elapsed())
+    }
+}
+
+/// H19: each request calls the granted API with its own body; the audit log has the call on the
+/// request's line, with H16's fields, and the grant in the header.
 #[test]
-fn http_is_refused_with_listen() {
-    let out = Command::new(env!("CARGO_BIN_EXE_kio"))
-        .args([
-            "run",
-            "../examples/serve/app.kio",
-            "--http",
-            "x=http://127.0.0.1:1",
-            "--listen",
-            "127.0.0.1:0",
-        ])
-        .output()
+fn a_handler_calls_an_api_per_request() {
+    let up = upstream::start();
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    let (kio, _app) = http::start(&up, &["--audit", log.to_str().unwrap()]);
+    for i in 0..3 {
+        let body = format!("hi {i}");
+        let (status, got) = send(kio.port, "POST", &format!("/api/{i}"), body.as_bytes());
+        assert_eq!(
+            (status, String::from_utf8(got).unwrap()),
+            (200, format!("POST /api/{i} hi {i}"))
+        );
+    }
+    assert_eq!(up.seen.lock().unwrap().len(), 3);
+    let text = std::fs::read_to_string(&log).unwrap();
+    let lines: Vec<serde_json::Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    let up_grant = (lines[0]["grants"].as_array().unwrap().iter())
+        .find(|g| g["name"] == "up")
         .unwrap();
-    assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("hint: Http grants under --listen are not supported yet"));
+    assert_eq!(up_grant["kind"], "Http");
+    assert_eq!(up_grant["target"], format!("{} methods=GET,POST", up.grant));
+    for req in 1..=3u64 {
+        let call = (lines.iter())
+            .find(|l| l["req"] == req && l["kind"] == "Http")
+            .unwrap_or_else(|| panic!("no Http call for req {req}: {text}"));
+        let i = req - 1;
+        assert_eq!(call["method"], "send");
+        assert_eq!(call["http"], "POST");
+        assert_eq!(call["arg"], format!("/api/{i}"));
+        assert_eq!(call["headers"], serde_json::json!(["x-key"]));
+        assert_eq!((call["sent"].as_u64(), call["status"].as_u64()), (Some(4), Some(200)));
+        assert_eq!(
+            call["received"].as_u64(),
+            Some(format!("POST /api/{i} hi {i}").len() as u64)
+        );
+        assert_eq!(call["result"], "ok");
+    }
+}
+
+/// H19: 50 requests at once, each with a `send_all` of 8, all answered in order.
+#[test]
+fn fifty_concurrent_requests_each_send_eight() {
+    let up = upstream::start();
+    let (kio, _app) = http::start(&up, &[]);
+    let port = kio.port;
+    let threads: Vec<_> = (0..50)
+        .map(|i| std::thread::spawn(move || send(port, "GET", &format!("/batch{i}"), b"")))
+        .collect();
+    let mut ok = 0;
+    for (i, t) in threads.into_iter().enumerate() {
+        match t.join().unwrap() {
+            (200, body) => {
+                let want: String = (0..8).map(|j| format!("GET /batch{i}/{j} ;")).collect();
+                assert_eq!(String::from_utf8(body).unwrap(), want);
+                ok += 1;
+            }
+            // Under load a request may wait past the queue wait and be told 503.
+            (status, _) => assert_eq!(status, 503),
+        }
+    }
+    assert!(ok >= 45, "only {ok} of 50 succeeded");
+    assert_eq!(up.seen.lock().unwrap().len(), ok * 8);
+}
+
+/// H19: a request whose upstream never answers holds one worker until its deadline; others are
+/// answered meanwhile.
+#[test]
+fn a_hanging_upstream_does_not_starve_other_requests() {
+    let up = upstream::start();
+    let (kio, _app) = http::start(&up, &["--timeout", "2"]);
+    let port = kio.port;
+    let hung = std::thread::spawn(move || http::timed(port, "/hang"));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    for i in 0..20 {
+        let (status, body, took) = http::timed(port, &format!("/ok{i}"));
+        assert_eq!((status, body), (200, format!("POST /ok{i} ").into_bytes()));
+        assert!(took < std::time::Duration::from_secs(1), "{took:?}");
+    }
+    let (status, _, took) = hung.join().unwrap();
+    assert!(matches!(status, 500 | 502), "{status}");
+    assert!(took >= std::time::Duration::from_millis(1500), "{took:?}");
 }
 
 /// H12: `--audit` with `--listen` writes one log: the header once, then each request's calls and

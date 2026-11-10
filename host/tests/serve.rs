@@ -90,3 +90,28 @@ fn program_hash_is_sha256_of_names_and_sources() {
         "file boundaries count"
     );
 }
+
+mod upstream;
+
+/// H19: every request resolves the granted host for itself, once, however many calls it makes:
+/// no request connects to an address another request's lookup returned.
+#[test]
+fn http_dns_is_pinned_per_request() {
+    let up = upstream::start();
+    let src = r#"fn main(req: Incoming, res: Outgoing, up: Http) -> Result<(), WebErr> {
+        let a = match up.get("/a") { Ok(b) => b.to_str(), Err(_) => "failed " };
+        let b = match up.get("/b") { Ok(b) => b.to_str(), Err(_) => "failed " };
+        res.send(200, [], [], (a + b).to_bytes())
+    }"#;
+    let mut origin = kio_host::Origin::parse(&up.grant.replace("127.0.0.1", "localhost")).unwrap();
+    origin.allow_private_addrs();
+    let mut server = Server::new(vec![("main".into(), src.into())], Limits::web())
+        .unwrap()
+        .unwrap();
+    server.grant_https(vec![("up".into(), origin.clone())]);
+    for n in 1..=3 {
+        let r = server.handle(get("/"), vec![]).unwrap();
+        assert_eq!((r.status, r.body.as_slice()), (200, &b"GET /a GET /b "[..]));
+        assert_eq!(origin.lookups(), n);
+    }
+}
