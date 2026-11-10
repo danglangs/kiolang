@@ -1120,6 +1120,61 @@ fn http_send_all_limits_and_audit() {
     );
 }
 
+/// H16b review: a batch's workers read within one budget, the run's remaining `--io`, so eight
+/// 10 MB responses with 1 MB left hold about 1 MB between them (each read its 10 MB before) and
+/// the run stops on `--io` as it did; within the budget, a response over 10 MB is `TooLarge` at
+/// its position and the others are whole.
+#[test]
+fn http_send_all_reads_within_the_io_budget() {
+    let g = serve();
+    let batch = |paths: &[&str]| {
+        let reqs: Vec<String> = paths
+            .iter()
+            .map(|p| {
+                format!(
+                    r#"HttpRequest {{ method: "GET", path: "{p}", headers: [], body: "".to_bytes(), timeout_ms: 0 }}"#
+                )
+            })
+            .collect();
+        format!(
+            "fn main(h: Http) -> List<Result<Int, HttpErr>> {{ h.send_all([{}]).map(|r| r.map(|r| r.body.len())) }}",
+            reqs.join(", ")
+        )
+    };
+    let origin = granted(&g, "");
+    let limits = Limits {
+        io: 1 << 20,
+        ..Limits::default()
+    };
+    let mut kio = Kio::new(limits).unwrap();
+    let r = kio.run_with(&batch(&["/big"; 8]), vec![], vec![("h".into(), origin.clone())]);
+    assert_eq!(
+        kio.explain(&r.unwrap_err()).unwrap(),
+        "too much I/O (limit 1 MB; raise it with --io)"
+    );
+    let read = origin.body_bytes_read();
+    assert!(
+        read > 1 << 20 && read <= (1 << 20) + 8 * (64 << 10),
+        "{read} bytes read"
+    );
+    let origin = granted(&g, "");
+    let mut kio = Kio::new(Limits::default()).unwrap();
+    let out = kio
+        .run_with(
+            &batch(&["/ok", "/big", "/ok"]),
+            vec![],
+            vec![("h".into(), origin.clone())],
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(out.value, "[Ok(5), Err(HttpErr::TooLarge), Ok(5)]");
+    let read = origin.body_bytes_read();
+    assert!(
+        read > 10 << 20 && read <= (10 << 20) + (64 << 10) + 10,
+        "{read} bytes read"
+    );
+}
+
 /// H16: `--http-methods` syntax.
 #[test]
 fn allow_methods() {

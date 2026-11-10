@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -124,6 +124,8 @@ pub struct Origin {
     pinned: Arc<Mutex<Option<Vec<SocketAddr>>>>,
     /// Real lookups made (at most one per run).
     lookups: Arc<AtomicU32>,
+    /// Response body bytes read through this grant, cut-off reads included.
+    read: Arc<AtomicU64>,
     /// Non-public addresses are allowed: the grant is an IP literal.
     any_addr: bool,
     /// The methods `--http-methods` added; GET is always allowed.
@@ -173,6 +175,7 @@ impl Origin {
             port,
             pinned: Arc::default(),
             lookups: Arc::default(),
+            read: Arc::default(),
             any_addr,
             methods: Vec::new(),
         })
@@ -226,6 +229,12 @@ impl Origin {
         self.lookups.load(Relaxed)
     }
 
+    /// Response body bytes read through this grant so far, by every worker.
+    #[cfg(feature = "test-hooks")]
+    pub fn body_bytes_read(&self) -> u64 {
+        self.read.load(Relaxed)
+    }
+
     /// Resolve `location` against `current`; `None` unless the result is exactly this origin
     /// (scheme, host and port, no credentials), so a redirect can never leave the grant.
     fn follow(&self, current: &str, location: &str) -> Option<String> {
@@ -263,9 +272,10 @@ impl Origin {
     }
 }
 
-/// Most detached host-call workers alive at once: room for a full `send_all` batch (`BATCH_MAX`)
-/// beside the timed-out workers that linger.
-const MAX_WORKERS: usize = 256;
+/// Most detached host-call workers alive at once, process-wide: room for a full `send_all` batch
+/// (`BATCH_MAX`) beside the timed-out workers that linger. Past it every host call is refused as
+/// a timeout until a worker ends.
+pub const MAX_WORKERS: usize = 256;
 /// The longest wait for one request; the run deadline can cut it shorter.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -279,6 +289,8 @@ const HEADERS_MAX: usize = 64;
 const HEADER_MAX: usize = 8 << 10;
 /// The most requests in one `send_all`; more is `invalid` for every one, and nothing is sent.
 const BATCH_MAX: usize = 64;
+/// Response bytes a worker reads at a time, each chunk taken from the run's I/O budget.
+const CHUNK: usize = 64 << 10;
 /// Headers the host sets or that frame the connection: a program naming one is `invalid`, with
 /// any `proxy-*`.
 const RESERVED_HEADERS: [&str; 8] = [
@@ -423,11 +435,32 @@ fn parse_headers(headers: &[String]) -> Option<Vec<(String, String)>> {
     Some(out)
 }
 
+/// Read a response body `CHUNK` bytes at a time into `body` until it ends (`Ok(true)`), or it
+/// passes `READ_CAP` or a chunk takes `budget` below zero (`Ok(false)`: too large), or a read
+/// fails. `budget` is what the run may still read; a batch's workers share one, so together they
+/// hold little more than it however many respond at once.
+fn read_body(mut r: impl Read, budget: &AtomicI64, body: &mut Vec<u8>) -> io::Result<bool> {
+    let mut buf = vec![0u8; CHUNK];
+    loop {
+        let n = match r.read(&mut buf) {
+            Ok(0) => return Ok(true),
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        body.extend_from_slice(&buf[..n]);
+        let had = budget.fetch_sub(n as i64, Relaxed);
+        if had < n as i64 || body.len() as u64 > READ_CAP {
+            return Ok(false);
+        }
+    }
+}
+
 /// Do `req` with no proxy, connecting only to `origin`'s pinned addresses, following a redirect
 /// within the origin (GET and HEAD only, `MAX_REDIRECTS` at most). Each hop is bounded by what
 /// is left of `req.timeout` and of `deadline`; the body is read through the same cap as
-/// `Dir.read`.
-fn perform(origin: &Origin, req: &Outbound, deadline: Instant) -> Performed {
+/// `Dir.read` and within `budget` (`read_body`).
+fn perform(origin: &Origin, req: &Outbound, deadline: Instant, budget: &AtomicI64) -> Performed {
     use kio::caps::net::HttpErr;
     let start = Instant::now();
     let until = deadline.min(start + req.timeout);
@@ -494,11 +527,12 @@ fn perform(origin: &Origin, req: &Outbound, deadline: Instant) -> Performed {
             .map(|(n, v)| format!("{}: {}", n.as_str(), String::from_utf8_lossy(v.as_bytes())))
             .collect();
         let mut body = Vec::new();
-        let read = resp.into_body().into_reader().take(READ_CAP + 1).read_to_end(&mut body);
+        let read = read_body(resp.into_body().into_reader(), budget, &mut body);
         done.read = body.len();
+        origin.read.fetch_add(body.len() as u64, Relaxed);
         break match read {
-            Ok(_) if body.len() as u64 > READ_CAP => Err(HttpErr::TooLarge),
-            Ok(_) => Ok(Inbound { status, headers, body }),
+            Ok(true) => Ok(Inbound { status, headers, body }),
+            Ok(false) => Err(HttpErr::TooLarge),
             Err(e) if timed_out(&e) => Err(HttpErr::Timeout),
             Err(_) => Err(HttpErr::Denied),
         };
@@ -1237,9 +1271,18 @@ impl State {
     /// Do `req` on a worker, then count its hops and charge what it read.
     fn finish(&mut self, origin: &Origin, req: Outbound) -> Result<Performed> {
         let (o, deadline) = (origin.clone(), self.deadline);
-        let done = self.within(move || perform(&o, &req, deadline))?;
+        let budget = Arc::new(AtomicI64::new(self.io_left()));
+        let b = budget.clone();
+        // A worker the deadline left behind stops reading at its next chunk.
+        let done = (self.within(move || perform(&o, &req, deadline, &b))).inspect_err(|_| budget.store(0, Relaxed))?;
         self.settle(&done)?;
         Ok(done)
+    }
+
+    /// Bytes the run may still read or write before `--io` stops it: a response's `read_body`
+    /// budget, so no worker holds what the run could never be charged for.
+    fn io_left(&self) -> i64 {
+        i64::try_from(self.io_limit.saturating_sub(self.io)).unwrap_or(i64::MAX)
     }
 
     /// Count each redirect a request followed as a call, and charge the body read, even when
@@ -1345,6 +1388,8 @@ impl State {
             self.count_call()?;
         }
         let mut works: Vec<Box<dyn FnOnce() -> Performed + Send>> = Vec::new();
+        // One read budget for the batch's workers, set once every body is charged.
+        let budget = Arc::new(AtomicI64::new(0));
         // Per request: its path, body bytes and audit fields, and the error that refused it, if
         // any (else its worker's result is the next of `done`).
         let mut checked = Vec::with_capacity(n);
@@ -1358,14 +1403,17 @@ impl State {
             let refused = match self.prepare(&origin, &r.method, &r.path, &r.headers, r.body, timeout, &mut extra)? {
                 Err(e) => Some(e),
                 Ok(req) => {
-                    let (o, deadline) = (origin.clone(), self.deadline);
-                    works.push(Box::new(move || perform(&o, &req, deadline)));
+                    let (o, deadline, budget) = (origin.clone(), self.deadline, budget.clone());
+                    works.push(Box::new(move || perform(&o, &req, deadline, &budget)));
                     None
                 }
             };
             checked.push((r.path, sent, extra, refused));
         }
-        let mut done = self.within_all(works)?.into_iter();
+        budget.store(self.io_left(), Relaxed);
+        // Workers the deadline left behind stop reading at their next chunk.
+        let done = (self.within_all(works)).inspect_err(|_| budget.store(0, Relaxed))?;
+        let mut done = done.into_iter();
         let mut results = Vec::with_capacity(n);
         for (path, sent, mut extra, refused) in checked {
             let (bytes, ms, result) = match refused {

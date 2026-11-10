@@ -95,15 +95,21 @@ fn hundred_concurrent_requests_succeed() {
 
 /// Requests on one keep-alive connection, in turn; returns each status.
 fn send_keep_alive(port: u16, paths: &[String]) -> Vec<u16> {
+    send_keep_alive_timed(port, paths).into_iter().map(|(s, _)| s).collect()
+}
+
+/// `send_keep_alive` with how long each request took to be answered.
+fn send_keep_alive_timed(port: u16, paths: &[String]) -> Vec<(u16, std::time::Duration)> {
     let s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     let mut r = BufReader::new(s.try_clone().unwrap());
     let mut w = s;
     let mut statuses = Vec::new();
     for path in paths {
+        let start = std::time::Instant::now();
         write!(w, "GET {path} HTTP/1.1\r\nhost: localhost\r\n\r\n").unwrap();
         let (mut line, mut len) = (String::new(), 0);
         r.read_line(&mut line).unwrap();
-        statuses.push(line.split(' ').nth(1).unwrap().parse().unwrap());
+        statuses.push((line.split(' ').nth(1).unwrap().parse().unwrap(), start.elapsed()));
         loop {
             line.clear();
             r.read_line(&mut line).unwrap();
@@ -831,6 +837,29 @@ fn keep_alive_does_not_wait_for_background_work() {
     let paths: Vec<String> = (0..200).map(|_| "/count".into()).collect();
     assert!(send_keep_alive(kio.port, &paths).iter().all(|&s| s == 200));
     after_send::hits_reach(kio.port, "200");
+}
+
+/// H18 review: one connection has at most two runs alive. Three `/slow` in turn on a keep-alive
+/// connection: two are answered at once and hold their workers to the 2 s deadline, the third
+/// waits for the first to end; a second client finds the third worker free meanwhile.
+#[test]
+fn a_connection_holds_at_most_two_runs() {
+    let port = after_send::serve_in_process(3);
+    let start = std::time::Instant::now();
+    let slow: Vec<String> = vec!["/slow".into(); 3];
+    let client = std::thread::spawn(move || send_keep_alive_timed(port, &slow));
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(send(port, "GET", "/", b""), (200, b"ok".to_vec()));
+    assert!(
+        start.elapsed() < std::time::Duration::from_millis(1000),
+        "{:?}",
+        start.elapsed()
+    );
+    let timed = client.join().unwrap();
+    assert!(timed.iter().all(|(s, _)| *s == 200), "{timed:?}");
+    assert!(timed[0].1 < std::time::Duration::from_millis(500), "{timed:?}");
+    assert!(timed[1].1 < std::time::Duration::from_millis(500), "{timed:?}");
+    assert!(timed[2].1 > std::time::Duration::from_millis(1200), "{timed:?}");
 }
 
 /// Background work holds its worker: with the only worker busy after `send`, the next request

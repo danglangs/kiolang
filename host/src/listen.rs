@@ -32,6 +32,11 @@ const QUEUE_WAIT: Duration = Duration::from_secs(1);
 const MAX_QUEUED: usize = 100;
 /// Open connections, WebSockets included; past this the accept loop drops new ones.
 const MAX_CONNECTIONS: usize = 1000;
+/// Runs one connection may have alive at once: since `send` answers before `main` ends (H18), a
+/// keep-alive client could otherwise hold a worker per answered request still working. The next
+/// request on the connection waits for a slot. Two, so that the normal case, where a run ends as
+/// its response is read, never waits on the last run's teardown.
+const MAX_ALIVE: usize = 2;
 /// Time to receive a request's headers (hyper's default is 30 s).
 const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 /// Most headers in one request.
@@ -184,13 +189,15 @@ pub fn serve_with(
                         let _ = tokio::time::timeout(limits.lifetime, async {
                         // Requests in flight, so that only a connection with none is idle.
                         let (busy, mut changes) = watch::channel(0usize);
+                        let alive = Arc::new(Semaphore::new(MAX_ALIVE));
                         let service = service_fn(move |req| {
                             let busy = busy.clone();
                             let ctx = ctx.clone();
                             let slot = slot.clone();
+                            let alive = alive.clone();
                             async move {
                                 busy.send_modify(|n| *n += 1);
-                                let response = handle(ctx, slot, req).await;
+                                let response = handle(ctx, slot, alive, req).await;
                                 busy.send_modify(|n| *n -= 1);
                                 response
                             }
@@ -226,6 +233,7 @@ pub fn serve_with(
 async fn handle(
     ctx: Arc<Ctx>,
     slot: Arc<OwnedSemaphorePermit>,
+    alive: Arc<Semaphore>,
     req: hyper::Request<Incoming>,
 ) -> Result<hyper::Response<Full<Bytes>>, Infallible> {
     if ctx.check_host && !host_allowed(req.headers(), &ctx.hosts) {
@@ -239,7 +247,7 @@ async fn handle(
     }
     Ok(match read_request(req, ctx.body_deadline).await {
         Err(status) => reply(status),
-        Ok(request) => match run(ctx, request).await {
+        Ok(request) => match run(ctx, alive, request).await {
             Ok(r) => respond(r),
             Err(status) => reply(status),
         },
@@ -276,13 +284,18 @@ async fn read_request(req: hyper::Request<Incoming>, deadline: Duration) -> Resu
     })
 }
 
-/// Run the guest on a blocking thread, once a worker permit is free, and return its response as
-/// soon as it sends one (H18). The run keeps its thread and permit until `main` ends.
-async fn run(ctx: Arc<Ctx>, request: Request) -> Result<Response, StatusCode> {
-    let (deliver, mut response) = tokio::sync::oneshot::channel();
-    let work = on_worker(ctx, move |server, dirs| server.handle_sending(request, dirs, deliver));
-    tokio::pin!(work);
+/// Run the guest on a blocking thread, once one of the connection's `alive` slots and a worker
+/// permit are free, and return its response as soon as it sends one (H18). The run keeps its
+/// thread, permit and slot until `main` ends.
+async fn run(ctx: Arc<Ctx>, alive: Arc<Semaphore>, request: Request) -> Result<Response, StatusCode> {
     let busy = StatusCode::SERVICE_UNAVAILABLE;
+    let slot = alive.acquire_owned().await.map_err(|_| busy)?;
+    let (deliver, mut response) = tokio::sync::oneshot::channel();
+    let work = on_worker(ctx, move |server, dirs| {
+        let _slot = slot;
+        server.handle_sending(request, dirs, deliver)
+    });
+    tokio::pin!(work);
     // Dropping `work` once the response is in leaves the blocking task running. A sender
     // dropped unsent means the run never started: `work` is ending with the 503 and its log line.
     tokio::select! {

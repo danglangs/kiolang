@@ -1,9 +1,9 @@
 //! H5/W8: detached host-call workers are capped. Own test binary: the cap is process-wide.
 
-use kio_host::{open_dir, Kio, Limits};
+use kio_host::{open_dir, Kio, Limits, MAX_WORKERS};
 
-/// 64 reads blocked (the `pipe` test hook) each leave a detached worker; the next host call,
-/// even one that would not block, is refused as a timeout.
+/// `MAX_WORKERS` reads blocked (the `pipe` test hook) each leave a detached worker; the next host
+/// call, even one that would not block, is refused as a timeout.
 #[cfg(unix)]
 #[test]
 fn blocked_reads_stop_at_the_worker_cap() {
@@ -22,7 +22,7 @@ fn blocked_reads_stop_at_the_worker_cap() {
     };
     let blocked = "fn main(d: Dir) -> Int { let r = d.read(\"pipe\"); 0 }";
     std::thread::scope(|s| {
-        for _ in 0..64 {
+        for _ in 0..MAX_WORKERS {
             s.spawn(|| assert!(run(blocked).starts_with("timed out")));
         }
     });
