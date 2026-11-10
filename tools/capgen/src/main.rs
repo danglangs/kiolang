@@ -19,6 +19,7 @@ fn kio(r: &Resolve, t: &Option<Type>) -> Result<String> {
         Type::Bool => "Ty::Bool".into(),
         Type::U8 | Type::U16 | Type::U32 | Type::U64 => "Ty::Int".into(),
         Type::S8 | Type::S16 | Type::S32 | Type::S64 => "Ty::Int".into(),
+        Type::F64 => "Ty::Float".into(),
         Type::Id(id) => match &r.types[*id].kind {
             TypeDefKind::List(Type::U8) => "Ty::Bytes".into(),
             TypeDefKind::List(t) => format!("Ty::List({})", boxed(*t)?),

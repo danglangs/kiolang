@@ -231,6 +231,7 @@ fn instantiate(
                 "Rng" => Grant::Rng(Resource::new_own(rep)),
                 "Clock" => Grant::Clock(Resource::new_own(rep)),
                 "Log" => Grant::Log(Resource::new_own(rep)),
+                "Db" => Grant::Db(Resource::new_own(rep)),
                 _ => Grant::WsSend(Resource::new_own(rep)),
             }
         })
@@ -661,6 +662,7 @@ impl Server {
         grants.extend(src.rngs.iter().map(|(n, r)| (n.clone(), "Rng", Some(r.label()))));
         grants.extend(src.clocks.iter().map(|(n, c)| (n.clone(), "Clock", Some(c.label()))));
         grants.extend(src.logs.iter().map(|(n, l)| (n.clone(), "Log", Some(l.label.clone()))));
+        grants.extend(src.dbs.iter().map(|(n, d)| (n.clone(), "Db", Some(d.label()))));
         let out: SharedLog = Arc::new(Mutex::new(Box::new(out)));
         write_line(&out, &audit_header(&self.program.files, &self.limits, &grants))?;
         self.audit = Some(out);

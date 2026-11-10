@@ -3,7 +3,7 @@ mod mcp;
 use kio_host::{listen, open_dir, ClockSpec, Diag, Kio, Limits, LogSink, Origin, RngSpec, Server, Sources};
 
 /// `kio run`'s flags.
-const USAGE: &str = "[--dir name=path]... [--http name=host]... [--http-methods name=POST,PUT,..]... [--kv name=path[:ro]|:memory:]... [--kv-mb mb] [--rng name[=seed:N]]... [--clock name[=fixed:T]]... [--log name=path|-]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]...";
+const USAGE: &str = "[--dir name=path]... [--http name=host]... [--http-methods name=POST,PUT,..]... [--kv name=path[:ro]|:memory:]... [--kv-mb mb] [--db name=path[:ro]|:memory:]... [--rng name[=seed:N]]... [--clock name[=fixed:T]]... [--log name=path|-]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]...";
 
 fn main() {
     // The host checks and lowers programs natively, and compiled code runs on this thread's stack
@@ -85,6 +85,7 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     let mut dir_paths = Vec::new();
     let mut kv_specs: Vec<(String, String)> = Vec::new();
     let mut kv_mb = 64;
+    let mut db_specs: Vec<(String, String)> = Vec::new();
     let mut sources = Sources::default();
     // `(name, path)` of each `--log` to a file, opened once the paths are checked.
     let mut log_paths: Vec<(String, String)> = Vec::new();
@@ -142,6 +143,17 @@ fn run(path: &str, flags: &[&str]) -> i32 {
                 match n.parse::<u64>().ok().filter(|&v| v > 0) {
                     Some(v) => kv_mb = v,
                     None => return fail(format!("--kv-mb {n}: expected a positive integer")),
+                }
+                continue;
+            }
+            ["--db", spec] => {
+                match spec.split_once('=') {
+                    Some((name, s)) if !name.is_empty() && !s.is_empty() => db_specs.push((name.into(), s.into())),
+                    _ => {
+                        return fail(format!(
+                            "--db {spec}: expected name=path, name=path:ro or name=:memory:"
+                        ))
+                    }
                 }
                 continue;
             }
@@ -230,14 +242,23 @@ fn run(path: &str, flags: &[&str]) -> i32 {
         &lang::CapTable::v0(),
     );
     let params = checked.as_ref().map(|p| p.main_params()).unwrap_or_default();
-    // A read-only store is refused to a program that can write it (H12); the host also stops
-    // any write that reaches it.
+    // A read-only store or database is refused to a program that can write it (H12, H17); the
+    // host also stops any write that reaches it.
     let report = checked.as_ref().map(lang::report).unwrap_or_default();
-    for (name, spec) in &kv_specs {
+    type WriteIn = fn(&str, &str) -> Option<&'static str>;
+    let readers = (kv_specs
+        .iter()
+        .map(|(n, s)| (n, s, kio_host::kv::write_in_report as WriteIn)))
+    .chain(
+        db_specs
+            .iter()
+            .map(|(n, s)| (n, s, kio_host::db::write_in_report as WriteIn)),
+    );
+    for (name, spec, write_in_report) in readers {
         if !kio_host::kv::split_spec(spec).1 {
             continue;
         }
-        if let Some(m) = kio_host::kv::write_in_report(&report, name) {
+        if let Some(m) = write_in_report(&report, name) {
             return fail(format!(
                 "`{name}` is granted read-only but `main` can call `{name} {m}`\n  hint: drop `:ro` or remove the writes"
             ));
@@ -276,30 +297,51 @@ fn run(path: &str, flags: &[&str]) -> i32 {
         (dir_paths.iter()).all(|(_, d)| std::fs::canonicalize(d).is_ok_and(|r| !kio_host::cache::overlaps(c, &r)))
     };
     let use_cache = resolved.as_ref().is_some_and(apart);
-    // A program that can write a store's log through a `Dir` could replace or craft it; a store
-    // inside the cache could likewise become an entry.
-    for (name, spec) in kv_specs.iter().filter(|(_, s)| s != ":memory:") {
-        let spec = kio_host::kv::split_spec(spec).0;
-        let store = kio_host::cache::resolve(spec.as_ref());
+    // A program that can write a store's log or a database through a `Dir` could replace or
+    // craft it; one inside the cache could likewise become an entry. `stores` is each `--kv` and
+    // `--db` file with the files beside it that are its own (a compaction's `.tmp`, SQLite's
+    // `-wal`, `-shm` and `-journal`), by flag.
+    let mut stores: Vec<(String, String)> = Vec::new();
+    let on_disk = |specs: &[(String, String)], flag: &str| -> Vec<(String, String)> {
+        (specs.iter().filter(|(_, s)| s != ":memory:"))
+            .map(|(n, s)| (format!("{flag} {n}"), kio_host::kv::split_spec(s).0.to_string()))
+            .collect()
+    };
+    for (flag, path) in on_disk(&kv_specs, "--kv").into_iter().chain(on_disk(&db_specs, "--db")) {
+        let store = kio_host::cache::resolve(path.as_ref());
         if let (Some(c), Some(s)) = (&resolved, store) {
             if s.starts_with(c) {
                 return fail(format!(
-                    "`--kv {name}` is inside kio's compile cache\n  hint: keep stores outside `$XDG_CACHE_HOME/kio` (default `~/.cache/kio`)"
+                    "`{flag}` is inside kio's compile cache\n  hint: keep stores outside `$XDG_CACHE_HOME/kio` (default `~/.cache/kio`)"
                 ));
             }
         }
-        let parent = std::path::Path::new(spec).parent();
+        let parent = std::path::Path::new(&path).parent();
         let parent = parent.filter(|p| !p.as_os_str().is_empty()).unwrap_or(".".as_ref());
-        let Ok(parent) = std::fs::canonicalize(parent) else {
-            continue;
-        };
-        for (d, dir) in &dir_paths {
-            if std::fs::canonicalize(dir).is_ok_and(|root| parent.starts_with(root)) {
-                return fail(format!(
-                    "`--kv {name}` is inside `--dir {d}`\n  hint: keep stores outside granted directories"
-                ));
+        if let Ok(parent) = std::fs::canonicalize(parent) {
+            for (d, dir) in &dir_paths {
+                if std::fs::canonicalize(dir).is_ok_and(|root| parent.starts_with(root)) {
+                    return fail(format!(
+                        "`{flag}` is inside `--dir {d}`\n  hint: keep stores outside granted directories"
+                    ));
+                }
             }
         }
+        // A database granted on a store's file (or the other way round) would corrupt it.
+        if let Some((other, _)) = stores
+            .iter()
+            .find(|(o, p)| !o.starts_with(&flag[..4]) && same_file(p, &path))
+        {
+            return fail(format!(
+                "`{flag}` is the same file as `{other}`\n  hint: give each its own file"
+            ));
+        }
+        let own: &[&str] = if flag.starts_with("--kv") {
+            &["", ".tmp"]
+        } else {
+            &["", "-wal", "-shm", "-journal"]
+        };
+        stores.extend(own.iter().map(|s| (flag.clone(), format!("{path}{s}"))));
     }
     // The audit log and each `--log` file: not a store, not inside a granted dir or the cache,
     // and not one another's file.
@@ -310,7 +352,7 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     }
     files_to_check.extend(log_paths.iter().map(|(n, p)| (format!("--log {n}"), p.as_str())));
     for (flag, path) in files_to_check {
-        if let Some(why) = file_refusal(&flag, path, &kv_specs, &dir_paths, resolved.as_deref(), &taken) {
+        if let Some(why) = file_refusal(&flag, path, &stores, &dir_paths, resolved.as_deref(), &taken) {
             return fail(why);
         }
         taken.push((flag, path));
@@ -319,6 +361,10 @@ fn run(path: &str, flags: &[&str]) -> i32 {
         Ok(kvs) => kvs,
         Err(e) => return fail(e),
     };
+    match kio_host::db::open_all(&db_specs) {
+        Ok(dbs) => sources.dbs = dbs,
+        Err(e) => return fail(e),
+    }
     for (name, path) in &log_paths {
         match open_append(path) {
             Ok(f) => sources.logs.push((name.clone(), LogSink::file(f, path))),
@@ -402,37 +448,38 @@ fn serve(
     }
 }
 
+/// Whether `a` and `b` name one file: the same path once symlinks resolve, or the same device
+/// and inode (so a hard link too).
+fn same_file(a: &str, b: &str) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let id = |p: &str| std::fs::metadata(p).ok().map(|m| (m.dev(), m.ino()));
+    let resolve = |p: &str| kio_host::cache::resolve(p.as_ref());
+    id(a).is_some() && id(a) == id(b) || resolve(a).is_some_and(|r| Some(r) == resolve(b))
+}
+
 /// Why the file `path` of `flag` (`--audit`, `--log name`) is refused, if it is: it must not be a
-/// `--kv` store (writing it would corrupt the store), lie inside a granted `--dir` (the program
-/// could read or replace its own log) or inside the compile cache, or be the file of another
-/// flag in `taken`. Checked before any of them is opened.
+/// `--kv` store's or `--db` database's file (one of `stores`; writing it would corrupt it), lie
+/// inside a granted `--dir` (the program could read or replace its own log) or inside the compile
+/// cache, or be the file of another flag in `taken`. Checked before any of them is opened.
 fn file_refusal(
     flag: &str,
     path: &str,
-    kv_specs: &[(String, String)],
+    stores: &[(String, String)],
     dir_paths: &[(String, String)],
     cache: Option<&std::path::Path>,
     taken: &[(String, &str)],
 ) -> Option<String> {
-    use std::os::unix::fs::MetadataExt;
     let what = if flag == "--audit" { "the audit log" } else { "the log" };
     let Some(log) = kio_host::cache::resolve(path.as_ref()) else {
         return Some(format!(
             "`{flag} {path}` has `.` or `..` past the directories that exist\n  hint: name {what} by a plain path"
         ));
     };
-    let id = |p: &std::path::Path| std::fs::metadata(p).ok().map(|m| (m.dev(), m.ino()));
-    let log_id = id(path.as_ref());
-    // Path or file: two paths to one store, or a hard link to it, are the same file. A store's
-    // compaction writes `path.tmp` beside it, so that name is the store's too.
-    let same = |p: &str| {
-        log_id.is_some() && id(p.as_ref()) == log_id || kio_host::cache::resolve(p.as_ref()).is_some_and(|r| r == log)
-    };
-    for (name, spec) in kv_specs.iter().filter(|(_, s)| s != ":memory:") {
-        let store = kio_host::kv::split_spec(spec).0;
-        if same(store) || same(&format!("{store}.tmp")) {
+    let same = |p: &str| same_file(path, p);
+    for (other, p) in stores {
+        if same(p) {
             return Some(format!(
-                "`{flag} {path}` is the same file as `--kv {name}`\n  hint: give {what} its own file; writing it would corrupt the store"
+                "`{flag} {path}` is the same file as `{other}`\n  hint: give {what} its own file; writing it would corrupt the store"
             ));
         }
     }

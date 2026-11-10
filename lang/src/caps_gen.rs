@@ -218,6 +218,35 @@ pub fn v0() -> CapTable {
                     Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("LogErr".into(), vec![]))),
                 )],
             },
+            CapType {
+                name: "Db".into(),
+                methods: vec![
+                    method(
+                        "query",
+                        vec![Ty::Str, Ty::List(Box::new(Ty::Enum("SqlValue".into(), vec![])))],
+                        Ty::Result(
+                            Box::new(Ty::List(Box::new(Ty::List(Box::new(Ty::Enum(
+                                "SqlValue".into(),
+                                vec![],
+                            )))))),
+                            Box::new(Ty::Enum("DbErr".into(), vec![])),
+                        ),
+                    ),
+                    method(
+                        "exec",
+                        vec![Ty::Str, Ty::List(Box::new(Ty::Enum("SqlValue".into(), vec![])))],
+                        Ty::Result(Box::new(Ty::Int), Box::new(Ty::Enum("DbErr".into(), vec![]))),
+                    ),
+                    method(
+                        "transaction",
+                        vec![
+                            Ty::List(Box::new(Ty::Str)),
+                            Ty::List(Box::new(Ty::List(Box::new(Ty::Enum("SqlValue".into(), vec![]))))),
+                        ],
+                        Ty::Result(Box::new(Ty::Int), Box::new(Ty::Enum("DbErr".into(), vec![]))),
+                    ),
+                ],
+            },
         ],
         enums: vec![
             Enum {
@@ -280,6 +309,32 @@ pub fn v0() -> CapTable {
                 name: "LogErr".into(),
                 tparams: vec![],
                 variants: vec![case("TooLarge", vec![])],
+                span: at,
+                public: true,
+            },
+            Enum {
+                name: "SqlValue".into(),
+                tparams: vec![],
+                variants: vec![
+                    case("Null", vec![]),
+                    case("Int", vec![ty("Int")]),
+                    case("Float", vec![ty("Float")]),
+                    case("Text", vec![ty("Str")]),
+                    case("Blob", vec![ty("Bytes")]),
+                ],
+                span: at,
+                public: true,
+            },
+            Enum {
+                name: "DbErr".into(),
+                tparams: vec![],
+                variants: vec![
+                    case("Invalid", vec![ty("Str")]),
+                    case("Denied", vec![]),
+                    case("Busy", vec![]),
+                    case("TooLarge", vec![]),
+                    case("Constraint", vec![ty("Str")]),
+                ],
                 span: at,
                 public: true,
             },

@@ -66,6 +66,9 @@ fn hint(name: &str, ty: &str) -> String {
             format!("grant it: `--clock {name}` (the system clock) or `--clock {name}=fixed:<ms or RFC 3339 time>`")
         }
         "Log" => format!("grant it: `--log {name}=path` (appended) or `--log {name}=-` (stderr)"),
+        "Db" => {
+            format!("grant it: `--db {name}=path` (a SQLite file), `--db {name}=path:ro` or `--db {name}=:memory:`")
+        }
         "WsMessage" | "WsSend" => "`--listen` grants WsMessage and WsSend".into(),
         _ => "`--listen` grants Incoming and Outgoing".into(),
     }

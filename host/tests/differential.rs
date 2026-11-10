@@ -139,6 +139,10 @@ fn world(params: &[(String, String)]) -> World {
                 .https
                 .push((name.clone(), Origin::parse("http://127.0.0.1:1").unwrap())),
             "Kv" => w.kvs.push((name.clone(), Arc::new(Store::memory(1 << 20)))),
+            "Db" => w
+                .sources
+                .dbs
+                .push((name.clone(), Arc::new(kio_host::db::Db::memory().unwrap()))),
             _ => {}
         }
     }

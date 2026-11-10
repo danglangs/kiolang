@@ -16,6 +16,7 @@
 use crate::abi::{addr, ptr, table};
 use crate::desc::{self, Desc, Table};
 use crate::entry::kio::caps::clock::Clock;
+use crate::entry::kio::caps::db::{Db, DbErr, SqlValue};
 use crate::entry::kio::caps::fs::{Dir, IoErr};
 use crate::entry::kio::caps::kv::{Kv, KvEntry, KvErr};
 use crate::entry::kio::caps::log::{Log, LogErr};
@@ -683,4 +684,118 @@ pub unsafe extern "C" fn rt_cap_log_write(ret: u32, h: u32, line: u32) -> u32 {
     // SAFETY: the contract above.
     let (l, line) = unsafe { (handle(h, Log::from_handle), text(line)) };
     result(ret, in_place(|| l.write(line)), unit, |LogErr::TooLarge| "TooLarge")
+}
+
+fn database(h: u32) -> ManuallyDrop<Db> {
+    // SAFETY: see `handle`.
+    unsafe { handle(h, Db::from_handle) }
+}
+
+/// A `Result<_, DbErr>` of descriptor `ret`: `Ok` of `f`'s slot, or the error, whose `Invalid`
+/// and `Constraint` carry SQLite's message as a `Str`.
+fn db_result<T>(ret: u32, r: Result<T, DbErr>, f: impl FnOnce(&Table, T) -> u64) -> u32 {
+    let t = table();
+    let (case, msg) = match r {
+        Ok(v) => {
+            let v = f(t, v);
+            return ok(t, ret, v);
+        }
+        Err(DbErr::Invalid(m)) => ("Invalid", Some(m)),
+        Err(DbErr::Denied) => ("Denied", None),
+        Err(DbErr::Busy) => ("Busy", None),
+        Err(DbErr::TooLarge) => ("TooLarge", None),
+        Err(DbErr::Constraint(m)) => ("Constraint", Some(m)),
+    };
+    // `err` writes its payload as slot bits: a `Str`'s is its pointer's slot.
+    err(t, ret, case, msg.map(|m| to_slot(str_obj(m)) as i64))
+}
+
+/// The variants of `SqlValue`, in caps.wit order; the checker numbers them the same way.
+const NULL: u32 = 0;
+const INT: u32 = 1;
+const FLOAT: u32 = 2;
+const TEXT: u32 = 3;
+const BLOB: u32 = 4;
+
+/// The `SqlValue`s of a `List<SqlValue>` argument, copied: wit-bindgen takes them owned.
+///
+/// # Safety
+/// `l` is a live `List<SqlValue>` that outlives the call.
+unsafe fn sql_values(l: u32) -> Vec<SqlValue> {
+    // SAFETY: the caller's guarantee: each element is a live `SqlValue`, an enum whose variant
+    // is at byte 8 and whose payload, if any, is slot 0 (an `Int`'s or `Float`'s bits, or a
+    // `Str`'s or `Bytes`' pointer).
+    unsafe {
+        obj::elems(ptr(l))
+            .iter()
+            .map(|&s| {
+                let p = obj::from_slot(s);
+                let object = || obj::bytes(obj::from_slot(obj::payload(p)));
+                match *obj::field::<u32>(p, 8) {
+                    NULL => SqlValue::Null,
+                    INT => SqlValue::Int(obj::payload(p) as i64),
+                    FLOAT => SqlValue::Float(f64::from_bits(obj::payload(p))),
+                    TEXT => SqlValue::Text(String::from(core::str::from_utf8_unchecked(object()))),
+                    BLOB => SqlValue::Blob(object().to_vec()),
+                    v => panic!("SqlValue variant {v}"),
+                }
+            })
+            .collect()
+    }
+}
+
+/// A `List<List<SqlValue>>` of descriptor `list`: each text or blob becomes a `Str` or `Bytes`
+/// in place (the host wrote it into `cabi_realloc`'s room).
+fn rows(t: &Table, list: u32, rows: Vec<Vec<SqlValue>>) -> *mut Header {
+    let Desc::List { elem: row } = t.desc(list) else {
+        panic!("not a list")
+    };
+    let Desc::List { elem: value } = t.desc(row) else {
+        panic!("not a list of lists")
+    };
+    let cell = |v: SqlValue| {
+        to_slot(match v {
+            SqlValue::Null => obj::alloc(t, value, NULL),
+            SqlValue::Int(n) => obj::variant1(t, value, INT, n as u64),
+            SqlValue::Float(x) => obj::variant1(t, value, FLOAT, x.to_bits()),
+            SqlValue::Text(s) => obj::variant1(t, value, TEXT, to_slot(str_obj(s))),
+            SqlValue::Blob(b) => obj::variant1(t, value, BLOB, to_slot(bytes_obj(b))),
+        })
+    };
+    let row = |r: Vec<SqlValue>| to_slot(obj::new_list(row, r.into_iter().map(cell).collect()));
+    obj::new_list(list, rows.into_iter().map(row).collect())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_cap_db_query(ret: u32, h: u32, sql: u32, params: u32) -> u32 {
+    // SAFETY: the contract above.
+    let (sql, params) = unsafe { (text(sql), sql_values(params)) };
+    let d = database(h);
+    let r = in_place(|| d.query(sql, &params));
+    db_result(ret, r, |t, v| to_slot(rows(t, payload(t, ret, 0), v)))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_cap_db_exec(ret: u32, h: u32, sql: u32, params: u32) -> u32 {
+    // SAFETY: the contract above.
+    let (sql, params) = unsafe { (text(sql), sql_values(params)) };
+    let d = database(h);
+    db_result(ret, in_place(|| d.exec(sql, &params)), |_, n| n as u64)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_cap_db_transaction(ret: u32, h: u32, sqls: u32, params: u32) -> u32 {
+    // SAFETY: the contract above: `sqls` is a live `List<Str>` and `params` a live
+    // `List<List<SqlValue>>`, each element live.
+    let (sqls, params): (Vec<String>, Vec<Vec<SqlValue>>) = unsafe {
+        let sqls = obj::elems(ptr(sqls))
+            .iter()
+            .map(|&s| String::from(text(addr(obj::from_slot(s)))));
+        let params = obj::elems(ptr(params))
+            .iter()
+            .map(|&l| sql_values(addr(obj::from_slot(l))));
+        (sqls.collect(), params.collect())
+    };
+    let d = database(h);
+    db_result(ret, in_place(|| d.transaction(&sqls, &params)), |_, n| n as u64)
 }

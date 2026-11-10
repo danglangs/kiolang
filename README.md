@@ -132,7 +132,7 @@ v0, working end to end.
 | | |
 |---|---|
 | Language | structs, enums, generics, closures, `match` with nested and `\|` patterns, `let`-else, constants, `Float`, `HashMap`, built-in JSON, SHA-256 |
-| Resources, each a grant | files (`Dir`), a key-value store (`Kv`), an HTTP client (`Http`: any granted method, headers, parallel `send_all`), `Rng`, `Clock`, `Log`; serving HTTP and WebSockets |
+| Resources, each a grant | files (`Dir`), a key-value store (`Kv`), SQLite (`Db`), an HTTP client (`Http`: any granted method, headers, parallel `send_all`), `Rng`, `Clock`, `Log`; serving HTTP and WebSockets |
 | Safety | the authority report before a run; a Wasm sandbox with fuel, memory, time, call and I/O limits; an audit log |
 | Speed | compiled to native code through Wasm: 1.1-2.3x Rust on compute, 2.3-8x where it allocates; faster than Python on most benchmarks ([table](docs/roadmap.md#speed-today)) |
 
@@ -170,7 +170,7 @@ The cost is the ecosystem: few libraries, no package manager yet. Agents write m
 
 ## Roadmap
 
-- **Now:** SQLite (`Db`); security reviews of the HTTP client and early `send`.
+- **Now:** security reviews of the HTTP client and SQLite.
 - **Next:** allocation speed (escape analysis); an eval of models writing kio.
 - **Later:** `par_map`, tasks, packages.
 

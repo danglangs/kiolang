@@ -42,7 +42,8 @@ fn every_capability_method_compiles() {
             "WsSend",
             "Rng",
             "Clock",
-            "Log"
+            "Log",
+            "Db"
         ],
         "runtime/src/entry.rs `run` numbers caps.wit's `grant` cases in this order"
     );
@@ -83,6 +84,7 @@ fn every_capability_method_compiles() {
                             .collect();
                         format!("{name} {{ {} }}", fields.join(", "))
                     }
+                    lang::check::Ty::Enum(n, _) if n == "SqlValue" => "SqlValue::Int(1)".into(),
                     t => panic!("a test argument of type {t:?}"),
                 }
             }
@@ -99,7 +101,7 @@ fn every_capability_method_compiles() {
     let src = format!("fn main({}) {{\n{body}}}", params.join(", "));
     let wasm = compile(&module(&src)).unwrap();
     wasmparser::Validator::new().validate_all(&wasm.component).unwrap();
-    assert_eq!(calls, 34);
+    assert_eq!(calls, 37);
 }
 
 #[test]

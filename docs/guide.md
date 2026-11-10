@@ -23,6 +23,7 @@ examples/fx/report.kio:10: error: no grant for `fx: Http`
 | `Dir` | `--dir name=path` | a directory: `read`, `create`, `list`, `write`, `remove`, `exists` |
 | `Http` | `--http name=host`, `--http-methods name=POST,..` | one host over HTTPS, GET unless more methods are granted; `--http name=http://127.0.0.1:9000` plain HTTP, for local testing |
 | `Kv` | `--kv name=path`, `name=path:ro`, `name=:memory:` | a key-value store |
+| `Db` | `--db name=path`, `name=path:ro`, `name=:memory:` | a SQLite database: `query`, `exec`, `transaction` |
 | `Rng` | `--rng name`, `--rng name=seed:N` | random values from the OS, or a fixed stream |
 | `Clock` | `--clock name`, `--clock name=fixed:T` | the system clock, or one fixed time |
 | `Log` | `--log name=path`, `--log name=-` | an append-only log file, or stderr |
@@ -92,6 +93,35 @@ main : input read, r int, now now_ms, log write
 Ok("globex wins at 1794225600000")
 ```
 
+### Db
+
+A SQLite database (the bundled SQLite, in the host) that outlives runs and is shared by every `--listen` request, one statement at a time. `--db name=path` opens or creates the file (WAL mode); `:memory:` keeps it for the process only. The program runs SQL with `query(sql, params)` (the rows, as `List<List<SqlValue>>`), `exec(sql, params)` (a statement that returns no rows: the rows it changed) and `transaction(sqls, params)` (each statement with its own parameter list, all applied or none). Values go in as `?` parameters, `SqlValue::Int(n)`, `Text(s)`, `Float(x)`, `Blob(b)` or `Null`, never as SQL text; the schema is the program's to create (`CREATE TABLE IF NOT EXISTS ..`).
+
+`path:ro` is read-only: a program that can call `exec` or `transaction` on it is refused at startup, and a `query` that would write is `Denied`.
+
+The connection is fenced, since the SQL is the program's and SQLite runs outside the sandbox: `ATTACH`, `DETACH`, `VACUUM`, `BEGIN`/`COMMIT`/`ROLLBACK`/`SAVEPOINT` (use `transaction`), `load_extension` and every `PRAGMA` but a few reads (`table_info`, `index_list`, `foreign_keys`, ..) are `Denied`; the schema is protected (`SQLITE_DBCONFIG_DEFENSIVE`). Limits: one statement per call, 1 MB of SQL, 8 MB per value, 4,096 parameters, 1,000 statements per `transaction`, 10,000 rows or 8 MB per `query` (else `TooLarge`); a statement still running at the run's `--timeout` is interrupted and the run stops; SQLite's memory is capped at 256 MB per process; another process holding the file for over 2 s is `Busy`. The database's path follows the `--kv` rules: not a symlink, not inside a granted `--dir` or the compile cache, not a store's or log's file.
+
+```
+$ kio run examples/totals.kio --dir input=examples/in --db totals=/tmp/totals.db
+int   : none
+main  : input read, totals exec query transaction
+parse : none
+text  : none
+Ok(["initech 300", "acme 120", "globex 45"])
+$ kio run examples/totals.kio --dir input=examples/in --db totals=/tmp/totals.db
+..
+Ok(["initech 600", "acme 240", "globex 90"])
+$ kio run examples/totals.kio --dir input=examples/in --db totals=/tmp/totals.db:ro
+kio: `totals` is granted read-only but `main` can call `totals exec`
+  hint: drop `:ro` or remove the writes
+```
+
+The audit log has a line per call with the SQL (cut at 256 characters), the parameter count, the rows or rows changed and the bytes, never a parameter value:
+
+```
+{"event":"call","seq":4,"cap":"totals","kind":"Db","method":"query","arg":"SELECT name, amount FROM totals ORDER BY amount DESC LIMIT ?","bytes":49,"result":"ok","params":1,"rows":3,"ms":0.1}
+```
+
 ### --listen: HTTP and WebSockets
 
 A listening socket is a grant too. Each request runs in a fresh sandbox; `main` takes `req: Incoming, res: Outgoing` (any names) plus its other grants. `send` answers the client at once, and `main` may go on working under the request's limits.
@@ -141,7 +171,7 @@ out of fuel (limit 10000000000; raise it with --fuel)
 
 ## Audit log
 
-`--audit log.jsonl` records every host call: capability, method, argument, bytes and result (never a drawn random value or a log line). A call the report did not predict stops the run as a checker bug. The log is appended to, never truncated, and refused at startup if it is a `--kv` store's file, inside a granted `--dir` or inside the compile cache.
+`--audit log.jsonl` records every host call: capability, method, argument, bytes and result (never a drawn random value or a log line). A call the report did not predict stops the run as a checker bug. The log is appended to, never truncated, and refused at startup if it is a `--kv` store's or `--db` database's file, inside a granted `--dir` or inside the compile cache.
 
 ```
 $ grep denied /tmp/leak.jsonl

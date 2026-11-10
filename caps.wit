@@ -122,6 +122,25 @@ interface log {
   }
 }
 
+interface db {
+  // A SQL value: a column of a row, or a `?` parameter. A `float` NaN binds as NULL (SQLite's rule).
+  variant sql-value { null, int(s64), float(f64), text(string), blob(list<u8>) }
+  // invalid: bad SQL, two statements in one call, a wrong parameter count, with SQLite's message;
+  // denied: a statement the host refuses (ATTACH, a PRAGMA, a transaction, a write on `:ro`);
+  // busy: another process held the database past the timeout; too-large: a result over 10,000
+  // rows or 8 MB, or a value past the limits; constraint: a constraint failed, with the message.
+  variant db-err { invalid(string), denied, busy, too-large, constraint(string) }
+
+  // One SQLite database the operator granted (`--db name=path`, `path:ro` or `:memory:`). One
+  // statement per call; values reach SQL only as `?` parameters.
+  resource db {
+    query:       func(sql: string, params: list<sql-value>) -> result<list<list<sql-value>>, db-err>;  // rows, columns in SELECT order
+    exec:        func(sql: string, params: list<sql-value>) -> result<s64, db-err>;                    // rows changed
+    // Each statement with its own parameters, in one transaction: all or nothing; rows changed in all.
+    transaction: func(sqls: list<string>, params: list<list<sql-value>>) -> result<s64, db-err>;
+  }
+}
+
 // Compiled kio (docs/codegen.md): the runtime with the program appended, one core module.
 world compiled {
   import fs;
@@ -132,6 +151,7 @@ world compiled {
   import rng;
   import clock;
   import log;
+  import db;
   use fs.{dir};
   use net.{http};
   use web.{incoming, outgoing};
@@ -140,11 +160,12 @@ world compiled {
   use rng.{rng};
   use clock.{clock};
   use log.{log};
+  use db.{db};
 
   // One handle per capability parameter of `main`, in parameter order.
   variant grant {
     dir(dir), http(http), incoming(incoming), outgoing(outgoing), kv(kv), ws-message(ws-message), ws-send(ws-send),
-    rng(rng), clock(clock), log(log),
+    rng(rng), clock(clock), log(log), db(db),
   }
   // main's value printed, and whether main returned `Err`.
   record outcome { value: string, failed: bool }

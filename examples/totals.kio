@@ -1,0 +1,39 @@
+// Running totals per customer, kept in SQLite across runs; prints the top customers.
+// kio run examples/totals.kio --dir input=examples/in --db totals=/tmp/totals.db
+const TOP: Int = 3;
+const SCHEMA: Str = "CREATE TABLE IF NOT EXISTS totals (name TEXT PRIMARY KEY, amount INTEGER NOT NULL)";
+const ADD: Str = "INSERT INTO totals VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET amount = amount + excluded.amount";
+
+struct Entry { name: Str, amount: Int }
+
+enum Failed { Io(IoErr), Db(DbErr) }
+
+fn parse(line: Str) -> Option<Entry> {
+  let parts = line.split(",");
+  if parts.len() != 2 { return None; }
+  let amount = match parts[1].trim() {
+    "" | "-" => 0,
+    s => s.parse_int()?,
+  };
+  Some(Entry { name: parts[0].trim(), amount: amount })
+}
+
+fn text(v: SqlValue) -> Str { match v { SqlValue::Text(s) => s, _ => "?" } }
+fn int(v: SqlValue) -> Str { match v { SqlValue::Int(n) => n.to_str(), _ => "?" } }
+
+fn main(input: Dir, totals: Db) -> Result<List<Str>, Failed> {
+  let text_in = input.read("invoices.csv").map_err(|e| Failed::Io(e))?.to_str();
+  totals.exec(SCHEMA, []).map_err(|e| Failed::Db(e))?;
+  // One statement per invoice line, all applied or none; values go in as `?` parameters.
+  let mut sqls: List<Str> = [];
+  let mut params: List<List<SqlValue>> = [];
+  for line in text_in.lines() {
+    let Some(entry) = parse(line) else { continue; };
+    sqls.push(ADD);
+    params.push([SqlValue::Text(entry.name), SqlValue::Int(entry.amount)]);
+  }
+  totals.transaction(sqls, params).map_err(|e| Failed::Db(e))?;
+  let top = totals.query("SELECT name, amount FROM totals ORDER BY amount DESC LIMIT ?", [SqlValue::Int(TOP)])
+    .map_err(|e| Failed::Db(e))?;
+  Ok(top.map(|row| text(row[0]) + " " + int(row[1])))
+}

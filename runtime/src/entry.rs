@@ -24,6 +24,7 @@ impl Guest for Runtime {
             Grant::Rng(r) => (7, r.handle()),
             Grant::Clock(r) => (8, r.handle()),
             Grant::Log(r) => (9, r.handle()),
+            Grant::Db(r) => (10, r.handle()),
         });
         // SAFETY: one thread, and nothing else holds a reference to `GRANTED`.
         unsafe { *GRANTED.0.get() = handles.collect() };

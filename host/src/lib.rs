@@ -3,8 +3,9 @@
 //! client fixed to one granted origin; `incoming` and `outgoing` hold one request and its first
 //! response; `kv` is a store shared across runs (kv.rs); `ws-message` and `ws-send` hold one
 //! WebSocket event and its sends (ws.rs); `rng`, `clock` and `log` are the OS's randomness (or a
-//! seeded stream), the system clock (or a fixed time) and an appended file (or stderr). Every
-//! import is counted and, if asked, written to an audit log.
+//! seeded stream), the system clock (or a fixed time) and an appended file (or stderr); `db` is
+//! a fenced SQLite connection shared across runs (db.rs). Every import is counted and, if asked,
+//! written to an audit log.
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir as RealDir, OpenOptions, OpenOptionsExt};
 use std::collections::{HashMap, HashSet};
@@ -28,6 +29,7 @@ use bindings::kio;
 pub mod cache;
 mod compiled;
 mod config;
+pub mod db;
 mod grants;
 #[cfg(feature = "test-hooks")]
 mod interp;
@@ -534,7 +536,7 @@ pub struct State {
     audit: Option<Audit>,
     /// Set by a call missing from the authority report.
     unexpected: bool,
-    /// Set by a write to a read-only `Kv` store.
+    /// Set by a write to a read-only `Kv` store or `Db`.
     read_only_write: bool,
     /// `(capability parameter, method)` pairs on `main`'s report line; any other call is a checker
     /// bug. Set at the start of every run, whether or not a log is written.
@@ -1696,13 +1698,15 @@ impl LogSink {
     }
 }
 
-/// The `--rng`, `--clock` and `--log` grants, by `main` parameter name. Every run (every request
-/// under `--listen`) gets fresh handles to them; a `Log`'s byte budget is per run.
+/// The `--rng`, `--clock`, `--log` and `--db` grants, by `main` parameter name. Every run (every
+/// request under `--listen`) gets fresh handles to them; a `Log`'s byte budget is per run; a
+/// `Db` outlives runs, so each run gets a handle to the same one (db.rs).
 #[derive(Clone, Default)]
 pub struct Sources {
     pub rngs: Vec<(String, RngSpec)>,
     pub clocks: Vec<(String, ClockSpec)>,
     pub logs: Vec<(String, LogSink)>,
+    pub dbs: Vec<(String, Arc<db::Db>)>,
 }
 
 /// A granted `Rng` in the resource table.
@@ -2141,6 +2145,10 @@ fn push_grants(
             written: 0,
         };
         add(name, "Log", s.table.push(handle)?.rep(), target);
+    }
+    for (name, db) in sources.dbs {
+        let target = Some(db.label());
+        add(name, "Db", s.table.push(db)?.rep(), target);
     }
     for b in &bound {
         s.handles.insert(b.rep, (b.name.clone(), b.kind));

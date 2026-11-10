@@ -5,6 +5,7 @@
 //! fuel, memory and stack limits do not apply.
 
 use crate::kio::caps::clock::HostClock;
+use crate::kio::caps::db::{DbErr, HostDb, SqlValue};
 use crate::kio::caps::fs::{HostDir, IoErr};
 use crate::kio::caps::kv::{HostKv, KvEntry, KvErr};
 use crate::kio::caps::log::{HostLog, LogErr};
@@ -179,6 +180,7 @@ impl Interp {
                             grants,
                             entry: struct_id("KvEntry"),
                             response: struct_id("HttpResponse"),
+                            sql_value: enum_id("SqlValue"),
                         };
                         let r = lang::run(&program, &mut native);
                         match (r, state_limit(&s, &self.limits)) {
@@ -229,6 +231,8 @@ struct Native<'a> {
     /// (`send` and `send_all` do).
     entry: StructId,
     response: StructId,
+    /// The program's id for the built-in `SqlValue`, which `Db` takes and returns.
+    sql_value: EnumId,
 }
 
 impl Native<'_> {
@@ -418,6 +422,30 @@ impl lang::Caps for Native<'_> {
                     .map(unit)
                     .map_err(|LogErr::TooLarge| err_value("LogErr", "TooLarge", vec![])),
             ),
+            ("Db", "query", [Value::Str(sql), Value::List(params)]) => {
+                let id = self.sql_value;
+                let params = sql_values(params, id)?;
+                let r = HostDb::query(s, own(rep), sql.to_string(), params).map_err(stop)?;
+                let row = |r: Vec<SqlValue>| list(r.into_iter().map(|v| sql_value(v, id)).collect());
+                result(r.map(|rows| list(rows.into_iter().map(row).collect())).map_err(db_err))
+            }
+            ("Db", "exec", [Value::Str(sql), Value::List(params)]) => {
+                let params = sql_values(params, self.sql_value)?;
+                let r = HostDb::exec(s, own(rep), sql.to_string(), params).map_err(stop)?;
+                result(r.map(Value::Int).map_err(db_err))
+            }
+            ("Db", "transaction", [Value::List(sqls), Value::List(lists)]) => {
+                let id = self.sql_value;
+                let lists = lists
+                    .iter()
+                    .map(|l| match l {
+                        Value::List(l) => sql_values(l, id),
+                        _ => Err("expected a List<List<SqlValue>>".to_string()),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let r = HostDb::transaction(s, own(rep), texts(sqls)?, lists).map_err(stop)?;
+                result(r.map(Value::Int).map_err(db_err))
+            }
             _ => {
                 return Err(format!(
                     "unsupported call `{cap}.{method}` with {} arguments",
@@ -442,7 +470,49 @@ fn bytes(b: Vec<u8>) -> Value {
 }
 
 fn strs(v: Vec<String>) -> Value {
-    Value::List(v.into_iter().map(|s| Value::Str(s.into())).collect::<Vec<_>>().into())
+    list(v.into_iter().map(|s| Value::Str(s.into())).collect())
+}
+
+fn list(v: Vec<Value>) -> Value {
+    Value::List(v.into())
+}
+
+/// The `SqlValue`s of a `List<SqlValue>` argument; `id` is the program's `SqlValue`.
+fn sql_values(v: &[Value], id: EnumId) -> Result<Vec<SqlValue>, String> {
+    let value = |v: &Value| match v {
+        Value::Enum(EnumRef::User(en), i, p) if *en == id => match (i, p.as_slice()) {
+            (0, []) => Ok(SqlValue::Null),
+            (1, [Value::Int(n)]) => Ok(SqlValue::Int(*n)),
+            (2, [Value::Float(x)]) => Ok(SqlValue::Float(*x)),
+            (3, [Value::Str(s)]) => Ok(SqlValue::Text(s.to_string())),
+            (4, [Value::Bytes(b)]) => Ok(SqlValue::Blob(b.to_vec())),
+            _ => Err("malformed SqlValue".to_string()),
+        },
+        _ => Err("expected a List<SqlValue>".to_string()),
+    };
+    v.iter().map(value).collect()
+}
+
+/// A `SqlValue` as the program's enum `id`, variants in caps.wit order.
+fn sql_value(v: SqlValue, id: EnumId) -> Value {
+    let (i, payload) = match v {
+        SqlValue::Null => (0, vec![]),
+        SqlValue::Int(n) => (1, vec![Value::Int(n)]),
+        SqlValue::Float(x) => (2, vec![Value::Float(x)]),
+        SqlValue::Text(s) => (3, vec![Value::Str(s.into())]),
+        SqlValue::Blob(b) => (4, vec![bytes(b)]),
+    };
+    Value::Enum(EnumRef::User(id), i, payload)
+}
+
+fn db_err(e: DbErr) -> Value {
+    match e {
+        DbErr::Invalid(m) => err_value("DbErr", "Invalid", vec![Value::Str(m.into())]),
+        DbErr::Denied => err_value("DbErr", "Denied", vec![]),
+        DbErr::Busy => err_value("DbErr", "Busy", vec![]),
+        DbErr::TooLarge => err_value("DbErr", "TooLarge", vec![]),
+        DbErr::Constraint(m) => err_value("DbErr", "Constraint", vec![Value::Str(m.into())]),
+    }
 }
 
 fn texts(v: &[Value]) -> Result<Vec<String>, String> {
@@ -500,6 +570,13 @@ fn err_value(en: &str, case: &str, payload: Vec<Value>) -> Value {
         .position(|v| v.name == case)
         .expect("generated variant");
     Value::Enum(EnumRef::User(EnumId(id as u32)), i, payload)
+}
+
+/// A capability enum's id: the lowered program numbers these enums first, in table order.
+fn enum_id(name: &str) -> EnumId {
+    let table = CapTable::v0();
+    let id = table.enums.iter().position(|e| e.name == name).expect("generated enum");
+    EnumId(id as u32)
 }
 
 /// A capability struct's id: the lowered program numbers these structs first, in table order.
