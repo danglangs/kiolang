@@ -4,7 +4,7 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 
 ## Now
 
-Compiled-only kio covers the whole language and every capability. What real apps needed is built: the HTTP client (H16, H16b), SQLite (H17) and `send` answering at once (H18), from the concurrency proposal (decided). Active: the H17 security review and H19 (`Http` under `--listen`); speed work (C8) paused after C8b7. Compiled code is 1.1-2.3x Rust on compute and 2.3-8x where it allocates (roadmap.md "Speed today"). The differential harness runs 492 programs both ways (489 agree, 3 excluded by limits, 0 leaked) and the generator 250 more per CI run.
+Compiled-only kio covers the whole language and every capability. What real apps needed is built: the HTTP client (H16, H16b), SQLite (H17) and `send` answering at once (H18), from the concurrency proposal (decided). H16-H19 and H17b are built and reviewed (fixes merged); speed work (C8) is paused after C8b7. Compiled code is 1.1-2.3x Rust on compute and 2.3-8x where it allocates (roadmap.md "Speed today"). The differential harness runs 492 programs both ways (489 agree, 3 excluded by limits, 0 leaked) and the generator 250 more per CI run.
 
 | Done | Result |
 |---|---|
@@ -55,7 +55,9 @@ Compiled-only kio covers the whole language and every capability. What real apps
 
 ## Next
 
-H16-H19 and H17b are built and reviewed. Next: the eval of models writing kio (raised: the first question for any product built on kio), awaiting the maintainer's product direction. C8 (roadmap.md): tree's remaining freeing (free-list pushes, a `List`'s separate buffer); tree's 4-5% from the larger size classes (#117); borrowed match bindings of a borrowed scrutinee (tree). The links target app (kio-web examples/links) gave L11, L12, H12, W14 (done); the maintainer then approved K2, H13-H15 and L13-L16: all done, with independent security reviews (fixes merged). H16, H16b and H18 are reviewed (fixes merged); H17 (`Db`, SQLite) awaits its review. Then H19 (`Http` under `--listen`, guest-host-todo.md). Pinned, not started: L18 `par_map` and L19 `scope`/`spawn` (concurrency stages 2 and 3, when a program needs them). Low priority after C8: the models-writing-kio eval (roadmap.md).
+Product direction A: approving AI-written code by its authority report ([product-todo.md](product-todo.md)): the models-writing-kio eval (roadmap.md), an authority diff for pull requests, secrets as host-injected `Http` headers.
+
+Also open: C8 (roadmap.md): tree's remaining freeing (free-list pushes, a `List`'s separate buffer); tree's 4-5% from the larger size classes (#117); borrowed match bindings of a borrowed scrutinee (tree). Pinned, not started: L18 `par_map` and L19 `scope`/`spawn` (concurrency stages 2 and 3, when a program needs them).
 
 ## Waiting on the maintainer
 

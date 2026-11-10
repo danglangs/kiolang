@@ -95,14 +95,14 @@ Most-used Rust crates, and kio's answer to each:
 | Abstraction | traits, generics, closures | function values (`fn(T) -> R`, L6a), closures (L6b) and built-ins taking them (`map`, `filter`, `any`, `all`, `and_then`, `map_err`; L6c), compiled (C9); generic functions (L7a) and generic structs and enums (L7b, L7d), monomorphized, with bounds `T: Eq`/`T: Ord` (L7c) | No traits: a bound is `Eq` or `Ord` only, `Ord` for `Int` and `Str`. |
 | Packages | cargo, crates.io | copy one file | A package manager, once there are a few libraries. |
 
-The two that blocked a real backend first, an HTTP client beyond GET (H16) and SQL (H17), are built. What is left, in order: `Http` under `--listen` (H19), typed JSON decode, streaming bodies, a server database.
+The two that blocked a real backend first, an HTTP client beyond GET (H16) and SQL (H17), are built. `Http` under `--listen` (H19) is built too. What is left, in order: typed JSON decode, streaming bodies, a server database.
 
 ## A target app
 
 A CRUD app over a `Dir` (W9a) proves the language. A target app proves the ecosystem: a small, real web service that an agent writes and an operator runs with exactly its grants. It is kio-web's links app (examples/links): a link shortener with a JSON API, a `Kv` store, a bearer token stored hashed, redirects that count hits, random slugs, expiring links, a log and HTML pages. Each piece it lacked became a task, as kio-web did for `--listen`: L11-L17, H12-H15, K2 and W14.
 
-## Can models write kio? (low priority)
+## Can models write kio?
 
 The design bets that models write kio from language.md and the checker's hints. Evidence so far is agents with the docs in context (the links app). Unmeasured: a cold or smaller model.
 
-Eval (after the in-flight capability and language work): about 30 tasks (pure compute, `Dir`, `Kv`, `Db`, HTTP handlers and clients), a model given only language.md. Measure per task: `kio check` passing on the first try, and check-and-fix rounds to pass (cap 5); the same tasks in Python as the baseline; two or three model sizes. Output: the rates, and the diagnostics models hit most, which feed the next L12-style round.
+Eval (next): about 30 tasks (pure compute, `Dir`, `Kv`, `Db`, HTTP handlers and clients), a model given only language.md. Measure per task: `kio check` passing on the first try, and check-and-fix rounds to pass (cap 5); the same tasks in Python as the baseline; two or three model sizes. Output: the rates, and the diagnostics models hit most, which feed the next L12-style round.
