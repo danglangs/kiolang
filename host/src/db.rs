@@ -17,7 +17,7 @@ use rusqlite::{Connection, ErrorCode, OpenFlags};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
-use std::sync::{Arc, Mutex, Once, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, Once, TryLockError};
 use std::time::{Duration, Instant};
 use wasmtime::component::Resource;
 use wasmtime::Result;
@@ -31,8 +31,11 @@ const BYTES_MAX: usize = 8 << 20;
 pub const ROWS_MAX: usize = 10_000;
 /// The most statements in one `transaction`.
 const STATEMENTS_MAX: usize = 1_000;
-/// How long a call waits for another process's lock before `busy`; the run's deadline cuts it.
+/// How long a call waits for another process's lock, or another request's statement on the
+/// shared connection, before `busy`; the run's deadline cuts it.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
+/// How often a call waiting for the connection looks again.
+const LOCK_POLL: Duration = Duration::from_micros(100);
 /// Virtual-machine steps between checks of the run's deadline.
 const PROGRESS_OPS: i32 = 1_000;
 /// The most memory SQLite may hold in this process, all connections together: temp tables and
@@ -233,10 +236,25 @@ impl Db {
         &self.target
     }
 
+    /// The connection, or `None` once another call has kept it past `until`. Some statements
+    /// SQLite cannot interrupt (`instr` or `replace` over megabytes is one VDBE step that runs
+    /// for minutes), so a wait is bounded: the other requests of a server get `busy` instead of
+    /// losing their whole deadline, and no worker lingers on the lock.
+    fn lock(&self, until: Instant) -> Option<MutexGuard<'_, Connection>> {
+        loop {
+            match self.conn.try_lock() {
+                Ok(conn) => return Some(conn),
+                Err(TryLockError::Poisoned(p)) => return Some(p.into_inner()),
+                Err(TryLockError::WouldBlock) if Instant::now() >= until => return None,
+                Err(TryLockError::WouldBlock) => std::thread::sleep(LOCK_POLL),
+            }
+        }
+    }
+
     /// Run `sqls` with `params` (one list per statement) under the connection's lock: one
     /// statement for `query` and `exec`, all of them in one transaction otherwise. Waits for
-    /// another process's lock at most `BUSY_TIMEOUT`, or until `deadline`; a statement still
-    /// running at `deadline` is interrupted.
+    /// the connection, then for another process's lock, at most `BUSY_TIMEOUT` each, or until
+    /// `deadline`; a statement still running at `deadline` is interrupted.
     fn run(
         &self,
         mode: Mode,
@@ -244,10 +262,31 @@ impl Db {
         params: &[Vec<SqlValue>],
         deadline: Instant,
     ) -> std::result::Result<Out, Fail> {
-        let mut conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
+        let until = (Instant::now() + BUSY_TIMEOUT).min(deadline);
+        let Some(mut conn) = self.lock(until) else {
+            return Err(Fail::Db(DbErr::Busy));
+        };
         conn.progress_handler(PROGRESS_OPS, Some(move || Instant::now() >= deadline))?;
         let left = deadline.saturating_duration_since(Instant::now());
         conn.busy_timeout(left.min(BUSY_TIMEOUT))?;
+        // The host's own statements, which the authorizer allows while `host` is set: reset on a
+        // panic too, or every later statement would run unfenced.
+        let trusted = |sql: &str| {
+            struct Reset<'a>(&'a AtomicBool);
+            impl Drop for Reset<'_> {
+                fn drop(&mut self) {
+                    self.0.store(false, Relaxed);
+                }
+            }
+            self.host.store(true, Relaxed);
+            let _reset = Reset(&self.host);
+            conn.execute_batch(sql)
+        };
+        // Only a panic inside an earlier `transaction` leaves one open: end it, or every later
+        // write would land in it and `BEGIN` would fail.
+        if !conn.is_autocommit() {
+            trusted("ROLLBACK")?;
+        }
         if mode != Mode::Transaction {
             return statement(&conn, &sqls[0], &params[0], mode == Mode::Query);
         }
@@ -261,12 +300,6 @@ impl Db {
         if sqls.len() > STATEMENTS_MAX {
             return Err(Fail::Db(DbErr::TooLarge));
         }
-        let trusted = |sql: &str| {
-            self.host.store(true, Relaxed);
-            let r = conn.execute_batch(sql);
-            self.host.store(false, Relaxed);
-            r
-        };
         trusted("BEGIN")?;
         let run = || -> std::result::Result<i64, Fail> {
             let mut changes = 0;

@@ -373,6 +373,54 @@ fn fifty_concurrent_requests_insert_fifty_rows() {
     assert_eq!(kio(&["run", &count, "--db", &flag]).1, "Ok([[SqlValue::Int(50)]])\n");
 }
 
+/// Some statements SQLite cannot interrupt: `instr` over megabytes is one VDBE step the progress
+/// handler never sees (2 MB against 1 MB runs 20 s). A run waiting for the connection another
+/// run keeps that way gets `busy` after the 2 s timeout, not a timeout of its own at its deadline,
+/// so one such request under `--listen` costs the others `busy`, not their runs.
+#[test]
+fn busy_when_another_run_keeps_the_connection() {
+    let db = Arc::new(Db::memory().unwrap());
+    let sources = || Sources {
+        dbs: vec![("db".into(), db.clone())],
+        ..Sources::default()
+    };
+    let slow = {
+        let sources = sources();
+        std::thread::spawn(move || {
+            let mut kio = Kio::new(Limits {
+                timeout_secs: 120,
+                ..Limits::default()
+            })
+            .unwrap();
+            kio.grant_sources(sources);
+            let main = r#"fn main(db: Db) -> Str {
+              rows(db.query("SELECT instr(printf('%.1000000c','a'), printf('%.500000c','a') || 'b')", []))
+            }"#;
+            kio.run(&format!("{SHOW}{main}"), vec![]).unwrap().unwrap().value
+        })
+    };
+    std::thread::sleep(Duration::from_millis(500));
+    let mut kio = Kio::new(Limits {
+        timeout_secs: 30,
+        ..Limits::default()
+    })
+    .unwrap();
+    kio.grant_sources(sources());
+    let start = Instant::now();
+    let main = r#"fn main(db: Db) -> Str { rows(db.query("SELECT 1", [])) }"#;
+    let out = kio.run(&format!("{SHOW}{main}"), vec![]).unwrap().unwrap().value;
+    let waited = start.elapsed();
+    assert_eq!(out, "busy");
+    assert!(
+        waited >= Duration::from_secs(2) && waited < Duration::from_secs(4),
+        "{waited:?}"
+    );
+    assert_eq!(slow.join().unwrap(), "0");
+    // The connection is free again.
+    kio.grant_sources(sources());
+    assert_eq!(kio.run(&format!("{SHOW}{main}"), vec![]).unwrap().unwrap().value, "1");
+}
+
 /// Another connection holding the write lock makes a write `busy` after the timeout, not a hang.
 #[test]
 fn busy_when_another_connection_holds_the_lock() {
