@@ -177,6 +177,9 @@ fn bad_flags_are_refused_with_a_hint() {
     let dir_grant = format!("d={}", conf.display());
     let inline = format!("up=Authorization:Bearer {SECRET}");
     let inline_no_colon = format!("up=Bearer{SECRET}");
+    let no_eq = format!("up_{SECRET}");
+    let linked = write(t.path(), "linked", FILE_SECRET);
+    std::fs::hard_link(&linked, conf.join("linked")).unwrap();
     let loopback = "up=http://127.0.0.1:1";
     let cases: &[(&[&str], &str)] = &[
         (
@@ -280,6 +283,12 @@ fn bad_flags_are_refused_with_a_hint() {
         // A value given inline by mistake is not echoed: only `name=Header`.
         (&["--http", loopback, "--http-header", &inline], "--http-header up=Authorization: expected"),
         (&["--http", loopback, "--http-header", &inline_no_colon], "--http-header up: expected"),
+        // Without `=` the whole spec could be the value: nothing of it is echoed.
+        (&["--http", loopback, "--http-header", &no_eq], "--http-header: expected"),
+        (
+            &["--http", loopback, "--http-header", &format!("up=Authorization:file:{linked}")],
+            "has other hard links; the program could read one\n  hint: give kio a key file of its own",
+        ),
     ];
     for (flags, want) in cases {
         let mut args = vec![prog.as_str()];

@@ -218,6 +218,22 @@ fn audit_lines_on_both_paths() {
 #[test]
 fn verify_only_refuses_sign_and_still_verifies() {
     assert_eq!(both(&program("6869"), || key(KEY.as_bytes(), true)), "denied");
+    // A refused `sign` is audited and charges no `--io`.
+    for compiled in [true, false] {
+        let audit = Buf::default();
+        let v = shown(run(
+            &program("6869"),
+            key(KEY.as_bytes(), true),
+            compiled,
+            Some(audit.clone()),
+        ));
+        assert_eq!(v, "denied");
+        let text = audit.text();
+        assert!(
+            text.contains(r#""method":"sign","arg":"sign","bytes":0,"result":"denied","len":2"#),
+            "{text}"
+        );
+    }
     let mac = hex(&reference(KEY.as_bytes(), b"hi"));
     let src = format!(
         r#"{UNHEX}
@@ -423,24 +439,36 @@ fn flags_grant_from_env_and_file_and_the_report_names_sign() {
     let out = kio(&["run", &prog, "--hmac", &format!("k=file:{file}")], &[]);
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert_eq!(stdout.trim(), hex(&reference(FILE_KEY.as_bytes(), b"hello")));
-    // `:verify` on a file: sign is refused, and the audit log says so.
+    // `:verify` is refused at start to a program that can sign with the grant, one-shot and
+    // under `--listen` (the host's own `Denied` is tested on both paths above).
+    let refusal =
+        "`k` is granted `:verify` but the program can sign with it\n  hint: drop `:verify`, or remove the `sign` call";
+    let out = kio(&["run", &prog, "--hmac", &format!("k=file:{file}:verify")], &[]);
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert_eq!((out.status.code(), out.stdout.is_empty()), (Some(2), true), "{err}");
+    assert!(err.contains(refusal), "{err}");
+    let app = write(
+        t.path(),
+        "app.kio",
+        r#"fn main(req: Incoming, res: Outgoing, k: Hmac) -> Result<(), WebErr> {
+          let m = k.sign(req.body());
+          res.send(200, [], [], "ok".to_bytes())
+        }"#,
+    );
     let out = kio(
         &[
             "run",
-            &prog,
+            &app,
+            "--listen",
+            "127.0.0.1:0",
             "--hmac",
             &format!("k=file:{file}:verify"),
-            "--audit",
-            audit.to_str().unwrap(),
         ],
         &[],
     );
-    assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), "denied");
-    let log = std::fs::read_to_string(&audit).unwrap();
-    assert!(
-        log.contains(r#""method":"sign","arg":"sign","bytes":5,"result":"denied","len":5"#),
-        "{log}"
-    );
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains(refusal) && !err.contains("listening"), "{err}");
     // The report names the methods; adding `sign` is new authority.
     let out = kio(&["check", &prog], &[]);
     assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), "main : k sign");
@@ -476,6 +504,8 @@ fn bad_keys_are_refused_at_start_and_never_shown() {
     let huge = write(t.path(), "huge", &format!("{FILE_KEY}{}", "k".repeat(9000)));
     let audit = write(t.path(), "audit.log", "");
     let logf = write(t.path(), "app.log", "");
+    let linked = write(t.path(), "linked", FILE_KEY);
+    std::fs::hard_link(&linked, granted.join("linked")).unwrap();
     let cases: Vec<(Vec<String>, &str)> = vec![
         (
             vec!["k=env:H22_KEY".into()],
@@ -515,7 +545,13 @@ fn bad_keys_are_refused_at_start_and_never_shown() {
             vec![format!("k={KEY}")],
             "--hmac k: expected name=env:VAR or name=file:PATH",
         ),
-        (vec![format!("={KEY}")], "--hmac : expected name=env:VAR"),
+        (vec![format!("={KEY}")], "--hmac: expected name=env:VAR"),
+        // Without `=` the whole spec could be the key: nothing of it is echoed.
+        (vec![KEY.into()], "--hmac: expected name=env:VAR"),
+        (
+            vec![format!("k=file:{linked}")],
+            "has other hard links; the program could read one\n  hint: give kio a key file of its own",
+        ),
         (vec!["k=env:".into()], "expected name=env:VAR"),
         (vec!["k=file:".into()], "expected name=env:VAR"),
     ];

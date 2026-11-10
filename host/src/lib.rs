@@ -2034,6 +2034,16 @@ impl HmacKey {
     pub(crate) fn label(&self) -> String {
         if self.verify_only { "verify" } else { "sign,verify" }.into()
     }
+
+    /// Whether `sign` is refused (`:verify`).
+    pub fn verify_only(&self) -> bool {
+        self.verify_only
+    }
+}
+
+/// Whether `main`'s report line has `name sign`: a `:verify` grant of `name` is then refused.
+pub fn signs_in_report(report: &str, name: &str) -> bool {
+    main_calls(report).contains(&(name.to_string(), "sign".to_string()))
 }
 
 /// HMAC-SHA256 (RFC 2104) of `msg` under `key`, over lang's SHA-256.
@@ -2118,11 +2128,11 @@ impl kio::caps::hmac::HostHmac for State {
             "sign",
             |s| {
                 s.audit_extra = format!(r#","len":{}"#, msg.len());
-                s.spend_io(msg.len())?;
-                let k = s.table.get(&Resource::<HmacKey>::new_borrow(h.rep()))?;
-                if k.verify_only {
+                if s.table.get(&Resource::<HmacKey>::new_borrow(h.rep()))?.verify_only {
                     return Ok(Err(kio::caps::hmac::HmacErr::Denied));
                 }
+                s.spend_io(msg.len())?;
+                let k = s.table.get(&Resource::<HmacKey>::new_borrow(h.rep()))?;
                 Ok(Ok(hmac_sha256(k.key.0.as_bytes(), &msg).to_vec()))
             },
             outcome,

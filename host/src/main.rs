@@ -182,6 +182,12 @@ fn read_secret(path: &str, dirs: &[(String, String)], files: &[(String, &str)]) 
         Ok(_) => return Err(cannot(&"not a regular file")),
         Err(e) => return Err(cannot(&e)),
     }
+    // Another name for the file could be inside a granted `--dir`, where the check below misses it.
+    if std::fs::metadata(path).is_ok_and(|m| std::os::unix::fs::MetadataExt::nlink(&m) > 1) {
+        return Err(format!(
+            "`{path}` has other hard links; the program could read one\n  hint: give kio a key file of its own"
+        ));
+    }
     let real = std::fs::canonicalize(path).map_err(|e| cannot(&e))?;
     for (d, dir) in dirs {
         if std::fs::canonicalize(dir).is_ok_and(|root| real.starts_with(root)) {
@@ -209,9 +215,21 @@ const SECRET_MAX: u64 = 8 << 10;
 /// `spec` of a `--http-header` as an error may show it: `name=Header`, never what follows the
 /// first `:` (or, without one, the `=`), where a value given inline by mistake would be.
 fn header_label(spec: &str) -> &str {
+    if !spec.contains('=') {
+        return "";
+    }
     match spec.split_once(':') {
         Some((label, _)) => label,
         None => spec.split('=').next().unwrap_or(""),
+    }
+}
+
+/// `--flag label: e`, or `--flag: e` for an empty label.
+fn flag_error(flag: &str, label: &str, e: &str) -> String {
+    if label.is_empty() {
+        format!("{flag}: {e}")
+    } else {
+        format!("{flag} {label}: {e}")
     }
 }
 
@@ -409,14 +427,18 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     written.extend(log_paths.iter().map(|(n, p)| (format!("--log {n}"), p.as_str())));
     for spec in http_headers {
         if let Err(e) = http_header(spec, &mut https, &dir_paths, &written) {
-            return fail(format!("--http-header {}: {e}", header_label(spec)));
+            return fail(flag_error("--http-header", header_label(spec), &e));
         }
     }
-    // An error names the grant only: a key given inline by mistake would follow the `=`.
+    // An error names the grant only: a key given inline by mistake would follow the `=`, or be
+    // the whole spec when there is none.
     for spec in hmac_specs {
         match hmac(spec, &dir_paths, &written) {
             Ok(grant) => sources.hmacs.push(grant),
-            Err(e) => return fail(format!("--hmac {}: {e}", spec.split('=').next().unwrap_or(""))),
+            Err(e) => {
+                let name = spec.split_once('=').map_or("", |(n, _)| n);
+                return fail(flag_error("--hmac", name, &e));
+            }
         }
     }
     // A program that fails to check says so before any check of `main`'s shape (H20).
@@ -447,6 +469,15 @@ fn run(path: &str, flags: &[&str]) -> i32 {
         if let Some(m) = write_in_report(&report, name) {
             return fail(format!(
                 "`{name}` is granted read-only but `main` can call `{name} {m}`\n  hint: drop `:ro` or remove the writes"
+            ));
+        }
+    }
+    // A `:verify` key is refused to a program that can sign with it; the host also refuses a
+    // `sign` that reaches it.
+    for (name, key) in &sources.hmacs {
+        if key.verify_only() && kio_host::signs_in_report(&report, name) {
+            return fail(format!(
+                "`{name}` is granted `:verify` but the program can sign with it\n  hint: drop `:verify`, or remove the `sign` call"
             ));
         }
     }
