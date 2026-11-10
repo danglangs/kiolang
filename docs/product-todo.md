@@ -27,12 +27,13 @@ operator runs it:  kio run app.kio --http stripe=… --http-header stripe=Author
   - Done: tests for an added method, a new `main` parameter, a removed method (exit 0), a new function using a capability, a function moved to a module, no change, a base that fails to check; the links app diffed against a version without the webhook shows exactly `hook send` added.
   - Result: `lang::authority` (the structure `report` prints) and `report_diff`; `kio check --base` prints the lines and `authority added: N lines (exit 3)` or `authority removed only`. kio-web links against itself without the webhook: `+ main: grant hook: Http`, `+ main: hook send`, `+ notify: hook send, log write` (notify is new, so its `log write` counts too). Tests: lang/tests/report.rs (`diff_*`, 8), host/tests/authority_diff.rs (6).
 
-- [ ] **S1. Secrets as headers the host adds.** The program never holds the key, so it cannot leak it.
+- [x] **S1. Secrets as headers the host adds.** The program never holds the key, so it cannot leak it.
   - `--http-header name=Header:SOURCE`, `SOURCE` = `env:VAR` or `file:PATH`, read once at start (missing or empty: refused, with a hint). Repeatable; only on a granted `Http` name.
   - The host adds the header to every request on that grant: `get`, `send`, `send_all`, and redirects (which stay in the origin). A program sending a header of the same name gets `HttpErr::Invalid`. Refused at start on an `http://` origin that is not loopback (the key would cross the network in clear).
   - Never in audit, `--log`, errors or the report: the audit line lists `"injected":["authorization"]`. Under `--listen`, the same for every run.
   - Threat model, documented: an origin that echoes request headers back (as httpbin's `/headers`) hands the key to the program; grant only origins that do not.
   - Done: a local server receives the header on every method and on a redirect; the program's same-name header refused; the value appears in no output (audit, log, stderr, response to the client); `env:` missing and cleartext refusals with hints; kio-web links signs its webhook with an injected `Authorization`. Independent security review.
+  - Result: `Origin::inject` holds each header as a `Secret` (`Debug` prints `<redacted>`) and `perform` adds it to every hop; `prepare` refuses a program header of the same name (`invalid`, audited with `injected`); `kio run` reads `env:`/`file:` once and refuses a missing or empty value, a bad or reserved name, a repeat, an ungranted name and cleartext non-loopback origins, never printing the value. Audit: `"injected":[..]` per request, ` injects=..` in the grant's target. Tests: host/tests/http_header.rs (4: every method and a redirect hop at a local upstream with a scan of stdout, stderr, audit and log; 11 refusals with hints; `Debug`; `--listen`). kio-web links: `--http-header hook=Authorization:file:..`, its receiver (`hook.py`) refuses a post without it. Security review pending.
 
 ## Order
 

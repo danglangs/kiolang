@@ -96,12 +96,12 @@ follow              : links get, clock now_ms
 notify              : hook send, log write
 ...
 $ kio run app.kio --kv links=links.kv --kv auth=auth.kv --dir assets=./static --rng links_rng --clock now --log log=links.log \
-    --http hook=hooks.example --http-methods hook=POST --listen 127.0.0.1:8080
+    --http hook=hooks.example --http-methods hook=POST --http-header hook=Authorization:env:HOOK_AUTH --listen 127.0.0.1:8080
 ...
 listening on http://127.0.0.1:8080
 ```
 
-A redirect (`follow`) can only read links and the clock; auth can only read the token hash; nothing can write the token hash or write files, and only `notify` reaches the network: one host, POST only. With 301 links it serves 15,500 redirects/s and 13,200 listings/s (`ab -c 20`, Apple silicon), a fresh sandbox per request.
+A redirect (`follow`) can only read links and the clock; auth can only read the token hash; nothing can write the token hash or write files, and only `notify` reaches the network: one host, POST only, with a key the host adds and the program never sees. With 301 links it serves 15,500 redirects/s and 13,200 listings/s (`ab -c 20`, Apple silicon), a fresh sandbox per request.
 
 ## Replay
 
@@ -182,7 +182,7 @@ The cost is the ecosystem: few libraries, no package manager yet. Agents write m
 ## Roadmap
 
 - **Now:** an eval of how well models write kio.
-- **Next:** allocation speed (escape analysis); a report diff for pull requests; a secrets grant.
+- **Next:** allocation speed (escape analysis).
 - **Later:** `par_map` and tasks (pinned), packages.
 
 Where work stands: [docs/status.md](docs/status.md); concurrency: [docs/proposals/concurrency.md](docs/proposals/concurrency.md).

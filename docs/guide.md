@@ -22,7 +22,7 @@ examples/fx/report.kio:10: error: no grant for `fx: Http`
 | Type | Flag | Grants |
 |---|---|---|
 | `Dir` | `--dir name=path` | a directory: `read`, `create`, `list`, `write`, `remove`, `exists` |
-| `Http` | `--http name=host`, `--http-methods name=POST,..` | one host over HTTPS, GET unless more methods are granted; `--http name=http://127.0.0.1:9000` plain HTTP, for local testing |
+| `Http` | `--http name=host`, `--http-methods name=POST,..`, `--http-header name=Header:env:VAR` | one host over HTTPS, GET unless more methods are granted; `--http name=http://127.0.0.1:9000` plain HTTP, for local testing |
 | `Kv` | `--kv name=path`, `name=path:ro`, `name=:memory:` | a key-value store |
 | `Db` | `--db name=path`, `name=path:ro`, `name=:memory:` | a SQLite database: `query`, `exec`, `transaction` |
 | `Rng` | `--rng name`, `--rng name=seed:N` | random values from the OS, or a fixed stream |
@@ -48,6 +48,15 @@ error: IoErr::InvalidPath
 - `send(method, path, headers, body) -> Result<HttpResponse, HttpErr>`: headers are `"name: value"` strings; any status is `Ok`, read `r.status`, `r.headers`, `r.body`. Framing headers (`host`, `content-length`, `transfer-encoding`, `connection`, ..) and any CR or LF are `Invalid`; a method not granted is `Denied`; a body over 8 MB is `TooLarge`. Redirects are followed only for GET and HEAD.
 - `send_all([HttpRequest { method, path, headers, body, timeout_ms }, ..])`: up to 64 requests at once; results in list order; a request past its timeout is `Err(Timeout)` in its place.
 - The audit log records each request's method, path, status, byte counts and header names, never a header value.
+
+**A secret the program never holds.** `--http-header api=Authorization:env:API_AUTH` (or `:file:PATH`) has the host add `Authorization: <value>` to every request on `api`: `get`, `send`, each `send_all` request and each redirect hop. The value is read once at start (a missing variable or file, or an empty value, is refused; a file's trailing newline is dropped) and never reaches the program, the audit log, `--log`, an error or stderr; the audit header lists `injects=authorization` and each request `"injected":["authorization"]`. Repeatable, one header name once per grant. A program that sends a header of the same name (any case) gets `Err(HttpErr::Invalid)`, nothing sent. Refused on an `http://` origin that is not loopback, where the key would cross the network in clear.
+
+```
+$ API_AUTH="Bearer $(cat ~/.keys/stripe)" kio run charge.kio --http stripe=api.stripe.com \
+    --http-methods stripe=POST --http-header stripe=Authorization:env:API_AUTH
+```
+
+Grant only origins that do not echo request headers back: an endpoint like httpbin's `/headers` returns the key in its response body, which the program can read and leak.
 
 A path, not a URL: `get(path)` takes a path on the granted host; anything else (`https://other.example/..`, `//other.example`) is `HttpErr::Denied` without a request. Redirects are rechecked against the grant, IP literals and private addresses are refused, DNS is pinned per run.
 

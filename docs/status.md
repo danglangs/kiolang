@@ -53,6 +53,7 @@ Compiled-only kio covers the whole language and every capability. What real apps
 | C8b7 | cheaper freeing (fuel stays): one precomputed plan per descriptor and variant (pointer slots as a mask, size), the table by reference, pointer-free objects freed in `dec` directly. Freeing fuel on a 2^22-leaf tree 4.61 to 2.75 G; tree 101 to 90 ms (fuel 2.26 to 1.80 G), word count 29.8 to 28.2, `HashMap` 23.6 to 22.4, json.kio 66 to 64, strings 5.0 to 4.5; fib 5% slower at the same fuel (code placement) |
 | H18 | concurrency stage 1b: under `--listen`, `send` answers the client at once and `main` runs on under the request's limits, holding its worker; a failure after it goes to stderr and the audit log; trailer `"after_send":N` (#146, #147). kio-web links counts a hit after the redirect: one-client redirects 6.0k to 7.0-7.6k/s, 20 clients unchanged (~15k) |
 | P1 | `kio check NEW --base OLD`: the authority diff (`+ main: grant hook: Http`, `+ create: hook send`), exit 3 when any was added; `tools/authority-diff.sh BASE_REF ENTRY` for CI (guide.md, "Reviewing authority in a pull request") |
+| S1 | `--http-header api=Authorization:env:VAR\|file:PATH`: the host adds a secret header to every request and redirect hop on the grant; the program, audit, `--log`, errors and stderr never see the value; a program header of the same name is `invalid`; cleartext non-loopback origins refused. kio-web links authorizes its webhook this way. Independent security review pending |
 
 ## Next
 

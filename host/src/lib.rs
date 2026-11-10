@@ -145,6 +145,19 @@ pub struct Origin {
     any_addr: bool,
     /// The methods `--http-methods` added; GET is always allowed.
     methods: Vec<&'static str>,
+    /// `--http-header`: headers (names lowercased) the host adds to every request and hop.
+    inject: Vec<(String, Secret)>,
+}
+
+/// A header value from `--http-header`. It is only ever written to a request: it has no
+/// `Display`, and its `Debug` prints `<redacted>`, so no message or log can carry it.
+#[derive(Clone)]
+pub struct Secret(Arc<str>);
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
 }
 
 /// The request methods a program may name; any other is `invalid`.
@@ -193,6 +206,7 @@ impl Origin {
             read: Arc::default(),
             any_addr,
             methods: Vec::new(),
+            inject: Vec::new(),
         })
     }
 
@@ -222,19 +236,82 @@ impl Origin {
         Ok(())
     }
 
+    /// Add `header: value` to every request on this grant (`--http-header`). Refused: a name
+    /// that is not a token, is reserved or is already injected; an empty value or one with a
+    /// control character; an `http://` origin that is not loopback. No error names the value.
+    pub fn inject(&mut self, header: &str, value: String) -> std::result::Result<(), String> {
+        let name = header.to_ascii_lowercase();
+        let token = |c: char| c.is_ascii_alphanumeric() || "!#$%&'*+-.^_`|~".contains(c);
+        if name.is_empty() || !name.chars().all(token) {
+            return Err(format!(
+                "{header:?} is not a header name\n  hint: a name is letters, digits and !#$%&'*+-.^_`|~, as `Authorization`"
+            ));
+        }
+        if RESERVED_HEADERS.contains(&name.as_str()) || name.starts_with("proxy-") {
+            return Err(format!(
+                "`{header}` is set by the host\n  hint: inject an application header, as `Authorization`"
+            ));
+        }
+        if self.injects(&name) {
+            return Err(format!(
+                "`{header}` is injected twice on this grant\n  hint: give each header once"
+            ));
+        }
+        if value.is_empty() {
+            return Err("the value is empty\n  hint: set it to the secret".into());
+        }
+        let control = |c: char| (c.is_ascii_control() && c != '\t') || c == '\u{7f}';
+        if value.len() > HEADER_MAX || value.chars().any(control) {
+            return Err(format!(
+                "the value has a control character (CR, LF, NUL..) or is over {HEADER_MAX} bytes\n  hint: store the value alone, on one line"
+            ));
+        }
+        let host = self.host.trim_matches(['[', ']']);
+        let loopback =
+            host.eq_ignore_ascii_case("localhost") || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
+        if !self.https && !loopback {
+            return Err(format!(
+                "`http://{}` would carry the header in clear\n  hint: grant `https://{}`; plain http is only for loopback",
+                self.host, self.host
+            ));
+        }
+        self.inject.push((name, Secret(value.into())));
+        Ok(())
+    }
+
+    /// Whether the host injects the header `name` (lowercase) on this grant.
+    fn injects(&self, name: &str) -> bool {
+        self.inject.iter().any(|(n, _)| n == name)
+    }
+
+    /// The audit field naming the injected headers, never their values; empty without any.
+    fn injected(&self) -> String {
+        if self.inject.is_empty() {
+            return String::new();
+        }
+        let names: Vec<String> = self.inject.iter().map(|(n, _)| json(n)).collect();
+        format!(r#","injected":[{}]"#, names.join(","))
+    }
+
     /// Whether the grant allows `method`, one of `METHODS`.
     fn allows(&self, method: &str) -> bool {
         method == "GET" || self.methods.contains(&method)
     }
 
-    /// `scheme://host:port`, with the methods added to GET if any, for the audit log.
+    /// `scheme://host:port`, with the methods added to GET and the injected header names if
+    /// any, for the audit log.
     fn target(&self) -> String {
         let methods = match self.methods.is_empty() {
             true => String::new(),
             false => format!(" methods=GET,{}", self.methods.join(",")),
         };
+        let inject: Vec<&str> = self.inject.iter().map(|(n, _)| n.as_str()).collect();
+        let inject = match inject.is_empty() {
+            true => String::new(),
+            false => format!(" injects={}", inject.join(",")),
+        };
         format!(
-            "{}://{}:{}{methods}",
+            "{}://{}:{}{methods}{inject}",
             if self.https { "https" } else { "http" },
             self.host,
             self.port
@@ -599,6 +676,10 @@ fn perform(origin: &Origin, req: &Outbound, deadline: Instant, budget: &AtomicI6
         let mut b = ureq::http::Request::builder().method(req.method).uri(url.as_str());
         for (name, value) in &req.headers {
             b = b.header(name.as_str(), value.as_str());
+        }
+        // `prepare` refused a program header of the same name, so each is sent once.
+        for (name, Secret(value)) in &origin.inject {
+            b = b.header(name.as_str(), &**value);
         }
         // A method that carries a body sends it with its length, `Content-Length: 0` when empty
         // (ureq would otherwise send an empty chunked body); any other sends none unless given one.
@@ -1410,8 +1491,9 @@ impl State {
             as_get: true,
         };
         let done = self.finish(&origin, req)?;
+        self.audit_extra = origin.injected();
         if done.busy {
-            self.audit_extra = BUSY.into();
+            self.audit_extra += BUSY;
         }
         Ok(done.result.map(|r| r.body))
     }
@@ -1479,6 +1561,11 @@ impl State {
         };
         let names: Vec<String> = headers.iter().map(|(n, _)| json(n)).collect();
         *extra += &format!(r#","headers":[{}]"#, names.join(","));
+        *extra += &origin.injected();
+        // The host sets this header; the program may not replace or repeat it.
+        if headers.iter().any(|(n, _)| origin.injects(n)) {
+            return Ok(Err(HttpErr::Invalid));
+        }
         if body.len() > BODY_CAP {
             return Ok(Err(HttpErr::TooLarge));
         }

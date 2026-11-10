@@ -3,7 +3,7 @@ mod mcp;
 use kio_host::{listen, open_dir, ClockSpec, Diag, Kio, Limits, LogSink, Origin, RngSpec, Server, Sources};
 
 /// `kio run`'s flags.
-const USAGE: &str = "[--dir name=path]... [--http name=host]... [--http-methods name=POST,PUT,..]... [--kv name=path[:ro]|:memory:]... [--kv-mb mb] [--db name=path[:ro]|:memory:]... [--db-mb mb] [--rng name[=seed:N]]... [--clock name[=fixed:T]]... [--log name=path|-]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]...";
+const USAGE: &str = "[--dir name=path]... [--http name=host]... [--http-methods name=POST,PUT,..]... [--http-header name=Header:env:VAR|file:path]... [--kv name=path[:ro]|:memory:]... [--kv-mb mb] [--db name=path[:ro]|:memory:]... [--db-mb mb] [--rng name[=seed:N]]... [--clock name[=fixed:T]]... [--log name=path|-]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]...";
 
 fn main() {
     // The host checks and lowers programs natively, and compiled code runs on this thread's stack
@@ -97,6 +97,51 @@ fn check_base(path: &str, base: &str) -> i32 {
     }
 }
 
+/// Apply one `--http-header name=Header:env:VAR` or `name=Header:file:PATH` to the grant `name`:
+/// the value is read now, once. A file's one trailing newline is dropped. Errors never hold the
+/// value (`spec` names only where it comes from).
+fn http_header(spec: &str, https: &mut [(String, Origin)]) -> Result<(), String> {
+    let usage = "expected name=Header:env:VAR or name=Header:file:PATH";
+    let Some((name, rest)) = spec.split_once('=') else {
+        return Err(usage.into());
+    };
+    let Some((header, source)) = rest.split_once(':') else {
+        return Err(usage.into());
+    };
+    let Some((_, origin)) = https.iter_mut().find(|(n, _)| n == name) else {
+        return Err(format!(
+            "no `--http {name}=host` grant\n  hint: --http-header adds a header to an Http grant of that name"
+        ));
+    };
+    let value = match source.split_once(':') {
+        Some(("env", var)) if !var.is_empty() => match std::env::var(var) {
+            Ok(v) => v,
+            Err(std::env::VarError::NotPresent) => {
+                return Err(format!(
+                    "`{var}` is not set\n  hint: export {var} in the environment that runs kio, or use file:PATH"
+                ))
+            }
+            Err(std::env::VarError::NotUnicode(_)) => return Err(format!("`{var}` is not UTF-8")),
+        },
+        Some(("file", path)) if !path.is_empty() => match std::fs::read_to_string(path) {
+            Ok(v) => {
+                let v = v.strip_suffix('\n').unwrap_or(&v);
+                v.strip_suffix('\r').unwrap_or(v).to_string()
+            }
+            Err(e) => {
+                return Err(format!(
+                    "cannot read {path}: {e}\n  hint: the file holds the header's value alone"
+                ))
+            }
+        },
+        _ => return Err(usage.into()),
+    };
+    if value.is_empty() {
+        return Err(format!("{source} is empty\n  hint: set it to the header's value"));
+    }
+    origin.inject(header, value)
+}
+
 fn run(path: &str, flags: &[&str]) -> i32 {
     let files = match read_files(path) {
         Ok(f) => f,
@@ -106,6 +151,8 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     let mut https: Vec<(String, Origin)> = Vec::new();
     // `(name, methods)` of each `--http-methods`, applied once every `--http` is known.
     let mut http_methods: Vec<(String, String)> = Vec::new();
+    // Each `--http-header` as given, read once every `--http` is known.
+    let mut http_headers: Vec<&str> = Vec::new();
     let mut limits = if flags.contains(&"--listen") {
         Limits::web()
     } else {
@@ -142,6 +189,10 @@ fn run(path: &str, flags: &[&str]) -> i32 {
                     }
                     _ => return fail(format!("--http-methods {spec}: expected name=GET,POST,..")),
                 }
+                continue;
+            }
+            ["--http-header", spec] => {
+                http_headers.push(spec);
                 continue;
             }
             [flag @ ("--fuel" | "--timeout" | "--memory" | "--stack" | "--calls" | "--io"), n] => {
@@ -272,6 +323,11 @@ fn run(path: &str, flags: &[&str]) -> i32 {
         };
         if let Err(e) = origin.allow_methods(list) {
             return fail(format!("--http-methods {name}={list}: {e}"));
+        }
+    }
+    for spec in http_headers {
+        if let Err(e) = http_header(spec, &mut https) {
+            return fail(format!("--http-header {spec}: {e}"));
         }
     }
     // A program that fails to check is reported by the run below.
