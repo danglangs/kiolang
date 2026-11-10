@@ -191,9 +191,9 @@ The cost is the ecosystem: few libraries, no package manager yet. Agents write m
 
 ## Roadmap
 
-- **Now:** what the eval showed models reaching for: an assignment as a match arm, `None` typed from the other branch.
-- **Next:** allocation speed (escape analysis).
-- **Later:** `par_map` and tasks (pinned), packages.
+- **Now:** allocation speed (escape analysis).
+- **Next:** packages (a module from another directory); `par_map` and tasks (pinned).
+- **Later:** tuples, if the eval shows models still reach for them.
 
 Where work stands: [docs/status.md](docs/status.md); concurrency: [docs/proposals/concurrency.md](docs/proposals/concurrency.md).
 
