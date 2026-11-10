@@ -57,6 +57,14 @@ main      : input read, fx get, out write
 summarize : fx get
 ```
 
+In a pull request, the reviewer reads only what changed, and CI fails until someone approves it ([tools/authority-diff.sh](tools/authority-diff.sh)):
+
+```
+$ kio check examples/fx/leak.kio --base examples/fx/report.kio
++ summarize: fx get
+authority added: 1 line (exit 3)
+```
+
 Run anyway, the host refuses the call: `fx` is `api.frankfurter.dev` and nothing else. The audit log records the attempt.
 
 ```
