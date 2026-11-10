@@ -50,7 +50,7 @@ error: IoErr::InvalidPath
 
 A path, not a URL: `get(path)` takes a path on the granted host; anything else (`https://other.example/..`, `//other.example`) is `HttpErr::Denied` without a request. Redirects are rechecked against the grant, IP literals and private addresses are refused, DNS is pinned per run.
 
-Under `--listen` each request gets its own `Http` handle (its own DNS lookup, pinned for that request) with the same grant, methods and limits; its audit lines carry `"req":N`. A request holds at most 64 HTTP requests in flight; the process at most 1,024. Past that a new `get`, `send` or `send_all` is `Err(Timeout)` at once, nothing sent (audited `"busy":true`); other calls, a `Dir` read for one, are unaffected. A path built from request input is the program's to check: the host keeps it on the granted host, but `?`, `/` and `..` inside it reach that host as given.
+Under `--listen` each request gets its own `Http` handle (its own DNS lookup, pinned for that request) with the same grant, methods and limits; its audit lines carry `"req":N`. A request holds at most 64 HTTP requests in flight; the process a full 64 per worker (at least 1,024), so a running request is never refused one. Past that (workers a deadline left behind) a new `get`, `send` or `send_all` is `Err(Timeout)` at once, nothing sent (audited `"busy":true`); other calls, a `Dir` read for one, are unaffected. A request may make 1,000 calls (`--calls`), so at most 1,000 outbound requests. A path built from request input is the program's to check: the host keeps it on the granted host, but `?`, `/` and `..` inside it reach that host as given.
 
 ```
 $ kio run examples/fx/report.kio --dir input=examples/in --http fx=api.frankfurter.dev --dir out=examples/tour/out
@@ -155,7 +155,7 @@ Throughput: 73,800 requests/s with keep-alive (kio-web hello, roadmap.md "Speed 
 
 ## Limits
 
-Every run is bounded; each limit's error names the flag that raises it. Under `--listen` the limits are per request, and the defaults are smaller: fuel 10,000,000, memory 64 MB, timeout 5 s (the flags override them).
+Every run is bounded; each limit's error names the flag that raises it. Under `--listen` the limits are per request, and the defaults are smaller: fuel 10,000,000, memory 64 MB, timeout 5 s, calls 1,000 (the flags override them).
 
 | Flag | Default |
 |---|---|

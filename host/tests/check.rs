@@ -461,13 +461,14 @@ fn overlong_path_is_invalid() {
 /// A one-thread HTTP/1.1 server on 127.0.0.1: `/ok` is 200 `hello`, `/big` is 10 MB + 1, `/hang`
 /// never answers, `/slow` answers after two seconds, `/echo` is 200 with the request line, headers
 /// and body as received (and two response headers), `/created` 201, `/error` 500 `boom`,
-/// `/moved` redirects off-host, `/same` to `/ok`, `/port` and `/https` to another port and
+/// `/moved` redirects off-host, `/same` to `/ok`, `/port`, `/https` and `/ftp` to another port or
 /// scheme, `/bare` redirects with no `Location`, `/hopN` redirects N times then `/ok`, anything
 /// else is 404. Returns the grant string.
 fn serve() -> String {
     use std::io::{BufRead, BufReader, Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let grant = format!("http://{}", listener.local_addr().unwrap());
+    let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             std::thread::spawn(move || {
@@ -511,6 +512,7 @@ fn serve() -> String {
                     "/same" => ("302 Found\r\nLocation: /ok".into(), vec![]),
                     "/port" => ("302 Found\r\nLocation: http://127.0.0.1:1/ok".into(), vec![]),
                     "/https" => ("302 Found\r\nLocation: https://127.0.0.1/ok".into(), vec![]),
+                    "/ftp" => (format!("302 Found\r\nLocation: ftp://127.0.0.1:{port}/ok"), vec![]),
                     "/bare" => ("302 Found".into(), vec![]),
                     p if p.starts_with("/hop") => {
                         let n: u32 = p[4..].parse().unwrap();
@@ -571,7 +573,7 @@ fn http_redirects() {
     let ok = "Ok(<5 bytes>)";
     assert_eq!(get(&g, "h.get(\"/same\")", l), ok);
     assert_eq!(get(&g, "h.get(\"/hop4\")", l), ok); // 5 redirects
-    for p in ["/moved", "/port", "/https", "/bare", "/hop5"] {
+    for p in ["/moved", "/port", "/https", "/ftp", "/bare", "/hop5"] {
         assert_eq!(get(&g, &format!("h.get(\"{p}\")"), l), HTTP_DENIED, "{p}");
     }
     let calls = |path: &str| {
@@ -920,7 +922,8 @@ fn http_send_redirects() {
     assert_eq!(status("HEAD", "HEAD", "/same"), "Ok(200)");
     assert_eq!(status("", "GET", "/hop4"), "Ok(200)");
     assert_eq!(status("POST", "POST", "/same"), "Ok(302)");
-    for p in ["/moved", "/port", "/https", "/bare"] {
+    // `/ftp` names the host and port with another scheme: not followed (H19 review).
+    for p in ["/moved", "/port", "/https", "/ftp", "/bare"] {
         assert_eq!(status("", "GET", p), "Ok(302)", "{p}");
     }
     assert_eq!(status("", "GET", "/hop5"), "Ok(307)");
@@ -940,6 +943,46 @@ fn http_send_redirects() {
         kio.import_calls()
     };
     assert_eq!(calls("/hop2"), calls("/ok") + 3);
+}
+
+/// H19 review: a path, method or header name from request input cannot break an audit line's
+/// JSON (`send_all`'s per-request lines included); a path is cut at 256 characters.
+#[test]
+fn http_audit_lines_stay_json() {
+    let g = serve();
+    let long = "/".to_string() + &"a".repeat(300);
+    let src = format!(
+        r#"fn main(h: Http) -> Int {{
+        let a = h.get("/x\"y\\z");
+        let b = h.get("{long}");
+        let c = h.send("GE\"T", "/q", ["x-\"y: v"], "".to_bytes());
+        let one = HttpRequest {{ method: "GET", path: "/x\"y", headers: [], body: "".to_bytes(), timeout_ms: 0 }};
+        let two = HttpRequest {{ method: "P\"OST", path: "/ok", headers: [], body: "".to_bytes(), timeout_ms: 0 }};
+        let d = h.send_all([one, two]);
+        0
+    }}"#
+    );
+    let log = Log::default();
+    let mut kio = Kio::new(Limits::default()).unwrap();
+    kio.audit(log.clone(), vec![]);
+    kio.run_with(&src, vec![], vec![("h".into(), kio_host::Origin::parse(&g).unwrap())])
+        .unwrap()
+        .unwrap();
+    let lines: Vec<serde_json::Value> = (log.lines().iter())
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))
+        .collect();
+    assert_eq!(lines.len(), 8, "{lines:?}");
+    assert_eq!(lines[1]["arg"], "/x\"y\\z");
+    assert_eq!(lines[2]["arg"].as_str().unwrap().len(), 256);
+    assert_eq!(
+        (&lines[3]["http"], &lines[3]["result"]),
+        (&serde_json::json!("GE\"T"), &serde_json::json!("invalid"))
+    );
+    assert_eq!(
+        (&lines[4]["arg"], &lines[4]["index"]),
+        (&serde_json::json!("/x\"y"), &serde_json::json!(0))
+    );
+    assert_eq!(lines[5]["http"], "P\"OST");
 }
 
 /// An audit log in memory.

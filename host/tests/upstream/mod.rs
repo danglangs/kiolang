@@ -1,6 +1,6 @@
 //! A small HTTP/1.1 upstream on 127.0.0.1 for `Http` grant tests, one thread per connection:
-//! `/hang` never answers, `/wait` answers after 300 ms, and any other path is 200 with
-//! `METHOD path body` as its body.
+//! `/hang` never answers, `/wait` answers after 300 ms, `/trickle` sends its headers and half its
+//! body then stalls, and any other path is 200 with `METHOD path body` as its body.
 #![allow(dead_code)]
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -86,5 +86,10 @@ fn answer(stream: &std::net::TcpStream, seen: &Mutex<Vec<Seen>>) {
         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         out.len()
     );
+    if path == "/trickle" {
+        let _ = w.write_all(&out[..out.len() / 2]);
+        std::thread::sleep(Duration::from_secs(60));
+        return;
+    }
     let _ = w.write_all(&out);
 }

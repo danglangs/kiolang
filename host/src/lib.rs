@@ -248,7 +248,7 @@ impl Origin {
     /// (scheme, host and port, no credentials), so a redirect can never leave the grant.
     fn follow(&self, current: &str, location: &str) -> Option<String> {
         let mut next = url::Url::parse(current).ok()?.join(location).ok()?;
-        let same = (next.scheme() == "https") == self.https
+        let same = next.scheme() == if self.https { "https" } else { "http" }
             && next.host_str().is_some_and(|h| h.eq_ignore_ascii_case(&self.host))
             && next.port_or_known_default() == Some(self.port)
             && next.username().is_empty()
@@ -287,7 +287,16 @@ impl Origin {
 pub const MAX_WORKERS: usize = 256;
 /// Most HTTP workers alive at once, process-wide: 16 runs each with a full `send_all`. Past it a
 /// new `get`, `send` or batch is `timeout` at once, with nothing sent (audited `"busy":true`).
+/// A server raises it to a full batch per worker (`size_http_pool`).
 pub const MAX_HTTP_WORKERS: usize = 1024;
+
+/// Let `workers` runs each hold a full `send_all` at once: under `--listen` a live run never
+/// sees `busy`; the worker pool (a 503) is the bound, and only workers a deadline left behind
+/// could reach the ceiling (#164).
+pub fn size_http_pool(workers: usize) {
+    let fit = workers.saturating_mul(BATCH_MAX).max(MAX_HTTP_WORKERS);
+    HTTP_POOL.max.store(fit, Relaxed);
+}
 
 /// A process-wide count of live workers and its ceiling.
 struct Pool {
@@ -335,6 +344,12 @@ pub fn set_http_worker_ceiling(n: usize) {
 #[cfg(feature = "test-hooks")]
 pub fn http_workers() -> usize {
     HTTP_POOL.live.load(Relaxed)
+}
+
+/// File, store and database workers alive now, process-wide.
+#[cfg(feature = "test-hooks")]
+pub fn host_workers() -> usize {
+    HOST_POOL.live.load(Relaxed)
 }
 
 /// The workers one run has alive; `State::within_all` keeps it at most `BATCH_MAX`.
@@ -2123,12 +2138,14 @@ impl Default for Limits {
 }
 
 impl Limits {
-    /// Per-request limits for serving (web decision 9): 10 million fuel, 64 MB, 5 s.
+    /// Per-request limits for serving (web decision 9): 10 million fuel, 64 MB, 5 s, and 1,000
+    /// calls (#164: with 10,000 one request could make 10,000 outbound requests in 5 s).
     pub fn web() -> Self {
         Limits {
             fuel: 10_000_000,
             timeout_secs: 5,
             memory: 64 << 20,
+            calls: 1_000,
             ..Limits::default()
         }
     }

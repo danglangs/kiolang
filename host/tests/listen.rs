@@ -480,6 +480,8 @@ fn a_handler_calls_an_api_per_request() {
         .unwrap();
     assert_eq!(up_grant["kind"], "Http");
     assert_eq!(up_grant["target"], format!("{} methods=GET,POST", up.grant));
+    // #164: 1,000 calls per request under `--listen`; `--calls` overrides (below).
+    assert_eq!(lines[0]["limits"]["calls"], 1000);
     for req in 1..=3u64 {
         let call = (lines.iter())
             .find(|l| l["req"] == req && l["kind"] == "Http")
@@ -495,6 +497,85 @@ fn a_handler_calls_an_api_per_request() {
             Some(format!("POST /api/{i} hi {i}").len() as u64)
         );
         assert_eq!(call["result"], "ok");
+    }
+}
+
+/// #164: `--calls` overrides the 1,000 default under `--listen`; the audit header shows it.
+#[test]
+fn calls_flag_overrides_the_listen_default() {
+    let up = upstream::start();
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    let (kio, _app) = http::start(&up, &["--audit", log.to_str().unwrap(), "--calls", "7"]);
+    assert_eq!(send(kio.port, "POST", "/api", b"x").0, 200);
+    let text = std::fs::read_to_string(&log).unwrap();
+    let head: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(head["limits"]["calls"], 7);
+}
+
+/// #164 (H19 security review): 16 requests each fanning 64 requests out to an upstream that
+/// never answers held the whole HTTP pool (1,024), and every other request's `get` was `timeout`
+/// at once. With a full batch per worker in the pool, another request's `get` answers while they
+/// hang. Served in-process at 32 workers (16 cores' worth) whatever this machine has.
+#[test]
+fn sixteen_fan_outs_do_not_starve_another_requests_get() {
+    use kio_host::listen::{serve_with, ListenLimits};
+    use kio_host::{open_dir, Limits, Origin, Server};
+    const APP: &str = r#"fn main(req: Incoming, res: Outgoing, public: Dir, up: Http) -> Result<(), WebErr> {
+        if req.target() == "/fan" {
+            let mut rs: List<HttpRequest> = [];
+            for i in 0..64 {
+                rs.push(HttpRequest { method: "GET", path: "/hang", headers: [], body: "".to_bytes(), timeout_ms: 0 });
+            }
+            let out = up.send_all(rs).map(|r| match r { Ok(_) => "ok", Err(_) => "!" }).join(";");
+            return res.send(200, [], [], out.to_bytes());
+        }
+        match up.get("/ok") {
+            Ok(b) => res.send(200, [], [], b),
+            Err(_) => res.send(502, [], [], "upstream failed".to_bytes()),
+        }
+    }"#;
+    let up = upstream::start();
+    let public = tempfile::tempdir().unwrap();
+    let mut server = Server::new(
+        vec![("app.kio".into(), APP.into())],
+        Limits {
+            timeout_secs: 2,
+            ..Limits::web()
+        },
+    )
+    .unwrap()
+    .unwrap();
+    server.grant_https(vec![("up".into(), Origin::parse(&up.grant).unwrap())]);
+    let dirs = vec![("public".to_string(), open_dir(public.path()).unwrap())];
+    let limits = ListenLimits {
+        workers: 32,
+        ..Default::default()
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = serve_with(server, dirs, "127.0.0.1:0".parse().unwrap(), limits, |a| {
+            tx.send(a.port()).unwrap()
+        });
+    });
+    let port = rx.recv().unwrap();
+    let fans: Vec<_> = (0..16)
+        .map(|_| std::thread::spawn(move || send(port, "GET", "/fan", b"")))
+        .collect();
+    let start = std::time::Instant::now();
+    while up.seen.lock().unwrap().len() < 16 * 64 {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "the fan-outs never all started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let (status, body, took) = http::timed(port, "/one");
+    assert_eq!((status, body), (200, b"GET /ok ".to_vec()));
+    assert!(took < std::time::Duration::from_secs(1), "{took:?}");
+    for f in fans {
+        let (status, _) = f.join().unwrap();
+        assert!(matches!(status, 200 | 500), "{status}");
     }
 }
 

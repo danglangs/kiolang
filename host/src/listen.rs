@@ -143,6 +143,8 @@ pub fn serve_with(
     limits: ListenLimits,
     bound: impl FnOnce(SocketAddr),
 ) -> Result<(), String> {
+    // A full `send_all` per worker fits the HTTP pool: a live run never sees `busy` (#164).
+    crate::size_http_pool(limits.workers);
     // Requests run compiled code on the runtime's blocking threads (`with_permit`).
     let rt = tokio::runtime::Builder::new_multi_thread()
         .thread_stack_size(crate::RUN_STACK)

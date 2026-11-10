@@ -1,6 +1,6 @@
 //! H19: HTTP workers. Own test binary: the ceiling is process-wide, and one test lowers it.
 
-use kio_host::{http_workers, open_dir, set_http_worker_ceiling, Kio, Limits, Origin, MAX_HTTP_WORKERS};
+use kio_host::{host_workers, http_workers, open_dir, set_http_worker_ceiling, Kio, Limits, Origin, MAX_HTTP_WORKERS};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -132,6 +132,71 @@ fn the_ceiling_refuses_new_requests_not_dir_reads() {
         run(&batch(2, "/ok"), &up.grant, Limits::default()),
         statuses("Ok(200)", 2)
     );
+}
+
+/// H19 review: under mixed load (full batches, small batches, hung and stalled requests that
+/// outlive their 1 s runs, file reads beside them) both pools return to zero as soon as the runs
+/// end: a worker the deadline left behind ends at the same instant (ureq's global timeout is the
+/// run's deadline), so it never counts against a later run.
+#[test]
+fn pools_balance_under_mixed_load() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    no_http_workers();
+    let up = upstream::start();
+    let t = tempfile::tempdir().unwrap();
+    std::fs::write(t.path().join("a"), "x").unwrap();
+    let short = Limits {
+        timeout_secs: 1,
+        ..Limits::default()
+    };
+    let one = |path: &str| format!("fn main(h: Http) -> Result<Int, HttpErr> {{ Ok(h.get(\"{path}\")?.len()) }}");
+    std::thread::scope(|s| {
+        for _ in 0..8 {
+            s.spawn(|| {
+                assert_eq!(
+                    run(&batch(64, "/wait"), &up.grant, Limits::default()),
+                    statuses("Ok(200)", 64)
+                );
+                assert_eq!(
+                    run(&batch(16, "/ok"), &up.grant, Limits::default()),
+                    statuses("Ok(200)", 16)
+                );
+            });
+        }
+        for _ in 0..4 {
+            // Each stops at its deadline, or its requests answer `timeout` first: either way.
+            for src in [batch(8, "/hang"), one("/trickle"), one("/hang")] {
+                let grant = up.grant.clone();
+                s.spawn(move || {
+                    let mut kio = Kio::new(short).unwrap();
+                    let _ = kio.run_with(&src, vec![], vec![("h".into(), Origin::parse(&grant).unwrap())]);
+                });
+            }
+        }
+        for _ in 0..4 {
+            s.spawn(|| {
+                let read = "fn main(d: Dir) -> Result<Str, IoErr> { Ok(d.read(\"a\")?.to_str()) }";
+                for _ in 0..10 {
+                    let mut kio = Kio::new(Limits::default()).unwrap();
+                    let out = kio
+                        .run(read, vec![("d".into(), open_dir(t.path()).unwrap())])
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(out.value, r#"Ok("x")"#);
+                }
+            });
+        }
+    });
+    let start = Instant::now();
+    while http_workers() > 0 || host_workers() > 0 {
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "workers linger: {} HTTP, {} other",
+            http_workers(),
+            host_workers()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// Wait up to 2 s for every HTTP worker in the process to end.
