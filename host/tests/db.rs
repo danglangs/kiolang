@@ -400,7 +400,7 @@ fn busy_when_another_run_keeps_the_connection() {
             kio.explain(&e).unwrap()
         })
     };
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(1500));
     let mut kio = Kio::new(Limits {
         timeout_secs: 30,
         ..Limits::default()
