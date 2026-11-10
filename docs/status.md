@@ -4,7 +4,7 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 
 ## Now
 
-Compiled-only kio covers the whole language and every capability. Active work: what real apps need (H16 HTTP beyond GET with `send_all`, H17 SQLite, H18 `send` flushing at once), from the concurrency proposal; speed work (C8) paused after C8b7. Compiled code is 1.1-2.3x Rust on compute and 2.3-8x where it allocates (roadmap.md "Speed today"). The differential harness runs 488 programs both ways (0 mismatches) and the generator 250 more per CI run.
+Compiled-only kio covers the whole language and every capability. What real apps needed is built: the HTTP client (H16, H16b), SQLite (H17) and `send` answering at once (H18), from the concurrency proposal (decided). Active: the H17 security review and H19 (`Http` under `--listen`); speed work (C8) paused after C8b7. Compiled code is 1.1-2.3x Rust on compute and 2.3-8x where it allocates (roadmap.md "Speed today"). The differential harness runs 492 programs both ways (489 agree, 3 excluded by limits, 0 leaked) and the generator 250 more per CI run.
 
 | Done | Result |
 |---|---|
@@ -55,17 +55,17 @@ Compiled-only kio covers the whole language and every capability. Active work: w
 
 ## Next
 
-C8 (roadmap.md): tree's remaining freeing (free-list pushes, a `List`'s separate buffer); tree's 4-5% from the larger size classes (#117); borrowed match bindings of a borrowed scrutinee (tree). The links target app (kio-web examples/links) gave L11, L12, H12, W14 (done); the maintainer then approved K2, H13-H15 and L13-L16: all done, with independent security reviews (fixes merged). H16, H16b (the HTTP client) and H17 (`Db`, SQLite) are built and await their security reviews. Low priority after C8: the models-writing-kio eval (roadmap.md).
+C8 (roadmap.md): tree's remaining freeing (free-list pushes, a `List`'s separate buffer); tree's 4-5% from the larger size classes (#117); borrowed match bindings of a borrowed scrutinee (tree). The links target app (kio-web examples/links) gave L11, L12, H12, W14 (done); the maintainer then approved K2, H13-H15 and L13-L16: all done, with independent security reviews (fixes merged). H16, H16b and H18 are reviewed (fixes merged); H17 (`Db`, SQLite) awaits its review. Then H19 (`Http` under `--listen`, guest-host-todo.md). Pinned, not started: L18 `par_map` and L19 `scope`/`spawn` (concurrency stages 2 and 3, when a program needs them). Low priority after C8: the models-writing-kio eval (roadmap.md).
 
 ## Waiting on the maintainer
 
 Nothing blocks work.
 
-## Speed (C8b5 with C8b6 marked, 2026-11-09, release, run time; all in [roadmap.md](roadmap.md))
+## Speed (C8b5 with C8b6 and C8b7 marked, 2026-11-09, release, run time; all in [roadmap.md](roadmap.md))
 
 | | fib(35) | 30 M loop | tree | JSON 1 MB | 100 k concatenations |
 |---|---|---|---|---|---|
 | Rust | 23 ms | 97 ms | 33 ms | 8.0 ms | 4.6 ms |
-| kio compiled (plus 20-25 ms compile, cached) | 53-57 ms | 106 ms | 98 ms (C8b6: 101) | 66 ms (json.kio); built-in JSON 13 ms (C8b6) | 5.2 ms (C8b6: 4.8) |
+| kio compiled (plus 20-25 ms compile, cached) | 53-57 ms | 106 ms | 98 ms (C8b6: 101; C8b7: 90) | 66 ms (json.kio; C8b7: 64); built-in JSON 13 ms (C8b6) | 5.2 ms (C8b6: 4.8; C8b7: 4.5) |
 | Python 3.13 | 704 ms | 933 ms | 2.87 s | 17 ms | 7.2 ms |
 | kio interpreter (the test oracle) | 1.54 s | 1.27 s | 1.03 s | 812 ms | 1.57 s |

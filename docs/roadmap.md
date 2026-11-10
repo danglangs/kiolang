@@ -79,11 +79,11 @@ Most-used Rust crates, and kio's answer to each:
 
 | Need | Rust | kio today | Gap |
 |---|---|---|---|
-| HTTP server | axum, hyper, tokio | `--listen` plus kio-web | Done for buffered request/response, and WebSockets with a fresh sandbox per message (WS1). WebSocket programs see the upgrade's path and headers (WS1b). No streaming or HTTP/2. |
+| HTTP server | axum, hyper, tokio | `--listen` plus kio-web | Done for buffered request/response, and WebSockets with a fresh sandbox per message (WS1). WebSocket programs see the upgrade's path and headers (WS1b). `send` answers the client at once and `main` runs on (H18). No streaming or HTTP/2; `Http` is refused under `--listen` for now (H19). |
 | HTTP client | reqwest | `Http.get`, `send`, `send_all` | Any method the operator grants, headers, bodies, parallel batches (H16, H16b). No streaming bodies. |
-| Async | tokio | none: a sandbox per request | Fine per request. Concurrent upstream calls inside one handler need host-side async (web decision 4). |
+| Async | tokio | none in the language: a sandbox per request (decided: no async/await, no Wasm threads) | Fine per request. Concurrent upstream calls: `send_all` (H16b); work after the response: `send` flushes at once (H18). CPU fan-out `List.par_map` (L18) and `scope`/`spawn` (L19) are pinned for when a program needs them ([proposal](proposals/concurrency.md)). |
 | Serialization | serde, serde_json | built-in `Json` (L9, C12), an untyped tree: `parse_json`, `to_json`, accessors; 1.5x `serde_json`, 1.4x faster than Python's `json` | Typed decode into structs needs a derive or traits; generics alone do not give it. |
-| Database | sqlx, diesel, redis | `Kv` (K1, K2): get/set/delete/keys/swap/scan/add, in memory or an append-only file the host owns; `:ro` readers follow a writer (H12) | No SQL. A `Sql` capability (`caps.wit`, owner decision): the host holds the connection pool, the program gets a capability scoped to one database. |
+| Database | sqlx, diesel, redis | `Db` (H17): SQLite in the host, `query`/`exec`/`transaction` with `?` parameters, `--db`, a fenced connection, `:ro` readers; `Kv` (K1, K2): get/set/delete/keys/swap/scan/add, in memory or an append-only file the host owns; `:ro` readers follow a writer (H12) | Only SQLite: no server databases (Postgres, Redis); no typed row decode. |
 | Time, randomness, UUIDs | chrono, rand, uuid | `Clock` (`now_ms`) and `Rng` (`bytes`, `int`) capabilities (H13, H14): granted explicitly (`--clock`, `--rng`), audited, fixable for replay (`fixed:`, `seed:`); a `Log` for the program's own lines (H15) | Date arithmetic and formatting as built-ins; UUIDs from `Rng.bytes(16)` in library code. |
 | Crypto, hashing | ring, sha2, jsonwebtoken | `sha256`, `to_hex`, constant-time `ct_eq` (L11) | No HMAC, signatures or encryption: pure functions, so built-ins in `lang` (no capability needed), or host functions for speed. |
 | Collections | `HashMap`, `BTreeMap`, tuples | `List`, `Map` (key order), `HashMap` (insertion order, L10, C13), `Int` or `Str` keys | No sets, tuples, `contains_key` or `for` over a map (open_questions #114). |
@@ -95,7 +95,7 @@ Most-used Rust crates, and kio's answer to each:
 | Abstraction | traits, generics, closures | function values (`fn(T) -> R`, L6a), closures (L6b) and built-ins taking them (`map`, `filter`, `any`, `all`, `and_then`, `map_err`; L6c), compiled (C9); generic functions (L7a) and generic structs and enums (L7b, L7d), monomorphized, with bounds `T: Eq`/`T: Ord` (L7c) | No traits: a bound is `Eq` or `Ord` only, `Ord` for `Int` and `Str`. |
 | Packages | cargo, crates.io | copy one file | A package manager, once there are a few libraries. |
 
-Non-starters today, in order of what blocks a real backend first: an SQL capability (H17, in progress); the HTTP client beyond GET is done (H16).
+The two that blocked a real backend first, an HTTP client beyond GET (H16) and SQL (H17), are built. What is left, in order: `Http` under `--listen` (H19), typed JSON decode, streaming bodies, a server database.
 
 ## A target app
 
@@ -105,4 +105,4 @@ A CRUD app over a `Dir` (W9a) proves the language. A target app proves the ecosy
 
 The design bets that models write kio from language.md and the checker's hints. Evidence so far is agents with the docs in context (the links app). Unmeasured: a cold or smaller model.
 
-Eval (after the in-flight capability and language work): about 30 tasks (pure compute, `Dir`, `Kv`, HTTP handlers), a model given only language.md. Measure per task: `kio check` passing on the first try, and check-and-fix rounds to pass (cap 5); the same tasks in Python as the baseline; two or three model sizes. Output: the rates, and the diagnostics models hit most, which feed the next L12-style round.
+Eval (after the in-flight capability and language work): about 30 tasks (pure compute, `Dir`, `Kv`, `Db`, HTTP handlers and clients), a model given only language.md. Measure per task: `kio check` passing on the first try, and check-and-fix rounds to pass (cap 5); the same tasks in Python as the baseline; two or three model sizes. Output: the rates, and the diagnostics models hit most, which feed the next L12-style round.

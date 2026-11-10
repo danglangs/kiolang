@@ -153,7 +153,7 @@ Throughput: 73,800 requests/s with keep-alive (kio-web hello, roadmap.md "Speed 
 
 ## Limits
 
-Every run is bounded; each limit's error names the flag that raises it. Under `--listen` the limits are per request.
+Every run is bounded; each limit's error names the flag that raises it. Under `--listen` the limits are per request, and the defaults are smaller: fuel 10,000,000, memory 64 MB, timeout 5 s (the flags override them).
 
 | Flag | Default |
 |---|---|
