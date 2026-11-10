@@ -54,7 +54,7 @@ Compiled-only kio covers the whole language and every capability. What real apps
 | H18 | concurrency stage 1b: under `--listen`, `send` answers the client at once and `main` runs on under the request's limits, holding its worker; a failure after it goes to stderr and the audit log; trailer `"after_send":N` (#146, #147). kio-web links counts a hit after the redirect: one-client redirects 6.0k to 7.0-7.6k/s, 20 clients unchanged (~15k) |
 | P1 | `kio check NEW --base OLD`: the authority diff (`+ main: grant hook: Http`, `+ create: hook send`), exit 3 when any was added; `tools/authority-diff.sh BASE_REF ENTRY` for CI (guide.md, "Reviewing authority in a pull request") |
 | S1 | `--http-header api=Authorization:env:VAR\|file:PATH`: the host adds a secret header to every request and redirect hop on the grant; the program, audit, `--log`, errors and stderr never see the value; a program header of the same name is `invalid`; cleartext non-loopback origins refused. kio-web links authorizes its webhook this way. Security-reviewed, fixes in |
-| H20, H21, L20 | usability gaps from E1: `--listen` prints a failed check's diagnostics before judging `main`'s shape, and refuses a grant `main` does not take before binding (plain `kio run`'s message, exit 2); `let (a, b) = ..` is "kio has no tuples" with a hint |
+| H20, H21, L20 | usability gaps from E1: `--listen` prints a failed check's diagnostics before judging `main`'s shape, and refuses a grant `main` does not take before binding (plain `kio run`'s message and exit 1); `let (a, b) = ..` is "kio has no tuples" with a hint |
 
 ## Next
 

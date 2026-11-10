@@ -599,11 +599,10 @@ fn serve(
     server.grant_https(https);
     server.grant_kvs(kvs);
     server.grant_sources(sources);
-    // A grant `main` does not take is refused before binding, as a usage error (H21).
+    // A grant `main` does not take is refused before binding, exit 1 as plain `kio run` (H21).
     let names: Vec<String> = dirs.iter().map(|(n, _)| n.clone()).collect();
     if let Err(diags) = server.check_grants(&names) {
-        print_diags(&files, diags);
-        return 2;
+        return print_diags(&files, diags);
     }
     if let Some((path, dir_paths)) = audit {
         let opened = open_append(&path).and_then(|f| server.audit(f, dir_paths));

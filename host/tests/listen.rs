@@ -885,7 +885,7 @@ fn listen_reports_a_parse_error_first() {
 fn listen_refuses_an_unused_grant_before_binding() {
     let src = "fn main(req: Incoming, res: Outgoing) -> Result<(), WebErr> {\n    res.send(200, [], [], \"x\".to_bytes())\n}\n";
     let (code, err) = run_src(src, &["--listen", "127.0.0.1:0", "--kv", "counts=:memory:"]);
-    assert_eq!(code, Some(2));
+    assert_eq!(code, Some(1));
     assert!(
         err.contains(
             "error: grant `counts` is not a parameter of `main`\n  hint: grant only `main`'s parameters: req, res"
