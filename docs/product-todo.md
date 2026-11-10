@@ -38,3 +38,5 @@ operator runs it:  kio run app.kio --http stripe=… --http-header stripe=Author
 ## Order
 
 E1 and P1 in parallel (eval/ and the report touch different code); S1 after P1 (both edit host/src/main.rs's flags).
+
+- [ ] **E2. Harder eval tasks** (E1 left Sonnet and Opus at 30/30 in both languages, so it cannot tell them apart or find kio's limits). 15 tasks of 150-400 reference lines each: several grants together, state across runs, error paths that must be right (partial failure, retries, idempotency), and data structures (an LRU over `Map`, a topological sort, an interval merge, a JSON schema check). Same layout and checks as E1 (`eval/tasks/31-…` to `45-…`), with references in kio and Python. `run.py --spec none` gives kio no language.md, to measure what the Rust syntax alone carries. Done: references pass in CI; a full run on all 45 tasks for three models, both languages, plus `--spec none` for kio; the roadmap and README tables updated.
