@@ -1,7 +1,7 @@
 //! H17: the `Db` capability (SQLite). Containment first: a program reaches nothing but the
 //! granted database, cannot run code, and cannot hold the host's CPU or memory past the run's
 //! limits.
-use kio_host::db::{open_all, Db};
+use kio_host::db::{open_all, Db, DB_MB};
 use kio_host::{Interp, Kio, Limits, Sources};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -39,7 +39,7 @@ fn rows(r: Result<List<List<SqlValue>>, DbErr>) -> Str {
 
 fn memory() -> Sources {
     Sources {
-        dbs: vec![("db".into(), Arc::new(Db::memory().unwrap()))],
+        dbs: vec![("db".into(), Arc::new(Db::memory(DB_MB).unwrap()))],
         ..Sources::default()
     }
 }
@@ -373,13 +373,13 @@ fn fifty_concurrent_requests_insert_fifty_rows() {
     assert_eq!(kio(&["run", &count, "--db", &flag]).1, "Ok([[SqlValue::Int(50)]])\n");
 }
 
-/// Some statements SQLite cannot interrupt: `instr` over megabytes is one VDBE step the progress
-/// handler never sees (2 MB against 1 MB runs 20 s). A run waiting for the connection another
-/// run keeps that way gets `busy` after the 2 s timeout, not a timeout of its own at its deadline,
-/// so one such request under `--listen` costs the others `busy`, not their runs.
+/// A statement runs until its own run's deadline, which may be far later than another run's. A
+/// run waiting for the connection another run keeps that way gets `busy` after the 2 s timeout,
+/// not a timeout of its own at its deadline, so one such request under `--listen` costs the
+/// others `busy`, not their runs.
 #[test]
 fn busy_when_another_run_keeps_the_connection() {
-    let db = Arc::new(Db::memory().unwrap());
+    let db = Arc::new(Db::memory(DB_MB).unwrap());
     let sources = || Sources {
         dbs: vec![("db".into(), db.clone())],
         ..Sources::default()
@@ -388,15 +388,16 @@ fn busy_when_another_run_keeps_the_connection() {
         let sources = sources();
         std::thread::spawn(move || {
             let mut kio = Kio::new(Limits {
-                timeout_secs: 120,
+                timeout_secs: 5,
                 ..Limits::default()
             })
             .unwrap();
             kio.grant_sources(sources);
             let main = r#"fn main(db: Db) -> Str {
-              rows(db.query("SELECT instr(printf('%.1000000c','a'), printf('%.500000c','a') || 'b')", []))
+              rows(db.query("SELECT instr(printf('%.8000000c','a'), printf('%.4000000c','a') || 'b')", []))
             }"#;
-            kio.run(&format!("{SHOW}{main}"), vec![]).unwrap().unwrap().value
+            let e = kio.run(&format!("{SHOW}{main}"), vec![]).unwrap_err();
+            kio.explain(&e).unwrap()
         })
     };
     std::thread::sleep(Duration::from_millis(500));
@@ -415,7 +416,7 @@ fn busy_when_another_run_keeps_the_connection() {
         waited >= Duration::from_secs(2) && waited < Duration::from_secs(4),
         "{waited:?}"
     );
-    assert_eq!(slow.join().unwrap(), "0");
+    assert_eq!(slow.join().unwrap(), "timed out after 5 s (raise it with --timeout)");
     // The connection is free again.
     kio.grant_sources(sources());
     assert_eq!(kio.run(&format!("{SHOW}{main}"), vec![]).unwrap().unwrap().value, "1");
@@ -426,7 +427,7 @@ fn busy_when_another_run_keeps_the_connection() {
 fn busy_when_another_connection_holds_the_lock() {
     let t = tempfile::tempdir().unwrap();
     let path = t.path().join("b.db");
-    let dbs = open_all(&[("db".into(), path.display().to_string())]).unwrap();
+    let dbs = open_all(&[("db".into(), path.display().to_string())], DB_MB).unwrap();
     let other = rusqlite::Connection::open(&path).unwrap();
     other
         .execute_batch("CREATE TABLE t (n); BEGIN IMMEDIATE; INSERT INTO t VALUES (1);")
@@ -652,7 +653,7 @@ fn a_write_to_a_read_only_db_stops_the_run() {
         ("exec", r#"db.exec("DELETE FROM t", [])"#),
         ("transaction", r#"db.transaction(["DELETE FROM t"], [[]])"#),
     ] {
-        let dbs = open_all(&[("db".into(), format!("{}:ro", path.display()))]).unwrap();
+        let dbs = open_all(&[("db".into(), format!("{}:ro", path.display()))], DB_MB).unwrap();
         let log = Log(Arc::default());
         let mut kio = Kio::new(Limits::default()).unwrap();
         kio.audit(Log(log.0.clone()), vec![]);
@@ -779,6 +780,392 @@ fn path_rules_and_grant_errors() {
     let (code, out, err) = kio(&["run", &prog, "--dir", &dir, "--db", &outside]);
     assert_eq!((code, out.as_str()), (0, "Ok(0)\n"), "{err}");
     assert_eq!(kio(&["run", &prog, "--dir", &dir, "--db", "db=:memory:"]).1, "Ok(0)\n");
+}
+
+/// A grant naming another grant's `-wal`, `-shm` or `-journal` (either way round) is refused:
+/// SQLite would read the other database's log as this one's.
+#[test]
+fn a_grant_on_another_databases_wal_is_refused() {
+    let t = tempfile::tempdir().unwrap();
+    let two = write(
+        t.path(),
+        "two.kio",
+        "fn main(a: Db, b: Db) -> Result<Int, DbErr> { b.exec(\"CREATE TABLE IF NOT EXISTS t (n)\", []) }",
+    );
+    let x = t.path().join("x.db").display().to_string();
+    for (a, b, shared) in [
+        (x.clone(), format!("{x}-wal"), format!("{x}-wal")),
+        (format!("{x}-shm"), x.clone(), format!("{x}-shm")),
+        (x.clone(), format!("{x}-journal"), format!("{x}-journal")),
+    ] {
+        let (code, _, err) = kio(&["run", &two, "--db", &format!("a={a}"), "--db", &format!("b={b}")]);
+        assert_eq!(
+            (code, err),
+            (
+                2,
+                format!("kio: `--db b` and `--db a` share the file {shared}\n  hint: a database's `-wal`, `-shm` and `-journal` (a store's `.tmp`) are its own: give each grant its own file\n")
+            )
+        );
+    }
+    assert!(!t.path().join("x.db").exists());
+    let y = t.path().join("y.db").display().to_string();
+    let (code, out, err) = kio(&["run", &two, "--db", &format!("a={x}"), "--db", &format!("b={y}")]);
+    assert_eq!((code, out.as_str()), (0, "Ok(0)\n"), "{err}");
+}
+
+/// `--db-mb` caps the database (a host-set `max_page_count` the program cannot change): a write
+/// past it is `too-large` and changes nothing, a transaction included; the file stays usable.
+#[test]
+fn db_mb_caps_the_database() {
+    let t = tempfile::tempdir().unwrap();
+    let prog = write(
+        t.path(),
+        "p.kio",
+        &format!(
+            "{SHOW}fn main(db: Db) -> Str {{
+      let made = show(db.exec(\"CREATE TABLE IF NOT EXISTS t (b BLOB)\", []));
+      let mut out: List<Str> = [];
+      for i in 0..12 {{ out.push(show(db.exec(\"INSERT INTO t VALUES (zeroblob(100000))\", []))); }}
+      let before = rows(db.query(\"SELECT count(*) FROM t\", []));
+      let tx = show(db.transaction([\"DELETE FROM t\", \"INSERT INTO t VALUES (zeroblob(2000000))\"], [[], []]));
+      let after = rows(db.query(\"SELECT count(*) FROM t\", []));
+      let set = show(db.exec(\"PRAGMA max_page_count = 100000\", []));
+      let read = rows(db.query(\"PRAGMA max_page_count\", []));
+      let freed = show(db.exec(\"DELETE FROM t WHERE rowid > 2\", []));
+      let again = show(db.exec(\"INSERT INTO t VALUES (zeroblob(100000))\", []));
+      made + \" [\" + out.join(\" \") + \"] \" + before + \" \" + tx + \" \" + after + \" \" + set + \" \" + read + \" \" + freed + \" \" + again
+    }}"
+        ),
+    );
+    let db = format!("db={}", t.path().join("a.db").display());
+    let (code, out, err) = kio(&["run", &prog, "--db", &db, "--db-mb", "1"]);
+    assert_eq!(
+        (code, out.as_str()),
+        (
+            0,
+            "0 [1 1 1 1 1 1 1 1 1 1 too-large too-large] 10 too-large 10 denied denied 8 1\n"
+        ),
+        "{err}"
+    );
+    // In memory too; and the default (64 MB) holds all twelve.
+    let (_, out, _) = kio(&["run", &prog, "--db", "db=:memory:", "--db-mb", "1"]);
+    assert!(out.starts_with("0 [1 1 1 1 1 1 1 1 1 1 too-large"), "{out}");
+    let (_, out, _) = kio(&["run", &prog, "--db", "db=:memory:"]);
+    assert!(out.starts_with("0 [1 1 1 1 1 1 1 1 1 1 1 1] 12 13 1 "), "{out}");
+    let (code, _, err) = kio(&["run", &prog, "--db", &db, "--db-mb", "0"]);
+    assert_eq!(
+        (code, err.as_str()),
+        (2, "kio: --db-mb 0: expected a positive integer\n")
+    );
+}
+
+/// The host's `instr`, `replace`, `like` and `glob` check the run's deadline as they scan, so
+/// one call over megabytes (a single VDBE step, which the progress handler never sees) stops
+/// within 100 ms of it. Before H17b the `instr` below ran for hours.
+#[test]
+fn a_long_scan_is_stopped_at_the_deadline() {
+    let big = "printf('%.8000000c','a')";
+    for scan in [
+        format!("instr({big}, printf('%.4000000c','a') || 'b')"),
+        format!("replace({big}, printf('%.4000000c','a') || 'b', '')"),
+        format!("{big} LIKE '%' || printf('%.1000c','a') || 'b'"),
+        format!("{big} GLOB '*' || printf('%.1000c','a') || 'b'"),
+    ] {
+        let mut interp = Interp::new(Limits {
+            timeout_secs: 1,
+            ..Limits::default()
+        })
+        .unwrap();
+        interp.grant_sources(memory());
+        let main = format!("fn main(db: Db) -> Str {{ rows(db.query(\"SELECT {scan}\", [])) }}");
+        let start = Instant::now();
+        let e = interp.run(&format!("{SHOW}{main}"), vec![]).unwrap_err();
+        let took = start.elapsed();
+        assert_eq!(
+            interp.explain(&e).unwrap(),
+            "timed out after 1 s (raise it with --timeout)",
+            "{scan}"
+        );
+        assert!(took < Duration::from_millis(1100), "{scan}: {took:?}");
+    }
+}
+
+/// Views may use the host's string functions under the fence (`trusted_schema` off): they are
+/// registered innocuous, as SQLite's built-ins are.
+#[test]
+fn views_may_use_the_string_functions() {
+    let main = r#"fn main(db: Db) -> Str {
+      let v = show(db.exec("CREATE VIEW v AS SELECT 'abc' LIKE 'A%', 'a%c' LIKE 'a!%c' ESCAPE '!', 'abc' GLOB 'a*', instr('héllo', 'l'), replace('abc', 'b', 'xy')", []));
+      v + " " + rows(db.query("SELECT * FROM v", []))
+    }"#;
+    assert_eq!(both(main), "0 1,1,1,3,'axyc'");
+}
+
+/// The host's string functions against SQLite's built-ins on a generated corpus (every
+/// argument type, NULLs, blobs, invalid UTF-8, embedded NUL bytes, ASCII and non-ASCII case,
+/// every wildcard and escape, REALs stored as integers, values past one 64 KB scan check): the same
+/// result, type and bytes, or the same error, for every call.
+#[test]
+fn string_functions_match_sqlite_builtins() {
+    use rusqlite::limits::Limit;
+    use rusqlite::types::{Value, ValueRef};
+    use rusqlite::Connection;
+
+    // A corpus value: its type and bytes (text bytes need not be UTF-8).
+    #[derive(Clone)]
+    enum V {
+        Null,
+        Int(i64),
+        Real(f64),
+        Text(Vec<u8>),
+        Blob(Vec<u8>),
+    }
+    let t = |s: &str| V::Text(s.as_bytes().to_vec());
+    let mut values = vec![
+        V::Null,
+        V::Int(0),
+        V::Int(1),
+        V::Int(-1),
+        V::Int(42),
+        V::Int(12),
+        V::Int(i64::MAX),
+        V::Int(i64::MIN),
+        V::Real(0.5),
+        V::Real(-0.0),
+        V::Real(1.5),
+        V::Real(1e-7),
+        V::Real(1e300),
+        V::Real(3.0),
+        V::Real(0.1),
+        t(""),
+        t("a"),
+        t("A"),
+        t("abc"),
+        t("ABC"),
+        t("aBc"),
+        t("b"),
+        t("%"),
+        t("_"),
+        t("a%"),
+        t("%a"),
+        t("_b_"),
+        t("a_c"),
+        t("%b%"),
+        t("[a-c]"),
+        t("[^a]"),
+        t("[]]"),
+        t("[]-]"),
+        t("[a-]"),
+        t("[é-ü]"),
+        t("*"),
+        t("?"),
+        t("a*"),
+        t("*c"),
+        t("?b?"),
+        t("*[b]*"),
+        t("\\"),
+        t("a\\%"),
+        t("é"),
+        t("É"),
+        t("ü"),
+        t("héllo"),
+        t("HÉLLO"),
+        t("日本語"),
+        t("本"),
+        t("😀"),
+        t("a\0b"),
+        t("\0"),
+        t("1"),
+        t("42"),
+        t("0.5"),
+        t("1.5"),
+        t("e"),
+        t(".0"),
+        V::Text(vec![0xc3]),
+        V::Text(vec![0x80, b'a']),
+        V::Text(vec![0xed, 0xa0, 0x80]),
+        V::Text(vec![0xc0, 0x80]),
+        V::Text(vec![0xff, 0xfe]),
+        V::Text(["x".repeat(70_000), "yz".into()].concat().into_bytes()),
+        V::Text("é".repeat(40_000).into_bytes()),
+        V::Blob(vec![]),
+        V::Blob(vec![0]),
+        V::Blob(b"a".to_vec()),
+        V::Blob(b"abc".to_vec()),
+        V::Blob("é".as_bytes().to_vec()),
+        V::Blob(vec![0xff]),
+        V::Blob(b"a\0b".to_vec()),
+        V::Blob(b"abc".repeat(30_000)),
+        t("a\\_c"),
+        t("%\\_"),
+        t("\\%%"),
+        t("a%%c"),
+        t("é_"),
+        t("[!]a"),
+    ];
+    let fixed = values.len();
+    // Random values over an alphabet of wildcards, case pairs, multi-byte and malformed UTF-8.
+    let tokens: [&[u8]; 26] = [
+        b"a",
+        b"A",
+        b"b",
+        b"B",
+        b"z",
+        b"%",
+        b"_",
+        b"*",
+        b"?",
+        b"[",
+        b"]",
+        b"^",
+        b"-",
+        b"\\",
+        b"!",
+        b" ",
+        "é".as_bytes(),
+        "É".as_bytes(),
+        "ß".as_bytes(),
+        "日".as_bytes(),
+        "😀".as_bytes(),
+        b"\0",
+        &[0xc3],
+        &[0x80],
+        &[0xed, 0xa0, 0x80],
+        &[0xff],
+    ];
+    let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut rand = move |n: usize| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % n as u64) as usize
+    };
+    for _ in 0..400 {
+        let len = rand(8);
+        let bytes: Vec<u8> = (0..len).flat_map(|_| tokens[rand(tokens.len())].to_vec()).collect();
+        values.push(match rand(20) {
+            0 => V::Null,
+            1 => V::Int(rand(1000) as i64 - 500),
+            2 => V::Real(rand(1000) as f64 / 8.0),
+            3..=5 => V::Blob(bytes),
+            _ => V::Text(bytes),
+        });
+    }
+    // Two connections with the fence's limits: SQLite's functions, and the host's.
+    let deadline = Arc::new(Mutex::new(Instant::now() + Duration::from_secs(3600)));
+    let open = |host: bool| {
+        let c = Connection::open_in_memory().unwrap();
+        c.set_limit(Limit::SQLITE_LIMIT_LENGTH, 1_000_000).unwrap();
+        c.set_limit(Limit::SQLITE_LIMIT_LIKE_PATTERN_LENGTH, 1_024).unwrap();
+        c.execute_batch(
+            "CREATE TABLE v (id INTEGER PRIMARY KEY, x);
+             CREATE TABLE r (id INTEGER PRIMARY KEY, x REAL);
+             INSERT INTO r VALUES (100000, 1e18), (100001, 5.0), (100002, -3.0), (100003, 123456789012.0);
+             CREATE VIEW vals AS SELECT id, x FROM v UNION ALL SELECT id, x FROM r;",
+        )
+        .unwrap();
+        let mut ins = c
+            .prepare("INSERT INTO v VALUES (?1, CASE WHEN ?2 THEN CAST(?3 AS TEXT) ELSE ?3 END)")
+            .unwrap();
+        for (i, v) in values.iter().enumerate() {
+            let (text, x) = match v.clone() {
+                V::Null => (false, Value::Null),
+                V::Int(n) => (false, Value::Integer(n)),
+                V::Real(x) => (false, Value::Real(x)),
+                V::Text(b) => (true, Value::Blob(b)),
+                V::Blob(b) => (false, Value::Blob(b)),
+            };
+            ins.execute(rusqlite::params![i as i64, text, x]).unwrap();
+        }
+        drop(ins);
+        if host {
+            kio_host::db::register_scans(&c, &deadline).unwrap();
+        }
+        c
+    };
+    let (sqlite, host) = (open(false), open(true));
+    // Each value's id, and REALs in a REAL column (stored as integers when whole).
+    let ids: Vec<i64> = (0..values.len() as i64).chain(100_000..100_004).collect();
+    let fixed_ids: Vec<i64> = (0..fixed as i64).chain(100_000..100_004).collect();
+    let show = |c: &Connection, sql: &str, args: &[i64]| -> String {
+        let mut stmt = c.prepare(sql).unwrap();
+        let r = stmt.query_row(rusqlite::params_from_iter(args), |row| {
+            Ok(match row.get_ref(0)? {
+                ValueRef::Null => "null".to_string(),
+                ValueRef::Integer(n) => format!("int {n}"),
+                ValueRef::Real(x) => format!("real {x:?}"),
+                ValueRef::Text(b) => format!("text {b:?}"),
+                ValueRef::Blob(b) => format!("blob {b:?}"),
+            })
+        });
+        r.unwrap_or_else(|e| format!("error {e}"))
+    };
+    let pick =
+        |n: usize, rand: &mut dyn FnMut(usize) -> usize| -> Vec<i64> { (0..n).map(|_| ids[rand(ids.len())]).collect() };
+    let mut cases: Vec<(&str, Vec<i64>)> = Vec::new();
+    let two = [
+        "SELECT instr(a.x, b.x) FROM vals a, vals b WHERE a.id = ?1 AND b.id = ?2",
+        "SELECT like(a.x, b.x) FROM vals a, vals b WHERE a.id = ?1 AND b.id = ?2",
+        "SELECT b.x GLOB a.x FROM vals a, vals b WHERE a.id = ?1 AND b.id = ?2",
+    ];
+    let three = [
+        "SELECT replace(a.x, b.x, c.x) FROM vals a, vals b, vals c WHERE a.id = ?1 AND b.id = ?2 AND c.id = ?3",
+        "SELECT b.x LIKE a.x ESCAPE c.x FROM vals a, vals b, vals c WHERE a.id = ?1 AND b.id = ?2 AND c.id = ?3",
+    ];
+    for sql in two {
+        for &a in &fixed_ids {
+            for &b in &fixed_ids {
+                cases.push((sql, vec![a, b]));
+            }
+        }
+        for _ in 0..20_000 {
+            cases.push((sql, pick(2, &mut rand)));
+        }
+    }
+    // Escapes (ids in `values`): one character ('a', '%', '_', '\', 'é', NUL), none, two, NULL,
+    // numbers, blobs.
+    let escapes = [16, 22, 23, 41, 43, 52, 15, 18, 0, 1, 2, 66, 67];
+    for &a in &fixed_ids {
+        for &b in &fixed_ids[..30] {
+            cases.push((three[0], vec![a, b, fixed_ids[rand(fixed_ids.len())]]));
+            for c in escapes {
+                cases.push((three[1], vec![a, b, c]));
+            }
+        }
+    }
+    for sql in three {
+        for _ in 0..15_000 {
+            cases.push((sql, pick(3, &mut rand)));
+        }
+    }
+    let mut matched = 0;
+    for (sql, args) in &cases {
+        let (want, got) = (show(&sqlite, sql, args), show(&host, sql, args));
+        assert_eq!(got, want, "{sql} {args:?}");
+        matched += (want == "int 1") as usize;
+    }
+    // The corpus exercises both outcomes, and SQLite's rendering of a REAL (1e18 reads as
+    // "1.0e+18").
+    assert!(
+        cases.len() > 100_000 && matched > 3_000,
+        "{} cases, {matched} matches",
+        cases.len()
+    );
+    let real = "SELECT instr(x, '.0') FROM r WHERE id = ?1";
+    assert_eq!(show(&host, real, &[100_000]), "int 2");
+    assert_eq!(show(&sqlite, real, &[100_000]), "int 2");
+    // Too large for SQLITE_LIMIT_LENGTH, and just under it.
+    let sql = "SELECT length(replace(printf('%.*c', ?1, 'a') || 'b', 'a', 'aa'))";
+    assert_eq!(show(&sqlite, sql, &[499_999]), "int 999999");
+    assert_eq!(show(&sqlite, sql, &[500_000]), "error string or blob too big");
+    for n in [499_999, 500_000] {
+        assert_eq!(show(&host, sql, &[n]), show(&sqlite, sql, &[n]));
+    }
+    // The host's functions are the ones called: past the deadline they stop the statement.
+    *deadline.lock().unwrap() = Instant::now();
+    let scan = "SELECT instr(printf('%.200000c', 'a'), 'ab')";
+    assert_eq!(show(&sqlite, scan, &[]), "int 0");
+    assert_eq!(show(&host, scan, &[]), "error interrupted");
 }
 
 struct Server(Child, u16);

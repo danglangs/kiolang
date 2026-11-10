@@ -3,7 +3,7 @@ mod mcp;
 use kio_host::{listen, open_dir, ClockSpec, Diag, Kio, Limits, LogSink, Origin, RngSpec, Server, Sources};
 
 /// `kio run`'s flags.
-const USAGE: &str = "[--dir name=path]... [--http name=host]... [--http-methods name=POST,PUT,..]... [--kv name=path[:ro]|:memory:]... [--kv-mb mb] [--db name=path[:ro]|:memory:]... [--rng name[=seed:N]]... [--clock name[=fixed:T]]... [--log name=path|-]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]...";
+const USAGE: &str = "[--dir name=path]... [--http name=host]... [--http-methods name=POST,PUT,..]... [--kv name=path[:ro]|:memory:]... [--kv-mb mb] [--db name=path[:ro]|:memory:]... [--db-mb mb] [--rng name[=seed:N]]... [--clock name[=fixed:T]]... [--log name=path|-]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]...";
 
 fn main() {
     // The host checks and lowers programs natively, and compiled code runs on this thread's stack
@@ -86,6 +86,7 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     let mut kv_specs: Vec<(String, String)> = Vec::new();
     let mut kv_mb = 64;
     let mut db_specs: Vec<(String, String)> = Vec::new();
+    let mut db_mb = kio_host::db::DB_MB;
     let mut sources = Sources::default();
     // `(name, path)` of each `--log` to a file, opened once the paths are checked.
     let mut log_paths: Vec<(String, String)> = Vec::new();
@@ -143,6 +144,13 @@ fn run(path: &str, flags: &[&str]) -> i32 {
                 match n.parse::<u64>().ok().filter(|&v| v > 0) {
                     Some(v) => kv_mb = v,
                     None => return fail(format!("--kv-mb {n}: expected a positive integer")),
+                }
+                continue;
+            }
+            ["--db-mb", n] => {
+                match n.parse::<u64>().ok().filter(|&v| v > 0) {
+                    Some(v) => db_mb = v,
+                    None => return fail(format!("--db-mb {n}: expected a positive integer")),
                 }
                 continue;
             }
@@ -299,6 +307,8 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     // `--db` file with the files beside it that are its own (a compaction's `.tmp`, SQLite's
     // `-wal`, `-shm` and `-journal`), by flag.
     let mut stores: Vec<(String, String)> = Vec::new();
+    // Each grant's files, its own path first.
+    let mut grants: Vec<(String, Vec<String>)> = Vec::new();
     let on_disk = |specs: &[(String, String)], flag: &str| -> Vec<(String, String)> {
         (specs.iter().filter(|(_, s)| s != ":memory:"))
             .map(|(n, s)| (format!("{flag} {n}"), kio_host::kv::split_spec(s).0.to_string()))
@@ -338,7 +348,23 @@ fn run(path: &str, flags: &[&str]) -> i32 {
         } else {
             &["", "-wal", "-shm", "-journal"]
         };
-        stores.extend(own.iter().map(|s| (flag.clone(), format!("{path}{s}"))));
+        let own: Vec<String> = own.iter().map(|s| format!("{path}{s}")).collect();
+        // A grant naming another's `-wal` (or the other way round) shares a file with it. Two
+        // grants of one file are `open_all`'s to refuse.
+        for (other, theirs) in grants.iter().filter(|(o, _)| o.starts_with(&flag[..4])) {
+            if same_file(&own[0], &theirs[0]) {
+                continue;
+            }
+            let pairs = own.iter().flat_map(|m| theirs.iter().map(move |t| (m, t)));
+            if let Some((m, t)) = pairs.into_iter().find(|(m, t)| same_file(m, t)) {
+                return fail(format!(
+                    "`{flag}` and `{other}` share the file {}\n  hint: a database's `-wal`, `-shm` and `-journal` (a store's `.tmp`) are its own: give each grant its own file",
+                    if *m == path { t } else { m }
+                ));
+            }
+        }
+        grants.push((flag.clone(), own.clone()));
+        stores.extend(own.into_iter().map(|p| (flag.clone(), p)));
     }
     // The audit log and each `--log` file: not a store, not inside a granted dir or the cache,
     // and not one another's file.
@@ -358,7 +384,7 @@ fn run(path: &str, flags: &[&str]) -> i32 {
         Ok(kvs) => kvs,
         Err(e) => return fail(e),
     };
-    match kio_host::db::open_all(&db_specs) {
+    match kio_host::db::open_all(&db_specs, db_mb) {
         Ok(dbs) => sources.dbs = dbs,
         Err(e) => return fail(e),
     }
