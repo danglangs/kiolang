@@ -715,7 +715,17 @@ fn compaction_never_follows_a_symlink() {
     let victim = t.path().join("victim.txt");
     std::fs::write(&victim, "keep").unwrap();
     std::os::unix::fs::symlink(&victim, t.path().join("s.kv.tmp")).unwrap();
-    drop(Store::open(&db, 1 << 20).unwrap()); // compacts: 50 records, one live
+    // A host worker may still hold the run's store for a moment under load: wait for its lock.
+    let start = std::time::Instant::now();
+    let reopened = loop {
+        match Store::open(&db, 1 << 20) {
+            Err(e) if e.contains("in use") && start.elapsed() < std::time::Duration::from_secs(5) => {
+                std::thread::sleep(std::time::Duration::from_millis(20))
+            }
+            r => break r,
+        }
+    };
+    drop(reopened.unwrap()); // compacts: 50 records, one live
     assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
     assert!(std::fs::symlink_metadata(&db).unwrap().is_file());
     assert_eq!(std::fs::metadata(&db).unwrap().len(), 8 + 8 + 5 + 1 + 2);
