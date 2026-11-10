@@ -23,6 +23,8 @@ eval/run.py --model haiku --lang py
 eval/run.py --model sonnet --lang kio --tasks 01,26 --jobs 2
 ```
 
+Flags: `--model` (a `claude --model` name), `--lang kio|py` (default kio), `--tasks` (numbers or names, default all), `--jobs` (default 4), `--rounds` (default 5), `--kio` (default `kio` on PATH, else `target/release/kio`), `--out` (result file).
+
 `run.py` needs Python 3 and a logged-in `claude` CLI (no API key; open_questions #165). Per task, up to 5 rounds: the model's program is checked with `kio check` (diagnostics are fed back), then with `check.sh` (its failure output is fed back). It writes `results/<date>-<model>-<lang>.json` (every round's program and feedback) and prints:
 
 | Column | Meaning |

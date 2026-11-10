@@ -204,7 +204,7 @@ A WebSocket server is `fn main(msg: WsMessage, conn: WsSend, ..)` under `--liste
 
 2. **Capabilities cannot be constructed.** There is no literal, constructor or cast that produces a `Dir`. Only the host provides them, as arguments to `main`.
 
-3. **`main` is the only entry point.** Its parameters are all capabilities and are the program's whole authority. Their names are what the operator binds with `--dir name=path`, `--http`, `--kv`, `--rng`, `--clock`, `--log`; under `--listen`, `Incoming`, `Outgoing`, `WsMessage` and `WsSend` are bound by type, whatever the names. It may return any type: `kio run` prints it, and an `Err` exits 1.
+3. **`main` is the only entry point.** Its parameters are all capabilities and are the program's whole authority. Their names are what the operator binds with `--dir name=path`, `--http`, `--kv`, `--db`, `--rng`, `--clock`, `--log`; under `--listen`, `Incoming`, `Outgoing`, `WsMessage` and `WsSend` are bound by type, whatever the names. It may return any type: `kio run` prints it, and an `Err` exits 1.
 
 4. **`?` needs matching error types.** `d.read(x)?` inside a function returning `Result<_, IoErr>` is fine. Inside one returning `Option` or a different error type it is rejected. No implicit conversion.
 

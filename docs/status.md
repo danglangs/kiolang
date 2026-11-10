@@ -4,7 +4,7 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 
 ## Now
 
-Compiled-only kio covers the whole language and every capability. What real apps needed is built: the HTTP client (H16, H16b), SQLite (H17) and `send` answering at once (H18), from the concurrency proposal (decided). H16-H19 and H17b are built and reviewed (fixes merged); speed work (C8) is paused after C8b7. Compiled code is 1.1-2.3x Rust on compute and 2.3-8x where it allocates (roadmap.md "Speed today"). The differential harness runs 492 programs both ways (489 agree, 3 excluded by limits, 0 leaked) and the generator 250 more per CI run.
+Compiled-only kio covers the whole language and every capability. What real apps needed is built, and so are the review and eval layers of direction A (P1 authority diff, S1 host-injected headers, E1 models-writing-kio eval): the HTTP client (H16, H16b), SQLite (H17) and `send` answering at once (H18), from the concurrency proposal (decided). H16-H19 and H17b are built and reviewed (fixes merged); speed work (C8) is paused after C8b7. Compiled code is 1.1-2.3x Rust on compute and 2.3-8x where it allocates (roadmap.md "Speed today"). The differential harness runs 492 programs both ways (489 agree, 3 excluded by limits, 0 leaked) and the generator 250 more per CI run.
 
 | Done | Result |
 |---|---|
@@ -54,17 +54,18 @@ Compiled-only kio covers the whole language and every capability. What real apps
 | H18 | concurrency stage 1b: under `--listen`, `send` answers the client at once and `main` runs on under the request's limits, holding its worker; a failure after it goes to stderr and the audit log; trailer `"after_send":N` (#146, #147). kio-web links counts a hit after the redirect: one-client redirects 6.0k to 7.0-7.6k/s, 20 clients unchanged (~15k) |
 | P1 | `kio check NEW --base OLD`: the authority diff (`+ main: grant hook: Http`, `+ create: hook send`), exit 3 when any was added; `tools/authority-diff.sh BASE_REF ENTRY` for CI (guide.md, "Reviewing authority in a pull request") |
 | S1 | `--http-header api=Authorization:env:VAR\|file:PATH`: the host adds a secret header to every request and redirect hop on the grant; the program, audit, `--log`, errors and stderr never see the value; a program header of the same name is `invalid`; cleartext non-loopback origins refused. kio-web links authorizes its webhook this way. Security-reviewed, fixes in |
+| E1 | `eval/`: 30 backend tasks, kio and Python, `eval/run.py` through `claude -p`. Full run 2026-11-10 (roadmap.md "Can models write kio?"): kio first try 24-30/30 (Haiku, Opus, Sonnet), 30/30 by round 5 for all three; Python first try 28-30/30; no over-asked grant. References run in CI (`eval/check_refs.sh`) |
 | H20, H21, L20 | usability gaps from E1: `--listen` prints a failed check's diagnostics before judging `main`'s shape, and refuses a grant `main` does not take before binding (plain `kio run`'s message and exit 1); `let (a, b) = ..` is "kio has no tuples" with a hint |
 
 ## Next
 
-Product direction A: approving AI-written code by its authority report ([product-todo.md](product-todo.md)): P1 (the authority diff) done; E1 (the models-writing-kio eval) built, its full runs next (eval/README.md); S1 (secrets as host-injected `Http` headers) done, reviewed.
+Direction A ([product-todo.md](product-todo.md)): P1, S1 and E1 are done. Next: harder eval tasks (Sonnet and Opus pass all 30, so they cannot be told apart), and the gaps models hit in E1: `Str.chars()`, `for` over `Bytes`, tuples (proposals, below).
 
 Also open: C8 (roadmap.md): tree's remaining freeing (free-list pushes, a `List`'s separate buffer); tree's 4-5% from the larger size classes (#117); borrowed match bindings of a borrowed scrutinee (tree). Pinned, not started: L18 `par_map` and L19 `scope`/`spawn` (concurrency stages 2 and 3, when a program needs them).
 
 ## Waiting on the maintainer
 
-Nothing blocks work.
+Nothing blocks work. Language additions from E1, each a semantics change programs would rely on, to be proposed with an example before any code: `Str.chars()` (Haiku wrote `split("")`), `for` over `Bytes` (Haiku), tuples (Opus; today a hint, L20).
 
 ## Speed (C8b5 with C8b6 and C8b7 marked, 2026-11-09, release, run time; all in [roadmap.md](roadmap.md))
 
