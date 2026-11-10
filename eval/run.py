@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Can models write kio? Runs eval/tasks against a model through `claude -p`.
 
-  eval/run.py --model haiku --lang kio [--tasks 01,02] [--jobs 4] [--kio target/release/kio]
+  eval/run.py --model haiku --lang kio [--spec none] [--tasks 01,02] [--jobs 4] [--kio target/release/kio]
 
 Per task: the model gets task.md (and, for kio, docs/language.md as the system
-prompt) and returns one program; up to --rounds rounds, each feeding back
-`kio check`'s diagnostics or the check's failure output. Writes
-eval/results/<date>-<model>-<lang>.json and prints a table.
+prompt, or with --spec none a one-line description) and returns one program; up to
+--rounds rounds, each feeding back `kio check`'s diagnostics or the check's failure
+output. Writes eval/results/<date>-<model>-<lang>[-nospec].json and prints a table.
 """
 import argparse
 import collections
@@ -25,6 +25,7 @@ EVAL = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(EVAL)
 
 KIO_SYSTEM = "You write programs in kio. This is the kio language reference.\n\n"
+KIO_NOSPEC = "You write programs in kio, a subset of Rust with capabilities as parameters."
 PY_SYSTEM = "You write Python 3 programs."
 
 KIO_HOW = """
@@ -33,7 +34,7 @@ Write the whole program in kio, as one file. It runs as `kio run prog.kio` with 
 Reply with the program in one fenced code block and nothing else."""
 
 PY_HOW = """
-Write the whole program in Python 3, standard library only, as one file. Each grant is an environment variable named after it in capitals: a `Dir` is a directory path; a `Kv` is the path of a file (absent at first) where you may keep state between runs in any format; a `Db` is the path of a SQLite database file; an `Http` is a base URL such as `http://127.0.0.1:8123`, to which you append paths. Print the output to stdout. An HTTP handler (`Incoming`, `Outgoing`) is a server on 127.0.0.1, port from the environment variable `PORT`, running until it is killed.
+Write the whole program in Python 3, standard library only, as one file. Each grant is an environment variable named after it in capitals: a `Dir` is a directory path; a `Kv` is the path of a file (absent at first) where you may keep state between runs in any format; a `Db` is the path of a SQLite database file; an `Http` is a base URL such as `http://127.0.0.1:8123`, to which you append paths; a `Clock` is the current time, an integer of milliseconds since the Unix epoch; a `Log` is the path of a file to append lines to; for an `Rng`, use Python's `secrets` module. Print the output to stdout. An HTTP handler (`Incoming`, `Outgoing`) is a server on 127.0.0.1, port from the environment variable `PORT`, running until it is killed.
 
 Reply with the program in one fenced code block and nothing else."""
 
@@ -220,6 +221,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", required=True, help="a `claude --model` name: haiku, sonnet, opus, ..")
     ap.add_argument("--lang", choices=["kio", "py"], default="kio")
+    ap.add_argument("--spec", choices=["full", "none"], default="full",
+                    help="kio's system prompt: docs/language.md (full) or one line (none)")
     ap.add_argument("--tasks", help="comma-separated task numbers or names (01,02); default all")
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--rounds", type=int, default=5)
@@ -234,7 +237,13 @@ def main():
     if args.tasks:
         want = args.tasks.split(",")
         tasks = [t for t in tasks if t[:2] in want or t in want]
-    system = PY_SYSTEM if args.lang == "py" else KIO_SYSTEM + open(os.path.join(ROOT, "docs", "language.md")).read()
+    nospec = args.lang == "kio" and args.spec == "none"
+    if args.lang == "py":
+        system = PY_SYSTEM
+    elif nospec:
+        system = KIO_NOSPEC
+    else:
+        system = KIO_SYSTEM + open(os.path.join(ROOT, "docs", "language.md")).read()
 
     results = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
@@ -247,9 +256,11 @@ def main():
     ordered = [results[t] for t in tasks]
 
     date = datetime.date.today().isoformat()
-    out = args.out or os.path.join(EVAL, "results", "%s-%s-%s.json" % (date, args.model, args.lang))
+    name = "%s-%s-%s%s.json" % (date, args.model, args.lang, "-nospec" if nospec else "")
+    out = args.out or os.path.join(EVAL, "results", name)
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    doc = {"model": args.model, "lang": args.lang, "date": date, "rounds": args.rounds,
+    doc = {"model": args.model, "lang": args.lang, "spec": "none" if nospec else "full", "date": date,
+           "rounds": args.rounds,
            "commit": subprocess.run(["git", "-C", ROOT, "rev-parse", "--short", "HEAD"],
                                     capture_output=True, text=True).stdout.strip(),
            "tasks": ordered}

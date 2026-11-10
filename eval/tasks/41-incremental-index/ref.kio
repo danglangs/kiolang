@@ -1,0 +1,100 @@
+enum Failed { Io(IoErr), Kv(KvErr) }
+
+fn io<T>(r: Result<T, IoErr>) -> Result<T, Failed> { r.map_err(|e| Failed::Io(e)) }
+fn kv<T>(r: Result<T, KvErr>) -> Result<T, Failed> { r.map_err(|e| Failed::Kv(e)) }
+
+// Every file under `dir` (a path ending in `/`, or "" for the root).
+fn walk(docs: Dir, dir: Str) -> Result<List<Str>, IoErr> {
+  let mut out: List<Str> = [];
+  for name in docs.list(dir)? {
+    if name.ends_with("/") {
+      for p in walk(docs, dir + name)? { out.push(p); }
+    } else {
+      out.push(dir + name);
+    }
+  }
+  Ok(out)
+}
+
+fn is_sep(c: Int) -> Bool {
+  c < 128 && !((c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122))
+}
+
+// The distinct words of `b`, sorted.
+fn words(b: Bytes) -> List<Str> {
+  let mut seen: Map<Str, Bool> = Map::new();
+  let mut cur = "".to_bytes();
+  for i in 0..b.len() + 1 {
+    if i == b.len() || is_sep(b[i]) {
+      if cur.len() > 0 { seen.insert(cur.to_str().to_lowercase(), true); }
+      cur = "".to_bytes();
+    } else {
+      cur.push(b[i]);
+    }
+  }
+  seen.keys()
+}
+
+// Keys: `h:PATH` the file's hash, `f:PATH` its words (one per line), `p:WORD\tPATH` a posting.
+fn unindex(index: Kv, path: Str) -> Result<(), KvErr> {
+  if let Some(ws) = index.get("f:" + path)? {
+    for w in ws.to_str().split("\n") {
+      if w != "" { index.delete("p:" + w + "\t" + path)?; }
+    }
+  }
+  index.delete("f:" + path)?;
+  index.delete("h:" + path)
+}
+
+fn reindex(index: Kv, path: Str, hash: Str, data: Bytes) -> Result<(), KvErr> {
+  unindex(index, path)?;
+  let ws = words(data);
+  for w in ws { index.set("p:" + w + "\t" + path, "".to_bytes())?; }
+  index.set("f:" + path, ws.join("\n").to_bytes())?;
+  index.set("h:" + path, hash.to_bytes())
+}
+
+fn postings(index: Kv, word: Str) -> Result<List<Str>, KvErr> {
+  let prefix = "p:" + word + "\t";
+  Ok(index.keys(prefix)?.map(|k| k.slice(prefix.len(), k.len())))
+}
+
+fn main(docs: Dir, queries: Dir, index: Kv) -> Result<Str, Failed> {
+  let mut paths: Map<Str, Bool> = Map::new();
+  for p in io(walk(docs, ""))? { paths.insert(p, true); }
+  for k in kv(index.keys("h:"))? { paths.insert(k.slice(2, k.len()), true); }
+  let mut out: List<Str> = [];
+  let mut unchanged = 0;
+  for p in paths.keys() {
+    let old = kv(index.get("h:" + p))?.map(|b| b.to_str());
+    let data = match docs.read(p) {
+      Ok(b) => b,
+      Err(IoErr::NotFound) => {
+        out.push("removed " + p);
+        kv(unindex(index, p))?;
+        continue;
+      }
+      Err(e) => return Err(Failed::Io(e)),
+    };
+    let hash = data.sha256().to_hex();
+    if old == Some(hash) {
+      unchanged += 1;
+      continue;
+    }
+    out.push(if old.is_some() { "changed " + p } else { "added " + p });
+    kv(reindex(index, p, hash, data))?;
+  }
+  out.push("unchanged " + unchanged.to_str());
+
+  for line in io(queries.read("queries.txt"))?.to_str().split("\n") {
+    if line.trim() == "" { continue; }
+    let ws = words(line.to_bytes());
+    let mut hits: List<Str> = [];
+    for i in 0..ws.len() {
+      let ps = kv(postings(index, ws[i]))?;
+      hits = if i == 0 { ps } else { hits.filter(|h| ps.contains(h)) };
+    }
+    out.push(line + ": " + if hits.len() == 0 { "none" } else { hits.join(", ") });
+  }
+  Ok(out.join("\n"))
+}

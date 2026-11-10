@@ -1,0 +1,30 @@
+{
+  "GET /changes?cursor=0": {"status": 200, "body": {"changes": [
+    {"op": "upsert", "sku": "A1", "name": "Anvil", "qty": 5, "version": 1},
+    {"op": "upsert", "sku": "B2", "name": "Bolt", "qty": 100, "version": 1},
+    {"op": "upsert", "sku": "C3", "name": "Café crème", "qty": 2, "version": 1}
+  ], "next": "c1"}},
+  "GET /changes?cursor=c1": {"status": 200, "body": {"changes": [
+    {"op": "upsert", "sku": "A1", "name": "Anvil", "qty": 4, "version": 2},
+    {"op": "delete", "sku": "B2", "version": 2},
+    {"op": "upsert", "sku": "B2", "name": "Bolt", "qty": 50, "version": 1},
+    {"op": "upsert", "sku": "D4", "name": "Drill", "qty": 1, "version": 3}
+  ], "next": "c2"}},
+  "GET /changes?cursor=c2": [
+    {"status": 500, "body": {"error": "upstream down"}},
+    {"status": 200, "body": {"changes": [
+      {"op": "upsert", "sku": "A1", "name": "Anvil old", "qty": 9, "version": 1},
+      {"op": "upsert", "sku": "E5", "name": "Éclair", "qty": 7, "version": 1},
+      {"op": "rename", "sku": "A1", "version": 4},
+      {"op": "upsert", "sku": "F6", "name": "Fan", "qty": "3", "version": 1}
+    ], "next": "c3"}}
+  ],
+  "GET /changes?cursor=c3": [
+    {"status": 200, "raw": "{\"changes\": ["},
+    {"status": 200, "body": {"changes": [
+      {"op": "delete", "sku": "C3", "version": 2},
+      {"op": "delete", "sku": "Z9", "version": 1},
+      {"op": "upsert", "sku": "B2", "name": "Bolt v2", "qty": 10, "version": 3}
+    ], "next": null}}
+  ]
+}

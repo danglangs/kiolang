@@ -1,0 +1,92 @@
+enum Failed { Io(IoErr), Kv(KvErr), Json(Str) }
+
+struct Job { id: Str, priority: Int, due: Int, attempts: Int, state: Str }
+
+fn kv<T>(r: Result<T, KvErr>) -> Result<T, Failed> { r.map_err(|e| Failed::Kv(e)) }
+fn io<T>(r: Result<T, IoErr>) -> Result<T, Failed> { r.map_err(|e| Failed::Io(e)) }
+fn int_of(j: Json, k: Str) -> Int { j.get(k).and_then(|v| v.as_int()).unwrap_or(0) }
+
+// One key per job, `job:ID`, holding its JSON.
+fn load(queue: Kv, id: Str) -> Result<Option<Job>, KvErr> {
+  let Some(b) = queue.get("job:" + id)? else { return Ok(None); };
+  let j = b.to_str().parse_json().unwrap_or(Json::Null);
+  Ok(Some(Job { id: id, priority: int_of(j, "priority"), due: int_of(j, "due"), attempts: int_of(j, "attempts"),
+                state: j.get("state").and_then(|v| v.as_str()).unwrap_or("pending") }))
+}
+
+fn save(queue: Kv, job: Job) -> Result<(), KvErr> {
+  let mut m: Map<Str, Json> = Map::new();
+  m.insert("priority", Json::Num(job.priority));
+  m.insert("due", Json::Num(job.due));
+  m.insert("attempts", Json::Num(job.attempts));
+  m.insert("state", Json::Str(job.state));
+  queue.set("job:" + job.id, Json::Obj(m).to_json().to_bytes())
+}
+
+fn parse(line: Str) -> Option<Job> {
+  let j = line.parse_json().ok()?;
+  let id = j.get("id")?.as_str()?;
+  let priority = match j.get("priority")? { Json::Num(n) => n, _ => return None };
+  Some(Job { id: id, priority: priority, due: 0, attempts: 0, state: "pending" })
+}
+
+fn outcome(script: Json, id: Str, attempt: Int) -> Str {
+  let list = script.get(id).and_then(|v| v.as_list()).unwrap_or([]);
+  if list.len() == 0 { return "ok"; }
+  list[attempt.min(list.len()) - 1].as_str().unwrap_or("ok")
+}
+
+fn first(a: Job, b: Job) -> Bool {
+  if a.priority != b.priority { return a.priority > b.priority; }
+  if a.due != b.due { return a.due < b.due; }
+  a.id < b.id
+}
+
+fn main(input: Dir, queue: Kv, clock: Clock) -> Result<Str, Failed> {
+  let now = clock.now_ms();
+  let script = io(input.read("script.json"))?.to_str().parse_json().map_err(|e| Failed::Json(e))?;
+  let lines = io(input.read("enqueue.jsonl"))?.to_str().split("\n");
+  let mut out: List<Str> = [];
+  for i in 0..lines.len() {
+    if lines[i].trim() == "" { continue; }
+    let Some(job) = parse(lines[i]) else { out.push("invalid line " + (i + 1).to_str()); continue; };
+    if kv(queue.get("job:" + job.id))?.is_some() {
+      out.push("duplicate " + job.id);
+      continue;
+    }
+    kv(save(queue, Job { due: now, ..job }))?;
+  }
+
+  let mut all: List<Job> = [];
+  for k in kv(queue.keys("job:"))? {
+    if let Some(job) = kv(load(queue, k.slice(4, k.len())))? { all.push(job); }
+  }
+  let mut due = all.filter(|j| j.state == "pending" && j.due <= now);
+  due.sort_by(first);
+  for job in due.slice(0, due.len().min(5)) {
+    let attempts = job.attempts + 1;
+    let next = if outcome(script, job.id, attempts) == "ok" {
+      out.push("done " + job.id);
+      Job { attempts: attempts, state: "done", ..job }
+    } else if attempts == 4 {
+      out.push("dead " + job.id);
+      Job { attempts: attempts, state: "dead", ..job }
+    } else {
+      let mut wait = 60;
+      for _ in 1..attempts { wait = wait * 2; }
+      out.push("retry " + job.id + " in " + wait.to_str());
+      Job { attempts: attempts, due: now + wait * 1000, ..job }
+    };
+    kv(save(queue, next))?;
+  }
+
+  let mut counts: Map<Str, Int> = Map::new();
+  for k in kv(queue.keys("job:"))? {
+    if let Some(job) = kv(load(queue, k.slice(4, k.len())))? {
+      counts.insert(job.state, counts.get(job.state).unwrap_or(0) + 1);
+    }
+  }
+  let n = |s: Str| counts.get(s).unwrap_or(0).to_str();
+  out.push("pending " + n("pending") + " done " + n("done") + " dead " + n("dead"));
+  Ok(out.join("\n"))
+}

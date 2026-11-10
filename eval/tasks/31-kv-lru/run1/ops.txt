@@ -1,0 +1,22 @@
+capacity 3
+put a 1
+put b two words
+put c ünïcödé ✓
+get a
+put d 4
+get b
+get c
+get a
+
+put a  leading space
+get a
+bogus x
+get
+put e
+get a b
+put e
+del c
+del zzz
+put e 5
+get e
+put f 6

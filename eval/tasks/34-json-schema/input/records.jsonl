@@ -1,0 +1,14 @@
+{"id": 1, "name": "Zoë", "items": [{"sku": "a", "qty": 2}]}
+{"id": 0, "name": "x", "items": []}
+{"id": true, "name": "ünïcödé!", "items": [{"sku": "", "qty": 100}, {"qty": 1.5}, "x"], "extra": 1}
+{"id": 2, "name": "broken"
+
+[1]
+{"id": 3, "name": "abcdefghi", "items": [{"sku": "z", "qty": 1}], "tier": "gold", "score": 100.5, "active": 1, "tags": ["abc", "abcd", "✓✓✓"], "meta": {"x": []}, "note": null}
+{"id": 4, "name": "ok", "items": [{"sku": "q", "qty": 5, "color": "red"}], "score": -2.5, "tier": "pro", "active": false, "meta": {}}
+{"name": "no id"}
+{"id": 5, "name": "dup", "name": "dupe!", "items": [{"sku": "s", "qty": 1}]}
+{"id": 6, "name": "nul", "items": null, "note": 0}
+{"id": 7, "name": "sc", "items": [{"sku": "s", "qty": 1}], "score": 7}
+{"id": 8.0, "name": "fl", "items": [{"sku": "s", "qty": 1}], "score": -11, "tags": "abc"}
+{"id": 9, "name": "ab", "items": [{"sku": "s", "qty": 1}, {"sku": "t", "qty": 0}, {"sku": "u", "qty": 1}, {"sku": "v", "qty": 1}, {"sku": "w", "qty": 1}, {"sku": "x", "qty": 1}, {"sku": "y", "qty": 1}, {"sku": "z", "qty": 1}, {"sku": "a", "qty": 1}, {"sku": "b", "qty": 1}, {"sku": "c", "qty": 0}]}

@@ -1,0 +1,101 @@
+enum Failed { Io(IoErr), Kv(KvErr), Bad(Str) }
+
+// `order` holds the keys least recently used first.
+struct Cache { order: List<Str>, vals: Map<Str, Str>, hits: Int, misses: Int, evictions: Int }
+
+fn int_of(j: Json, k: Str) -> Int { j.get(k).and_then(|v| v.as_int()).unwrap_or(0) }
+
+fn load(cache: Kv) -> Result<Cache, Failed> {
+  let mut c = Cache { order: [], vals: Map::new(), hits: 0, misses: 0, evictions: 0 };
+  let Some(b) = cache.get("lru").map_err(|e| Failed::Kv(e))? else { return Ok(c); };
+  let j = b.to_str().parse_json().map_err(|e| Failed::Bad(e))?;
+  for k in j.get("order").and_then(|v| v.as_list()).unwrap_or([]) { c.order.push(k.as_str().unwrap_or("")); }
+  let vals = j.get("vals").and_then(|v| v.as_map()).unwrap_or(Map::new());
+  for k in vals.keys() { c.vals.insert(k, vals.get(k).and_then(|v| v.as_str()).unwrap_or("")); }
+  c.hits = int_of(j, "hits");
+  c.misses = int_of(j, "misses");
+  c.evictions = int_of(j, "evictions");
+  Ok(c)
+}
+
+fn save(cache: Kv, c: Cache) -> Result<(), Failed> {
+  let mut vals: Map<Str, Json> = Map::new();
+  for k in c.vals.keys() { vals.insert(k, Json::Str(c.vals.get(k).unwrap_or(""))); }
+  let mut m: Map<Str, Json> = Map::new();
+  m.insert("order", Json::Arr(c.order.map(|k| Json::Str(k))));
+  m.insert("vals", Json::Obj(vals));
+  m.insert("hits", Json::Num(c.hits));
+  m.insert("misses", Json::Num(c.misses));
+  m.insert("evictions", Json::Num(c.evictions));
+  cache.set("lru", Json::Obj(m).to_json().to_bytes()).map_err(|e| Failed::Kv(e))
+}
+
+fn touch(order: List<Str>, k: Str) -> List<Str> {
+  let mut o = order.filter(|x| x != k);
+  o.push(k);
+  o
+}
+
+fn main(input: Dir, cache: Kv) -> Result<Str, Failed> {
+  let text = input.read("ops.txt").map_err(|e| Failed::Io(e))?.to_str();
+  let lines = text.split("\n");
+  let cap = lines[0].strip_prefix("capacity ").and_then(|s| s.parse_int()).unwrap_or(1);
+  let mut c = load(cache)?;
+  let mut out: List<Str> = [];
+  while c.order.len() > cap {
+    let k = c.order[0];
+    c.order = c.order.slice(1, c.order.len());
+    c.vals.remove(k);
+    c.evictions += 1;
+    out.push("evict " + k);
+  }
+  for n in 1..lines.len() {
+    let line = lines[n];
+    if line.trim() == "" { continue; }
+    let w = line.split(" ");
+    let op = w[0];
+    if (op == "get" || op == "del") && w.len() == 2 && w[1] != "" {
+      let k = w[1];
+      let Some(v) = c.vals.get(k) else {
+        if op == "get" {
+          c.misses += 1;
+          out.push(k + " miss");
+        }
+        continue;
+      };
+      if op == "get" {
+        c.hits += 1;
+        c.order = touch(c.order, k);
+        out.push(k + "=" + v);
+      } else {
+        c.vals.remove(k);
+        c.order = c.order.filter(|x| x != k);
+      }
+      continue;
+    }
+    if op == "put" && w.len() >= 3 && w[1] != "" {
+      let k = w[1];
+      let start = 4 + k.len() + 1;
+      let v = line.slice(start, line.len());
+      if v != "" {
+        if c.vals.get(k).is_none() && c.order.len() >= cap {
+          let old = c.order[0];
+          c.order = c.order.slice(1, c.order.len());
+          c.vals.remove(old);
+          c.evictions += 1;
+          out.push("evict " + old);
+        }
+        c.vals.insert(k, v);
+        c.order = touch(c.order, k);
+        continue;
+      }
+    }
+    out.push("bad line " + (n + 1).to_str());
+  }
+  let mut recent = c.order;
+  recent.reverse();
+  out.push("cache: " + recent.join(","));
+  out.push("stats hits " + c.hits.to_str() + " misses " + c.misses.to_str() + " evictions " + c.evictions.to_str());
+  save(cache, c)?;
+  Ok(out.join("\n"))
+}

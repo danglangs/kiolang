@@ -1,6 +1,6 @@
 # Eval: can models write kio?
 
-30 backend tasks (E1, docs/product-todo.md), each solved in kio and, as a baseline, in Python.
+45 backend tasks (E1 and E2, docs/product-todo.md), each solved in kio and, as a baseline, in Python. 31-45 are harder: several grants, state across runs, error paths, data structures.
 
 | Tasks | Grants |
 |---|---|
@@ -10,8 +10,14 @@
 | 22-25 SQLite | `input: Dir`, a `Db` (23: read-only) |
 | 26-28 HTTP handlers | `req: Incoming`, `res: Outgoing`, a `Kv` or `Db` |
 | 29-30 HTTP clients | `api: Http` against a local fixture server |
+| 31 LRU cache, 41 incremental index, 43 job queue (retries, backoff) | `Dir`, a `Kv` (2-5 runs); 43 a fixed `Clock` per run |
+| 32 build stages and cycles, 33 interval merge, 34 JSON schema, 39 sessions, 40 quoted CSV, 44 expression parser | `input: Dir` (40: and `out: Dir`) |
+| 35 push with retries | `input: Dir`, `state: Kv`, `api: Http` (PUT) against a flaky upstream |
+| 36 ledger | `input: Dir`, `db: Db`, `log: Log`, `clock: Clock` (3 runs) |
+| 37 sessions, 38 idempotent payments, 45 signed ordered webhooks | HTTP handlers with `Kv` + `Clock` + `Rng`, `Db`, `Db` + `Dir` + `Log`; restarted mid-check |
+| 42 resumable change feed | `api: Http`, `db: Db` (4 runs; pages fail, then succeed) |
 
-A task is `tasks/NN-name/`: `task.md` (the prompt), `check.sh PROGRAM` (kio), `check_py.sh PROGRAM` (the same check for Python; grants become environment variables, `INPUT=/path`), `ref.kio` and `ref.py`, and fixtures. Shared check code is `lib/`.
+A task is `tasks/NN-name/`: `task.md` (the prompt), `check.sh PROGRAM` (kio), `check_py.sh PROGRAM` (the same check for Python; grants become environment variables, `INPUT=/path`, a fixed clock `CLOCK=<ms>`), `ref.kio` and `ref.py`, and fixtures. Shared check code is `lib/`; its fixture API (`lib/api.py`) logs every request and can answer a route with a list of responses, one per call (a flaky upstream).
 
 ## Run
 
@@ -21,11 +27,12 @@ eval/check_refs.sh                                   # every reference passes (C
 eval/run.py --model haiku --lang kio --kio target/release/kio
 eval/run.py --model haiku --lang py
 eval/run.py --model sonnet --lang kio --tasks 01,26 --jobs 2
+eval/run.py --model sonnet --lang kio --spec none    # no language.md: what Rust syntax alone carries
 ```
 
-Flags: `--model` (a `claude --model` name), `--lang kio|py` (default kio), `--tasks` (numbers or names, default all), `--jobs` (default 4), `--rounds` (default 5), `--kio` (default `kio` on PATH, else `target/release/kio`), `--out` (result file).
+Flags: `--model` (a `claude --model` name), `--lang kio|py` (default kio), `--spec full|none` (kio's system prompt: docs/language.md, or only "You write programs in kio, a subset of Rust with capabilities as parameters."; the result file ends `-nospec`), `--tasks` (numbers or names, default all), `--jobs` (default 4), `--rounds` (default 5), `--kio` (default `kio` on PATH, else `target/release/kio`), `--out` (result file).
 
-`run.py` needs Python 3 and a logged-in `claude` CLI (no API key; open_questions #165). Per task, up to 5 rounds: the model's program is checked with `kio check` (diagnostics are fed back), then with `check.sh` (its failure output is fed back). It writes `results/<date>-<model>-<lang>.json` (every round's program and feedback) and prints:
+`run.py` needs Python 3 and a logged-in `claude` CLI (no API key; open_questions #165). Per task, up to 5 rounds: the model's program is checked with `kio check` (diagnostics are fed back), then with `check.sh` (its failure output is fed back). It writes `results/<date>-<model>-<lang>[-nospec].json` (every round's program and feedback) and prints:
 
 | Column | Meaning |
 |---|---|

@@ -1,0 +1,144 @@
+struct Reply { status: Int, body: Json }
+struct Payment { n: Int, account: Str, cents: Int, currency: Str, status: Str, refunded: Int }
+
+fn error(status: Int, msg: Str) -> Reply {
+  let mut m: Map<Str, Json> = Map::new();
+  m.insert("error", Json::Str(msg));
+  Reply { status: status, body: Json::Obj(m) }
+}
+
+fn not_found() -> Reply { error(404, "not found") }
+
+fn to_json(p: Payment) -> Json {
+  let mut m: Map<Str, Json> = Map::new();
+  m.insert("id", Json::Str("pay_" + p.n.to_str()));
+  m.insert("account", Json::Str(p.account));
+  m.insert("cents", Json::Num(p.cents));
+  m.insert("currency", Json::Str(p.currency));
+  m.insert("status", Json::Str(p.status));
+  m.insert("refunded", Json::Num(p.refunded));
+  Json::Obj(m)
+}
+
+fn int_at(row: List<SqlValue>, i: Int) -> Int { match row[i] { SqlValue::Int(n) => n, _ => 0 } }
+fn str_at(row: List<SqlValue>, i: Int) -> Str { match row[i] { SqlValue::Text(s) => s, _ => "" } }
+
+fn row_payment(r: List<SqlValue>) -> Payment {
+  Payment { n: int_at(r, 0), account: str_at(r, 1), cents: int_at(r, 2), currency: str_at(r, 3),
+            status: str_at(r, 4), refunded: int_at(r, 5) }
+}
+
+const COLS: Str = "SELECT n, account, cents, currency, status, refunded FROM payments";
+
+fn payment(db: Db, n: Int) -> Result<Option<Payment>, DbErr> {
+  let rows = db.query(COLS + " WHERE n = ?", [SqlValue::Int(n)])?;
+  if rows.len() == 0 { Ok(None) } else { Ok(Some(row_payment(rows[0]))) }
+}
+
+fn ok(db: Db, status: Int, n: Int) -> Result<Reply, DbErr> {
+  match payment(db, n)? { Some(p) => Ok(Reply { status: status, body: to_json(p) }), None => Ok(not_found()) }
+}
+
+fn pos_int(j: Option<Json>) -> Option<Int> {
+  match j { Some(Json::Num(n)) => if n > 0 { Some(n) } else { None }, _ => None }
+}
+
+fn create(db: Db, body: Json) -> Result<Reply, DbErr> {
+  let Json::Obj(m) = body else { return Ok(error(422, "invalid payment")); };
+  let account = m.get("account").and_then(|v| v.as_str()).unwrap_or("");
+  let cents = pos_int(m.get("cents")).unwrap_or(0);
+  let currency = m.get("currency").and_then(|v| v.as_str()).unwrap_or("");
+  if m.len() != 3 || account == "" || cents == 0 || (currency != "EUR" && currency != "USD") {
+    return Ok(error(422, "invalid payment"));
+  }
+  db.exec("INSERT INTO payments (account, cents, currency, status, refunded) VALUES (?, ?, ?, 'pending', 0)",
+          [SqlValue::Text(account), SqlValue::Int(cents), SqlValue::Text(currency)])?;
+  let rows = db.query("SELECT max(n) FROM payments", [])?;
+  ok(db, 201, int_at(rows[0], 0))
+}
+
+fn act(db: Db, n: Int, verb: Str, body: Json) -> Result<Reply, DbErr> {
+  let Some(p) = payment(db, n)? else { return Ok(not_found()); };
+  if verb == "capture" {
+    if p.status != "pending" && p.status != "captured" { return Ok(error(409, "invalid transition")); }
+    db.exec("UPDATE payments SET status = 'captured' WHERE n = ?", [SqlValue::Int(n)])?;
+  } else if verb == "cancel" {
+    if p.status != "pending" { return Ok(error(409, "invalid transition")); }
+    db.exec("UPDATE payments SET status = 'canceled' WHERE n = ?", [SqlValue::Int(n)])?;
+  } else {
+    let Some(cents) = pos_int(body.get("cents")) else { return Ok(error(422, "invalid refund")); };
+    if p.status != "captured" { return Ok(error(409, "invalid transition")); }
+    let total = p.refunded + cents;
+    if total > p.cents { return Ok(error(409, "exceeds captured")); }
+    let status = if total == p.cents { "refunded" } else { "captured" };
+    db.exec("UPDATE payments SET refunded = ?, status = ? WHERE n = ?",
+            [SqlValue::Int(total), SqlValue::Text(status), SqlValue::Int(n)])?;
+  }
+  ok(db, 200, n)
+}
+
+fn header(req: Incoming, name: Str) -> Option<Str> {
+  let names = req.header_names();
+  for i in 0..names.len() { if names[i] == name { return Some(req.header_values()[i]); } }
+  None
+}
+
+// `/payments/pay_N[/verb]` as N and the verb ("" for none); N 0 when the path is not one.
+struct Target { n: Int, verb: Str }
+
+fn target(path: Str) -> Target {
+  let parts = path.split("/");
+  let none = Target { n: 0, verb: "" };
+  if parts.len() < 3 || parts.len() > 4 || parts[0] != "" || parts[1] != "payments" { return none; }
+  let Some(digits) = parts[2].strip_prefix("pay_") else { return none; };
+  if digits.starts_with("0") || digits.starts_with("+") || digits.starts_with("-") { return none; }
+  let Some(n) = digits.parse_int() else { return none; };
+  let verb = if parts.len() == 4 { parts[3] } else { "" };
+  if verb != "" && verb != "capture" && verb != "cancel" && verb != "refund" { return none; }
+  Target { n: n, verb: verb }
+}
+
+fn route(req: Incoming, db: Db) -> Result<Reply, DbErr> {
+  let method = req.method();
+  let path = req.target();
+  let t = target(path);
+  if method == "GET" && t.n > 0 && t.verb == "" { return ok(db, 200, t.n); }
+  if method == "GET" {
+    let Some(account) = path.strip_prefix("/payments?account=") else { return Ok(not_found()); };
+    let rows = db.query(COLS + " WHERE account = ? ORDER BY n", [SqlValue::Text(account)])?;
+    return Ok(Reply { status: 200, body: Json::Arr(rows.map(|r| to_json(row_payment(r)))) });
+  }
+  if method != "POST" { return Ok(not_found()); }
+  let keyed = path == "/payments" || (t.n > 0 && t.verb == "refund");
+  if !keyed {
+    if t.n > 0 && t.verb != "" { return act(db, t.n, t.verb, Json::Null); }
+    return Ok(not_found());
+  }
+  let Some(key) = header(req, "idempotency-key") else { return Ok(error(400, "missing idempotency key")); };
+  let body = req.body().to_str().parse_json().unwrap_or(Json::Null);
+  let request = path + " " + body.to_json();
+  let old = db.query("SELECT request, status, body FROM keys WHERE k = ?", [SqlValue::Text(key)])?;
+  if old.len() > 0 {
+    if str_at(old[0], 0) != request { return Ok(error(409, "key reused")); }
+    return Ok(Reply { status: int_at(old[0], 1), body: str_at(old[0], 2).parse_json().unwrap_or(Json::Null) });
+  }
+  let r = if path == "/payments" { create(db, body)? } else { act(db, t.n, "refund", body)? };
+  if r.status >= 200 && r.status < 300 {
+    db.exec("INSERT INTO keys (k, request, status, body) VALUES (?, ?, ?, ?)",
+            [SqlValue::Text(key), SqlValue::Text(request), SqlValue::Int(r.status), SqlValue::Text(r.body.to_json())])?;
+  }
+  Ok(r)
+}
+
+fn schema(db: Db) -> Result<Int, DbErr> {
+  db.exec("CREATE TABLE IF NOT EXISTS payments (n INTEGER PRIMARY KEY, account TEXT NOT NULL, cents INTEGER NOT NULL, currency TEXT NOT NULL, status TEXT NOT NULL, refunded INTEGER NOT NULL)", [])?;
+  db.exec("CREATE TABLE IF NOT EXISTS keys (k TEXT PRIMARY KEY, request TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL)", [])
+}
+
+fn main(req: Incoming, res: Outgoing, db: Db) -> Result<(), WebErr> {
+  let r = match schema(db) {
+    Ok(_) => route(req, db).unwrap_or(error(500, "database failed")),
+    Err(_) => error(500, "database failed"),
+  };
+  res.send(r.status, ["content-type"], ["application/json"], r.body.to_json().to_bytes())
+}

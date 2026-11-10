@@ -1,0 +1,19 @@
+open alice 1000
+open bob 500
+open bob 1
+transfer t1 alice bob 300
+transfer t2 bob carol 50
+transfer t3 bob alice 900
+transfer t1 alice bob 300
+transfer t1 alice bob 301
+open carol 0
+transfer t4 alice carol 700
+transfer t5 alice alice 1
+transfer t6 alice bob 0
+close bob
+fly me to the moon
+open dave x
+open dave -5
+
+open Zoë 25
+transfer t7 Zoë alice 25

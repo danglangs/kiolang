@@ -1,0 +1,142 @@
+struct Record { fields: List<Str>, ok: Bool }
+struct Region { revenue: Map<Str, Int>, items: Int }
+
+const QUOTE: Int = 34;
+const COMMA: Int = 44;
+const CR: Int = 13;
+const LF: Int = 10;
+
+fn ends_field(c: Int) -> Bool { c == COMMA || c == CR || c == LF }
+
+// RFC 4180 records; `ok` is false for stray quotes or a quote left open at the end.
+fn parse(b: Bytes) -> List<Record> {
+  let mut out: List<Record> = [];
+  let n = b.len();
+  let mut i = 0;
+  while i < n {
+    let mut fields: List<Str> = [];
+    let mut ok = true;
+    loop {
+      let mut field = "".to_bytes();
+      if i < n && b[i] == QUOTE {
+        i += 1;
+        let mut closed = false;
+        while i < n {
+          if b[i] == QUOTE {
+            if i + 1 < n && b[i + 1] == QUOTE {
+              field.push(QUOTE);
+              i += 2;
+              continue;
+            }
+            i += 1;
+            closed = true;
+            break;
+          }
+          field.push(b[i]);
+          i += 1;
+        }
+        if !closed {
+          fields.push(field.to_str());
+          out.push(Record { fields: fields, ok: false });
+          return out;
+        }
+        if i < n && !ends_field(b[i]) { ok = false; }
+      }
+      while i < n && !ends_field(b[i]) {
+        if b[i] == QUOTE { ok = false; }
+        field.push(b[i]);
+        i += 1;
+      }
+      fields.push(field.to_str());
+      if i < n && b[i] == COMMA {
+        i += 1;
+        continue;
+      }
+      if i + 1 < n && b[i] == CR && b[i + 1] == LF { i += 2; } else if i < n { i += 1; }
+      break;
+    }
+    out.push(Record { fields: fields, ok: ok });
+  }
+  out
+}
+
+fn digits(s: Str) -> Bool {
+  let b = s.to_bytes();
+  if b.len() == 0 { return false; }
+  for i in 0..b.len() { if b[i] < 48 || b[i] > 57 { return false; } }
+  true
+}
+
+fn int_text(s: Str) -> Bool { digits(s.strip_prefix("-").unwrap_or(s)) }
+
+fn cents(price: Str) -> Option<Int> {
+  let parts = price.split(".");
+  if !digits(parts[0]) || parts.len() > 2 { return None; }
+  let whole = parts[0].parse_int()? * 100;
+  if parts.len() == 1 { return Some(whole); }
+  let frac = parts[1];
+  if !digits(frac) || frac.len() > 2 { return None; }
+  let f = frac.parse_int()?;
+  Some(whole + if frac.len() == 1 { f * 10 } else { f })
+}
+
+fn two(n: Int) -> Str { if n < 10 { "0" + n.to_str() } else { n.to_str() } }
+
+fn money(c: Int) -> Str {
+  let sign = if c < 0 { "-" } else { "" };
+  let a = if c < 0 { 0 - c } else { c };
+  sign + (a / 100).to_str() + "." + two(a % 100)
+}
+
+fn quote(f: Str) -> Str {
+  if f.contains(",") || f.contains("\"") || f.contains("\r") || f.contains("\n") {
+    "\"" + f.replace("\"", "\"\"") + "\""
+  } else {
+    f
+  }
+}
+
+fn main(input: Dir, out: Dir) -> Result<Str, IoErr> {
+  let all = parse(input.read("sales.csv")?);
+  let rows = all.filter(|r| !(r.ok && r.fields == [""]));
+  if rows.len() == 0 { return Ok("records 0 bad 0"); }
+  let mut clean = rows[0].fields.join(",") + "\n";
+  let mut bad: List<Str> = [];
+  let mut regions: Map<Str, Region> = Map::new();
+  for n in 1..rows.len() {
+    let r = rows[n];
+    let f = r.fields;
+    let valid = r.ok && f.len() == 5 && f[0] != "" && f[1] != "" && int_text(f[2]) && cents(f[3]).is_some();
+    if !valid {
+      bad.push(n.to_str());
+      continue;
+    }
+    let c = cents(f[3]).unwrap_or(0);
+    let qty = f[2].parse_int().unwrap_or(0);
+    clean = clean + [quote(f[0]), quote(f[1]), quote(f[2]), money(c), quote(f[4])].join(",") + "\n";
+    let mut reg = regions.get(f[0]).unwrap_or(Region { revenue: Map::new(), items: 0 });
+    reg.items += qty;
+    reg.revenue.insert(f[1], reg.revenue.get(f[1]).unwrap_or(0) + qty * c);
+    regions.insert(f[0], reg);
+  }
+  out.write("clean.csv", clean.to_bytes())?;
+  let mut lines: List<Str> = [];
+  for name in regions.keys() {
+    let reg = regions.get(name).unwrap_or(Region { revenue: Map::new(), items: 0 });
+    let mut total = 0;
+    let mut top = "";
+    let mut best = 0;
+    for p in reg.revenue.keys() {
+      let v = reg.revenue.get(p).unwrap_or(0);
+      total += v;
+      if top == "" || v > best {
+        top = p;
+        best = v;
+      }
+    }
+    lines.push(name + " revenue " + money(total) + " items " + reg.items.to_str() + " top " + top);
+  }
+  let tail = if bad.len() == 0 { "" } else { ": " + bad.join(", ") };
+  lines.push("records " + (rows.len() - 1).to_str() + " bad " + bad.len().to_str() + tail);
+  Ok(lines.join("\n"))
+}

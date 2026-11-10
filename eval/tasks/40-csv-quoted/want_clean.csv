@@ -1,0 +1,10 @@
+region,product,qty,price,note
+north,widget,3,2.50,plain
+north,"gadget, large",1,10.00,"says ""hi"""
+south,widget,2,2.50,"two
+lines"
+south,Ünïcode ✓,1,0.99,
+west,thing,10,0.10,"comma, and
+CRLF inside"
+north,widget,-2,2.50,return
+south,"gadget, large",2,10.00,"""quoted"""

@@ -1,0 +1,11 @@
+{
+  "PUT /records/r1": {"status": 200, "body": {"ok": true}},
+  "PUT /records/r2": [{"status": 503, "body": {"error": "busy"}}, {"status": 200, "body": {"ok": true}}],
+  "PUT /records/r3": {"status": 422, "body": {"error": "name taken"}},
+  "PUT /records/r4": [{"status": 503, "body": {"error": "busy"}}, {"status": 502, "raw": "<html>bad gateway</html>"},
+                      {"status": 503, "body": {"error": "busy"}}, {"status": 200, "body": {"ok": true}}],
+  "PUT /records/r5": {"status": 200, "body": {"ok": true}},
+  "PUT /records/r7": {"status": 201, "body": {"created": true}},
+  "PUT /records/r8": [{"status": 500, "body": {"error": "oops"}}, {"status": 409, "body": {"error": "conflict"}}],
+  "PUT /records/r9": {"status": 204, "raw": ""}
+}

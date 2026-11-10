@@ -1,0 +1,108 @@
+struct Error { path: Str, msg: Str }
+
+fn chars(s: Str) -> Int {
+  let b = s.to_bytes();
+  let mut n = 0;
+  for i in 0..b.len() {
+    // Count every byte that does not continue a UTF-8 sequence.
+    if b[i] < 128 || b[i] >= 192 { n += 1; }
+  }
+  n
+}
+
+fn bound(s: Json, k: Str) -> Option<Int> { s.get(k).and_then(|v| v.as_int()) }
+
+fn type_ok(t: Str, v: Json) -> Bool {
+  match v {
+    Json::Obj(_) => t == "object",
+    Json::Arr(_) => t == "array",
+    Json::Str(_) => t == "string",
+    Json::Num(_) => t == "integer" || t == "number",
+    Json::Float(_) => t == "number",
+    Json::Bool(_) => t == "boolean",
+    Json::Null => t == "null",
+  }
+}
+
+fn check(s: Json, v: Json, path: Str) -> List<Error> {
+  let t = s.get("type").and_then(|x| x.as_str()).unwrap_or("");
+  let mut errs: List<Error> = [];
+  if !type_ok(t, v) {
+    errs.push(Error { path: path, msg: "expected " + t });
+    return errs;
+  }
+  match v {
+    Json::Obj(fields) => {
+      let props = s.get("properties").and_then(|x| x.as_map()).unwrap_or(Map::new());
+      for f in s.get("required").and_then(|x| x.as_list()).unwrap_or([]) {
+        let name = f.as_str().unwrap_or("");
+        if fields.get(name).is_none() { errs.push(Error { path: path + "." + name, msg: "missing required field" }); }
+      }
+      let closed = s.get("additional") == Some(Json::Bool(false));
+      for k in fields.keys() {
+        let x = fields.get(k).unwrap_or(Json::Null);
+        match props.get(k) {
+          Some(sub) => { for e in check(sub, x, path + "." + k) { errs.push(e); } }
+          None => { if closed { errs.push(Error { path: path + "." + k, msg: "unexpected field" }); } }
+        }
+      }
+    }
+    Json::Arr(items) => {
+      if let Some(n) = bound(s, "min_items") {
+        if items.len() < n { errs.push(Error { path: path, msg: "fewer than " + n.to_str() + " items" }); }
+      }
+      if let Some(sub) = s.get("items") {
+        for i in 0..items.len() {
+          for e in check(sub, items[i], path + "[" + i.to_str() + "]") { errs.push(e); }
+        }
+      }
+    }
+    Json::Str(text) => {
+      let n = chars(text);
+      let allowed = s.get("enum").and_then(|x| x.as_list());
+      if bound(s, "min_length").is_some() && n < bound(s, "min_length").unwrap_or(0) {
+        errs.push(Error { path: path, msg: "shorter than " + bound(s, "min_length").unwrap_or(0).to_str() });
+      } else if bound(s, "max_length").is_some() && n > bound(s, "max_length").unwrap_or(0) {
+        errs.push(Error { path: path, msg: "longer than " + bound(s, "max_length").unwrap_or(0).to_str() });
+      } else if allowed.is_some() && !allowed.unwrap_or([]).contains(Json::Str(text)) {
+        errs.push(Error { path: path, msg: "not in enum" });
+      }
+    }
+    _ => {
+      let x = v.as_float().unwrap_or(0.0);
+      if let Some(lo) = bound(s, "minimum") {
+        if x < lo.to_float() {
+          errs.push(Error { path: path, msg: "less than " + lo.to_str() });
+          return errs;
+        }
+      }
+      if let Some(hi) = bound(s, "maximum") {
+        if x > hi.to_float() { errs.push(Error { path: path, msg: "greater than " + hi.to_str() }); }
+      }
+    }
+  }
+  errs
+}
+
+fn main(input: Dir) -> Result<Str, IoErr> {
+  let schema = input.read("schema.json")?.to_str().parse_json().unwrap_or(Json::Null);
+  let lines = input.read("records.jsonl")?.to_str().split("\n");
+  let mut out: List<Str> = [];
+  let mut valid = 0;
+  let mut total = 0;
+  for i in 0..lines.len() {
+    if lines[i].trim() == "" { continue; }
+    total += 1;
+    let label = "line " + (i + 1).to_str() + ": ";
+    let Ok(rec) = lines[i].parse_json() else { out.push(label + "invalid JSON"); continue; };
+    let mut errs = check(schema, rec, "$");
+    if errs.len() == 0 {
+      valid += 1;
+      out.push(label + "ok");
+    }
+    errs.sort_by(|a, b| a.path < b.path || (a.path == b.path && a.msg < b.msg));
+    for e in errs { out.push(label + e.path + ": " + e.msg); }
+  }
+  out.push("valid " + valid.to_str() + " of " + total.to_str());
+  Ok(out.join("\n"))
+}

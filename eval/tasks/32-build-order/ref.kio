@@ -1,0 +1,90 @@
+fn dedup_sorted(xs: List<Str>) -> List<Str> {
+  let mut s = xs;
+  s.sort();
+  let mut out: List<Str> = [];
+  for x in s { if out.len() == 0 || out[out.len() - 1] != x { out.push(x); } }
+  out
+}
+
+// Every package reachable from `p` through one or more dependency edges.
+fn reach(deps: Map<Str, List<Str>>, p: Str) -> Map<Str, Bool> {
+  let mut seen: Map<Str, Bool> = Map::new();
+  let mut todo = deps.get(p).unwrap_or([]);
+  while todo.len() > 0 {
+    let v = todo.pop().unwrap_or("");
+    if seen.get(v).is_some() { continue; }
+    let Some(ds) = deps.get(v) else { continue; };
+    seen.insert(v, true);
+    for d in ds { todo.push(d); }
+  }
+  seen
+}
+
+fn main(input: Dir) -> Result<Str, IoErr> {
+  let text = input.read("packages.json")?.to_str();
+  let Ok(Json::Obj(raw)) = text.parse_json() else { return Ok("error: not an object"); };
+  let mut deps: Map<Str, List<Str>> = Map::new();
+  let mut invalid: List<Str> = [];
+  for name in raw.keys() {
+    let list = raw.get(name).and_then(|v| v.as_list());
+    let mut names: List<Str> = [];
+    let mut ok = list.is_some();
+    for d in list.unwrap_or([]) {
+      match d { Json::Str(s) => names.push(s), _ => { ok = false; } }
+    }
+    if ok { deps.insert(name, dedup_sorted(names)); } else { invalid.push(name); }
+  }
+
+  let mut stage: Map<Str, Int> = Map::new();
+  let mut changed = true;
+  while changed {
+    changed = false;
+    for p in deps.keys() {
+      if stage.get(p).is_some() { continue; }
+      let mut s = 1;
+      let mut ready = true;
+      for d in deps.get(p).unwrap_or([]) {
+        match stage.get(d) { Some(n) => { s = s.max(n + 1); } None => { ready = false; } }
+      }
+      if ready {
+        stage.insert(p, s);
+        changed = true;
+      }
+    }
+  }
+
+  let mut reaches: Map<Str, Map<Str, Bool>> = Map::new();
+  for p in deps.keys() { reaches.insert(p, reach(deps, p)); }
+  let mut cycles: Map<Str, List<Str>> = Map::new();
+  let mut in_cycle: Map<Str, Bool> = Map::new();
+  for p in deps.keys() {
+    let rp = reaches.get(p).unwrap_or(Map::new());
+    if rp.get(p).is_none() { continue; }
+    let group = deps.keys().filter(|q| rp.get(q).is_some() && reaches.get(q).unwrap_or(Map::new()).get(p).is_some());
+    cycles.insert(group[0], group);
+    in_cycle.insert(p, true);
+  }
+
+  let mut out: List<Str> = [];
+  let mut top = 0;
+  for p in stage.keys() { top = top.max(stage.get(p).unwrap_or(0)); }
+  for s in 1..top + 1 {
+    out.push("stage " + s.to_str() + ": " + stage.keys().filter(|p| stage.get(p) == Some(s)).join(", "));
+  }
+  for c in cycles.keys() { out.push("cycle: " + cycles.get(c).unwrap_or([]).join(", ")); }
+  let mut missing: Map<Str, List<Str>> = Map::new();
+  for p in deps.keys() {
+    for d in deps.get(p).unwrap_or([]) {
+      if deps.get(d).is_some() { continue; }
+      let mut by = missing.get(d).unwrap_or([]);
+      by.push(p);
+      missing.insert(d, by);
+    }
+  }
+  for m in missing.keys() { out.push("missing: " + m + " (needed by " + missing.get(m).unwrap_or([]).join(", ") + ")"); }
+  if invalid.len() > 0 { out.push("invalid: " + invalid.join(", ")); }
+  let blocked = deps.keys().filter(|p| stage.get(p).is_none() && in_cycle.get(p).is_none());
+  if blocked.len() > 0 { out.push("blocked: " + blocked.join(", ")); }
+  out.push("built " + stage.len().to_str() + " of " + deps.len().to_str());
+  Ok(out.join("\n"))
+}

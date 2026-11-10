@@ -4,6 +4,7 @@
 #
 # Grants are written once, as `kind:name=value`:
 #   dir:input=PATH  kv:counts=PATH  db:shop=PATH  http:api=URL  methods:api=POST,PUT
+#   clock:now=fixed:MS (Python gets NOW=MS)  log:events=PATH
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 LIB=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -40,6 +41,7 @@ build() {
       up=$(echo "$name" | tr '[:lower:]' '[:upper:]')
       case $kind in
         methods) ;;
+        clock) ENVS+=("$up=${val#fixed:}") ;;
         *) ENVS+=("$up=${val%:ro}") ;;
       esac
     fi
@@ -95,9 +97,13 @@ serve() {
   else
     (cd "$T" && exec env PORT="$PORT" ${ENVS[@]+"${ENVS[@]}"} python3 "$PROG") >"$T/raw" 2>"$T/stderr" &
   fi
-  PIDS+=($!)
-  wait_port "$PORT" "$!"
+  SERVER=$!
+  PIDS+=($SERVER)
+  wait_port "$PORT" "$SERVER"
 }
+
+# Stop the server `serve` started (to start it again, with other grants).
+stop() { kill "$SERVER" 2>/dev/null; wait "$SERVER" 2>/dev/null || true; }
 
 wait_port() {
   local i
@@ -123,10 +129,12 @@ api() {
 }
 
 # One HTTP request to the server: `req METHOD PATH [BODY]` prints "STATUS BODY".
+# $HDR, when set, is one more request header ("name: value").
 # The body is checked as JSON when it parses as JSON (keys order and spacing ignored).
 req() {
   local args=(-s --max-time 10 -o "$T/body" -w '%{http_code}' -X "$1" "$BASE$2")
   [ $# -ge 3 ] && args+=(-H 'content-type: application/json' --data-binary "$3")
+  [ -n "${HDR:-}" ] && args+=(-H "$HDR")
   local code
   rm -f "$T/body"
   code=$(curl "${args[@]}") || code=000

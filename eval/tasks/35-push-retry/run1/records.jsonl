@@ -1,0 +1,12 @@
+{"id": "r1", "name": "alpha", "version": 1}
+{"id": "r2", "name": "beta", "version": 1}
+{"id": "r3", "name": "gamma", "version": 1}
+{"id": "r4", "name": "delta", "version": 1}
+{"id": "r5", "name": "eps", "version": 1}
+garbage
+{"id": "r5", "name": "epsilon", "version": 2}
+{"id": "r6", "name": "no version"}
+
+{"id": "r7", "name": "ünïcödé", "version": 1}
+{"id": "r8", "name": "theta", "version": 1}
+{"id": 9, "name": "bad id", "version": 1}

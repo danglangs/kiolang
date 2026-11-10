@@ -1,0 +1,135 @@
+struct Reply { status: Int, body: Json }
+struct Event { id: Str, kind: Str, sub: Str, seq: Int }
+struct Sub { state: Str, seq: Int, history: List<Json> }
+
+fn obj(k: Str, v: Json) -> Json {
+  let mut m: Map<Str, Json> = Map::new();
+  m.insert(k, v);
+  Json::Obj(m)
+}
+
+fn reply(status: Int, k: Str, v: Str) -> Reply { Reply { status: status, body: obj(k, Json::Str(v)) } }
+fn int_at(row: List<SqlValue>, i: Int) -> Int { match row[i] { SqlValue::Int(n) => n, _ => 0 } }
+fn str_at(row: List<SqlValue>, i: Int) -> Str { match row[i] { SqlValue::Text(s) => s, _ => "" } }
+fn t(s: Str) -> SqlValue { SqlValue::Text(s) }
+
+fn header(req: Incoming, name: Str) -> Str {
+  let names = req.header_names();
+  for i in 0..names.len() { if names[i] == name { return req.header_values()[i]; } }
+  ""
+}
+
+fn secret(secrets: Dir) -> Result<Bytes, IoErr> {
+  let key = secrets.read("webhook.key")?;
+  let n = key.len();
+  if n > 0 && key[n - 1] == 10 { Ok(key.slice(0, n - 1)) } else { Ok(key) }
+}
+
+fn parse(body: Bytes) -> Option<Event> {
+  let j = body.to_str().parse_json().ok()?;
+  let kind = j.get("type")?.as_str()?;
+  let known = ["subscription.created", "subscription.activated", "payment.failed", "subscription.canceled"];
+  if !known.contains(kind) { return None; }
+  let seq = match j.get("seq")? { Json::Num(n) => n, _ => return None };
+  if seq < 1 { return None; }
+  Some(Event { id: j.get("id")?.as_str()?, kind: kind, sub: j.get("subscription")?.as_str()?, seq: seq })
+}
+
+// The state `kind` moves `from` to, or "" when it may not.
+fn move_to(kind: Str, from: Str) -> Str {
+  match kind {
+    "subscription.created" => if from == "none" { "created" } else { "" },
+    "subscription.activated" => if from == "created" || from == "past_due" { "active" } else { "" },
+    "payment.failed" => if from == "active" { "past_due" } else { "" },
+    _ => if from == "created" || from == "active" || from == "past_due" { "canceled" } else { "" },
+  }
+}
+
+fn load_sub(db: Db, id: Str) -> Result<Option<Sub>, DbErr> {
+  let rows = db.query("SELECT state, seq, history FROM subs WHERE id = ?", [t(id)])?;
+  if rows.len() == 0 { return Ok(None); }
+  let history = str_at(rows[0], 2).parse_json().ok().and_then(|j| j.as_list()).unwrap_or([]);
+  Ok(Some(Sub { state: str_at(rows[0], 0), seq: int_at(rows[0], 1), history: history }))
+}
+
+fn receive(req: Incoming, db: Db, secrets: Dir, log: Log) -> Result<Reply, Str> {
+  let body = req.body();
+  let mut signed = secret(secrets).map_err(|_| "no key")?;
+  signed.extend(".".to_bytes());
+  signed.extend(body);
+  let want = "sha256=" + signed.sha256().to_hex();
+  if !header(req, "x-signature").ct_eq(want) {
+    log.write("rejected signature").map_err(|_| "log failed")?;
+    return Ok(reply(401, "error", "bad signature"));
+  }
+  let Some(e) = parse(body) else { return Ok(reply(400, "error", "invalid event")); };
+  apply(db, log, e).map_err(|_| "database failed")
+}
+
+fn apply(db: Db, log: Log, e: Event) -> Result<Reply, DbErr> {
+  if db.query("SELECT 1 FROM events WHERE id = ?", [t(e.id)])?.len() > 0 {
+    return Ok(reply(200, "status", "duplicate"));
+  }
+  let mut s = load_sub(db, e.sub)?.unwrap_or(Sub { state: "none", seq: 0, history: [] });
+  let insert = "INSERT INTO events (id, sub, seq, type, status) VALUES (?, ?, ?, ?, ?)";
+  let status = if e.seq <= s.seq { "stale" } else { "queued" };
+  db.exec(insert, [t(e.id), t(e.sub), SqlValue::Int(e.seq), t(e.kind), t(status)])?;
+  if e.seq <= s.seq { return Ok(reply(200, "status", "stale")); }
+  if e.seq > s.seq + 1 { return Ok(reply(202, "status", "queued")); }
+  let mut applied = 0;
+  loop {
+    let rows = db.query("SELECT id, type FROM events WHERE sub = ? AND seq = ? AND status = 'queued'",
+                        [t(e.sub), SqlValue::Int(s.seq + 1)])?;
+    if rows.len() == 0 { break; }
+    let id = str_at(rows[0], 0);
+    let to = move_to(str_at(rows[0], 1), s.state);
+    if to == "" {
+      if log.write("invalid transition " + id).is_err() { return Err(DbErr::Invalid("log failed")); }
+    } else {
+      s.state = to;
+      s.history.push(Json::Str(to));
+    }
+    s.seq += 1;
+    applied += 1;
+    db.exec("UPDATE events SET status = 'applied' WHERE id = ?", [t(id)])?;
+  }
+  db.exec("INSERT OR REPLACE INTO subs (id, state, seq, history) VALUES (?, ?, ?, ?)",
+          [t(e.sub), t(s.state), SqlValue::Int(s.seq), t(Json::Arr(s.history).to_json())])?;
+  let mut m: Map<Str, Json> = Map::new();
+  m.insert("status", Json::Str("applied"));
+  m.insert("applied", Json::Num(applied));
+  Ok(Reply { status: 200, body: Json::Obj(m) })
+}
+
+fn show(db: Db, path: Str) -> Result<Reply, DbErr> {
+  let not_found = reply(404, "error", "not found");
+  let Some(id) = path.strip_prefix("/subscriptions/") else { return Ok(not_found); };
+  if id == "" || id.contains("/") || id.contains("?") { return Ok(not_found); }
+  let Some(s) = load_sub(db, id)? else { return Ok(not_found); };
+  let mut m: Map<Str, Json> = Map::new();
+  m.insert("id", Json::Str(id));
+  m.insert("state", Json::Str(s.state));
+  m.insert("seq", Json::Num(s.seq));
+  m.insert("history", Json::Arr(s.history));
+  Ok(Reply { status: 200, body: Json::Obj(m) })
+}
+
+fn schema(db: Db) -> Result<Int, DbErr> {
+  db.exec("CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, sub TEXT NOT NULL, seq INTEGER NOT NULL, type TEXT NOT NULL, status TEXT NOT NULL)", [])?;
+  db.exec("CREATE TABLE IF NOT EXISTS subs (id TEXT PRIMARY KEY, state TEXT NOT NULL, seq INTEGER NOT NULL, history TEXT NOT NULL)", [])
+}
+
+fn main(req: Incoming, res: Outgoing, db: Db, secrets: Dir, log: Log) -> Result<(), WebErr> {
+  let failed = reply(500, "error", "server error");
+  let method = req.method();
+  let r = if schema(db).is_err() {
+    failed
+  } else if method == "POST" && req.target() == "/webhooks" {
+    receive(req, db, secrets, log).unwrap_or(failed)
+  } else if method == "GET" {
+    show(db, req.target()).unwrap_or(failed)
+  } else {
+    reply(404, "error", "not found")
+  };
+  res.send(r.status, ["content-type"], ["application/json"], r.body.to_json().to_bytes())
+}

@@ -1,0 +1,118 @@
+enum Failed { Io(IoErr), Db(DbErr), Log(LogErr) }
+
+struct Account { cents: Int, open: Bool }
+
+const MAX: Int = 9223372036854775807;
+
+fn two(n: Int) -> Str { if n < 10 { "0" + n.to_str() } else { n.to_str() } }
+
+// Milliseconds since the epoch as `YYYY-MM-DDTHH:MM:SSZ` (days to civil date: H. Hinnant's algorithm).
+fn iso(ms: Int) -> Str {
+  let secs = ms / 1000;
+  let days = secs / 86400;
+  let rem = secs % 86400;
+  let z = days + 719468;
+  let era = z / 146097;
+  let doe = z - era * 146097;
+  let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  let mp = (5 * doy + 2) / 153;
+  let d = doy - (153 * mp + 2) / 5 + 1;
+  let m = if mp < 10 { mp + 3 } else { mp - 9 };
+  let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+  y.to_str() + "-" + two(m) + "-" + two(d) + "T" + two(rem / 3600) + ":" + two(rem % 3600 / 60) + ":" + two(rem % 60) + "Z"
+}
+
+fn int_at(row: List<SqlValue>, i: Int) -> Int { match row[i] { SqlValue::Int(n) => n, _ => 0 } }
+fn str_at(row: List<SqlValue>, i: Int) -> Str { match row[i] { SqlValue::Text(s) => s, _ => "" } }
+fn t(s: Str) -> SqlValue { SqlValue::Text(s) }
+fn n(i: Int) -> SqlValue { SqlValue::Int(i) }
+
+fn account(db: Db, name: Str) -> Result<Option<Account>, DbErr> {
+  let rows = db.query("SELECT cents, open FROM accounts WHERE name = ?", [t(name)])?;
+  if rows.len() == 0 { return Ok(None); }
+  Ok(Some(Account { cents: int_at(rows[0], 0), open: int_at(rows[0], 1) == 1 }))
+}
+
+fn amount(s: Str) -> Option<Int> {
+  if s.starts_with("+") { return None; }
+  s.parse_int()
+}
+
+// None when the operation succeeded, else "duplicate" or the failure's message.
+fn apply(db: Db, w: List<Str>, now: Int) -> Result<Option<Str>, DbErr> {
+  let op = w[0];
+  if op == "open" && w.len() == 3 && amount(w[2]).is_some() {
+    let cents = amount(w[2]).unwrap_or(0);
+    if cents < 0 { return Ok(Some("bad amount")); }
+    if account(db, w[1])?.is_some() { return Ok(Some("account exists")); }
+    db.exec("INSERT INTO accounts (name, cents, open, last) VALUES (?, ?, 1, ?)", [t(w[1]), n(cents), n(now)])?;
+    return Ok(None);
+  }
+  if op == "close" && w.len() == 2 {
+    let Some(a) = account(db, w[1])? else { return Ok(Some("no account " + w[1])); };
+    if !a.open { return Ok(Some("no account " + w[1])); }
+    if a.cents != 0 { return Ok(Some("balance not zero")); }
+    db.exec("UPDATE accounts SET open = 0 WHERE name = ?", [t(w[1])])?;
+    return Ok(None);
+  }
+  if op == "transfer" && w.len() == 5 && amount(w[4]).is_some() {
+    let id = w[1];
+    let src = w[2];
+    let dst = w[3];
+    let cents = amount(w[4]).unwrap_or(0);
+    let old = db.query("SELECT src, dst, cents FROM transfers WHERE id = ?", [t(id)])?;
+    if old.len() > 0 {
+      let same = str_at(old[0], 0) == src && str_at(old[0], 1) == dst && int_at(old[0], 2) == cents;
+      return Ok(Some(if same { "duplicate" } else { "id reused" }));
+    }
+    if cents <= 0 { return Ok(Some("bad amount")); }
+    if src == dst { return Ok(Some("same account")); }
+    let a = account(db, src)?;
+    let b = account(db, dst)?;
+    let Some(a) = a else { return Ok(Some("no account " + src)); };
+    if !a.open { return Ok(Some("no account " + src)); }
+    let Some(b) = b else { return Ok(Some("no account " + dst)); };
+    if !b.open { return Ok(Some("no account " + dst)); }
+    if a.cents < cents { return Ok(Some("insufficient funds")); }
+    if b.cents > MAX - cents { return Ok(Some("overflow")); }
+    db.transaction(
+      ["UPDATE accounts SET cents = cents - ?, last = ? WHERE name = ?",
+       "UPDATE accounts SET cents = cents + ?, last = ? WHERE name = ?",
+       "INSERT INTO transfers (id, src, dst, cents) VALUES (?, ?, ?, ?)"],
+      [[n(cents), n(now), t(src)], [n(cents), n(now), t(dst)], [t(id), t(src), t(dst), n(cents)]])?;
+    return Ok(None);
+  }
+  Ok(Some("malformed"))
+}
+
+fn main(input: Dir, db: Db, log: Log, clock: Clock) -> Result<Str, Failed> {
+  let now = clock.now_ms();
+  let time = iso(now);
+  let lines = input.read("ops.txt").map_err(|e| Failed::Io(e))?.to_str().split("\n");
+  db.exec("CREATE TABLE IF NOT EXISTS accounts (name TEXT PRIMARY KEY, cents INTEGER NOT NULL, open INTEGER NOT NULL, last INTEGER NOT NULL)", [])
+    .map_err(|e| Failed::Db(e))?;
+  db.exec("CREATE TABLE IF NOT EXISTS transfers (id TEXT PRIMARY KEY, src TEXT NOT NULL, dst TEXT NOT NULL, cents INTEGER NOT NULL)", [])
+    .map_err(|e| Failed::Db(e))?;
+  let mut ok = 0;
+  let mut failed = 0;
+  let mut dup = 0;
+  for i in 0..lines.len() {
+    if lines[i].trim() == "" { continue; }
+    match apply(db, lines[i].split(" "), now).map_err(|e| Failed::Db(e))? {
+      None => { ok += 1; }
+      Some(msg) => {
+        if msg == "duplicate" {
+          dup += 1;
+        } else {
+          failed += 1;
+          log.write(time + " line " + (i + 1).to_str() + ": " + msg).map_err(|e| Failed::Log(e))?;
+        }
+      }
+    }
+  }
+  let mut out = ["ok " + ok.to_str() + " failed " + failed.to_str() + " duplicate " + dup.to_str()];
+  let rows = db.query("SELECT name, cents, last FROM accounts WHERE open = 1 ORDER BY name", []).map_err(|e| Failed::Db(e))?;
+  for r in rows { out.push(str_at(r, 0) + " " + int_at(r, 1).to_str() + " last " + iso(int_at(r, 2))); }
+  Ok(out.join("\n"))
+}

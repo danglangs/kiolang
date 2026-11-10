@@ -1,0 +1,103 @@
+struct Booking { s: Int, e: Int, who: Str }
+struct Span { s: Int, e: Int }
+struct Conflict { s: Int, text: Str }
+
+fn digit(b: Bytes, i: Int) -> Option<Int> {
+  let c = b[i];
+  if c >= 48 && c <= 57 { Some(c - 48) } else { None }
+}
+
+fn minutes(t: Str) -> Option<Int> {
+  let b = t.to_bytes();
+  if b.len() != 5 || b[2] != 58 { return None; }
+  let h = digit(b, 0)? * 10 + digit(b, 1)?;
+  let m = digit(b, 3)? * 10 + digit(b, 4)?;
+  if h == 24 && m == 0 { return Some(1440); }
+  if h > 23 || m > 59 { return None; }
+  Some(h * 60 + m)
+}
+
+fn two(n: Int) -> Str { if n < 10 { "0" + n.to_str() } else { n.to_str() } }
+fn fmt(m: Int) -> Str { two(m / 60) + ":" + two(m % 60) }
+fn span(s: Int, e: Int) -> Str { fmt(s) + "-" + fmt(e) }
+
+fn merge(bs: List<Booking>) -> List<Span> {
+  let mut sorted = bs;
+  sorted.sort_by_key(|b| b.s);
+  let mut out: List<Span> = [];
+  for b in sorted {
+    let n = out.len();
+    if n > 0 && b.s <= out[n - 1].e {
+      out[n - 1].e = out[n - 1].e.max(b.e);
+    } else {
+      out.push(Span { s: b.s, e: b.e });
+    }
+  }
+  out
+}
+
+fn free(busy: List<Span>) -> List<Str> {
+  let mut out: List<Str> = [];
+  let mut at = 540;
+  let mut spans = busy;
+  spans.push(Span { s: 1080, e: 1080 });
+  for sp in spans {
+    let end = sp.s.min(1080);
+    if end - at >= 30 { out.push(span(at, end)); }
+    at = at.max(sp.e);
+  }
+  out
+}
+
+fn conflicts(bs: List<Booking>) -> List<Str> {
+  let mut cs: List<Conflict> = [];
+  for i in 0..bs.len() {
+    for j in i + 1..bs.len() {
+      let s = bs[i].s.max(bs[j].s);
+      let e = bs[i].e.min(bs[j].e);
+      if s >= e { continue; }
+      let mut who = [bs[i].who, bs[j].who];
+      who.sort();
+      cs.push(Conflict { s: s, text: "  conflict " + who.join("/") + " " + span(s, e) });
+    }
+  }
+  cs.sort_by(|a, b| a.s < b.s || (a.s == b.s && a.text < b.text));
+  cs.map(|c| c.text)
+}
+
+fn main(input: Dir) -> Result<Str, IoErr> {
+  let lines = input.read("bookings.csv")?.to_str().split("\n");
+  let mut rooms: Map<Str, Map<Str, List<Booking>>> = Map::new();
+  let mut seen: Map<Str, Bool> = Map::new();
+  let mut skipped: List<Str> = [];
+  for n in 1..lines.len() {
+    let line = lines[n];
+    if line.trim() == "" { continue; }
+    let f = line.split(",");
+    let s = if f.len() == 5 { minutes(f[2]).unwrap_or(-1) } else { -1 };
+    let e = if f.len() == 5 { minutes(f[3]).unwrap_or(-1) } else { -1 };
+    if s < 0 || e <= s { skipped.push((n + 1).to_str()); continue; }
+    if seen.get(line).is_some() { continue; }
+    seen.insert(line, true);
+    let mut days = rooms.get(f[0]).unwrap_or(Map::new());
+    let mut bs = days.get(f[1]).unwrap_or([]);
+    bs.push(Booking { s: s, e: e, who: f[4] });
+    days.insert(f[1], bs);
+    rooms.insert(f[0], days);
+  }
+  let mut out: List<Str> = [];
+  for room in rooms.keys() {
+    let days = rooms.get(room).unwrap_or(Map::new());
+    for day in days.keys() {
+      let bs = days.get(day).unwrap_or([]);
+      out.push(room + " " + day);
+      let busy = merge(bs);
+      out.push("  busy " + busy.map(|sp| span(sp.s, sp.e)).join(", "));
+      let fr = free(busy);
+      out.push("  free " + if fr.len() == 0 { "none" } else { fr.join(", ") });
+      for c in conflicts(bs) { out.push(c); }
+    }
+  }
+  out.push("skipped: " + if skipped.len() == 0 { "none" } else { skipped.join(", ") });
+  Ok(out.join("\n"))
+}

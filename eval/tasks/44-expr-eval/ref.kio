@@ -1,0 +1,203 @@
+enum Expr { Lit(Str), Var(Str), Neg(List<Expr>), Bin(Str, List<Expr>), Call(Str, List<Expr>) }
+
+struct Parsed { e: Expr, pos: Int }
+
+const MAX: Int = 9223372036854775807;
+const SYNTAX: Str = "syntax error";
+
+fn min_int() -> Int { 0 - MAX - 1 }
+
+fn is_digit(c: Int) -> Bool { c >= 48 && c <= 57 }
+fn is_alpha(c: Int) -> Bool { (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95 }
+
+fn is_op(c: Int) -> Bool {
+  let ops = "+-*/%^(),=".to_bytes();
+  for i in 0..ops.len() { if ops[i] == c { return true; } }
+  false
+}
+
+fn tokenize(line: Str) -> Result<List<Str>, Str> {
+  let b = line.to_bytes();
+  let mut toks: List<Str> = [];
+  let mut i = 0;
+  while i < b.len() {
+    let c = b[i];
+    if c == 32 {
+      i += 1;
+      continue;
+    }
+    let start = i;
+    if is_digit(c) {
+      while i < b.len() && is_digit(b[i]) { i += 1; }
+    } else if is_alpha(c) {
+      while i < b.len() && (is_alpha(b[i]) || is_digit(b[i])) { i += 1; }
+    } else if is_op(c) {
+      i += 1;
+    } else {
+      return Err(SYNTAX);
+    }
+    toks.push(b.slice(start, i).to_str());
+  }
+  Ok(toks)
+}
+
+fn is_name(t: Str) -> Bool { t.len() > 0 && is_alpha(t.to_bytes()[0]) }
+
+fn at(toks: List<Str>, pos: Int) -> Str { if pos < toks.len() { toks[pos] } else { "" } }
+
+fn expect(toks: List<Str>, pos: Int, want: Str) -> Result<Int, Str> {
+  if at(toks, pos) == want { Ok(pos + 1) } else { Err(SYNTAX) }
+}
+
+fn expr(toks: List<Str>, pos: Int) -> Result<Parsed, Str> {
+  let mut p = term(toks, pos)?;
+  while at(toks, p.pos) == "+" || at(toks, p.pos) == "-" {
+    let op = toks[p.pos];
+    let r = term(toks, p.pos + 1)?;
+    p = Parsed { e: Expr::Bin(op, [p.e, r.e]), pos: r.pos };
+  }
+  Ok(p)
+}
+
+fn term(toks: List<Str>, pos: Int) -> Result<Parsed, Str> {
+  let mut p = factor(toks, pos)?;
+  while at(toks, p.pos) == "*" || at(toks, p.pos) == "/" || at(toks, p.pos) == "%" {
+    let op = toks[p.pos];
+    let r = factor(toks, p.pos + 1)?;
+    p = Parsed { e: Expr::Bin(op, [p.e, r.e]), pos: r.pos };
+  }
+  Ok(p)
+}
+
+fn factor(toks: List<Str>, pos: Int) -> Result<Parsed, Str> {
+  if at(toks, pos) == "-" {
+    let p = factor(toks, pos + 1)?;
+    return Ok(Parsed { e: Expr::Neg([p.e]), pos: p.pos });
+  }
+  let a = atom(toks, pos)?;
+  if at(toks, a.pos) != "^" { return Ok(a); }
+  let b = factor(toks, a.pos + 1)?;
+  Ok(Parsed { e: Expr::Bin("^", [a.e, b.e]), pos: b.pos })
+}
+
+fn atom(toks: List<Str>, pos: Int) -> Result<Parsed, Str> {
+  let t = at(toks, pos);
+  if t == "" { return Err(SYNTAX); }
+  if is_digit(t.to_bytes()[0]) { return Ok(Parsed { e: Expr::Lit(t), pos: pos + 1 }); }
+  if t == "(" {
+    let p = expr(toks, pos + 1)?;
+    return Ok(Parsed { e: p.e, pos: expect(toks, p.pos, ")")? });
+  }
+  if !is_name(t) { return Err(SYNTAX); }
+  if at(toks, pos + 1) != "(" { return Ok(Parsed { e: Expr::Var(t), pos: pos + 1 }); }
+  let mut args: List<Expr> = [];
+  let mut p = expr(toks, pos + 2)?;
+  args.push(p.e);
+  while at(toks, p.pos) == "," {
+    p = expr(toks, p.pos + 1)?;
+    args.push(p.e);
+  }
+  Ok(Parsed { e: Expr::Call(t, args), pos: expect(toks, p.pos, ")")? })
+}
+
+fn add(a: Int, b: Int) -> Result<Int, Str> {
+  if (b > 0 && a > MAX - b) || (b < 0 && a < min_int() - b) { Err("overflow") } else { Ok(a + b) }
+}
+
+fn sub(a: Int, b: Int) -> Result<Int, Str> {
+  if (b < 0 && a > MAX + b) || (b > 0 && a < min_int() + b) { Err("overflow") } else { Ok(a - b) }
+}
+
+fn mul(a: Int, b: Int) -> Result<Int, Str> {
+  if a == 0 || b == 0 { return Ok(0); }
+  let over = if a > 0 && b > 0 { a > MAX / b }
+    else if a > 0 { b < min_int() / a }
+    else if b > 0 { a < min_int() / b }
+    else { a < MAX / b };
+  if over { Err("overflow") } else { Ok(a * b) }
+}
+
+fn pow(a: Int, b: Int) -> Result<Int, Str> {
+  if b < 0 { return Err("negative exponent"); }
+  if b == 0 || a == 1 { return Ok(1); }
+  if a == 0 { return Ok(0); }
+  if a == -1 { return Ok(if b % 2 == 0 { 1 } else { -1 }); }
+  let mut r = 1;
+  for _ in 0..b { r = mul(r, a)?; }
+  Ok(r)
+}
+
+fn arity(name: Str) -> Int { if name == "abs" { 1 } else if name == "min" || name == "max" { 2 } else { 0 } }
+
+fn eval(e: Expr, env: Map<Str, Int>) -> Result<Int, Str> {
+  match e {
+    Expr::Lit(t) => t.parse_int().ok_or("overflow"),
+    Expr::Var(n) => env.get(n).ok_or("unknown variable " + n),
+    Expr::Neg(x) => sub(0, eval(x[0], env)?),
+    Expr::Call(f, args) => {
+      if arity(f) == 0 { return Err("unknown function " + f); }
+      if args.len() != arity(f) { return Err("wrong number of arguments to " + f); }
+      let a = eval(args[0], env)?;
+      if f == "abs" { return if a < 0 { sub(0, a) } else { Ok(a) }; }
+      let b = eval(args[1], env)?;
+      Ok(if f == "min" { a.min(b) } else { a.max(b) })
+    }
+    Expr::Bin(op, xs) => {
+      let a = eval(xs[0], env)?;
+      let b = eval(xs[1], env)?;
+      match op {
+        "+" => add(a, b),
+        "-" => sub(a, b),
+        "*" => mul(a, b),
+        "^" => pow(a, b),
+        _ => {
+          if b == 0 { return Err("division by zero"); }
+          if b == -1 { return if op == "/" { sub(0, a) } else { Ok(0) }; }
+          Ok(if op == "/" { a / b } else { a % b })
+        }
+      }
+    }
+  }
+}
+
+struct Stmt { name: Str, e: Expr }
+
+fn parse_line(line: Str) -> Result<Stmt, Str> {
+  let toks = tokenize(line)?;
+  let mut name = "";
+  let mut start = 0;
+  if at(toks, 0) == "let" {
+    if !is_name(at(toks, 1)) || at(toks, 2) != "=" { return Err(SYNTAX); }
+    name = toks[1];
+    start = 3;
+  }
+  let p = expr(toks, start)?;
+  if p.pos != toks.len() { return Err(SYNTAX); }
+  Ok(Stmt { name: name, e: p.e })
+}
+
+fn main(input: Dir) -> Result<Str, IoErr> {
+  let lines = input.read("program.txt")?.to_str().split("\n");
+  let mut env: Map<Str, Int> = Map::new();
+  let mut out: List<Str> = [];
+  for i in 0..lines.len() {
+    if lines[i].trim() == "" { continue; }
+    let label = (i + 1).to_str() + ": ";
+    let s = match parse_line(lines[i]) {
+      Ok(s) => s,
+      Err(msg) => { out.push(label + "error: " + msg); continue; }
+    };
+    match eval(s.e, env) {
+      Ok(v) => {
+        if s.name == "" {
+          out.push(label + v.to_str());
+        } else {
+          env.insert(s.name, v);
+          out.push(label + s.name + " = " + v.to_str());
+        }
+      }
+      Err(msg) => out.push(label + "error: " + msg),
+    }
+  }
+  Ok(out.join("\n"))
+}

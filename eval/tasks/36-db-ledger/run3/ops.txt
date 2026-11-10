@@ -1,0 +1,5 @@
+transfer t1 alice bob 300
+open erin 9223372036854775807
+transfer t12 erin alice 9223372036854775807
+transfer t13 alice erin 1
+close

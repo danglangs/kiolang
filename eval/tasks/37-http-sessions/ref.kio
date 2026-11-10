@@ -1,0 +1,134 @@
+const TTL: Int = 1800000;
+const LOCK: Int = 900000;
+
+struct User { hash: Str, fails: Int, locked_until: Int, logins: Int }
+struct Creds { name: Str, password: Str }
+struct Reply { status: Int, body: Option<Json> }
+
+fn obj(k: Str, v: Json) -> Json {
+  let mut m: Map<Str, Json> = Map::new();
+  m.insert(k, v);
+  Json::Obj(m)
+}
+
+fn error(status: Int, msg: Str) -> Reply { Reply { status: status, body: Some(obj("error", Json::Str(msg))) } }
+fn int_of(j: Json, k: Str) -> Int { j.get(k).and_then(|v| v.as_int()).unwrap_or(0) }
+
+fn creds(body: Bytes) -> Option<Creds> {
+  let j = body.to_str().parse_json().ok()?;
+  Some(Creds { name: j.get("name")?.as_str()?, password: j.get("password")?.as_str()? })
+}
+
+fn valid_name(name: Str) -> Bool {
+  let b = name.to_bytes();
+  if b.len() < 3 || b.len() > 20 { return false; }
+  for i in 0..b.len() {
+    let c = b[i];
+    if !((c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 95) { return false; }
+  }
+  true
+}
+
+fn digest(c: Creds) -> Str { (c.name + ":" + c.password).sha256().to_hex() }
+
+fn get_json(store: Kv, key: Str) -> Result<Option<Json>, KvErr> {
+  let Some(b) = store.get(key)? else { return Ok(None); };
+  Ok(b.to_str().parse_json().ok())
+}
+
+fn get_user(store: Kv, name: Str) -> Result<Option<User>, KvErr> {
+  let Some(j) = get_json(store, "u:" + name)? else { return Ok(None); };
+  Ok(Some(User { hash: j.get("hash").and_then(|v| v.as_str()).unwrap_or(""), fails: int_of(j, "fails"),
+                 locked_until: int_of(j, "locked_until"), logins: int_of(j, "logins") }))
+}
+
+fn put_user(store: Kv, name: Str, u: User) -> Result<(), KvErr> {
+  let mut m: Map<Str, Json> = Map::new();
+  m.insert("hash", Json::Str(u.hash));
+  m.insert("fails", Json::Num(u.fails));
+  m.insert("locked_until", Json::Num(u.locked_until));
+  m.insert("logins", Json::Num(u.logins));
+  store.set("u:" + name, Json::Obj(m).to_json().to_bytes())
+}
+
+fn put_session(store: Kv, token: Str, name: Str, expires: Int) -> Result<(), KvErr> {
+  let mut m: Map<Str, Json> = Map::new();
+  m.insert("name", Json::Str(name));
+  m.insert("expires", Json::Num(expires));
+  store.set("s:" + token, Json::Obj(m).to_json().to_bytes())
+}
+
+fn bearer(req: Incoming) -> Option<Str> {
+  let names = req.header_names();
+  let values = req.header_values();
+  for i in 0..names.len() {
+    if names[i] == "authorization" {
+      let t = values[i].strip_prefix("Bearer ")?;
+      if t == "" { return None; }
+      return Some(t);
+    }
+  }
+  None
+}
+
+fn create(store: Kv, body: Bytes) -> Result<Reply, KvErr> {
+  let Some(c) = creds(body) else { return Ok(error(400, "invalid")); };
+  if !valid_name(c.name) || c.password.len() < 8 { return Ok(error(400, "invalid")); }
+  if store.get("u:" + c.name)?.is_some() { return Ok(error(409, "name taken")); }
+  put_user(store, c.name, User { hash: digest(c), fails: 0, locked_until: 0, logins: 0 })?;
+  Ok(Reply { status: 201, body: Some(obj("name", Json::Str(c.name))) })
+}
+
+fn login(store: Kv, rng: Rng, now: Int, body: Bytes) -> Result<Reply, KvErr> {
+  let Some(c) = creds(body) else { return Ok(error(401, "bad credentials")); };
+  let Some(u) = get_user(store, c.name)? else { return Ok(error(401, "bad credentials")); };
+  if now < u.locked_until { return Ok(error(429, "locked")); }
+  if !u.hash.ct_eq(digest(c)) {
+    let fails = u.fails + 1;
+    let next = if fails >= 3 { User { fails: 0, locked_until: now + LOCK, ..u } } else { User { fails: fails, ..u } };
+    put_user(store, c.name, next)?;
+    return Ok(error(401, "bad credentials"));
+  }
+  put_user(store, c.name, User { fails: 0, logins: u.logins + 1, ..u })?;
+  let token = rng.bytes(16).to_hex();
+  put_session(store, token, c.name, now + TTL)?;
+  let mut m: Map<Str, Json> = Map::new();
+  m.insert("token", Json::Str(token));
+  m.insert("expires_in", Json::Num(1800));
+  Ok(Reply { status: 200, body: Some(Json::Obj(m)) })
+}
+
+fn session(store: Kv, req: Incoming, now: Int, logout: Bool) -> Result<Reply, KvErr> {
+  let Some(token) = bearer(req) else { return Ok(error(401, "unauthorized")); };
+  let Some(s) = get_json(store, "s:" + token)? else { return Ok(error(401, "unauthorized")); };
+  if now >= int_of(s, "expires") { return Ok(error(401, "unauthorized")); }
+  if logout {
+    store.delete("s:" + token)?;
+    return Ok(Reply { status: 204, body: None });
+  }
+  let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("");
+  put_session(store, token, name, now + TTL)?;
+  let logins = match get_user(store, name)? { Some(u) => u.logins, None => 0 };
+  let mut m: Map<Str, Json> = Map::new();
+  m.insert("name", Json::Str(name));
+  m.insert("logins", Json::Num(logins));
+  Ok(Reply { status: 200, body: Some(Json::Obj(m)) })
+}
+
+fn route(req: Incoming, store: Kv, clock: Clock, rng: Rng) -> Result<Reply, KvErr> {
+  let m = req.method();
+  let p = req.target();
+  if m == "POST" && p == "/users" { return create(store, req.body()); }
+  if m == "POST" && p == "/login" { return login(store, rng, clock.now_ms(), req.body()); }
+  if m == "GET" && p == "/me" { return session(store, req, clock.now_ms(), false); }
+  if m == "POST" && p == "/logout" { return session(store, req, clock.now_ms(), true); }
+  Ok(error(404, "not found"))
+}
+
+fn main(req: Incoming, res: Outgoing, store: Kv, clock: Clock, rng: Rng) -> Result<(), WebErr> {
+  let r = route(req, store, clock, rng).unwrap_or(error(500, "store failed"));
+  match r.body {
+    Some(b) => res.send(r.status, ["content-type"], ["application/json"], b.to_json().to_bytes()),
+    None => res.send(r.status, [], [], "".to_bytes()),
+  }
+}

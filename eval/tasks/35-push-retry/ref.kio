@@ -1,0 +1,88 @@
+enum Failed { Io(IoErr), Kv(KvErr) }
+
+struct Record { id: Str, version: Int, body: Str }
+
+fn kv<T>(r: Result<T, KvErr>) -> Result<T, Failed> { r.map_err(|e| Failed::Kv(e)) }
+
+fn parse(line: Str) -> Option<Record> {
+  let j = line.parse_json().ok()?;
+  let id = j.get("id")?.as_str()?;
+  let version = match j.get("version")? { Json::Num(n) => n, _ => return None };
+  if j.as_map().is_none() { return None; }
+  Some(Record { id: id, version: version, body: j.to_json() })
+}
+
+fn put(r: Record) -> HttpRequest {
+  HttpRequest { method: "PUT", path: "/records/" + r.id, headers: ["content-type: application/json"],
+                body: r.body.to_bytes(), timeout_ms: 0 }
+}
+
+// Pushes `todo`, retrying 5xx and errors, at most 3 rounds: each id's outcome.
+fn push(api: Http, todo: List<Record>) -> Map<Str, Str> {
+  let mut result: Map<Str, Str> = Map::new();
+  let mut pending = todo;
+  let mut round = 0;
+  while pending.len() > 0 && round < 3 {
+    round += 1;
+    let answers = api.send_all(pending.map(put));
+    let mut again: List<Record> = [];
+    for i in 0..pending.len() {
+      let r = pending[i];
+      match answers[i] {
+        Ok(resp) => {
+          if resp.status >= 200 && resp.status < 300 {
+            result.insert(r.id, "synced");
+          } else if resp.status >= 400 && resp.status < 500 {
+            result.insert(r.id, "rejected " + resp.status.to_str());
+          } else {
+            again.push(r);
+          }
+        }
+        Err(_) => again.push(r),
+      }
+    }
+    pending = again;
+  }
+  for r in pending { result.insert(r.id, "failed"); }
+  result
+}
+
+fn main(input: Dir, state: Kv, api: Http) -> Result<Str, Failed> {
+  let lines = input.read("records.jsonl").map_err(|e| Failed::Io(e))?.to_str().split("\n");
+  let mut out: List<Str> = [];
+  let mut records: Map<Str, Record> = Map::new();
+  for i in 0..lines.len() {
+    if lines[i].trim() == "" { continue; }
+    match parse(lines[i]) {
+      Some(r) => records.insert(r.id, r),
+      None => out.push("line " + (i + 1).to_str() + " invalid"),
+    }
+  }
+  let mut result: Map<Str, Str> = Map::new();
+  let mut todo: List<Record> = [];
+  for id in records.keys() {
+    let r = records.get(id).unwrap_or(Record { id: id, version: 0, body: "" });
+    let last = kv(state.get("v:" + id))?.and_then(|b| b.to_str().parse_int());
+    if last.is_some() && r.version <= last.unwrap_or(0) {
+      result.insert(id, "unchanged");
+    } else {
+      todo.push(r);
+    }
+  }
+  let pushed = push(api, todo);
+  for r in todo {
+    let what = pushed.get(r.id).unwrap_or("failed");
+    if what == "synced" { kv(state.set("v:" + r.id, r.version.to_str().to_bytes()))?; }
+    result.insert(r.id, what);
+  }
+  let mut counts: Map<Str, Int> = Map::new();
+  for id in result.keys() {
+    let what = result.get(id).unwrap_or("");
+    out.push(id + " " + what);
+    let word = what.split(" ")[0];
+    counts.insert(word, counts.get(word).unwrap_or(0) + 1);
+  }
+  let n = |w: Str| counts.get(w).unwrap_or(0).to_str();
+  out.push("synced " + n("synced") + " unchanged " + n("unchanged") + " rejected " + n("rejected") + " failed " + n("failed"));
+  Ok(out.join("\n"))
+}

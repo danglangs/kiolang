@@ -1,0 +1,22 @@
+2026-11-10T09:00:00Z line 3: account exists
+2026-11-10T09:00:00Z line 5: no account carol
+2026-11-10T09:00:00Z line 6: insufficient funds
+2026-11-10T09:00:00Z line 8: id reused
+2026-11-10T09:00:00Z line 11: same account
+2026-11-10T09:00:00Z line 12: bad amount
+2026-11-10T09:00:00Z line 13: balance not zero
+2026-11-10T09:00:00Z line 14: malformed
+2026-11-10T09:00:00Z line 15: malformed
+2026-11-10T09:00:00Z line 16: bad amount
+2026-12-31T23:59:59Z line 1: account exists
+2026-12-31T23:59:59Z line 4: id reused
+2026-12-31T23:59:59Z line 5: balance not zero
+2026-12-31T23:59:59Z line 7: no account Zoë
+2026-12-31T23:59:59Z line 8: account exists
+2026-12-31T23:59:59Z line 9: insufficient funds
+2026-12-31T23:59:59Z line 10: insufficient funds
+2026-12-31T23:59:59Z line 11: balance not zero
+2026-12-31T23:59:59Z line 12: no account erin
+2028-02-29T12:00:00Z line 3: overflow
+2028-02-29T12:00:00Z line 4: overflow
+2028-02-29T12:00:00Z line 5: malformed

@@ -1,0 +1,12 @@
+open carol 5
+transfer t2 bob carol 50
+transfer t4 alice carol 700
+transfer t4 alice carol 70
+close carol
+close Zoë
+transfer t8 alice Zoë 1
+open Zoë 1
+transfer t9 carol bob 755
+transfer t10 bob alice 1555
+close carol
+transfer t11 alice erin 1

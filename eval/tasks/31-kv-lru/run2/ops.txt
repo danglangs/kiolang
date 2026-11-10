@@ -1,0 +1,10 @@
+capacity 2
+get e
+get a
+put g 7
+get f
+put e 55
+get e
+del e
+get e
+put h 8

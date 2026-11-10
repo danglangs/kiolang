@@ -1,0 +1,103 @@
+struct Event { t: Int, page: Str }
+struct Count { page: Str, n: Int }
+
+fn num(b: Bytes, from: Int, to: Int) -> Option<Int> {
+  let mut n = 0;
+  for i in from..to {
+    if b[i] < 48 || b[i] > 57 { return None; }
+    n = n * 10 + b[i] - 48;
+  }
+  Some(n)
+}
+
+fn leap(y: Int) -> Bool { (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 }
+
+fn month_days(y: Int, m: Int) -> Int {
+  if m == 2 { return if leap(y) { 29 } else { 28 }; }
+  if m == 4 || m == 6 || m == 9 || m == 11 { 30 } else { 31 }
+}
+
+// Days since 1970-01-01 (H. Hinnant's days_from_civil).
+fn days(y0: Int, m: Int, d: Int) -> Int {
+  let y = if m <= 2 { y0 - 1 } else { y0 };
+  let era = y / 400;
+  let yoe = y - era * 400;
+  let mp = if m > 2 { m - 3 } else { m + 9 };
+  let doy = (153 * mp + 2) / 5 + d - 1;
+  let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  era * 146097 + doe - 719468
+}
+
+// `YYYY-MM-DDTHH:MM:SSZ` as seconds since the epoch.
+fn parse_time(s: Str) -> Option<Int> {
+  let b = s.to_bytes();
+  if b.len() != 20 || b[4] != 45 || b[7] != 45 || b[10] != 84 || b[13] != 58 || b[16] != 58 || b[19] != 90 { return None; }
+  let y = num(b, 0, 4)?;
+  let mo = num(b, 5, 7)?;
+  let d = num(b, 8, 10)?;
+  let h = num(b, 11, 13)?;
+  let mi = num(b, 14, 16)?;
+  let se = num(b, 17, 19)?;
+  if mo < 1 || mo > 12 || d < 1 || d > month_days(y, mo) || h > 23 || mi > 59 || se > 59 { return None; }
+  Some(days(y, mo, d) * 86400 + h * 3600 + mi * 60 + se)
+}
+
+fn two(n: Int) -> Str { if n < 10 { "0" + n.to_str() } else { n.to_str() } }
+
+fn main(input: Dir) -> Result<Str, IoErr> {
+  let lines = input.read("events.log")?.to_str().split("\n");
+  let mut users: Map<Str, List<Event>> = Map::new();
+  let mut seen: HashMap<Str, Bool> = HashMap::new();
+  let mut malformed = 0;
+  let mut dups = 0;
+  for line in lines {
+    if line.trim() == "" { continue; }
+    let f = line.split(" ");
+    let t: Option<Int> = if f.len() == 3 { parse_time(f[0]) } else { None };
+    let Some(t) = t else { malformed += 1; continue; };
+    if seen.get(line).is_some() { dups += 1; continue; }
+    seen.insert(line, true);
+    let mut evs = users.get(f[1]).unwrap_or([]);
+    evs.push(Event { t: t, page: f[2] });
+    users.insert(f[1], evs);
+  }
+
+  let mut out: List<Str> = [];
+  let mut durations: List<Int> = [];
+  let mut pages: Map<Str, Int> = Map::new();
+  for user in users.keys() {
+    let mut evs = users.get(user).unwrap_or([]);
+    evs.sort_by_key(|e| e.t);
+    let mut sessions = 0;
+    let mut first = 0;
+    let mut last = 0;
+    let mut longest = 0;
+    let mut mine: Map<Str, Bool> = Map::new();
+    for i in 0..evs.len() {
+      let e = evs[i];
+      if i == 0 || e.t - last > 1800 {
+        if i > 0 { durations.push(last - first); }
+        sessions += 1;
+        first = e.t;
+      }
+      last = e.t;
+      longest = longest.max(last - first);
+      mine.insert(e.page, true);
+      pages.insert(e.page, pages.get(e.page).unwrap_or(0) + 1);
+    }
+    durations.push(last - first);
+    out.push(user + " sessions " + sessions.to_str() + " events " + evs.len().to_str() + " longest "
+             + two(longest / 3600) + ":" + two(longest / 60 % 60) + ":" + two(longest % 60)
+             + " pages " + mine.len().to_str());
+  }
+  if durations.len() > 0 {
+    durations.sort();
+    out.push("median " + durations[(durations.len() - 1) / 2].to_str());
+    let mut counts = pages.keys().map(|p| Count { page: p, n: pages.get(p).unwrap_or(0) });
+    counts.sort_by(|a, b| a.n > b.n);
+    let top = counts.slice(0, counts.len().min(3));
+    out.push("top: " + top.map(|c| c.page + " (" + c.n.to_str() + ")").join(", "));
+  }
+  out.push("malformed " + malformed.to_str() + " duplicates " + dups.to_str());
+  Ok(out.join("\n"))
+}

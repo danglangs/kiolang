@@ -1,0 +1,84 @@
+enum Failed { Db(DbErr) }
+
+struct Change { op: Str, sku: Str, name: Str, qty: Int, version: Int }
+struct Counts { applied: Int, stale: Int, invalid: Int }
+
+fn int_field(j: Json, k: Str) -> Option<Int> { match j.get(k)? { Json::Num(n) => Some(n), _ => None } }
+
+fn change(j: Json) -> Option<Change> {
+  let op = j.get("op")?.as_str()?;
+  let sku = j.get("sku")?.as_str()?;
+  let version = int_field(j, "version")?;
+  if op == "delete" { return Some(Change { op: op, sku: sku, name: "", qty: 0, version: version }); }
+  if op != "upsert" { return None; }
+  Some(Change { op: op, sku: sku, name: j.get("name")?.as_str()?, qty: int_field(j, "qty")?, version: version })
+}
+
+fn int_at(row: List<SqlValue>, i: Int) -> Int { match row[i] { SqlValue::Int(n) => n, _ => 0 } }
+fn str_at(row: List<SqlValue>, i: Int) -> Str { match row[i] { SqlValue::Text(s) => s, _ => "" } }
+
+// Applies one page and saves `cursor` in one transaction.
+fn apply(db: Db, changes: List<Json>, cursor: Str) -> Result<Counts, DbErr> {
+  let mut c = Counts { applied: 0, stale: 0, invalid: 0 };
+  // Versions as of this page, including the page's own earlier changes.
+  let mut seen: Map<Str, Int> = Map::new();
+  let mut sql: List<Str> = [];
+  let mut params: List<List<SqlValue>> = [];
+  for j in changes {
+    let Some(ch) = change(j) else { c.invalid += 1; continue; };
+    let old: Option<Int> = match seen.get(ch.sku) {
+      Some(v) => Some(v),
+      None => {
+        let rows = db.query("SELECT version FROM items WHERE sku = ?", [SqlValue::Text(ch.sku)])?;
+        if rows.len() == 0 { None } else { Some(int_at(rows[0], 0)) }
+      }
+    };
+    if old.is_some() && ch.version <= old.unwrap_or(0) {
+      c.stale += 1;
+      continue;
+    }
+    c.applied += 1;
+    seen.insert(ch.sku, ch.version);
+    sql.push("INSERT OR REPLACE INTO items (sku, name, qty, version, live) VALUES (?, ?, ?, ?, ?)");
+    params.push([SqlValue::Text(ch.sku), SqlValue::Text(ch.name), SqlValue::Int(ch.qty), SqlValue::Int(ch.version),
+                 SqlValue::Int(if ch.op == "upsert" { 1 } else { 0 })]);
+  }
+  sql.push("INSERT OR REPLACE INTO sync (id, cursor) VALUES (1, ?)");
+  params.push([SqlValue::Text(cursor)]);
+  db.transaction(sql, params)?;
+  Ok(c)
+}
+
+fn main(api: Http, db: Db) -> Result<Str, Failed> {
+  let d = |e: DbErr| Failed::Db(e);
+  db.exec("CREATE TABLE IF NOT EXISTS items (sku TEXT PRIMARY KEY, name TEXT NOT NULL, qty INTEGER NOT NULL, version INTEGER NOT NULL, live INTEGER NOT NULL)", []).map_err(d)?;
+  db.exec("CREATE TABLE IF NOT EXISTS sync (id INTEGER PRIMARY KEY CHECK (id = 1), cursor TEXT NOT NULL)", []).map_err(d)?;
+  let rows = db.query("SELECT cursor FROM sync", []).map_err(d)?;
+  let mut cursor = if rows.len() == 0 { "0" } else { str_at(rows[0], 0) };
+  let mut pages = 0;
+  let mut total = Counts { applied: 0, stale: 0, invalid: 0 };
+  let mut stop = "";
+  loop {
+    let r = api.send("GET", "/changes?cursor=" + cursor, [], "".to_bytes());
+    let Ok(resp) = r else { stop = "no response"; break; };
+    if resp.status != 200 {
+      stop = "status " + resp.status.to_str();
+      break;
+    }
+    let page = resp.body.to_str().parse_json().unwrap_or(Json::Null);
+    let Some(changes) = page.get("changes").and_then(|v| v.as_list()) else { stop = "invalid page"; break; };
+    let next = page.get("next").and_then(|v| v.as_str());
+    let c = apply(db, changes, next.unwrap_or(cursor)).map_err(d)?;
+    pages += 1;
+    total = Counts { applied: total.applied + c.applied, stale: total.stale + c.stale, invalid: total.invalid + c.invalid };
+    let Some(n) = next else { break; };
+    cursor = n;
+  }
+  let mut out = ["pages " + pages.to_str() + " applied " + total.applied.to_str() + " stale " + total.stale.to_str()
+                 + " invalid " + total.invalid.to_str(),
+                 if stop == "" { "complete" } else { "stopped at " + cursor + " (" + stop + ")" }];
+  for r in db.query("SELECT sku, qty, name FROM items WHERE live = 1 ORDER BY sku", []).map_err(d)? {
+    out.push(str_at(r, 0) + " " + int_at(r, 1).to_str() + " " + str_at(r, 2));
+  }
+  Ok(out.join("\n"))
+}

@@ -1,0 +1,27 @@
+{
+  "type": "object",
+  "required": ["id", "name", "items"],
+  "additional": false,
+  "properties": {
+    "id": {"type": "integer", "minimum": 1},
+    "name": {"type": "string", "min_length": 2, "max_length": 8},
+    "tier": {"type": "string", "enum": ["free", "pro"]},
+    "score": {"type": "number", "minimum": -10, "maximum": 100},
+    "active": {"type": "boolean"},
+    "note": {"type": "null"},
+    "meta": {"type": "object"},
+    "tags": {"type": "array", "items": {"type": "string", "max_length": 3}},
+    "items": {
+      "type": "array",
+      "min_items": 1,
+      "items": {
+        "type": "object",
+        "required": ["sku", "qty"],
+        "properties": {
+          "sku": {"type": "string", "min_length": 1},
+          "qty": {"type": "integer", "minimum": 1, "maximum": 99}
+        }
+      }
+    }
+  }
+}

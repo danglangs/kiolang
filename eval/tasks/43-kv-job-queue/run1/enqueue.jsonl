@@ -1,0 +1,10 @@
+{"id": "j1", "priority": 0}
+{"id": "j2", "priority": 5}
+{"id": "j3", "priority": 0}
+{"id": "j1", "priority": 7}
+{"id": "j4", "priority": 1}
+not json
+{"id": "j5", "priority": 0}
+
+{"id": "j6", "priority": 0}
+{"priority": 3}

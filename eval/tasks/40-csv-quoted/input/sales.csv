@@ -1,0 +1,20 @@
+region,product,qty,price,note
+north,widget,3,2.50,plain
+north,"gadget, large",1,10,"says ""hi"""
+south,widget,2,2.5,"two
+lines"
+"south","Ünïcode ✓",1,0.99,
+east,widget,x,1.00,bad qty
+east,widget,1,1.001,bad price
+east,widget,1,1.00
+east,"broken"quote,1,1.00,x
+west,thing,10,0.10,"comma, and
+CRLF inside"
+
+north,widget,-2,2.50,return
+west,"",1,5.00,empty product
+east,gizmo,4,.50,no leading digit
+east,gizmo,4,7.,trailing dot
+south,"gadget, large",2,10.00,"""quoted"""
+north,unterminated,1,1.00,"oops
+north,never,1,1.00,seen
