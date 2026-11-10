@@ -49,7 +49,7 @@ fn main(input: Dir, out: Dir) -> Result<(), IoErr> {
 | Functions | free functions, recursion, generic functions `fn f<T>(..)`, function values of type `fn(T, ..) -> R`, closures |
 | Capabilities | `Dir`, `Http`, `Kv`, `Incoming`, `Outgoing`, `WsMessage`, `WsSend`, `Rng`, `Clock`, `Log`, `Db`, generated from `caps.wit` |
 
-Everything else is rejected with a message that names the kio alternative, for example `&str` (use `Str`), `Vec` (use `List`), `format!` (use `+` and `to_str()`), `if let .. && ..` (nest an `if`), `impl`, traits, bounds other than `Eq` and `Ord` (`T: Clone`), `use`, nested modules, tuples (`for (k, v) in m`: loop over `m.keys()` and `get`), globals, `unsafe`.
+Everything else is rejected with a message that names the kio alternative, for example `&str` (use `Str`), `Vec` (use `List`), `format!` (use `+` and `to_str()`), `if let .. && ..` (nest an `if`), `impl`, traits, bounds other than `Eq` and `Ord` (`T: Clone`), `use`, nested modules, tuples (`let (a, b) = ..`: a struct or one `let` per value; `for (k, v) in m`: loop over `m.keys()` and `get`), globals, `unsafe`.
 
 ## Semantics
 

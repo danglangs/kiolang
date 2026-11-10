@@ -1124,6 +1124,23 @@ impl Parser {
                 }
             }
             Some(Kind::Sym("..")) => return Err(self.dotdot()),
+            // `let (a, b) = ..`: Rust's tuple pattern, reported over the parentheses.
+            Some(Kind::Sym("(")) => {
+                let mut depth = 0;
+                while let Some(k) = self.peek() {
+                    depth += match k {
+                        Kind::Sym("(") => 1,
+                        Kind::Sym(")") => -1,
+                        _ => 0,
+                    };
+                    self.pos += 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                let hint = "return a struct and read its fields, or write one `let` per value";
+                return Err(err(self.since(start), "kio has no tuples", Some(hint)));
+            }
             _ => return Err(self.unexpected("a pattern")),
         };
         Ok(Pat {

@@ -959,6 +959,26 @@ fn for_tuple_at_the_end_of_input() {
     );
 }
 
+/// L20: Rust's tuple pattern, in `let`, nested, in a match arm, and cut off at the end.
+#[test]
+fn l20_tuple_pattern_teaches() {
+    let hint = Some("return a struct and read its fields, or write one `let` per value");
+    rejected_with("fn f() { let (a, b) = p; }", "(a, b)", "kio has no tuples", hint);
+    rejected_with(
+        "fn f() { let ((a, b), c) = p; }",
+        "((a, b), c)",
+        "kio has no tuples",
+        hint,
+    );
+    rejected_with(
+        "fn f() { match p { Some((a, b)) => 1, _ => 2 } }",
+        "(a, b)",
+        "kio has no tuples",
+        hint,
+    );
+    rejected_with("fn f() { let (a, b", "(a, b", "kio has no tuples", hint);
+}
+
 #[test]
 fn l15_struct_update_parses() {
     let e = |src: &str| match &parse(&format!("fn f() {{ {src}; }}")).unwrap()[0] {
