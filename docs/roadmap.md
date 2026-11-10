@@ -80,7 +80,7 @@ Most-used Rust crates, and kio's answer to each:
 | Need | Rust | kio today | Gap |
 |---|---|---|---|
 | HTTP server | axum, hyper, tokio | `--listen` plus kio-web | Done for buffered request/response, and WebSockets with a fresh sandbox per message (WS1). WebSocket programs see the upgrade's path and headers (WS1b). No streaming or HTTP/2. |
-| HTTP client | reqwest | `Http.get` | GET only: POST, headers and JSON bodies need `caps.wit` methods. |
+| HTTP client | reqwest | `Http.get`, `send`, `send_all` | Any method the operator grants, headers, bodies, parallel batches (H16, H16b). No streaming bodies. |
 | Async | tokio | none: a sandbox per request | Fine per request. Concurrent upstream calls inside one handler need host-side async (web decision 4). |
 | Serialization | serde, serde_json | built-in `Json` (L9, C12), an untyped tree: `parse_json`, `to_json`, accessors; 1.5x `serde_json`, 1.4x faster than Python's `json` | Typed decode into structs needs a derive or traits; generics alone do not give it. |
 | Database | sqlx, diesel, redis | `Kv` (K1, K2): get/set/delete/keys/swap/scan/add, in memory or an append-only file the host owns; `:ro` readers follow a writer (H12) | No SQL. A `Sql` capability (`caps.wit`, owner decision): the host holds the connection pool, the program gets a capability scoped to one database. |
@@ -95,7 +95,7 @@ Most-used Rust crates, and kio's answer to each:
 | Abstraction | traits, generics, closures | function values (`fn(T) -> R`, L6a), closures (L6b) and built-ins taking them (`map`, `filter`, `any`, `all`, `and_then`, `map_err`; L6c), compiled (C9); generic functions (L7a) and generic structs and enums (L7b, L7d), monomorphized, with bounds `T: Eq`/`T: Ord` (L7c) | No traits: a bound is `Eq` or `Ord` only, `Ord` for `Int` and `Str`. |
 | Packages | cargo, crates.io | copy one file | A package manager, once there are a few libraries. |
 
-Non-starters today, in order of what blocks a real backend first: an SQL capability and an HTTP client beyond GET.
+Non-starters today, in order of what blocks a real backend first: an SQL capability (H17, in progress); the HTTP client beyond GET is done (H16).
 
 ## A target app
 

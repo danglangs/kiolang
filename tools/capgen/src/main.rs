@@ -52,11 +52,19 @@ fn main() -> Result<()> {
     let mut r = Resolve::new();
     r.push_file(format!("{ROOT}/caps.wit"))?;
     let (mut caps, mut enums, mut structs) = (String::new(), String::new(), String::new());
-    // A scalar, `Str` or `Bytes` as an AST type: a variant's payload or a record's field.
+    // A scalar, `Str` or `Bytes` as an AST type: a variant's payload or a record's field, which
+    // may also be a `List` of one of those.
     let plain = |t: &Type, what: &str| -> Result<String> {
-        match kio(&r, &Some(*t))?.strip_prefix("Ty::") {
+        let scalar = |t: &Type| match kio(&r, &Some(*t))?.strip_prefix("Ty::") {
             Some(n) if !n.contains('(') => Ok(format!("ty(\"{n}\")")),
-            _ => bail!("unsupported type on `{what}`: only scalars, strings and bytes"),
+            _ => bail!("unsupported type on `{what}`: only scalars, strings, bytes and lists of those"),
+        };
+        match t {
+            Type::Id(id) => match &r.types[*id].kind {
+                TypeDefKind::List(e) if !matches!(e, Type::U8) => Ok(format!("list({})", scalar(e)?)),
+                _ => scalar(t),
+            },
+            _ => scalar(t),
         }
     };
     for (_, i) in &r.interfaces {
@@ -122,6 +130,7 @@ fn main() -> Result<()> {
          let ty = |n: &str| Type {{ kind: TypeKind::Named(n.into(), vec![]), span: at }};\n\
          let case = |n: &str, fields: Vec<Type>| Variant {{ name: n.into(), fields, span: at }};\n\
          let field = |n: &str, ty: Type| Param {{ name: n.into(), ty, span: at }};\n\
+         let list = |e: Type| Type {{ kind: TypeKind::Named(\"List\".into(), vec![e]), span: at }};\n\
          let method = |n: &str, params, ret| (n.to_string(), params, ret);\n\
          CapTable {{ caps: vec![{caps}], enums: vec![{enums}], structs: vec![{structs}] }}\n}}\n"
     );

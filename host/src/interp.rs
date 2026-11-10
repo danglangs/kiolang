@@ -8,7 +8,7 @@ use crate::kio::caps::clock::HostClock;
 use crate::kio::caps::fs::{HostDir, IoErr};
 use crate::kio::caps::kv::{HostKv, KvEntry, KvErr};
 use crate::kio::caps::log::{HostLog, LogErr};
-use crate::kio::caps::net::{HostHttp, HttpErr};
+use crate::kio::caps::net::{HostHttp, HttpErr, HttpRequest, HttpResponse};
 use crate::kio::caps::rng::HostRng;
 use crate::kio::caps::web::{HostIncoming, HostOutgoing, WebErr};
 use crate::kio::caps::ws::{HostWsMessage, HostWsSend, WsErr};
@@ -174,11 +174,11 @@ impl Interp {
                     Err(diags) => Ok(Err(diags.into_iter().map(Diag::from).collect())),
                     Ok(_) => {
                         let grants = bound.iter().map(|b| (b.name.clone(), (b.kind, b.rep))).collect();
-                        let entry = struct_id("KvEntry");
                         let mut native = Native {
                             s: &mut s,
                             grants,
-                            entry,
+                            entry: struct_id("KvEntry"),
+                            response: struct_id("HttpResponse"),
                         };
                         let r = lang::run(&program, &mut native);
                         match (r, state_limit(&s, &self.limits)) {
@@ -225,8 +225,38 @@ impl Interp {
 struct Native<'a> {
     s: &'a mut State,
     grants: BTreeMap<String, (&'static str, u32)>,
-    /// The program's id for the built-in `KvEntry`, which `scan` returns.
+    /// The program's ids for the built-in `KvEntry` (`scan` returns it) and `HttpResponse`
+    /// (`send` and `send_all` do).
     entry: StructId,
+    response: StructId,
+}
+
+impl Native<'_> {
+    fn response(&self, r: HttpResponse) -> Value {
+        let fields = vec![Value::Int(r.status.into()), strs(r.headers), bytes(r.body)];
+        Value::Struct(self.response, fields)
+    }
+}
+
+/// An `HttpRequest` argument's fields: method, path, headers, body and `timeout_ms`, which is
+/// passed as `u32::MAX` outside `u32` (the host caps it at the grant's timeout, as any value
+/// past it).
+fn request(v: &Value) -> Result<HttpRequest, String> {
+    match v {
+        Value::Struct(_, fields) => match fields.as_slice() {
+            [Value::Str(method), Value::Str(path), Value::List(headers), Value::Bytes(body), Value::Int(ms)] => {
+                Ok(HttpRequest {
+                    method: method.to_string(),
+                    path: path.to_string(),
+                    headers: texts(headers)?,
+                    body: body.to_vec(),
+                    timeout_ms: u32::try_from(*ms).unwrap_or(u32::MAX),
+                })
+            }
+            _ => Err("expected an HttpRequest".into()),
+        },
+        _ => Err("expected an HttpRequest".into()),
+    }
 }
 
 impl lang::Caps for Native<'_> {
@@ -276,6 +306,16 @@ impl lang::Caps for Native<'_> {
                     .map(bytes)
                     .map_err(http_err),
             ),
+            ("Http", "send", [Value::Str(m), Value::Str(p), Value::List(hs), Value::Bytes(b)]) => {
+                let r = HostHttp::send(s, own(rep), m.to_string(), p.to_string(), texts(hs)?, b.to_vec());
+                result(r.map_err(stop)?.map(|r| self.response(r)).map_err(http_err))
+            }
+            ("Http", "send_all", [Value::List(reqs)]) => {
+                let reqs = reqs.iter().map(request).collect::<Result<Vec<_>, _>>()?;
+                let rs = HostHttp::send_all(s, own(rep), reqs).map_err(stop)?;
+                let each = |r: Result<HttpResponse, HttpErr>| result(r.map(|r| self.response(r)).map_err(http_err));
+                Value::List(rs.into_iter().map(each).collect::<Vec<_>>().into())
+            }
             ("Incoming", "method", []) => Value::Str(HostIncoming::method(s, own(rep)).map_err(stop)?.into()),
             ("Incoming", "target", []) => Value::Str(HostIncoming::target(s, own(rep)).map_err(stop)?.into()),
             ("Incoming", "header_names", []) => strs(HostIncoming::header_names(s, own(rep)).map_err(stop)?),
@@ -490,6 +530,7 @@ fn http_err(e: HttpErr) -> Value {
         HttpErr::Timeout => err_value("HttpErr", "Timeout", vec![]),
         HttpErr::TooLarge => err_value("HttpErr", "TooLarge", vec![]),
         HttpErr::Status(n) => err_value("HttpErr", "Status", vec![Value::Int(n.into())]),
+        HttpErr::Invalid => err_value("HttpErr", "Invalid", vec![]),
     }
 }
 

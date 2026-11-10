@@ -3,7 +3,7 @@ mod mcp;
 use kio_host::{listen, open_dir, ClockSpec, Diag, Kio, Limits, LogSink, Origin, RngSpec, Server, Sources};
 
 /// `kio run`'s flags.
-const USAGE: &str = "[--dir name=path]... [--http name=host]... [--kv name=path[:ro]|:memory:]... [--kv-mb mb] [--rng name[=seed:N]]... [--clock name[=fixed:T]]... [--log name=path|-]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]...";
+const USAGE: &str = "[--dir name=path]... [--http name=host]... [--http-methods name=POST,PUT,..]... [--kv name=path[:ro]|:memory:]... [--kv-mb mb] [--rng name[=seed:N]]... [--clock name[=fixed:T]]... [--log name=path|-]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]...";
 
 fn main() {
     // The host checks and lowers programs natively, and compiled code runs on this thread's stack
@@ -70,7 +70,9 @@ fn run(path: &str, flags: &[&str]) -> i32 {
         Err(code) => return code,
     };
     let mut dirs = Vec::new();
-    let mut https = Vec::new();
+    let mut https: Vec<(String, Origin)> = Vec::new();
+    // `(name, methods)` of each `--http-methods`, applied once every `--http` is known.
+    let mut http_methods: Vec<(String, String)> = Vec::new();
     let mut limits = if flags.contains(&"--listen") {
         Limits::web()
     } else {
@@ -95,6 +97,15 @@ fn run(path: &str, flags: &[&str]) -> i32 {
                 match Origin::parse(origin) {
                     Ok(o) => https.push((name.to_string(), o)),
                     Err(e) => return fail(format!("--http {name}={origin}: {e}")),
+                }
+                continue;
+            }
+            ["--http-methods", spec] => {
+                match spec.split_once('=') {
+                    Some((name, list)) if !name.is_empty() && !list.is_empty() => {
+                        http_methods.push((name.into(), list.into()))
+                    }
+                    _ => return fail(format!("--http-methods {spec}: expected name=GET,POST,..")),
                 }
                 continue;
             }
@@ -197,6 +208,21 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     }
     if listen.is_some() && !https.is_empty() {
         return fail("--http with --listen\n  hint: Http grants under --listen are not supported yet".into());
+    }
+    for (i, (name, list)) in http_methods.iter().enumerate() {
+        if http_methods[..i].iter().any(|(n, _)| n == name) {
+            return fail(format!(
+                "--http-methods {name}={list}: `{name}` is given more than once\n  hint: list every method in one flag: `--http-methods {name}=GET,POST,PUT`"
+            ));
+        }
+        let Some((_, origin)) = https.iter_mut().find(|(n, _)| n == name) else {
+            return fail(format!(
+                "--http-methods {name}={list}: no `--http {name}=host` grant\n  hint: --http-methods adds methods to an Http grant of that name; GET needs none"
+            ));
+        };
+        if let Err(e) = origin.allow_methods(list) {
+            return fail(format!("--http-methods {name}={list}: {e}"));
+        }
     }
     // A program that fails to check is reported by the run below.
     let checked = lang::check_files(

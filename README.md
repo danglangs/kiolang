@@ -94,7 +94,7 @@ On a loopback `--listen`, a request's `Host` must be `localhost`, `127.0.0.1` or
 
 ### More
 
-- `--http api=api.example` grants `Http` (`get` only) to one host over HTTPS; `--http api=http://127.0.0.1:9000` allows plain HTTP for local testing.
+- `--http api=api.example` grants `Http` to one host over HTTPS, GET only; `--http-methods api=POST,PUT,DELETE` adds methods for `api.send(method, path, headers, body)`, and `api.send_all([..])` issues several requests at once. `--http api=http://127.0.0.1:9000` allows plain HTTP for local testing. The audit log records each request's method, path, status and header names, never a header value.
 - `--kv store=data.kv` grants a key-value store (`store: Kv`) that outlives runs and is shared by every `--listen` request; `--kv store=:memory:` keeps it for the process only. `swap` updates a key atomically, `add` counts in one, `scan` pages through a prefix's entries. `--kv store=data.kv:ro` is read-only: a program that can call `set`, `delete`, `swap` or `add` on it is refused, no lock is taken, and each `get`, `keys` and `scan` sees what another kio writing the file stored (a server reading tokens a separate job rotates). [examples/ledger.kio](examples/ledger.kio) keeps running totals per customer:
 
   ```

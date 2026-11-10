@@ -22,6 +22,10 @@ pub fn v0() -> CapTable {
         ty,
         span: at,
     };
+    let list = |e: Type| Type {
+        kind: TypeKind::Named("List".into(), vec![e]),
+        span: at,
+    };
     let method = |n: &str, params, ret| (n.to_string(), params, ret);
     CapTable {
         caps: vec![
@@ -65,11 +69,29 @@ pub fn v0() -> CapTable {
             },
             CapType {
                 name: "Http".into(),
-                methods: vec![method(
-                    "get",
-                    vec![Ty::Str],
-                    Ty::Result(Box::new(Ty::Bytes), Box::new(Ty::Enum("HttpErr".into(), vec![]))),
-                )],
+                methods: vec![
+                    method(
+                        "get",
+                        vec![Ty::Str],
+                        Ty::Result(Box::new(Ty::Bytes), Box::new(Ty::Enum("HttpErr".into(), vec![]))),
+                    ),
+                    method(
+                        "send",
+                        vec![Ty::Str, Ty::Str, Ty::List(Box::new(Ty::Str)), Ty::Bytes],
+                        Ty::Result(
+                            Box::new(Ty::Struct("HttpResponse".into(), vec![])),
+                            Box::new(Ty::Enum("HttpErr".into(), vec![])),
+                        ),
+                    ),
+                    method(
+                        "send_all",
+                        vec![Ty::List(Box::new(Ty::Struct("HttpRequest".into(), vec![])))],
+                        Ty::List(Box::new(Ty::Result(
+                            Box::new(Ty::Struct("HttpResponse".into(), vec![])),
+                            Box::new(Ty::Enum("HttpErr".into(), vec![])),
+                        ))),
+                    ),
+                ],
             },
             CapType {
                 name: "Incoming".into(),
@@ -219,6 +241,7 @@ pub fn v0() -> CapTable {
                     case("Timeout", vec![]),
                     case("TooLarge", vec![]),
                     case("Status", vec![ty("Int")]),
+                    case("Invalid", vec![]),
                 ],
                 span: at,
                 public: true,
@@ -261,12 +284,38 @@ pub fn v0() -> CapTable {
                 public: true,
             },
         ],
-        structs: vec![Struct {
-            name: "KvEntry".into(),
-            tparams: vec![],
-            fields: vec![field("key", ty("Str")), field("value", ty("Bytes"))],
-            span: at,
-            public: true,
-        }],
+        structs: vec![
+            Struct {
+                name: "HttpResponse".into(),
+                tparams: vec![],
+                fields: vec![
+                    field("status", ty("Int")),
+                    field("headers", list(ty("Str"))),
+                    field("body", ty("Bytes")),
+                ],
+                span: at,
+                public: true,
+            },
+            Struct {
+                name: "HttpRequest".into(),
+                tparams: vec![],
+                fields: vec![
+                    field("method", ty("Str")),
+                    field("path", ty("Str")),
+                    field("headers", list(ty("Str"))),
+                    field("body", ty("Bytes")),
+                    field("timeout_ms", ty("Int")),
+                ],
+                span: at,
+                public: true,
+            },
+            Struct {
+                name: "KvEntry".into(),
+                tparams: vec![],
+                fields: vec![field("key", ty("Str")), field("value", ty("Bytes"))],
+                span: at,
+                public: true,
+            },
+        ],
     }
 }

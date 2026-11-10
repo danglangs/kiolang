@@ -124,7 +124,12 @@ pub struct Origin {
     lookups: Arc<AtomicU32>,
     /// Non-public addresses are allowed: the grant is an IP literal.
     any_addr: bool,
+    /// The methods `--http-methods` added; GET is always allowed.
+    methods: Vec<&'static str>,
 }
+
+/// The request methods a program may name; any other is `invalid`.
+const METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
 
 impl Origin {
     /// Parse `host[:port]` (HTTPS), `http://host[:port]` or `https://host[:port]`; nothing else.
@@ -167,13 +172,40 @@ impl Origin {
             pinned: Arc::default(),
             lookups: Arc::default(),
             any_addr,
+            methods: Vec::new(),
         })
     }
 
-    /// `scheme://host:port`, for the audit log.
+    /// Allow the methods in `list` (`POST,PUT`, any case) besides GET: `--http-methods`.
+    pub fn allow_methods(&mut self, list: &str) -> std::result::Result<(), String> {
+        for m in list.split(',') {
+            let m = m.trim().to_ascii_uppercase();
+            let Some(known) = METHODS.iter().find(|k| **k == m) else {
+                return Err(format!(
+                    "unknown method {m:?}; expected a list of {}",
+                    METHODS.join(", ")
+                ));
+            };
+            if *known != "GET" && !self.methods.contains(known) {
+                self.methods.push(known);
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the grant allows `method`, one of `METHODS`.
+    fn allows(&self, method: &str) -> bool {
+        method == "GET" || self.methods.contains(&method)
+    }
+
+    /// `scheme://host:port`, with the methods added to GET if any, for the audit log.
     fn target(&self) -> String {
+        let methods = match self.methods.is_empty() {
+            true => String::new(),
+            false => format!(" methods=GET,{}", self.methods.join(",")),
+        };
         format!(
-            "{}://{}:{}",
+            "{}://{}:{}{methods}",
             if self.https { "https" } else { "http" },
             self.host,
             self.port
@@ -229,13 +261,34 @@ impl Origin {
     }
 }
 
-/// Most detached host-call workers alive at once.
-const MAX_WORKERS: usize = 64;
+/// Most detached host-call workers alive at once: room for a full `send_all` batch (`BATCH_MAX`)
+/// beside the timed-out workers that linger.
+const MAX_WORKERS: usize = 256;
 /// The longest wait for one request; the run deadline can cut it shorter.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Redirects followed per `Http.get`; the next one is `denied`.
+/// Redirects followed per request (GET and HEAD only); the next one is `denied` for `get`, and
+/// `send` returns it as the response.
 const MAX_REDIRECTS: usize = 5;
+/// The most a `send` body may hold; more is `too-large` before anything is sent.
+const BODY_CAP: usize = 8 << 20;
+/// The most headers one request may carry, and the longest `name: value`; more is `invalid`.
+const HEADERS_MAX: usize = 64;
+const HEADER_MAX: usize = 8 << 10;
+/// The most requests in one `send_all`; more is `invalid` for every one, and nothing is sent.
+const BATCH_MAX: usize = 64;
+/// Headers the host sets or that frame the connection: a program naming one is `invalid`, with
+/// any `proxy-*`.
+const RESERVED_HEADERS: [&str; 8] = [
+    "host",
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "upgrade",
+    "te",
+    "trailer",
+    "keep-alive",
+];
 
 /// Whether a connection may go to `ip`: not loopback, private, link-local, unspecified,
 /// multicast or shared (CGNAT) space. IPv4-mapped and NAT64 IPv6 addresses are judged as the IPv4
@@ -310,57 +363,147 @@ impl ureq::unversioned::resolver::Resolver for Pinned {
     }
 }
 
-/// GET `url` with no redirects, no proxy and `timeout` for the whole exchange, connecting only to
-/// `origin`'s pinned addresses. A non-2xx status is `Status`; the body is read through the same cap
-/// as `Dir.read`. Returns the bytes read, and the `Location` if the answer was a redirect.
-fn fetch(
-    origin: &Origin,
-    url: &str,
+/// A request the host checked: the first URL, a method the grant allows, headers that passed
+/// `parse_headers`, the body, and how long the whole request (every hop) may take.
+struct Outbound {
+    url: String,
+    method: &'static str,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
     timeout: Duration,
-) -> (
-    Vec<u8>,
-    std::result::Result<(), kio::caps::net::HttpErr>,
-    Option<String>,
-) {
+    /// `get`'s rules: a non-2xx status is `Status`, a redirect not followed is `denied`, and the
+    /// body is read only on 2xx. `send`'s: every status is a response, with its body.
+    as_get: bool,
+}
+
+/// What a request got back.
+struct Inbound {
+    status: u16,
+    /// `name: value`, names lowercased, in order.
+    headers: Vec<String>,
+    body: Vec<u8>,
+}
+
+/// A request done: the redirects followed (each a counted call), the body bytes read (charged
+/// even when refused), the time it took, and the response or the error.
+struct Performed {
+    hops: usize,
+    read: usize,
+    ms: f64,
+    result: std::result::Result<Inbound, kio::caps::net::HttpErr>,
+}
+
+/// `name: value` headers checked: at most `HEADERS_MAX`, each at most `HEADER_MAX` bytes, the
+/// name a token (lowercased here) that is not reserved, the value free of control characters
+/// (so no CR or LF). `None` if any fails.
+fn parse_headers(headers: &[String]) -> Option<Vec<(String, String)>> {
+    if headers.len() > HEADERS_MAX {
+        return None;
+    }
+    let token = |c: char| c.is_ascii_alphanumeric() || "!#$%&'*+-.^_`|~".contains(c);
+    let mut out = Vec::with_capacity(headers.len());
+    for h in headers {
+        let (name, value) = h.split_once(": ").filter(|_| h.len() <= HEADER_MAX)?;
+        let name = name.to_ascii_lowercase();
+        let reserved = RESERVED_HEADERS.contains(&name.as_str()) || name.starts_with("proxy-");
+        if name.is_empty() || !name.chars().all(token) || reserved {
+            return None;
+        }
+        let value = value.trim_matches([' ', '\t']);
+        if value
+            .chars()
+            .any(|c| (c.is_ascii_control() && c != '\t') || c == '\u{7f}')
+        {
+            return None;
+        }
+        out.push((name, value.to_string()));
+    }
+    Some(out)
+}
+
+/// Do `req` with no proxy, connecting only to `origin`'s pinned addresses, following a redirect
+/// within the origin (GET and HEAD only, `MAX_REDIRECTS` at most). Each hop is bounded by what
+/// is left of `req.timeout` and of `deadline`; the body is read through the same cap as
+/// `Dir.read`.
+fn perform(origin: &Origin, req: &Outbound, deadline: Instant) -> Performed {
     use kio::caps::net::HttpErr;
+    let start = Instant::now();
+    let until = deadline.min(start + req.timeout);
     let timed_out = |e: &io::Error| e.kind() == io::ErrorKind::TimedOut;
-    let config = ureq::Agent::config_builder()
-        .proxy(None) // ureq's default reads proxy variables from the environment
-        .max_redirects(0)
-        .http_status_as_error(false)
-        .timeout_global(Some(timeout))
-        .build();
-    let agent = ureq::Agent::with_parts(
-        config,
-        ureq::unversioned::transport::DefaultConnector::default(),
-        Pinned(origin.clone()),
-    );
-    let mut data = Vec::new();
-    let resp = match agent.get(url).call() {
-        Ok(r) => r,
-        Err(ureq::Error::Timeout(_)) => return (data, Err(HttpErr::Timeout), None),
-        Err(ureq::Error::Io(e)) if timed_out(&e) => return (data, Err(HttpErr::Timeout), None),
-        Err(_) => return (data, Err(HttpErr::Denied), None),
+    let follows = matches!(req.method, "GET" | "HEAD");
+    let mut done = Performed {
+        hops: 0,
+        read: 0,
+        ms: 0.0,
+        result: Err(HttpErr::Denied),
     };
-    let status = resp.status().as_u16();
-    if matches!(status, 301 | 302 | 303 | 307 | 308) {
-        // A redirect without a usable `Location` is refused.
-        return match resp.headers().get("location").and_then(|v| v.to_str().ok()) {
-            Some(loc) => (data, Err(HttpErr::Status(status)), Some(loc.to_string())),
-            None => (data, Err(HttpErr::Denied), None),
+    let mut url = req.url.clone();
+    let result = loop {
+        let config = ureq::Agent::config_builder()
+            .proxy(None) // ureq's default reads proxy variables from the environment
+            .max_redirects(0)
+            .http_status_as_error(false)
+            .timeout_global(Some(until.saturating_duration_since(Instant::now())))
+            .build();
+        let agent = ureq::Agent::with_parts(
+            config,
+            ureq::unversioned::transport::DefaultConnector::default(),
+            Pinned(origin.clone()),
+        );
+        let mut b = ureq::http::Request::builder().method(req.method).uri(url.as_str());
+        for (name, value) in &req.headers {
+            b = b.header(name.as_str(), value.as_str());
+        }
+        // A method that carries a body sends it with its length, `Content-Length: 0` when empty
+        // (ureq would otherwise send an empty chunked body); any other sends none unless given one.
+        let with_body = !req.body.is_empty() || matches!(req.method, "POST" | "PUT" | "PATCH");
+        let sent = match with_body {
+            true => b
+                .body(req.body.as_slice())
+                .map_err(ureq::Error::from)
+                .and_then(|r| agent.run(r)),
+            false => b.body(()).map_err(ureq::Error::from).and_then(|r| agent.run(r)),
         };
-    }
-    if !(200..300).contains(&status) {
-        return (data, Err(HttpErr::Status(status)), None);
-    }
-    let read = resp.into_body().into_reader().take(READ_CAP + 1).read_to_end(&mut data);
-    let result = match read {
-        Ok(_) if data.len() as u64 > READ_CAP => Err(HttpErr::TooLarge),
-        Ok(_) => Ok(()),
-        Err(e) if timed_out(&e) => Err(HttpErr::Timeout),
-        Err(_) => Err(HttpErr::Denied),
+        let resp = match sent {
+            Ok(r) => r,
+            Err(ureq::Error::Timeout(_)) => break Err(HttpErr::Timeout),
+            Err(ureq::Error::Io(e)) if timed_out(&e) => break Err(HttpErr::Timeout),
+            Err(ureq::Error::Http(_)) => break Err(HttpErr::Invalid),
+            Err(_) => break Err(HttpErr::Denied),
+        };
+        let status = resp.status().as_u16();
+        if matches!(status, 301 | 302 | 303 | 307 | 308) {
+            let location = resp.headers().get("location").and_then(|v| v.to_str().ok());
+            match location.and_then(|l| origin.follow(&url, l)) {
+                Some(next) if follows && done.hops < MAX_REDIRECTS => {
+                    done.hops += 1;
+                    url = next;
+                    continue;
+                }
+                // `get` refuses a redirect it cannot follow; `send` hands it to the program.
+                _ if req.as_get => break Err(HttpErr::Denied),
+                _ => {}
+            }
+        }
+        if req.as_get && !(200..300).contains(&status) {
+            break Err(HttpErr::Status(status));
+        }
+        let headers = (resp.headers().iter())
+            .map(|(n, v)| format!("{}: {}", n.as_str(), String::from_utf8_lossy(v.as_bytes())))
+            .collect();
+        let mut body = Vec::new();
+        let read = resp.into_body().into_reader().take(READ_CAP + 1).read_to_end(&mut body);
+        done.read = body.len();
+        break match read {
+            Ok(_) if body.len() as u64 > READ_CAP => Err(HttpErr::TooLarge),
+            Ok(_) => Ok(Inbound { status, headers, body }),
+            Err(e) if timed_out(&e) => Err(HttpErr::Timeout),
+            Err(_) => Err(HttpErr::Denied),
+        };
     };
-    (data, result, None)
+    done.ms = start.elapsed().as_secs_f64() * 1000.0;
+    done.result = result;
+    done
 }
 
 /// Open a directory to grant: the host's only ambient filesystem call, made once per `--dir`.
@@ -401,6 +544,8 @@ pub struct State {
     audit_msg: String,
     /// More fields of the current call's audit line (`,"n":1`), set by the call; cleared after it.
     audit_extra: String,
+    /// `send_all` calls so far: the next batch's id in the audit log.
+    batches: u64,
     /// Compiled code: the third value of the next runtime error's message (compiled.rs).
     trap_c: i64,
     /// `calls` when `Outgoing.send` handed over the response; the trailer counts the calls after.
@@ -438,6 +583,7 @@ impl State {
             handles: HashMap::new(),
             audit_msg: String::new(),
             audit_extra: String::new(),
+            batches: 0,
             trap_c: 0,
             sent_at: None,
             table: ResourceTable::new(),
@@ -630,8 +776,9 @@ impl State {
             .and_then(|()| self.check_report(handle, method))
             .and_then(|()| f(self));
         let extra = std::mem::take(&mut self.audit_extra);
-        let Some(mut a) = self.audit.take() else { return r };
-        let (cap, kind) = self.handles.get(&handle).cloned().unwrap_or(("?".into(), "?"));
+        if self.audit.is_none() {
+            return r;
+        }
         let why = match &r {
             Ok(v) => result(v),
             Err(_) if self.unexpected => "stopped:unexpected".into(),
@@ -641,23 +788,40 @@ impl State {
             Err(_) if self.timed_out => "stopped:time".into(),
             Err(_) => "stopped:error".into(),
         };
+        let ms = start.elapsed().as_secs_f64() * 1000.0;
+        let written = self.audit_line(handle, method, arg, self.io - io, &why, &extra, ms);
+        let r = r?;
+        written.map_err(|e| wasmtime::Error::msg(format!("audit: cannot write the log: {e}")))?;
+        Ok(r)
+    }
+
+    /// One line of the audit log for a call of `method` on `handle`, with the next `seq`: `arg`
+    /// cut at 256 characters, `bytes` of I/O, its `result`, `extra` fields (`,"n":1`) and its
+    /// duration. Nothing without a log.
+    #[allow(clippy::too_many_arguments)]
+    fn audit_line(
+        &mut self,
+        handle: u32,
+        method: &str,
+        arg: &str,
+        bytes: u64,
+        result: &str,
+        extra: &str,
+        ms: f64,
+    ) -> io::Result<()> {
+        let Some(a) = self.audit.as_mut() else { return Ok(()) };
+        let (cap, kind) = self.handles.get(&handle).cloned().unwrap_or(("?".into(), "?"));
         a.seq += 1;
         let line = format!(
-            r#"{{"event":"call","seq":{},"cap":{},"kind":"{kind}","method":{},"arg":{},"bytes":{},"result":{}{extra}{},"ms":{:.1}}}"#,
+            r#"{{"event":"call","seq":{},"cap":{},"kind":"{kind}","method":{},"arg":{},"bytes":{bytes},"result":{}{extra}{},"ms":{ms:.1}}}"#,
             a.seq,
             json(&cap),
             json(method),
             json(&arg.chars().take(256).collect::<String>()),
-            self.io - io,
-            json(&why),
+            json(result),
             if self.unexpected { r#","unexpected":true"# } else { "" },
-            start.elapsed().as_secs_f64() * 1000.0
         );
-        let written = a.line(&line);
-        self.audit = Some(a);
-        let r = r?;
-        written.map_err(|e| wasmtime::Error::msg(format!("audit: cannot write the log: {e}")))?;
-        Ok(r)
+        a.line(&line)
     }
 
     /// Stop a call whose `(capability parameter, method)` is not on `main`'s
@@ -707,16 +871,19 @@ impl State {
     /// Run `work` on a detached thread and wait for it until the run's deadline; past it, stop the
     /// run. The thread finishes in the background and its result is dropped.
     fn within<T: Send + 'static>(&mut self, work: impl FnOnce() -> T + Send + 'static) -> Result<T> {
+        let mut done = self.within_all(vec![Box::new(work)])?;
+        Ok(done.pop().expect("one worker, one result"))
+    }
+
+    /// Run each of `works` on its own worker thread at once and wait for all of them, in order,
+    /// until the run's deadline; past it, the run stops as `within`'s does.
+    fn within_all<T: Send + 'static>(&mut self, works: Vec<Box<dyn FnOnce() -> T + Send>>) -> Result<Vec<T>> {
         // Timed-out workers linger; past MAX_WORKERS live ones, refuse as a timeout.
         static LIVE: AtomicUsize = AtomicUsize::new(0);
         let timeout = |s: &mut Self| {
             s.timed_out = true;
             wasmtime::Error::msg("host call timed out")
         };
-        if LIVE.fetch_add(1, Relaxed) >= MAX_WORKERS {
-            LIVE.fetch_sub(1, Relaxed);
-            return Err(timeout(self));
-        }
         // Releases the slot when the worker ends, even if `work` panics.
         struct Slot;
         impl Drop for Slot {
@@ -724,16 +891,30 @@ impl State {
                 LIVE.fetch_sub(1, Relaxed);
             }
         }
+        let n = works.len();
         let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _slot = Slot;
-            let _ = tx.send(work());
-        });
-        rx.recv_timeout(self.deadline.saturating_duration_since(Instant::now()))
-            .map_err(|e| match e {
-                RecvTimeoutError::Timeout => timeout(self),
-                RecvTimeoutError::Disconnected => wasmtime::Error::msg("host call failed"),
-            })
+        for (i, work) in works.into_iter().enumerate() {
+            if LIVE.fetch_add(1, Relaxed) >= MAX_WORKERS {
+                LIVE.fetch_sub(1, Relaxed);
+                return Err(timeout(self));
+            }
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let _slot = Slot;
+                let _ = tx.send((i, work()));
+            });
+        }
+        let mut done: Vec<Option<T>> = (0..n).map(|_| None).collect();
+        for _ in 0..n {
+            let (i, v) = rx
+                .recv_timeout(self.deadline.saturating_duration_since(Instant::now()))
+                .map_err(|e| match e {
+                    RecvTimeoutError::Timeout => timeout(self),
+                    RecvTimeoutError::Disconnected => wasmtime::Error::msg("host call failed"),
+                })?;
+            done[i] = Some(v);
+        }
+        Ok(done.into_iter().map(|v| v.expect("every worker answered")).collect())
     }
 }
 
@@ -973,43 +1154,241 @@ impl kio::caps::net::HostHttp for State {
         self.call(h.rep(), "get", &arg, |s| s.get_url(&h, path), outcome)
     }
 
+    fn send(
+        &mut self,
+        h: Resource<kio::caps::net::Http>,
+        method: String,
+        path: String,
+        headers: Vec<String>,
+        body: Vec<u8>,
+    ) -> Result<Result<HttpResponse, kio::caps::net::HttpErr>> {
+        let arg = path.clone();
+        self.call(
+            h.rep(),
+            "send",
+            &arg,
+            |s| s.send_one(&h, &method, &path, &headers, body),
+            outcome,
+        )
+    }
+
+    fn send_all(
+        &mut self,
+        h: Resource<kio::caps::net::Http>,
+        reqs: Vec<HttpRequest>,
+    ) -> Result<Vec<Result<HttpResponse, kio::caps::net::HttpErr>>> {
+        let arg = reqs.len().to_string();
+        let refused = |rs: &Vec<_>| if rs.len() > BATCH_MAX { "invalid" } else { "ok" }.to_string();
+        self.call(h.rep(), "send_all", &arg, |s| s.send_batch(&h, reqs), refused)
+    }
+
     fn drop(&mut self, h: Resource<kio::caps::net::Http>) -> Result<()> {
         let _ = self.table.delete(Resource::<Origin>::new_own(h.rep()));
         Ok(())
     }
 }
 
+use kio::caps::net::{HttpRequest, HttpResponse};
+
+/// The audit fields a finished request adds: its status if it got one, and the body bytes read.
+fn received(done: &Performed) -> String {
+    match &done.result {
+        Ok(r) => format!(r#","status":{},"received":{}"#, r.status, done.read),
+        Err(_) => format!(r#","received":{}"#, done.read),
+    }
+}
+
+fn audit_failed(e: io::Error) -> wasmtime::Error {
+    wasmtime::Error::msg(format!("audit: cannot write the log: {e}"))
+}
+
 impl State {
+    /// The grant behind `h`.
+    fn origin(&self, h: &Resource<kio::caps::net::Http>) -> Option<Origin> {
+        self.table.get(&Resource::<Origin>::new_borrow(h.rep())).ok().cloned()
+    }
+
     fn get_url(
         &mut self,
         h: &Resource<kio::caps::net::Http>,
         path: String,
     ) -> Result<Result<Vec<u8>, kio::caps::net::HttpErr>> {
         use kio::caps::net::HttpErr;
-        let Ok(origin) = self.table.get(&Resource::<Origin>::new_borrow(h.rep())).cloned() else {
+        let Some(origin) = self.origin(h) else {
             return Ok(Err(HttpErr::Denied));
         };
-        let Some(mut url) = origin.url(&path) else {
+        let Some(url) = origin.url(&path) else {
             return Ok(Err(HttpErr::Denied));
         };
-        for hop in 0..=MAX_REDIRECTS {
-            if hop > 0 {
-                self.count_call()?; // each followed redirect is a call
-            }
-            let timeout = HTTP_TIMEOUT.min(self.deadline.saturating_duration_since(Instant::now()));
-            let (o, u) = (origin.clone(), url.clone());
-            let (data, result, location) = self.within(move || fetch(&o, &u, timeout))?;
-            // Charge what was read, even when it is refused.
-            self.spend_io(data.len())?;
-            let Some(location) = location else {
-                return Ok(result.map(|()| data));
-            };
-            match origin.follow(&url, &location) {
-                Some(next) if hop < MAX_REDIRECTS => url = next,
-                _ => break,
-            }
+        let req = Outbound {
+            url,
+            method: "GET",
+            headers: Vec::new(),
+            body: Vec::new(),
+            timeout: HTTP_TIMEOUT,
+            as_get: true,
+        };
+        let done = self.finish(&origin, req)?;
+        Ok(done.result.map(|r| r.body))
+    }
+
+    /// Do `req` on a worker, then count its hops and charge what it read.
+    fn finish(&mut self, origin: &Origin, req: Outbound) -> Result<Performed> {
+        let (o, deadline) = (origin.clone(), self.deadline);
+        let done = self.within(move || perform(&o, &req, deadline))?;
+        self.settle(&done)?;
+        Ok(done)
+    }
+
+    /// Count each redirect a request followed as a call, and charge the body read, even when
+    /// it was refused.
+    fn settle(&mut self, done: &Performed) -> Result<()> {
+        for _ in 0..done.hops {
+            self.count_call()?;
         }
-        Ok(Err(HttpErr::Denied))
+        self.spend_io(done.read)
+    }
+
+    /// Check one `send`: the method is one of `METHODS` (else `invalid`) that `origin` allows
+    /// (else `denied`), the path as `get`'s, the headers (`parse_headers`), the body at most
+    /// `BODY_CAP` (charged to `--io` here). `extra` gets the audit fields known so far: the method,
+    /// the header names once they pass, never a value, and the body size.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        &mut self,
+        origin: &Origin,
+        method: &str,
+        path: &str,
+        headers: &[String],
+        body: Vec<u8>,
+        timeout: Duration,
+        extra: &mut String,
+    ) -> Result<Result<Outbound, kio::caps::net::HttpErr>> {
+        use kio::caps::net::HttpErr;
+        *extra += &format!(r#","http":{}"#, json(&method.chars().take(32).collect::<String>()));
+        let Some(&method) = METHODS.iter().find(|m| **m == method) else {
+            return Ok(Err(HttpErr::Invalid));
+        };
+        if !origin.allows(method) {
+            return Ok(Err(HttpErr::Denied));
+        }
+        let Some(url) = origin.url(path) else {
+            return Ok(Err(HttpErr::Denied));
+        };
+        let Some(headers) = parse_headers(headers) else {
+            return Ok(Err(HttpErr::Invalid));
+        };
+        let names: Vec<String> = headers.iter().map(|(n, _)| json(n)).collect();
+        *extra += &format!(r#","headers":[{}]"#, names.join(","));
+        if body.len() > BODY_CAP {
+            return Ok(Err(HttpErr::TooLarge));
+        }
+        self.spend_io(body.len())?;
+        *extra += &format!(r#","sent":{}"#, body.len());
+        Ok(Ok(Outbound {
+            url,
+            method,
+            headers,
+            body,
+            timeout,
+            as_get: false,
+        }))
+    }
+
+    fn send_one(
+        &mut self,
+        h: &Resource<kio::caps::net::Http>,
+        method: &str,
+        path: &str,
+        headers: &[String],
+        body: Vec<u8>,
+    ) -> Result<Result<HttpResponse, kio::caps::net::HttpErr>> {
+        let Some(origin) = self.origin(h) else {
+            return Ok(Err(kio::caps::net::HttpErr::Denied));
+        };
+        let mut extra = String::new();
+        let r = match self.prepare(&origin, method, path, headers, body, HTTP_TIMEOUT, &mut extra)? {
+            Ok(req) => {
+                let done = self.finish(&origin, req)?;
+                extra += &received(&done);
+                done.result.map(response)
+            }
+            Err(e) => Err(e),
+        };
+        self.audit_extra = extra;
+        Ok(r)
+    }
+
+    /// `send_all`: every request checked as a `send`, each counted as a call (the batch's own
+    /// count is the first), issued together on workers and awaited until the run's deadline. One
+    /// audit line per request, with the batch's id and the request's index, before the batch's
+    /// own line.
+    fn send_batch(
+        &mut self,
+        h: &Resource<kio::caps::net::Http>,
+        reqs: Vec<HttpRequest>,
+    ) -> Result<Vec<Result<HttpResponse, kio::caps::net::HttpErr>>> {
+        use kio::caps::net::HttpErr;
+        self.batches += 1;
+        let batch = self.batches;
+        self.audit_extra = format!(r#","batch":{batch}"#);
+        let n = reqs.len();
+        if n > BATCH_MAX {
+            return Ok((0..n).map(|_| Err(HttpErr::Invalid)).collect());
+        }
+        let Some(origin) = self.origin(h) else {
+            return Ok((0..n).map(|_| Err(HttpErr::Denied)).collect());
+        };
+        for _ in 1..n {
+            self.count_call()?;
+        }
+        let mut works: Vec<Box<dyn FnOnce() -> Performed + Send>> = Vec::new();
+        // Per request: its path, body bytes and audit fields, and the error that refused it, if
+        // any (else its worker's result is the next of `done`).
+        let mut checked = Vec::with_capacity(n);
+        for (i, r) in reqs.into_iter().enumerate() {
+            let mut extra = format!(r#","batch":{batch},"index":{i}"#);
+            let timeout = match r.timeout_ms {
+                0 => HTTP_TIMEOUT,
+                ms => Duration::from_millis(ms.into()).min(HTTP_TIMEOUT),
+            };
+            let sent = r.body.len() as u64;
+            let refused = match self.prepare(&origin, &r.method, &r.path, &r.headers, r.body, timeout, &mut extra)? {
+                Err(e) => Some(e),
+                Ok(req) => {
+                    let (o, deadline) = (origin.clone(), self.deadline);
+                    works.push(Box::new(move || perform(&o, &req, deadline)));
+                    None
+                }
+            };
+            checked.push((r.path, sent, extra, refused));
+        }
+        let mut done = self.within_all(works)?.into_iter();
+        let mut results = Vec::with_capacity(n);
+        for (path, sent, mut extra, refused) in checked {
+            let (bytes, ms, result) = match refused {
+                Some(e) => (0, 0.0, Err(e)),
+                None => {
+                    let d = done.next().expect("a worker per request issued");
+                    self.settle(&d)?;
+                    extra += &received(&d);
+                    (sent + d.read as u64, d.ms, d.result.map(response))
+                }
+            };
+            let why = outcome(&result);
+            self.audit_line(h.rep(), "send", &path, bytes, &why, &extra, ms)
+                .map_err(audit_failed)?;
+            results.push(result);
+        }
+        Ok(results)
+    }
+}
+
+fn response(r: Inbound) -> HttpResponse {
+    HttpResponse {
+        status: r.status,
+        headers: r.headers,
+        body: r.body,
     }
 }
 

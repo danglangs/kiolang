@@ -19,11 +19,25 @@ interface fs {
 }
 
 interface net {
-  variant http-err { denied, timeout, too-large, status(u16) }
+  // `invalid`: a method that is not one of GET, HEAD, POST, PUT, PATCH, DELETE or OPTIONS, a header
+  // without `: `, with CR or LF, or naming one the host sets (host, content-length, ..), over 64
+  // headers or 8 KB each, or a batch of more than 64 requests. `status(n)` is `get`'s only.
+  variant http-err { denied, timeout, too-large, status(u16), invalid }
+  // Headers are `name: value`, one string each; response names are lowercased, in order.
+  record http-response { status: u16, headers: list<string>, body: list<u8> }
+  // One request of `send-all`. `timeout-ms` 0 means the grant's timeout; a larger value is capped at it.
+  record http-request { method: string, path: string, headers: list<string>, body: list<u8>, timeout-ms: u32 }
 
-  // A host and method set the operator granted. Rechecked on every redirect.
+  // One host the operator granted (`--http name=host`), GET only unless `--http-methods name=..`
+  // adds methods. Redirects are followed for GET and HEAD only, each hop rechecked.
   resource http {
-    get: func(path: string) -> result<list<u8>, http-err>;
+    get: func(path: string) -> result<list<u8>, http-err>;              // a non-2xx status is status(n)
+    // A non-2xx status is ok (the program reads `status`); a method not granted is denied; the
+    // body at most 8 MB (else too-large); the response as `get`'s limits.
+    send: func(method: string, path: string, headers: list<string>, body: list<u8>) -> result<http-response, http-err>;
+    // `reqs` issued at once, each checked, counted and audited as a `send`; results in list order
+    // whatever finished first. At most 64 a batch, else every result is invalid and nothing is sent.
+    send-all: func(reqs: list<http-request>) -> list<result<http-response, http-err>>;
   }
 }
 

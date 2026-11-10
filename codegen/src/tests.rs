@@ -50,17 +50,43 @@ fn every_capability_method_compiles() {
     let mut body = String::new();
     for c in &caps.caps {
         for (method, params, _) in &c.methods {
-            fn arg(t: &lang::check::Ty) -> String {
+            // A built-in struct's field type as written (`List<Str>`), as a literal.
+            fn field(t: &lang::ast::Type) -> String {
+                let lang::ast::TypeKind::Named(name, args) = &t.kind else {
+                    panic!("a field of type {t:?}")
+                };
+                match name.as_str() {
+                    "Str" => "\"a\"".into(),
+                    "Bytes" => "\"a\".to_bytes()".into(),
+                    "Int" => "1".into(),
+                    "List" => format!("[{}]", field(&args[0])),
+                    n => panic!("a field of type {n}"),
+                }
+            }
+            fn arg(caps: &lang::CapTable, t: &lang::check::Ty) -> String {
                 match t {
                     lang::check::Ty::Str => "\"a\"".into(),
                     lang::check::Ty::Bytes => "\"a\".to_bytes()".into(),
                     lang::check::Ty::Int => "1".into(),
-                    lang::check::Ty::List(_) => "[\"a\"]".into(),
-                    lang::check::Ty::Option(t) => format!("Some({})", arg(t)),
+                    lang::check::Ty::List(t) => format!("[{}]", arg(caps, t)),
+                    lang::check::Ty::Option(t) => format!("Some({})", arg(caps, t)),
+                    lang::check::Ty::Struct(name, _) => {
+                        let s = caps
+                            .structs
+                            .iter()
+                            .find(|s| s.name == *name)
+                            .expect("a built-in struct");
+                        let fields: Vec<String> = s
+                            .fields
+                            .iter()
+                            .map(|f| format!("{}: {}", f.name, field(&f.ty)))
+                            .collect();
+                        format!("{name} {{ {} }}", fields.join(", "))
+                    }
                     t => panic!("a test argument of type {t:?}"),
                 }
             }
-            let args: Vec<String> = params.iter().map(arg).collect();
+            let args: Vec<String> = params.iter().map(|t| arg(&caps, t)).collect();
             body += &format!(
                 "    let r{calls} = {}.{method}({});\n",
                 c.name.to_lowercase(),
@@ -73,7 +99,7 @@ fn every_capability_method_compiles() {
     let src = format!("fn main({}) {{\n{body}}}", params.join(", "));
     let wasm = compile(&module(&src)).unwrap();
     wasmparser::Validator::new().validate_all(&wasm.component).unwrap();
-    assert_eq!(calls, 32);
+    assert_eq!(calls, 34);
 }
 
 #[test]

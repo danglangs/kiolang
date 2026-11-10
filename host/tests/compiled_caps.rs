@@ -178,6 +178,42 @@ fn http_errors_match_the_interpreter() {
     assert_eq!(got, "[Err(HttpErr::Denied), Err(HttpErr::Denied)]");
 }
 
+/// H16, H16b: `send` and `send_all` against an origin that refuses connections: the host's
+/// checks (method, grant, headers, batch size) and the connection failure agree both ways, and
+/// a response struct and a batch's list are built the same.
+#[test]
+fn http_send_matches_the_interpreter() {
+    let src = r#"fn main(h: Http) -> List<Result<HttpResponse, HttpErr>> {
+        let req = |m: Str, p: Str| HttpRequest { method: m, path: p, headers: ["a: b"], body: "x".to_bytes(), timeout_ms: 1 };
+        let mut out = [
+            h.send("GET", "/x", [], "".to_bytes()),
+            h.send("POST", "/x", [], "".to_bytes()),
+            h.send("PUT", "/x", ["bad"], "".to_bytes()),
+            h.send("get", "/x", [], "".to_bytes()),
+            h.send("GET", "x", [], "".to_bytes()),
+        ];
+        for r in h.send_all([req("GET", "/a"), req("DELETE", "/b"), req("PUT", "/c"), req("GET", "nope")]) { out.push(r); }
+        let mut many: List<HttpRequest> = [];
+        for i in 0..65 { many.push(req("GET", "/")); }
+        for r in h.send_all(many).slice(0, 2) { out.push(r); }
+        out
+    }"#;
+    let o = || {
+        let mut origin = Origin::parse("http://127.0.0.1:1").unwrap();
+        origin.allow_methods("PUT").unwrap();
+        vec![("h".to_string(), origin)]
+    };
+    let mut c = Kio::new(Limits::default()).unwrap();
+    let got = c.run_with(src, vec![], o()).unwrap().unwrap().value;
+    let mut i = Interp::new(Limits::default()).unwrap();
+    let want = i.run_with(src, vec![], o()).unwrap().unwrap().value;
+    assert_eq!((got.as_str(), c.import_calls()), (want.as_str(), i.import_calls()));
+    assert_eq!(c.import_calls(), 5 + 4 + 1);
+    let d = "Err(HttpErr::Denied)";
+    let v = "Err(HttpErr::Invalid)";
+    assert_eq!(got, format!("[{d}, {d}, {v}, {v}, {d}, {d}, {d}, {d}, {d}, {v}, {v}]"));
+}
+
 /// Quotas and the report check stop a compiled run with the interpreter's message.
 #[test]
 fn quotas_and_the_report_check_stop_a_compiled_run() {

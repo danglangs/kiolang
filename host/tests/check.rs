@@ -459,21 +459,53 @@ fn overlong_path_is_invalid() {
 }
 
 /// A one-thread HTTP/1.1 server on 127.0.0.1: `/ok` is 200 `hello`, `/big` is 10 MB + 1, `/hang`
-/// never answers, `/moved` redirects off-host, `/same` to `/ok`, `/port` and `/https` to another
-/// port and scheme, `/bare` redirects with no `Location`, `/hopN` redirects N times then `/ok`,
-/// anything else is 404. Returns the grant string.
+/// never answers, `/slow` answers after two seconds, `/echo` is 200 with the request line, headers
+/// and body as received (and two response headers), `/created` 201, `/error` 500 `boom`,
+/// `/moved` redirects off-host, `/same` to `/ok`, `/port` and `/https` to another port and
+/// scheme, `/bare` redirects with no `Location`, `/hopN` redirects N times then `/ok`, anything
+/// else is 404. Returns the grant string.
 fn serve() -> String {
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{BufRead, BufReader, Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let grant = format!("http://{}", listener.local_addr().unwrap());
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             std::thread::spawn(move || {
-                let mut lines = BufReader::new(&stream).lines().map(Result::unwrap);
-                let path = lines.next().unwrap().split(' ').nth(1).unwrap().to_string();
-                while lines.next().is_some_and(|l| !l.is_empty()) {}
+                let mut reader = BufReader::new(&stream);
+                let mut request = String::new();
+                reader.read_line(&mut request).unwrap();
+                let mut words = request.split_whitespace();
+                let (method, path) = (words.next().unwrap().to_string(), words.next().unwrap().to_string());
+                let mut headers = String::new();
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    let line = line.trim_end();
+                    if line.is_empty() {
+                        break;
+                    }
+                    if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length: ") {
+                        length = n.parse().unwrap();
+                    }
+                    headers += line;
+                    headers.push('\n');
+                }
+                let mut sent = vec![0; length];
+                reader.read_exact(&mut sent).unwrap();
                 let (head, body): (String, Vec<u8>) = match path.as_str() {
                     "/ok" => ("200 OK".into(), b"hello".to_vec()),
+                    "/echo" => {
+                        let mut body = format!("{method} {path}\n{headers}\n").into_bytes();
+                        body.extend(sent);
+                        ("200 OK\r\nX-Echo: yes\r\nSet-Thing: a".into(), body)
+                    }
+                    "/created" => ("201 Created".into(), b"made".to_vec()),
+                    "/error" => ("500 Internal Server Error".into(), b"boom".to_vec()),
+                    "/slow" => {
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        ("200 OK".into(), b"slow".to_vec())
+                    }
                     "/big" => ("200 OK".into(), vec![b'x'; (10 << 20) + 1]),
                     "/moved" => ("302 Found\r\nLocation: http://evil.com/x".into(), vec![]),
                     "/same" => ("302 Found\r\nLocation: /ok".into(), vec![]),
@@ -683,6 +715,424 @@ fn http_grant_rules() {
     assert_eq!(run(&["h", "h"])[0].message, "grant `h` is given more than once");
     assert_eq!(run(&["h", "x"])[0].message, "grant `x` is not a parameter of `main`");
     assert_eq!(run(&[])[0].message, "no grant for `h: Http`");
+}
+
+/// `main(h: Http) -> R { body }` compiled, on the server at `grant` with `methods` added to the
+/// grant; the printed value.
+fn send(grant: &str, methods: &str, ret: &str, body: &str) -> String {
+    let src = format!("fn main(h: Http) -> {ret} {{ {body} }}");
+    let mut kio = Kio::new(Limits::default()).unwrap();
+    kio.run_with(&src, vec![], vec![("h".into(), granted(grant, methods))])
+        .unwrap()
+        .unwrap()
+        .value
+}
+
+fn granted(grant: &str, methods: &str) -> kio_host::Origin {
+    let mut origin = kio_host::Origin::parse(grant).unwrap();
+    if !methods.is_empty() {
+        origin.allow_methods(methods).unwrap();
+    }
+    origin
+}
+
+const RESPONSE: &str = "Result<HttpResponse, HttpErr>";
+
+/// H16: `send` with each method; a method not granted is `denied`, one that is not a method is
+/// `invalid`; a non-2xx status is `Ok` with its status; `GET` needs no `--http-methods`.
+#[test]
+fn http_send_methods_and_statuses() {
+    let g = serve();
+    let empty = r#""".to_bytes()"#;
+    let status = |call: &str| {
+        send(
+            &g,
+            "POST,PUT,PATCH,DELETE,HEAD,OPTIONS",
+            "Result<Int, HttpErr>",
+            &format!("Ok({call}?.status)"),
+        )
+    };
+    for m in ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] {
+        assert_eq!(
+            status(&format!(r#"h.send("{m}", "/ok", [], {empty})"#)),
+            "Ok(200)",
+            "{m}"
+        );
+    }
+    assert_eq!(
+        status(&format!(r#"h.send("POST", "/created", [], {empty})"#)),
+        "Ok(201)"
+    );
+    assert_eq!(status(&format!(r#"h.send("GET", "/error", [], {empty})"#)), "Ok(500)");
+    assert_eq!(status(&format!(r#"h.send("GET", "/nope", [], {empty})"#)), "Ok(404)");
+    let text = |methods: &str, call: &str| {
+        send(
+            &g,
+            methods,
+            "Result<Str, HttpErr>",
+            &format!("Ok({call}?.body.to_str())"),
+        )
+    };
+    assert_eq!(text("", r#"h.send("GET", "/ok", [], "".to_bytes())"#), "Ok(\"hello\")");
+    assert_eq!(
+        text("", r#"h.send("GET", "/error", [], "".to_bytes())"#),
+        "Ok(\"boom\")"
+    );
+    assert_eq!(text("HEAD", r#"h.send("HEAD", "/ok", [], "".to_bytes())"#), "Ok(\"\")");
+    for m in ["POST", "PUT", "DELETE"] {
+        let call = format!(r#"h.send("{m}", "/ok", [], {empty})"#);
+        assert_eq!(text("", &call), "HttpErr::Denied", "{m} without the grant");
+        assert_eq!(
+            text("POST,PUT", &call),
+            if m == "DELETE" {
+                "HttpErr::Denied"
+            } else {
+                "Ok(\"hello\")"
+            }
+        );
+    }
+    for m in ["get", "Post", "PROPFIND", "", "GET ", "GE\nT"] {
+        let call = format!(r#"h.send("{}", "/ok", [], {empty})"#, m.replace('\n', "\\n"));
+        assert_eq!(text("POST", &call), "HttpErr::Invalid", "{m:?}");
+    }
+    // A bad path is `denied` as for `get`; the body is sent and echoed.
+    assert_eq!(
+        text("POST", r#"h.send("POST", "http://evil.com/", [], "".to_bytes())"#),
+        "HttpErr::Denied"
+    );
+    let echoed = text("POST", r#"h.send("POST", "/echo", [], "payload".to_bytes())"#);
+    assert!(
+        echoed.starts_with("Ok(\"POST /echo\\n") && echoed.ends_with("\\n\\npayload\")"),
+        "{echoed}"
+    );
+    // A POST without a body says so; nothing is chunked.
+    let echoed = text("POST", r#"h.send("POST", "/echo", [], "".to_bytes())"#);
+    assert!(
+        echoed.contains("\\ncontent-length: 0\\n") && !echoed.contains("chunked"),
+        "{echoed}"
+    );
+}
+
+/// H16: request headers reach the server (names lowercased), response headers come back as
+/// `name: value` with lowercase names in order; a header the host refuses is `invalid`.
+#[test]
+fn http_send_headers() {
+    let g = serve();
+    let echoed = send(
+        &g,
+        "POST",
+        "Result<Str, HttpErr>",
+        r#"Ok(h.send("POST", "/echo", ["X-Token: abc", "content-type: text/plain", "accept:  a, b "], "hi".to_bytes())?.body.to_str())"#,
+    );
+    for want in [
+        "\\nx-token: abc\\n",
+        "\\ncontent-type: text/plain\\n",
+        "\\naccept: a, b\\n",
+        "\\ncontent-length: 2\\n",
+    ] {
+        assert!(echoed.contains(want), "{want} in {echoed}");
+    }
+    let headers = send(
+        &g,
+        "",
+        "Result<List<Str>, HttpErr>",
+        r#"Ok(h.send("GET", "/echo", [], "".to_bytes())?.headers)"#,
+    );
+    assert!(
+        headers.starts_with(r#"Ok(["x-echo: yes", "set-thing: a", "content-length: "#)
+            && headers.ends_with(r#""connection: close"])"#),
+        "{headers}"
+    );
+    let bad = [
+        "X-A: a\\r\\nX-B: b",
+        "X-A: a\\nb",
+        "NoColon",
+        "name:value",
+        ": v",
+        "bad name: v",
+        "Host: evil.com",
+        "host: evil.com",
+        "Content-Length: 0",
+        "Transfer-Encoding: chunked",
+        "Connection: close",
+        "Upgrade: h2c",
+        "TE: trailers",
+        "Trailer: x",
+        "Keep-Alive: 1",
+        "Proxy-Authorization: x",
+        "X-A: a\\0",
+    ];
+    for h in bad {
+        let r = send(
+            &g,
+            "",
+            RESPONSE,
+            &format!(r#"h.send("GET", "/ok", ["{h}"], "".to_bytes())"#),
+        );
+        assert_eq!(r, "HttpErr::Invalid", "{h}");
+    }
+    let del = r#"let mut b = "X-A: a".to_bytes(); b.push(127); h.send("GET", "/ok", [b.to_str()], "".to_bytes())"#;
+    assert_eq!(send(&g, "", RESPONSE, del), "HttpErr::Invalid");
+    let many = r#"let mut hs: List<Str> = []; for i in 0..65 { hs.push("x-" + i.to_str() + ": a"); } h.send("GET", "/ok", hs, "".to_bytes())"#;
+    assert_eq!(send(&g, "", RESPONSE, many), "HttpErr::Invalid");
+    let long = r#"let mut v = "a"; for i in 0..13 { v = v + v; } h.send("GET", "/ok", ["x: " + v], "".to_bytes())"#;
+    assert_eq!(send(&g, "", RESPONSE, long), "HttpErr::Invalid"); // 8,195 bytes
+    let fits = r#"let mut v = "a"; for i in 0..12 { v = v + v; } Ok(h.send("GET", "/ok", ["x: " + v], "".to_bytes())?.status)"#;
+    assert_eq!(send(&g, "", "Result<Int, HttpErr>", fits), "Ok(200)");
+}
+
+/// H16: a body over 8 MB is `too-large` and nothing is sent; one at the cap goes.
+#[test]
+fn http_send_body_limit() {
+    let g = serve();
+    let big = |extra: &str| {
+        format!(
+            r#"let mut b = "x".to_bytes(); for i in 0..23 {{ b.extend(b); }} {extra} Ok(h.send("POST", "/created", [], b)?.status)"#
+        )
+    };
+    assert_eq!(send(&g, "POST", "Result<Int, HttpErr>", &big("")), "Ok(201)");
+    assert_eq!(
+        send(&g, "POST", "Result<Int, HttpErr>", &big("b.push(1);")),
+        "HttpErr::TooLarge"
+    );
+    let mut kio = Kio::new(Limits::default()).unwrap();
+    let src = format!("fn main(h: Http) -> Result<Int, HttpErr> {{ {} }}", big("b.push(1);"));
+    kio.run_with(&src, vec![], vec![("h".into(), granted(&g, "POST"))])
+        .unwrap()
+        .unwrap();
+    assert_eq!(kio.import_calls(), 1);
+}
+
+/// H16: `send` follows a redirect for GET and HEAD only, within the origin and up to 5 hops,
+/// each a counted call; any other redirect is the response, with its `location`.
+#[test]
+fn http_send_redirects() {
+    let g = serve();
+    let status = |methods: &str, m: &str, path: &str| {
+        send(
+            &g,
+            methods,
+            "Result<Int, HttpErr>",
+            &format!(r#"Ok(h.send("{m}", "{path}", [], "".to_bytes())?.status)"#),
+        )
+    };
+    assert_eq!(status("", "GET", "/same"), "Ok(200)");
+    assert_eq!(status("HEAD", "HEAD", "/same"), "Ok(200)");
+    assert_eq!(status("", "GET", "/hop4"), "Ok(200)");
+    assert_eq!(status("POST", "POST", "/same"), "Ok(302)");
+    for p in ["/moved", "/port", "/https", "/bare"] {
+        assert_eq!(status("", "GET", p), "Ok(302)", "{p}");
+    }
+    assert_eq!(status("", "GET", "/hop5"), "Ok(307)");
+    let location = send(
+        &g,
+        "POST",
+        "Result<List<Str>, HttpErr>",
+        r#"Ok(h.send("POST", "/same", [], "".to_bytes())?.headers)"#,
+    );
+    assert!(location.starts_with(r#"Ok(["location: /ok""#), "{location}");
+    let calls = |path: &str| {
+        let src = format!(r#"fn main(h: Http) -> Int {{ let r = h.send("GET", "{path}", [], "".to_bytes()); 0 }}"#);
+        let mut kio = Kio::new(Limits::default()).unwrap();
+        kio.run_with(&src, vec![], vec![("h".into(), granted(&g, ""))])
+            .unwrap()
+            .unwrap();
+        kio.import_calls()
+    };
+    assert_eq!(calls("/hop2"), calls("/ok") + 3);
+}
+
+/// An audit log in memory.
+#[derive(Clone, Default)]
+struct Log(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Log {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Log {
+    fn lines(&self) -> Vec<String> {
+        String::from_utf8(self.0.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .map(String::from)
+            .collect()
+    }
+}
+
+/// H16: the audit line of a `send` holds the method, path, status, byte counts and the request
+/// header names, never a value; the grant's methods are in the header.
+#[test]
+fn http_send_is_audited_without_header_values() {
+    let g = serve();
+    let src = r#"fn main(h: Http) -> Result<Int, HttpErr> {
+        Ok(h.send("POST", "/echo", ["Authorization: Bearer secret-token-xyz", "content-type: text/plain"], "hi".to_bytes())?.status)
+    }"#;
+    let log = Log::default();
+    let mut kio = Kio::new(Limits::default()).unwrap();
+    kio.audit(log.clone(), vec![]);
+    let out = kio
+        .run_with(src, vec![], vec![("h".into(), granted(&g, "post,PUT"))])
+        .unwrap()
+        .unwrap();
+    assert_eq!(out.value, "Ok(200)");
+    let lines = log.lines();
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert!(
+        lines[0].contains(&format!(r#""kind":"Http","target":"{g} methods=GET,POST,PUT""#)),
+        "{}",
+        lines[0]
+    );
+    let call = &lines[1];
+    for want in [
+        r#""method":"send","arg":"/echo","bytes":"#,
+        r#""result":"ok","http":"POST","headers":["authorization","content-type"],"sent":2,"status":200,"received":"#,
+    ] {
+        assert!(call.contains(want), "{want} in {call}");
+    }
+    assert!(!lines.join("\n").contains("secret"), "{lines:?}");
+    // A refused request is audited before the network: the method, and no header names.
+    let src = r#"fn main(h: Http) -> Result<Int, HttpErr> { Ok(h.send("DELETE", "/echo", ["Authorization: Bearer s3cret"], "".to_bytes())?.status) }"#;
+    let log = Log::default();
+    let mut kio = Kio::new(Limits::default()).unwrap();
+    kio.audit(log.clone(), vec![]);
+    kio.run_with(src, vec![], vec![("h".into(), granted(&g, ""))])
+        .unwrap()
+        .unwrap();
+    let call = &log.lines()[1];
+    assert!(call.contains(r#""result":"denied","http":"DELETE","ms":"#), "{call}");
+    assert!(!call.contains("s3cret"), "{call}");
+}
+
+/// H16b: `send_all` answers in list order whatever finished first, runs its requests at once,
+/// times out one request at its position, and refuses a method inside the batch as `send`
+/// would; the interpreter agrees.
+#[test]
+fn http_send_all() {
+    let g = serve();
+    let req = |m: &str, path: &str, ms: u32| {
+        format!(
+            r#"HttpRequest {{ method: "{m}", path: "{path}", headers: [], body: "".to_bytes(), timeout_ms: {ms} }}"#
+        )
+    };
+    let src = format!(
+        "fn main(h: Http) -> List<Result<Str, HttpErr>> {{ h.send_all([{}, {}, {}, {}, {}, {}]).map(|r| r.map(|r| r.status.to_str() + \" \" + r.body.to_str())) }}",
+        req("GET", "/slow", 0),
+        req("GET", "/ok", 0),
+        req("GET", "/slow", 0),
+        req("GET", "/hang", 300),
+        req("POST", "/ok", 0),
+        req("DELETE", "/ok", 0),
+    );
+    let want = r#"[Ok("200 slow"), Ok("200 hello"), Ok("200 slow"), Err(HttpErr::Timeout), Ok("200 hello"), Err(HttpErr::Denied)]"#;
+    let start = std::time::Instant::now();
+    let mut kio = Kio::new(Limits::default()).unwrap();
+    let out = kio
+        .run_with(&src, vec![], vec![("h".into(), granted(&g, "POST"))])
+        .unwrap()
+        .unwrap();
+    assert_eq!(out.value, want);
+    // Two 2 s requests in parallel, not 4 s in turn; the margin covers compiling under load.
+    assert!(
+        start.elapsed() < std::time::Duration::from_millis(3500),
+        "{:?}",
+        start.elapsed()
+    );
+    assert_eq!(kio.import_calls(), 6);
+    let mut interp = kio_host::Interp::new(Limits::default()).unwrap();
+    let out = interp
+        .run_with(&src, vec![], vec![("h".into(), granted(&g, "POST"))])
+        .unwrap()
+        .unwrap();
+    assert_eq!(out.value, want);
+    assert_eq!(interp.import_calls(), 6);
+}
+
+/// H16b: a batch over 64 is `invalid` throughout and sends nothing; each request counts toward
+/// `--calls`; the audit log has one line per request with the batch id and index, then the
+/// batch's own.
+#[test]
+fn http_send_all_limits_and_audit() {
+    let g = serve();
+    let batch = |n: usize, m: &str| {
+        format!(
+            r#"fn main(h: Http) -> List<Result<Int, HttpErr>> {{ let mut rs: List<HttpRequest> = []; for i in 0..{n} {{ rs.push(HttpRequest {{ method: "{m}", path: "/ok", headers: [], body: "".to_bytes(), timeout_ms: 0 }}); }} h.send_all(rs).map(|r| r.map(|r| r.status)) }}"#
+        )
+    };
+    let mut kio = Kio::new(Limits::default()).unwrap();
+    let out = kio
+        .run_with(&batch(65, "GET"), vec![], vec![("h".into(), granted(&g, ""))])
+        .unwrap()
+        .unwrap();
+    assert_eq!(out.value, format!("[{}]", vec!["Err(HttpErr::Invalid)"; 65].join(", ")));
+    assert_eq!(kio.import_calls(), 1);
+    let mut kio = Kio::new(Limits::default()).unwrap();
+    let out = kio
+        .run_with(&batch(64, "GET"), vec![], vec![("h".into(), granted(&g, ""))])
+        .unwrap()
+        .unwrap();
+    assert_eq!(out.value, format!("[{}]", vec!["Ok(200)"; 64].join(", ")));
+    assert_eq!(kio.import_calls(), 64);
+    let limits = Limits {
+        calls: 2,
+        ..Limits::default()
+    };
+    let mut kio = Kio::new(limits).unwrap();
+    let r = kio.run_with(&batch(3, "GET"), vec![], vec![("h".into(), granted(&g, ""))]);
+    assert_eq!(
+        kio.explain(&r.unwrap_err()).unwrap(),
+        "too many host calls (limit 2; raise it with --calls)"
+    );
+    let log = Log::default();
+    let mut kio = Kio::new(Limits::default()).unwrap();
+    kio.audit(log.clone(), vec![]);
+    let src = format!(
+        r#"fn main(h: Http) -> Int {{ let a = h.send_all([{}, {}]); let b = h.send_all([{}]); 0 }}"#,
+        r#"HttpRequest { method: "GET", path: "/ok", headers: ["X-A: 1"], body: "".to_bytes(), timeout_ms: 0 }"#,
+        r#"HttpRequest { method: "POST", path: "/nope", headers: [], body: "".to_bytes(), timeout_ms: 0 }"#,
+        r#"HttpRequest { method: "GET", path: "/error", headers: [], body: "".to_bytes(), timeout_ms: 0 }"#,
+    );
+    kio.run_with(&src, vec![], vec![("h".into(), granted(&g, ""))])
+        .unwrap()
+        .unwrap();
+    let lines = log.lines();
+    assert_eq!(lines.len(), 7, "{lines:?}");
+    let wants = [
+        r#""seq":1,"cap":"h","kind":"Http","method":"send","arg":"/ok","bytes":5,"result":"ok","batch":1,"index":0,"http":"GET","headers":["x-a"],"sent":0,"status":200,"received":5,"ms":"#,
+        r#""seq":2,"cap":"h","kind":"Http","method":"send","arg":"/nope","bytes":0,"result":"denied","batch":1,"index":1,"http":"POST","ms":"#,
+        r#""seq":3,"cap":"h","kind":"Http","method":"send_all","arg":"2","bytes":5,"result":"ok","batch":1,"ms":"#,
+        r#""seq":4,"cap":"h","kind":"Http","method":"send","arg":"/error","bytes":4,"result":"ok","batch":2,"index":0,"http":"GET","headers":[],"sent":0,"status":500,"received":4,"ms":"#,
+        r#""seq":5,"cap":"h","kind":"Http","method":"send_all","arg":"1","bytes":4,"result":"ok","batch":2,"ms":"#,
+    ];
+    for (line, want) in lines[1..].iter().zip(wants) {
+        assert!(line.contains(want), "{want}\n in {line}");
+    }
+    assert!(
+        lines[6].contains(r#""event":"end","outcome":"ok","calls":3,"io":9"#),
+        "{}",
+        lines[6]
+    );
+}
+
+/// H16: `--http-methods` syntax.
+#[test]
+fn allow_methods() {
+    let mut o = kio_host::Origin::parse("example.com").unwrap();
+    o.allow_methods("post, put").unwrap();
+    o.allow_methods("POST,DELETE").unwrap();
+    for bad in ["FOO", "POST,", "", "GET PUT", "PROPFIND"] {
+        let e = kio_host::Origin::parse("example.com")
+            .unwrap()
+            .allow_methods(bad)
+            .unwrap_err();
+        assert!(e.contains("expected a list of GET, HEAD, POST"), "{bad}: {e}");
+    }
 }
 
 /// N1: grant syntax.

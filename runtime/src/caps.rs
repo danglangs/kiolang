@@ -19,7 +19,7 @@ use crate::entry::kio::caps::clock::Clock;
 use crate::entry::kio::caps::fs::{Dir, IoErr};
 use crate::entry::kio::caps::kv::{Kv, KvEntry, KvErr};
 use crate::entry::kio::caps::log::{Log, LogErr};
-use crate::entry::kio::caps::net::{Http, HttpErr};
+use crate::entry::kio::caps::net::{Http, HttpErr, HttpRequest, HttpResponse};
 use crate::entry::kio::caps::rng::Rng;
 use crate::entry::kio::caps::web::Incoming;
 use crate::entry::kio::caps::ws::{WsErr, WsMessage, WsSend};
@@ -247,6 +247,17 @@ pub unsafe extern "C" fn rt_cap_dir_exists(ret: u32, h: u32, path: u32) -> u32 {
     result(ret, in_place(|| d.exists(path)), |_, b| b as u64, io_err)
 }
 
+/// `Err(e)` of `Result` descriptor `ret`.
+fn http_err(t: &Table, ret: u32, e: HttpErr) -> u32 {
+    match e {
+        HttpErr::Denied => err(t, ret, "Denied", None),
+        HttpErr::Timeout => err(t, ret, "Timeout", None),
+        HttpErr::TooLarge => err(t, ret, "TooLarge", None),
+        HttpErr::Status(n) => err(t, ret, "Status", Some(n.into())),
+        HttpErr::Invalid => err(t, ret, "Invalid", None),
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rt_cap_http_get(ret: u32, h: u32, path: u32) -> u32 {
     // SAFETY: the contract above.
@@ -254,11 +265,104 @@ pub unsafe extern "C" fn rt_cap_http_get(ret: u32, h: u32, path: u32) -> u32 {
     let t = table();
     match in_place(|| c.get(path)) {
         Ok(b) => ok(t, ret, to_slot(bytes_obj(b))),
-        Err(HttpErr::Denied) => err(t, ret, "Denied", None),
-        Err(HttpErr::Timeout) => err(t, ret, "Timeout", None),
-        Err(HttpErr::TooLarge) => err(t, ret, "TooLarge", None),
-        Err(HttpErr::Status(n)) => err(t, ret, "Status", Some(n.into())),
+        Err(e) => http_err(t, ret, e),
     }
+}
+
+/// The text of the `Str` in slot value `s`.
+///
+/// # Safety
+/// `s` holds a live `Str` that outlives `'a`.
+unsafe fn slot_text<'a>(s: u64) -> &'a str {
+    // SAFETY: the caller's guarantee; a `Str` is UTF-8.
+    unsafe { core::str::from_utf8_unchecked(obj::bytes(obj::from_slot(s))) }
+}
+
+/// A `List<Str>` argument's strings, copied (wit-bindgen's binding takes `&[String]`).
+///
+/// # Safety
+/// `l` is a live `List<Str>` that outlives the call.
+unsafe fn strings(l: u32) -> Vec<String> {
+    // SAFETY: the caller's guarantee; each element is a live `Str`.
+    unsafe { obj::elems(ptr(l)).iter().map(|&s| String::from(slot_text(s))).collect() }
+}
+
+/// A `Result<HttpResponse, HttpErr>` of descriptor `ret` as a slot value: the record's slots are
+/// the status, the headers (a `List<Str>` of the record's second slot type) and the body.
+fn http_result(t: &Table, ret: u32, r: Result<HttpResponse, HttpErr>) -> u64 {
+    let r = match r {
+        Ok(r) => r,
+        Err(e) => return to_slot(ptr(http_err(t, ret, e))),
+    };
+    let rec = payload(t, ret, 0);
+    let Desc::Record { slots, .. } = t.desc(rec) else {
+        panic!("not a record")
+    };
+    let headers = t.slots(slots)[1];
+    let p = obj::alloc(t, rec, 0);
+    // SAFETY: `HttpResponse` has three slots; the headers and body take the objects' references.
+    unsafe {
+        *obj::slot(t, p, 0) = u64::from(r.status);
+        *obj::slot(t, p, 1) = to_slot(strs(headers, r.headers));
+        *obj::slot(t, p, 2) = to_slot(bytes_obj(r.body));
+    }
+    to_slot(ptr(ok(t, ret, to_slot(p))))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_cap_http_send(ret: u32, h: u32, method: u32, path: u32, headers: u32, body: u32) -> u32 {
+    // SAFETY: the contract above.
+    let (c, method, path, headers, body) = unsafe {
+        (
+            handle(h, Http::from_handle),
+            text(method),
+            text(path),
+            strings(headers),
+            bytes(body),
+        )
+    };
+    let r = in_place(|| c.send(method, path, &headers, body));
+    addr(obj::from_slot(http_result(table(), ret, r)))
+}
+
+/// An `HttpRequest` argument's fields, copied. A `timeout_ms` outside `u32` is passed as
+/// `u32::MAX`, which the host caps at the grant's timeout, as it does any value past it.
+///
+/// # Safety
+/// `p` is a live `HttpRequest` that outlives the call.
+unsafe fn request(t: &Table, p: *mut Header) -> HttpRequest {
+    // SAFETY: the caller's guarantee; the slots are a `Str`, a `Str`, a `List<Str>`, a `Bytes`
+    // and an `Int`, in field order.
+    unsafe {
+        HttpRequest {
+            method: String::from(slot_text(*obj::slot(t, p, 0))),
+            path: String::from(slot_text(*obj::slot(t, p, 1))),
+            headers: strings(addr(obj::from_slot(*obj::slot(t, p, 2)))),
+            body: obj::bytes(obj::from_slot(*obj::slot(t, p, 3))).to_vec(),
+            timeout_ms: u32::try_from(*obj::slot(t, p, 4) as i64).unwrap_or(u32::MAX),
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_cap_http_send_all(ret: u32, h: u32, reqs: u32) -> u32 {
+    let t = table();
+    // SAFETY: the contract above; `reqs` is a `List<HttpRequest>`.
+    let (c, reqs) = unsafe {
+        let reqs: Vec<HttpRequest> = obj::elems(ptr(reqs))
+            .iter()
+            .map(|&r| request(t, obj::from_slot(r)))
+            .collect();
+        (handle(h, Http::from_handle), reqs)
+    };
+    let rs = in_place(|| c.send_all(&reqs));
+    let Desc::List { elem } = t.desc(ret) else {
+        panic!("not a list")
+    };
+    addr(obj::new_list(
+        ret,
+        rs.into_iter().map(|r| http_result(t, elem, r)).collect(),
+    ))
 }
 
 fn incoming(h: u32) -> ManuallyDrop<Incoming> {
