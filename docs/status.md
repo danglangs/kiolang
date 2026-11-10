@@ -59,6 +59,7 @@ Compiled-only kio covers the whole language and every capability. What real apps
 | L21, L22 | `Str.chars() -> List<Str>`, interpreted and compiled (`rt_str_chars`); `split("")`'s error names `s.chars()`; `for b in bytes`, lowered to an index loop (no codegen change) |
 | L23 | every parse error reported, up to 20: the lexer and parser step over Rust forms (`&`, lifetimes, `#[..]`, macros, tuples, `as`) and resume at the next statement or item; Rust type names in signatures reported beside them. A Rust-flavoured sample: 1 error before, 18 after; no cascades (each item alone is the test oracle) |
 | L24 | an assignment as a match arm (`Some(x) => n += x,`), parsed as the block `{ n += x; }`, as Rust; kiogen generates it. Harness 507 ran both ways, 504 agreed, 3 excluded by limits, 0 leaked |
+| L25 | an open branch (`None`, `Ok(..)`, `[]`, `Map::new()`) takes the type the other `if`/`match` branches settle, in any order: `if c { None } else { Some(1) }` checks unannotated. Checker only. Harness 509 ran both ways, 506 agreed, 3 excluded by limits, 0 leaked |
 
 ## Next
 

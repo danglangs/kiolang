@@ -2063,7 +2063,7 @@ fn builtins_that_take_functions_reject() {
             "`match` on the value, or convert it: `.ok_or(e)` makes an Option a Result",
         ),
         (
-            "fn main() { Some(\"1\").and_then(|s| if s == \"\" { None } else { s.parse_int() }); }".to_string(),
+            "fn main() { Some(\"1\").and_then(|s| if s == \"\" { None } else { None }); }".to_string(),
             "cannot tell the type of `None`",
             "None",
             "give the closure a type: `let f: fn(Str) -> Option<Int> = |s| ..;`, then `.and_then(f)`",
@@ -2209,4 +2209,48 @@ fn l24_assignment_arm_type() {
         (msg.as_str(), at.as_str()),
         ("`match` arms have different types: () and Int", "2")
     );
+}
+
+/// L25: an open branch takes the type the other branches settle, in any order.
+#[test]
+fn l25_open_branch_typed_from_the_other() {
+    let c = "fn main() { let c = true; let x = 1; ";
+    for body in [
+        "let a = if c { None } else { Some(1) }; let b: Option<Int> = a;",
+        "let a = if c { Some(1) } else { None }; let b: Option<Int> = a;",
+        "let a = if c { None } else if x > 1 { Some(1) } else { None }; let b: Option<Int> = a;",
+        "let a = if c { None } else if x > 1 { None } else { Some(1) }; let b: Option<Int> = a;",
+        "let a = match x { 0 => None, 1 => \"1\".parse_int(), _ => None }; let b: Option<Int> = a;",
+        "let a = match x { 0 => Some(1), _ => None }; let b: Option<Int> = a;",
+        "let a = match x { 0 => None, _ => Some(1) }; let b: Option<Int> = a;",
+        "let a = if c { Some(None) } else { Some(Some(1)) }; let b: Option<Option<Int>> = a;",
+        "let a = match x { 0 => Ok(1), _ => Some(2).ok_or(\"no\") }; let b: Result<Int, Str> = a;",
+        "let a = if c { Err(\"no\") } else { \"1\".parse_int().ok_or(\"bad\") }; let b: Result<Int, Str> = a;",
+        "let a = if c { [] } else { [1] }; let b: List<Int> = a;",
+        "let a = if c { Map::new() } else { let m: Map<Str, Int> = Map::new(); m }; let b: Map<Str, Int> = a;",
+        "let a = if let Some(_) = Some(x) { None } else { Some(1) }; let b: Option<Int> = a;",
+        "let a = match Some(x) { Some(y) => { let z = y; if z > 0 { None } else { None } }, None => Some(1) }; let b: Option<Int> = a;",
+    ] {
+        ok(&format!("{c}{body} }}"));
+    }
+    // The closure `and_then` takes: its `None` is typed by the other branch.
+    ok("fn main() { Some(\"1\").and_then(|s| if s == \"\" { None } else { s.parse_int() }); }");
+    // No branch settles it: as before, at the first open branch.
+    let add = "add a type: `let x: Option<Int> = None;`";
+    for src in [
+        "fn main() { let a = if true { None } else { None }; }",
+        "fn main() { let a = match 1 { 0 => None, _ => None }; }",
+        "fn f() -> Int { let a = match 1 { 0 => None, _ => return 1 }; 0 } fn main() {}",
+    ] {
+        let (msg, at) = reject(src);
+        assert_eq!(
+            (msg.as_str(), at.as_str()),
+            ("cannot tell the type of `None`", "None"),
+            "{src}"
+        );
+        assert_eq!(hint(src), add, "{src}");
+    }
+    // A settled branch that is no Option.
+    let (msg, at) = reject("fn main() { let a = if true { None } else { 1 }; }");
+    assert_eq!((msg.as_str(), at.as_str()), ("expected Int, found an Option", "None"));
 }

@@ -2814,15 +2814,17 @@ impl<'a> Checker<'a> {
             }
             ExprKind::If(cond, then, els) => {
                 want_expr(cond, &self.expr(cond, None)?, &Ty::Bool)?;
-                let t = self.block(then, expected)?;
-                self.else_branch(e, t, then, els.as_deref(), expected)
+                let first = self.else_first(then, els.as_deref(), expected)?;
+                let t = self.block(then, first.as_ref().map_or(expected, settled))?;
+                self.else_branch(e, (t, first), then, els.as_deref(), expected)
             }
             ExprKind::IfLet(pat, scrut, then, els) => {
                 let st = self.scrutinee(scrut, None)?;
+                let first = self.else_first(then, els.as_deref(), expected)?;
                 self.bind_pattern(pat, &st)?;
-                let t = self.block(then, expected)?;
+                let t = self.block(then, first.as_ref().map_or(expected, settled))?;
                 self.scopes.pop();
-                self.else_branch(e, t, then, els.as_deref(), expected)
+                self.else_branch(e, (t, first), then, els.as_deref(), expected)
             }
             ExprKind::Block(b) => self.block(b, expected),
             ExprKind::Call(callee, args) => self.call(e, callee, args, expected),
@@ -3337,11 +3339,23 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// The type of an `if` (`e`) whose then-block has type `t`, given its else branch.
+    /// Without an expected type, the type of the else branch of an `if` whose then-block is
+    /// open and the else branch is not, checked first so that the then-block can take it.
+    fn else_first(&mut self, then: &Block, els: Option<&Expr>, expected: Option<&Ty>) -> Result<Option<Ty>, Diag> {
+        match els {
+            Some(x) if expected.is_none() && self.open_block(then) && !self.open_value(x) => {
+                Ok(Some(self.expr(x, None)?))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// The type of an `if` (`e`) whose then-block has type `t`, given its else branch and,
+    /// from `else_first`, that branch's type if it was checked first.
     fn else_branch(
         &mut self,
         e: &Expr,
-        t: Ty,
+        (t, first): (Ty, Option<Ty>),
         then: &Block,
         els: Option<&Expr>,
         expected: Option<&Ty>,
@@ -3350,7 +3364,12 @@ impl<'a> Checker<'a> {
             want(then.span, &t, &Ty::Unit)?;
             return Ok(Ty::Unit);
         };
-        let f = self.expr(els, expected)?;
+        let f = match first {
+            Some(f) => f,
+            // An open else branch takes the then-block's type.
+            None if expected.is_none() && self.open_value(els) => self.expr(els, settled(&t))?,
+            None => self.expr(els, expected)?,
+        };
         if t == Ty::Never {
             Ok(f)
         } else if f == Ty::Never || t == f {
@@ -3399,6 +3418,10 @@ impl<'a> Checker<'a> {
         let tys = [st.clone()];
         let mut ty = Ty::Never;
         let mut rows = Vec::new();
+        // Without an expected type, open arms (`None`, `[]`, ..) are checked last, with the
+        // type the others settle, each in the scope its pattern bound.
+        let defer = expected.is_none() && !arms.iter().all(|a| self.open_value(&a.body));
+        let mut later = Vec::new();
         for arm in arms {
             let cover = self.bind_pattern(&arm.pat, &st)?;
             // Each alternative of the arm must match a value that no earlier one does.
@@ -3422,14 +3445,19 @@ impl<'a> Checker<'a> {
                 let hint = "earlier patterns match every value it matches; remove it";
                 return Err(err(span, "unreachable alternative".to_string(), Some(hint)));
             }
+            if defer && self.open_value(&arm.body) {
+                later.push((arm, self.scopes.pop().expect("pushed by bind_pattern")));
+                continue;
+            }
             let body = self.expr(&arm.body, expected)?;
             self.scopes.pop();
-            if ty == Ty::Never {
-                ty = body;
-            } else if body != Ty::Never && body != ty {
-                let msg = format!("`match` arms have different types: {ty} and {body}");
-                return Err(err(arm.body.span, msg, Some("every branch must have the same type")));
-            }
+            ty = join_arms(ty, body, arm)?;
+        }
+        for (arm, scope) in later {
+            self.scopes.push(scope);
+            let body = self.expr(&arm.body, settled(&ty))?;
+            self.scopes.pop();
+            ty = join_arms(ty, body, arm)?;
         }
         let Some(missing) = u.useful(&rows, &[Cover::All], &tys).map_err(too_complex)? else {
             return Ok(ty);
@@ -3930,6 +3958,21 @@ impl<'a> Checker<'a> {
         Ok(binds)
     }
 
+    /// Whether the value of `e` waits for an expected type: an open argument (`needs_expected`),
+    /// or a block, `if` or `match` all of whose branches are open.
+    fn open_value(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Block(b) => self.open_block(b),
+            ExprKind::If(_, t, Some(x)) | ExprKind::IfLet(_, _, t, Some(x)) => self.open_block(t) && self.open_value(x),
+            ExprKind::Match(_, arms) => arms.iter().all(|a| self.open_value(&a.body)),
+            _ => self.needs_expected(e),
+        }
+    }
+
+    fn open_block(&self, b: &Block) -> bool {
+        b.tail.as_ref().is_some_and(|t| self.open_value(t))
+    }
+
     /// Whether argument `a` takes its type from the parameter's: it is checked after the
     /// arguments that can fix the type parameters.
     fn needs_expected(&self, a: &Expr) -> bool {
@@ -4217,5 +4260,22 @@ impl<'a> Checker<'a> {
     /// Whether a value of `ty` can hold a function, which has no equality.
     fn has_fn(&self, ty: &Ty) -> bool {
         has_fn(ty, self.fields, self.variants, &mut HashSet::new())
+    }
+}
+
+/// `t` as the expected type of another branch: none if it never finishes.
+fn settled(t: &Ty) -> Option<&Ty> {
+    (*t != Ty::Never).then_some(t)
+}
+
+/// The type of a `match` so far, `ty`, joined with the type of `arm`'s body.
+fn join_arms(ty: Ty, body: Ty, arm: &Arm) -> Result<Ty, Diag> {
+    if ty == Ty::Never {
+        Ok(body)
+    } else if body != Ty::Never && body != ty {
+        let msg = format!("`match` arms have different types: {ty} and {body}");
+        Err(err(arm.body.span, msg, Some("every branch must have the same type")))
+    } else {
+        Ok(ty)
     }
 }

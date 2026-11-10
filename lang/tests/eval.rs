@@ -1807,3 +1807,34 @@ fn l24_assignment_arms() {
     // n = 0 + 3 - 1 - 1 = 1, then * 10 = 10; p.x = 7; xs[1] = 5.
     assert_eq!(int(src), Value::Int(22));
 }
+
+/// L25: an open branch (`None`, `Ok(..)`, `[]`, `Map::new()`) takes the type the others settle.
+#[test]
+fn l25_open_branch_typed_from_the_other() {
+    let src = "fn pick(c: Int) -> Int {
+                   let a = if c == 0 { None } else { Some(c) };
+                   let b = if c == 1 { None } else if c == 2 { Some(20) } else { None };
+                   let d = if c == 1 { None } else if c == 2 { None } else { Some(30) };
+                   let e = match c { 0 => None, 1 => \"7\".parse_int(), _ => Some(c) };
+                   let f = match c { 0 => Some(1), _ => None };
+                   let g = if c == 3 { Some(None) } else { Some(Some(c)) };
+                   let h = match c { 0 => Ok(5), _ => \"x\".parse_int().ok_or(\"bad\") };
+                   let o = Some(c);
+                   let i = match o {
+                       Some(x) => { let y = x + 1; if y > 2 { None } else { None } },
+                       None => Some(0),
+                   };
+                   let j = if let Some(_) = o { [] } else { [1, 2] };
+                   let k = if c == 0 { Map::new() } else { let mut m: Map<Str, Int> = Map::new(); m.insert(\"a\", c); m };
+                   let gv = match g { Some(Some(v)) => v, Some(None) => 100, None => 200 };
+                   let hv = match h { Ok(v) => v, Err(s) => s.len() };
+                   a.unwrap_or(-1) + b.unwrap_or(-2) + d.unwrap_or(-3) + e.unwrap_or(-4)
+                       + f.unwrap_or(-5) + gv + hv + i.unwrap_or(-6) + j.len() + k.len()
+               }
+               fn main() -> Int { pick(0) * 1000000 + pick(1) * 10000 + pick(2) * 100 + pick(3) }";
+    // pick(0): -1 -2 +30 -4 +1 +0 +5 -6 +0 +0 = 23
+    // pick(1): 1 -2 -3 +7 -5 +1 +3 -6 +0 +1 = -3
+    // pick(2): 2 +20 -3 +2 -5 +2 +3 -6 +0 +1 = 16
+    // pick(3): 3 -2 +30 +3 -5 +100 +3 -6 +0 +1 = 127
+    assert_eq!(int(src), Value::Int(23 * 1000000 - 3 * 10000 + 16 * 100 + 127));
+}
