@@ -96,10 +96,10 @@ def _maybe(src) -> Iterator[str | None]:
 
 @contextmanager
 def _program(src, modules: dict[str, str] | None) -> Iterator[str]:
-    """A path to run. A Path, or a str naming an existing file, is used as is; any other str
-    is source, written as `main.kio` in a temp dir. `mod web;` loads `web.kio` beside the
+    """A path to run. A `Path` (any `os.PathLike`) is used as is; a `str` is always source
+    (model output is never taken as a path), written as `main.kio` in a temp dir. `mod web;` loads `web.kio` beside the
     root file, so `modules` ({"web": text}) become `web.kio` there."""
-    if isinstance(src, os.PathLike) or (isinstance(src, str) and "\n" not in src and os.path.isfile(src)):
+    if isinstance(src, os.PathLike):
         if modules:
             raise ValueError("modules apply to source text; a path has its module files beside it")
         yield os.fspath(src)

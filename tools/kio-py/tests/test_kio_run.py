@@ -72,7 +72,8 @@ class Tests(unittest.TestCase):
         r = self.kio.check(p)
         self.assertTrue(r.ok)
         self.assertEqual(r.report, ["main : input read"])
-        self.assertTrue(self.kio.check(str(p)).ok)
+        self.assertFalse(self.kio.check(str(p)).ok)  # a str is source, never a path
+        self.assertTrue(self.kio.check(p).ok)
 
     def test_modules(self):
         root = "mod web;\nfn main() -> Int {\n  web::double(4)\n}\n"
