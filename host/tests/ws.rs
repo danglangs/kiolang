@@ -368,7 +368,7 @@ fn grant_rules_are_checked_at_startup() {
         "run",
         "../examples/serve/app.kio",
         "--dir",
-        "public=../examples/serve",
+        "public=../examples/tour/in",
         "--listen",
         "127.0.0.1:0",
         "--ws-origin",

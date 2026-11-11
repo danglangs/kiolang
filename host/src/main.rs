@@ -262,6 +262,41 @@ fn grants_refusal(path: &str, dirs: &[(String, String)], written: &[(String, &st
     None
 }
 
+/// Why a writable `--dir` is refused, if one is: it contains one of the program's `files` (the
+/// root file, then each module beside it), so the program could rewrite itself for the next run.
+/// The file and the name it was given are both checked: a symlink inside a `--dir` could be
+/// pointed elsewhere. A `:ro` dir (one of `read_only`) cannot write and is not refused.
+fn source_refusal(files: &[(String, String)], dirs: &[(String, String)], read_only: &[String]) -> Option<String> {
+    let root = std::path::Path::new(&files[0].0);
+    let dir = root.parent().unwrap_or(".".as_ref());
+    let paths = std::iter::once(root.to_path_buf()).chain(files[1..].iter().map(|(n, _)| dir.join(n)));
+    let places: Vec<_> = paths
+        .flat_map(|p| {
+            let parent = p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(".".as_ref());
+            let named = std::fs::canonicalize(parent)
+                .ok()
+                .zip(p.file_name())
+                .map(|(d, f)| d.join(f));
+            [std::fs::canonicalize(&p).ok(), named]
+                .into_iter()
+                .flatten()
+                .map(move |r| (r, p.clone()))
+        })
+        .collect();
+    for (d, path) in dirs.iter().filter(|(d, _)| !read_only.contains(d)) {
+        let Ok(granted) = std::fs::canonicalize(path) else {
+            continue;
+        };
+        if let Some((_, file)) = places.iter().find(|(r, _)| r.starts_with(&granted)) {
+            return Some(format!(
+                "`--dir {d}={path}` contains the program's own source (`{}`); it could rewrite itself for the next run\n  hint: keep the program outside every granted directory",
+                file.display()
+            ));
+        }
+    }
+    None
+}
+
 /// Apply one `--http-header name=Header:env:VAR` or `name=Header:file:PATH` to the grant `name`:
 /// the value is read now, once. A file's one trailing newline is dropped. The file must be a
 /// regular file outside every granted `dirs` (the program could read it) and not the file of a
@@ -599,6 +634,9 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
             Ok(d) => dirs.push((name.to_string(), d)),
             Err(e) => return fail(format!("--dir {name}={dir}: {e}")),
         }
+    }
+    if let Some(why) = source_refusal(&files, &dir_paths, &sources.read_only_dirs) {
+        return fail(why);
     }
     for (i, (name, list)) in http_methods.iter().enumerate() {
         if http_methods[..i].iter().any(|(n, _)| n == name) {
