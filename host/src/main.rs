@@ -16,11 +16,12 @@ fn cli() -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
         ["check", path] => return check(path),
-        ["check", path, "--base", base] => return check_base(path, base),
+        ["check", path, "--base", base] => return check_base(path, base, false),
+        ["check", path, "--base", base, "--detail"] => return check_base(path, base, true),
         ["mcp"] => return mcp::serve(),
         ["run", path, ref flags @ ..] => return run(path, flags),
         _ => eprintln!(
-            "kio: a capability-typed language; code names what it needs, the operator grants what that is.\n\nusage: kio check <prog.kio> [--base <old.kio>]\n       kio mcp\n       kio run <prog.kio> {USAGE}"
+            "kio: a capability-typed language; code names what it needs, the operator grants what that is.\n\nusage: kio check <prog.kio> [--base <old.kio> [--detail]]\n       kio mcp\n       kio run <prog.kio> {USAGE}"
         ),
     }
     2
@@ -66,35 +67,46 @@ fn check(path: &str) -> i32 {
 }
 
 /// The authority `path` adds over `base` and the authority it drops: exit 3 when any was added.
-fn check_base(path: &str, base: &str) -> i32 {
+/// One line per changed grant; then, with `detail` or when those lines do not show every
+/// addition, a blank line and one per changed function.
+fn check_base(path: &str, base: &str, detail: bool) -> i32 {
     let (old, new) = match (read_files(base), read_files(path)) {
         (Ok(o), Ok(n)) => (o, n),
         (Err(code), _) | (_, Err(code)) => return code,
     };
-    match kio_host::diff_files(&old, &new) {
-        Ok(lines) if lines.is_empty() => {
-            println!("no change in authority");
-            0
-        }
-        Ok(lines) => {
-            println!("{}", lines.join("\n"));
-            let added = lines.iter().filter(|l| l.starts_with('+')).count();
-            if added == 0 {
-                println!("authority removed only");
-                return 0;
-            }
-            println!(
-                "authority added: {added} line{} (exit 3)",
-                if added == 1 { "" } else { "s" }
-            );
-            3
-        }
+    let diff = match kio_host::diff_files(&old, &new) {
+        Ok(diff) => diff,
         Err((is_base, diags)) => {
             let (side, files) = if is_base { ("base", &old) } else { ("new", &new) };
             eprintln!("kio: the {side} program {} does not check", files[0].0);
-            print_diags(files, diags)
+            return print_diags(files, diags);
         }
+    };
+    if diff.grants.is_empty() && diff.funcs.is_empty() {
+        println!("no change in authority");
+        return 0;
     }
+    // A grant line adds authority when it has a `+`: no name, type or method has one.
+    let funcs = detail || (diff.added && !diff.grants.iter().any(|l| l.contains('+'))) || diff.grants.is_empty();
+    let mut out = diff.grants.clone();
+    if funcs {
+        if !out.is_empty() {
+            out.push(String::new());
+        }
+        out.extend(diff.funcs.iter().cloned());
+    }
+    println!("{}", out.join("\n"));
+    if !diff.added {
+        println!("authority removed only");
+        return 0;
+    }
+    let hint = if funcs || diff.funcs.is_empty() {
+        ""
+    } else {
+        "; --detail lists each function"
+    };
+    println!("authority added (exit 3){hint}");
+    3
 }
 
 /// Apply one `--http-header name=Header:env:VAR` or `name=Header:file:PATH` to the grant `name`:

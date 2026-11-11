@@ -480,7 +480,7 @@ fn flags_grant_from_env_and_file_and_the_report_names_sign() {
     let out = kio(&["check", &prog, "--base", &base], &[]);
     let diff = String::from_utf8(out.stdout).unwrap();
     assert!(
-        diff.contains("+ main: k sign") && diff.contains("- main: k verify"),
+        diff.starts_with("~ k: Hmac (+sign -verify)\n") && out.status.code() == Some(3),
         "{diff}"
     );
     // Ungranted: the hint names the flag.

@@ -4,7 +4,7 @@ The operator's and user's reference: every grant, limit and output of `kio run`.
 
 ```
 kio check <prog.kio>             the authority report, or errors with hints
-kio check <new.kio> --base <old.kio>   the authority new adds or drops; exit 3 if any added
+kio check <new.kio> --base <old.kio> [--detail]   grants new adds or drops; exit 3 if any added
 kio run <prog.kio> [grants] [limits] [--audit log] [--listen addr]
 kio mcp                          the MCP server (README, "Use from an agent")
 ```
@@ -156,7 +156,6 @@ The audit log has a line per call with the SQL (cut at 256 characters), the para
 ### --listen: HTTP and WebSockets
 
 A listening socket is a grant too. Each request runs in a fresh sandbox; `main` takes `req: Incoming, res: Outgoing` (any names) plus its other grants, `Http` included. `send` answers the client at once, and `main` may go on working under the request's limits (a webhook after the response, say).
-
 ```
 $ kio run examples/serve/app.kio --dir public=examples/tour/in --listen 127.0.0.1:8080
 main             : req body header_names header_values method target, res send, public read
@@ -213,19 +212,36 @@ Each run writes a `start` line (program hash, grants, limits), its calls, and an
 
 ## Reviewing authority in a pull request
 
-`kio check NEW --base OLD` diffs the two programs' reports: what a reviewer approves. Modules resolve beside each entry. `main`'s parameters come first, as each is a new grant; then each function's capability methods added (`+`) or dropped (`-`). A function on one side only counts in full, so one moved into a module shows as removed and added.
+`kio check NEW --base OLD` diffs the two programs' reports: what a reviewer approves. One line per grant (`main` parameter) whose authority changed, with the methods `main` reaches on it through any function: `+` a new grant, `~` methods gained (`+m`) or lost (`-m`) on one of the same name and type, `-` a removed grant (a changed type is one removed and one added).
 
 ```
 $ kio check app.kio --base old/app.kio
-+ main: grant hook: Http
-+ main: hook send
-+ notify: hook send, log write
-authority added: 3 lines (exit 3)
+~ req: Incoming (+body)
+~ db: Db (+query)
++ stripe: Hmac (verify)
+authority added (exit 3); --detail lists each function
 ```
 
-Exit 0: no authority added (`no change in authority`, or `authority removed only`). Exit 3: some added. Exit 1: a side does not check (the message names `base` or `new`).
+`--detail` adds a blank line, then each function's capability methods added (`+`) or dropped (`-`). A function on one side only counts in full, so one moved into a module shows as removed and added. The function lines are shown without `--detail` when the grant lines show no addition, as when a helper starts calling a method `main` already reached elsewhere (`+ summarize: fx get`) or a function `main` does not call gains one.
 
-`tools/authority-diff.sh BASE_REF ENTRY.kio` checks `BASE_REF` out with `git worktree add` into a temporary directory and diffs `ENTRY.kio` against it (`KIO` names the binary). In CI, as a GitHub Actions job step that fails a pull request adding authority until someone with the right to approve it does:
+```
+$ kio check app.kio --base old/app.kio --detail
+~ req: Incoming (+body)
+~ db: Db (+query)
++ stripe: Hmac (verify)
+
++ check_signature: stripe verify
++ handle: req body, db query, stripe verify
++ main: req body, db query, stripe verify
++ store: db query
+authority added (exit 3)
+```
+
+Exit 0: no authority added (`no change in authority`, or `authority removed only`). Exit 3: some added. Exit 1: a side does not check (the message names `base` or `new`). Exit 2: a file is missing.
+
+Each side's `mod NAME;` lines resolve to `NAME.kio` beside that side's entry, so an `old/app.kio` copied alone fails with `mod web: cannot read old/web.kio`: copy its modules beside it, or let `tools/authority-diff.sh` check the whole base out.
+
+`tools/authority-diff.sh BASE_REF ENTRY.kio [--detail]` checks `BASE_REF` out with `git worktree add` into a temporary directory and diffs `ENTRY.kio` against it (`KIO` names the binary). In CI, as a GitHub Actions job step that fails a pull request adding authority until someone with the right to approve it does:
 
 ```yaml
 - uses: actions/checkout@v4

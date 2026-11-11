@@ -14,10 +14,16 @@ fn side(root: &Path, side: &str, files: &[(&str, &str)]) -> String {
 
 /// `kio check new --base old`: exit code, stdout, stderr.
 fn diff(old: &[(&str, &str)], new: &[(&str, &str)]) -> (i32, String, String) {
+    diff_with(old, new, &[])
+}
+
+/// `kio check new --base old` followed by `flags`.
+fn diff_with(old: &[(&str, &str)], new: &[(&str, &str)], flags: &[&str]) -> (i32, String, String) {
     let t = tempfile::tempdir().unwrap();
     let (old, new) = (side(t.path(), "old", old), side(t.path(), "new", new));
     let out = Command::new(env!("CARGO_BIN_EXE_kio"))
         .args(["check", &new, "--base", &old])
+        .args(flags)
         .output()
         .unwrap();
     let s = |b: Vec<u8>| String::from_utf8(b).unwrap();
@@ -43,9 +49,14 @@ fn added_method_exits_3() {
         r#"links.delete("k")?;"#,
         r#"links.delete("k")?; let _k = links.keys("")?;"#,
     );
-    let want = "+ delete: links keys\n+ main: links keys\nauthority added: 2 lines (exit 3)\n";
+    let want = "~ links: Kv (+keys)\nauthority added (exit 3); --detail lists each function\n";
     assert_eq!(
         diff(&[("app.kio", OLD)], &[("app.kio", &new)]),
+        (3, want.into(), "".into())
+    );
+    let want = "~ links: Kv (+keys)\n\n+ delete: links keys\n+ main: links keys\nauthority added (exit 3)\n";
+    assert_eq!(
+        diff_with(&[("app.kio", OLD)], &[("app.kio", &new)], &["--detail"]),
         (3, want.into(), "".into())
     );
 }
@@ -53,10 +64,29 @@ fn added_method_exits_3() {
 #[test]
 fn removed_method_exits_0() {
     let new = OLD.replace(r#"let _w = log.write("gone"); "#, "");
-    let want = "- delete: log write\n- main: log write\nauthority removed only\n";
+    let want = "~ log: Log (-write)\nauthority removed only\n";
     assert_eq!(
         diff(&[("app.kio", OLD)], &[("app.kio", &new)]),
         (0, want.into(), "".into())
+    );
+}
+
+#[test]
+fn function_lines_shown_when_no_grant_line_shows_the_addition() {
+    // `main` never calls `audit`: no grant changes, yet authority is added (exit 3 as before).
+    let new = format!("{OLD}fn audit(links: Kv) -> Int {{ let _k = links.keys(\"\"); 0 }}");
+    let want = "+ audit: links keys\nauthority added (exit 3)\n";
+    assert_eq!(
+        diff(&[("app.kio", OLD)], &[("app.kio", &new)]),
+        (3, want.into(), "".into())
+    );
+}
+
+#[test]
+fn detail_on_no_change_is_no_change() {
+    assert_eq!(
+        diff_with(&[("app.kio", OLD)], &[("app.kio", OLD)], &["--detail"]),
+        (0, "no change in authority\n".into(), "".into())
     );
 }
 
@@ -113,6 +143,33 @@ fn links_webhook_adds_exactly_hook_send() {
         &[("app.kio", LINKS_OLD), ("http.kio", HTTP)],
         &[("app.kio", &new), ("http.kio", HTTP)],
     );
-    let want = "+ main: grant hook: Http\n+ main: hook send\nauthority added: 2 lines (exit 3)\n";
+    let want = "+ hook: Http (send)\nauthority added (exit 3); --detail lists each function\n";
     assert_eq!((code, out.as_str(), err.as_str()), (3, want, ""));
+}
+
+/// kio-web payhook's step 2: a new `Hmac` grant reaching `verify` through `receive`, `handle`
+/// and `check_signature`, and a `Clock`. The reviewer reads two lines; `--detail` adds the four
+/// functions.
+const PAY_OLD: &str = r#"fn handle(req: Incoming) -> Int { req.body().len() }
+fn receive(req: Incoming) -> Int { handle(req) }
+fn main(req: Incoming, res: Outgoing) -> Result<(), WebErr> { let _n = receive(req); res.send(200, [], [], "ok".to_bytes()) }
+"#;
+const PAY_NEW: &str = r#"fn check_signature(stripe: Hmac, body: Bytes) -> Bool { stripe.verify(body, "".to_bytes()) }
+fn handle(req: Incoming, stripe: Hmac, now: Clock) -> Int {
+    if now.now_ms() < 0 || !check_signature(stripe, req.body()) { return 0; }
+    req.body().len()
+}
+fn receive(req: Incoming, stripe: Hmac, now: Clock) -> Int { handle(req, stripe, now) }
+fn main(req: Incoming, res: Outgoing, stripe: Hmac, now: Clock) -> Result<(), WebErr> { let _n = receive(req, stripe, now); res.send(200, [], [], "ok".to_bytes()) }
+"#;
+
+#[test]
+fn payhook_step_2_is_two_lines() {
+    let summary = "+ stripe: Hmac (verify)\n+ now: Clock (now_ms)\n";
+    let want = format!("{summary}authority added (exit 3); --detail lists each function\n");
+    let (old, new) = ([("app.kio", PAY_OLD)], [("app.kio", PAY_NEW)]);
+    assert_eq!(diff(&old, &new), (3, want, "".into()));
+    let funcs = "+ check_signature: stripe verify\n+ handle: stripe verify, now now_ms\n+ main: stripe verify, now now_ms\n+ receive: stripe verify, now now_ms\n";
+    let want = format!("{summary}\n{funcs}authority added (exit 3)\n");
+    assert_eq!(diff_with(&old, &new, &["--detail"]), (3, want, "".into()));
 }

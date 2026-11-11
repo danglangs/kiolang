@@ -62,7 +62,7 @@ In a pull request, the reviewer reads only what changed, and CI fails until some
 ```
 $ kio check examples/fx/leak.kio --base examples/fx/report.kio
 + summarize: fx get
-authority added: 1 line (exit 3)
+authority added (exit 3)
 ```
 
 Run anyway, the host refuses the call: `fx` is `api.frankfurter.dev` and nothing else. The audit log records the attempt.
@@ -106,10 +106,10 @@ A redirect (`follow`) can only read links and the clock; auth can only read the 
 **Built by an agent, reviewed by authority.** [payhook](https://github.com/danglangs/kio-web/tree/main/examples/payhook) takes signed Stripe-style webhooks, drops replays in SQLite, and posts to a chat webhook with retries. A coding agent that read only kio's docs wrote it in five steps with no kio error; a reviewer approved each step from its diff, without reading the code:
 
 ```
-step 2   + main: grant stripe: Hmac      + check_signature: stripe verify     (verify only, never sign)
-step 3   + main: grant db: Db            + main: grant log: Log
-step 4   + main: grant slack: Http       + deliver: slack send_all           (one host, key injected)
-step 5   + retry_pending: db exec query, slack send_all, log write
+step 2   + stripe: Hmac (verify)      + now: Clock (now_ms)     (verify only, never sign)
+step 3   + db: Db (exec)              + log: Log (write)
+step 4   + slack: Http (send_all)                               (one host, key injected)
+step 5   ~ db: Db (+query)                                      (retries pending events)
 ```
 
 The diffs say what the code can reach; the tests (124 checks) say what it does there.

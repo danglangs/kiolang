@@ -113,7 +113,7 @@ pub fn check_files(files: &[(String, String)]) -> std::result::Result<Report, Ve
 pub fn diff_files(
     old: &[(String, String)],
     new: &[(String, String)],
-) -> std::result::Result<Vec<String>, (bool, Vec<Diag>)> {
+) -> std::result::Result<lang::AuthorityDiff, (bool, Vec<Diag>)> {
     let check = |files: &[(String, String)]| {
         let pairs: Vec<(&str, &str)> = files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
         lang::check_files(&pairs, &lang::CapTable::v0()).map_err(|ds| ds.into_iter().map(Diag::from).collect())

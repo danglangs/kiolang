@@ -39,17 +39,44 @@ fn uses_str(params: &[(String, BTreeSet<String>)]) -> String {
     parts.join(", ")
 }
 
-/// The authority `new` has that `old` lacks (`+` lines) and the reverse (`-` lines): `main`'s
-/// parameters first (`+ main: grant hook: Http`), then each function by name
-/// (`+ create: hook send`). A function on one side only counts in full; a parameter is matched by
-/// name. Empty when nothing changed.
-pub fn report_diff(old: &Program, new: &Program) -> Vec<String> {
+/// What `new` changes in `old`'s authority; every list is empty when nothing changed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuthorityDiff {
+    /// One line per grant (`main` parameter) whose authority changed, in `new`'s order, then the
+    /// removed ones: `+ stripe: Hmac (verify)` for a new grant, with the methods `main` reaches on
+    /// it through any function; `~ db: Db (+query -get)` for methods gained and lost on a grant
+    /// of the same name and type; `- x: Dir (read)`. A grant whose type changed is one removed
+    /// and one added.
+    pub grants: Vec<String>,
+    /// Per function by name, the capability methods added (`+ handle: stripe verify`) and dropped
+    /// (`- ..`). A function on one side only counts in full; a parameter is matched by name.
+    pub funcs: Vec<String>,
+    /// Some line adds authority.
+    pub added: bool,
+}
+
+/// The authority `new` has that `old` lacks, and the reverse.
+pub fn report_diff(old: &Program, new: &Program) -> AuthorityDiff {
     let (old, new) = (authority(old), authority(new));
-    let mut lines = Vec::new();
-    for (sign, a, b) in [('+', &new, &old), ('-', &old, &new)] {
-        for (d, ty) in a.main.iter().filter(|g| !b.main.contains(g)) {
-            lines.push(format!("{sign} main: grant {d}: {ty}"));
+    let mut diff = AuthorityDiff::default();
+    for g @ (d, ty) in &new.main {
+        let ms = reached(&new, d);
+        if !old.main.contains(g) {
+            diff.grants.push(format!("+ {d}: {ty}{}", in_parens(ms)));
+            diff.added = true;
+            continue;
         }
+        let was = reached(&old, d);
+        let gained: Vec<String> = ms.difference(&was).map(|m| format!("+{m}")).collect();
+        let lost: Vec<String> = was.difference(&ms).map(|m| format!("-{m}")).collect();
+        if !gained.is_empty() || !lost.is_empty() {
+            diff.added |= !gained.is_empty();
+            diff.grants
+                .push(format!("~ {d}: {ty}{}", in_parens([gained, lost].concat())));
+        }
+    }
+    for (d, ty) in old.main.iter().filter(|g| !new.main.contains(g)) {
+        diff.grants.push(format!("- {d}: {ty}{}", in_parens(reached(&old, d))));
     }
     let none = Vec::new();
     let names: BTreeSet<&String> = old.funcs.keys().chain(new.funcs.keys()).collect();
@@ -72,11 +99,31 @@ pub fn report_diff(old: &Program, new: &Program) -> Vec<String> {
                 }
             }
             if !only.is_empty() {
-                lines.push(format!("{sign} {name}: {}", uses_str(&only)));
+                diff.added |= sign == '+';
+                diff.funcs.push(format!("{sign} {name}: {}", uses_str(&only)));
             }
         }
     }
-    lines
+    diff
+}
+
+/// The methods `main` reaches on its parameter `d`, through any function.
+fn reached(a: &Authority, d: &str) -> BTreeSet<String> {
+    let main = a.funcs.get("main").map_or(&[][..], Vec::as_slice);
+    main.iter()
+        .find(|(e, _)| e == d)
+        .map(|(_, ms)| ms.clone())
+        .unwrap_or_default()
+}
+
+/// ` (a b)`, or nothing for no items.
+fn in_parens(items: impl IntoIterator<Item = String>) -> String {
+    let items: Vec<String> = items.into_iter().collect();
+    if items.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", items.join(" "))
+    }
 }
 
 /// The structure `report` prints.

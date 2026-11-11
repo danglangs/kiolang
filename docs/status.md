@@ -62,6 +62,7 @@ Compiled-only kio covers the whole language and every capability. What real apps
 | L24 | an assignment as a match arm (`Some(x) => n += x,`), parsed as the block `{ n += x; }`, as Rust; kiogen generates it. Harness 507 ran both ways, 504 agreed, 3 excluded by limits, 0 leaked |
 | L25 | an open branch (`None`, `Ok(..)`, `[]`, `Map::new()`) takes the type the other `if`/`match` branches settle, in any order: `if c { None } else { Some(1) }` checks unannotated. Checker only. Harness 509 ran both ways, 506 agreed, 3 excluded by limits, 0 leaked |
 | H22 | `Hmac` (`--hmac k=env:VAR\|file:PATH[:verify]`): `sign(msg) -> Result<Bytes, HmacErr>` and constant-time `verify(msg, mac) -> Bool`, HMAC-SHA256 in the host over lang's SHA-256 under a key read once at start with S1's rules; `:verify` makes `sign` `Denied`. caps.wit (owner-approved), both paths, report, audit (method, length, result; never a key or MAC), grant hint, `--listen`. RFC 4231 vectors; a Stripe-style webhook verified in kio. Security-reviewed, fixes in |
+| P3 (product) | `kio check NEW --base OLD` prints one line per changed grant first (`+ stripe: Hmac (verify)`, `~ db: Db (+query)`, `- x: Dir (read)`), the per-function lines under `--detail` or when no grant line shows the addition; payhook's step 2 diff is 2 lines, was 6. Exit codes unchanged (#180) |
 
 ## Next
 

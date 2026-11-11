@@ -152,10 +152,20 @@ fn a_shadowed_capability_is_not_charged_with_other_methods() {
 }
 
 /// `lang::report_diff` of two programs, each `(name, source)` files with the root first.
-fn diff(old: &[(&str, &str)], new: &[(&str, &str)]) -> Vec<String> {
+fn diff(old: &[(&str, &str)], new: &[(&str, &str)]) -> lang::AuthorityDiff {
     let caps = common::caps();
     let p = |f: &[(&str, &str)]| lang::check_files(f, &caps).expect("program checks");
     lang::report_diff(&p(old), &p(new))
+}
+
+/// The diff with these grant and function lines.
+fn want(grants: &[&str], funcs: &[&str], added: bool) -> lang::AuthorityDiff {
+    let own = |ls: &[&str]| ls.iter().map(|l| l.to_string()).collect();
+    lang::AuthorityDiff {
+        grants: own(grants),
+        funcs: own(funcs),
+        added,
+    }
 }
 
 const CREATE: &str = r#"fn create(links: Kv, log: Log) -> Result<(), KvErr> { links.set("k", "v".to_bytes())?; let _w = log.write("made"); Ok(()) }"#;
@@ -170,7 +180,7 @@ fn old() -> String {
 
 #[test]
 fn diff_no_change() {
-    assert_eq!(diff(&[("a.kio", &old())], &[("a.kio", &old())]), Vec::<String>::new());
+    assert_eq!(diff(&[("a.kio", &old())], &[("a.kio", &old())]), want(&[], &[], false));
 }
 
 #[test]
@@ -181,19 +191,37 @@ fn diff_added_method() {
     );
     assert_eq!(
         diff(&[("a.kio", &old())], &[("a.kio", &new)]),
-        ["+ delete: links get", "+ main: links get"]
+        want(
+            &["~ links: Kv (+get)"],
+            &["+ delete: links get", "+ main: links get"],
+            true
+        )
     );
 }
 
 #[test]
-fn diff_removed_method() {
+fn diff_removed_method_main_still_reaches() {
+    // `main` still writes the log through `create`: no grant changed.
     let new = old().replace(r#"let _w = log.write("gone"); "#, "");
-    assert_eq!(diff(&[("a.kio", &old())], &[("a.kio", &new)]), ["- delete: log write"]);
+    assert_eq!(
+        diff(&[("a.kio", &old())], &[("a.kio", &new)]),
+        want(&[], &["- delete: log write"], false)
+    );
+}
+
+#[test]
+fn diff_method_gained_and_lost_on_one_grant() {
+    let new = old()
+        .replace(r#"links.delete("k")?;"#, r#"let _k = links.keys("")?;"#)
+        .replace(r#"links.set("k", "v".to_bytes())?;"#, "");
+    let got = diff(&[("a.kio", &old())], &[("a.kio", &new)]);
+    assert_eq!(got.grants, ["~ links: Kv (+keys -delete -set)"]);
+    assert!(got.added);
 }
 
 #[test]
 fn diff_new_main_parameter() {
-    // The new grant comes first; `main` then reaches `hook send` through `notify`, a new function.
+    // The new grant with what `main` reaches on it; `notify` is a new function.
     let new = old()
         .replace(
             "fn main(links: Kv, log: Log)",
@@ -201,8 +229,14 @@ fn diff_new_main_parameter() {
         )
         .replace("create(links, log)?;", "create(links, log)?; notify(hook);")
         + r#"fn notify(hook: Http) { let _r = hook.send("POST", "/", [], "{}".to_bytes()); }"#;
-    let want = ["+ main: grant hook: Http", "+ main: hook send", "+ notify: hook send"];
-    assert_eq!(diff(&[("a.kio", &old())], &[("a.kio", &new)]), want);
+    assert_eq!(
+        diff(&[("a.kio", &old())], &[("a.kio", &new)]),
+        want(
+            &["+ hook: Http (send)"],
+            &["+ main: hook send", "+ notify: hook send"],
+            true
+        )
+    );
 }
 
 #[test]
@@ -211,7 +245,22 @@ fn diff_new_main_parameter_unused() {
     let new = old().replace("fn main(links: Kv, log: Log)", "fn main(links: Kv, log: Log, out: Dir)");
     assert_eq!(
         diff(&[("a.kio", &old())], &[("a.kio", &new)]),
-        ["+ main: grant out: Dir"]
+        want(&["+ out: Dir"], &[], true)
+    );
+}
+
+#[test]
+fn diff_removed_main_parameter() {
+    let new = old()
+        .replace("fn main(links: Kv, log: Log)", "fn main(links: Kv)")
+        .replace("create(links, log)?; delete(links, log)", r#"links.delete("k")"#);
+    assert_eq!(
+        diff(&[("a.kio", &old())], &[("a.kio", &new)]),
+        want(
+            &["~ links: Kv (-set)", "- log: Log (write)"],
+            &["- main: links set, log write"],
+            false
+        )
     );
 }
 
@@ -220,17 +269,18 @@ fn diff_grant_type_changed() {
     let (old, new) = ("fn main(d: Dir) -> Int { 1 }", "fn main(d: Kv) -> Int { 1 }");
     assert_eq!(
         diff(&[("a.kio", old)], &[("a.kio", new)]),
-        ["+ main: grant d: Kv", "- main: grant d: Dir"]
+        want(&["+ d: Kv", "- d: Dir"], &[], true)
     );
 }
 
 #[test]
 fn diff_new_function_counts_in_full() {
-    // `log write` and `links keys` both count, though `main` could already write the log.
+    // `log write` and `links keys` both count, though `main` could already write the log. `main`
+    // does not call `audit`, so no grant line changes.
     let new = old() + r#"fn audit(log: Log, links: Kv) -> Int { let _w = log.write("x"); let _k = links.keys(""); 0 }"#;
     assert_eq!(
         diff(&[("a.kio", &old())], &[("a.kio", &new)]),
-        ["+ audit: log write, links keys"]
+        want(&[], &["+ audit: log write, links keys"], true)
     );
 }
 
@@ -243,12 +293,46 @@ fn diff_function_moved_to_module() {
         DIFF_OLD.replace("create(links, log)?;", "store::create(links, log)?;")
     );
     let store = format!("pub {CREATE}");
-    let want = [
-        "- create: links set, log write",
-        "+ store::create: links set, log write",
-    ];
     assert_eq!(
         diff(&[("a.kio", &old())], &[("a.kio", &root), ("store.kio", &store)]),
-        want
+        want(
+            &[],
+            &[
+                "- create: links set, log write",
+                "+ store::create: links set, log write"
+            ],
+            true
+        )
+    );
+}
+
+/// kio-web payhook's step 2: a new `Hmac` grant reaching `verify` through two helpers, and a
+/// `Clock`. Two grant lines, though five functions changed.
+#[test]
+fn diff_payhook_step_2_is_two_grant_lines() {
+    let old = r#"
+fn handle(body: Str) -> Int { body.len() }
+fn receive(body: Str) -> Int { handle(body) }
+fn main(log: Log) { let _w = log.write(receive("x").to_str()); }
+"#;
+    let new = r#"
+fn check_signature(stripe: Hmac, body: Str, mac: Bytes) -> Bool { stripe.verify(body.to_bytes(), mac) }
+fn handle(stripe: Hmac, now: Clock, body: Str) -> Int {
+    if now.now_ms() < 0 { return 0; }
+    if check_signature(stripe, body, "".to_bytes()) { body.len() } else { 0 }
+}
+fn receive(stripe: Hmac, now: Clock, body: Str) -> Int { handle(stripe, now, body) }
+fn main(log: Log, stripe: Hmac, now: Clock) { let _w = log.write(receive(stripe, now, "x").to_str()); }
+"#;
+    let got = diff(&[("a.kio", old)], &[("a.kio", new)]);
+    assert_eq!(got.grants, ["+ stripe: Hmac (verify)", "+ now: Clock (now_ms)"]);
+    assert_eq!(
+        got.funcs,
+        [
+            "+ check_signature: stripe verify",
+            "+ handle: stripe verify, now now_ms",
+            "+ main: stripe verify, now now_ms",
+            "+ receive: stripe verify, now now_ms",
+        ]
     );
 }

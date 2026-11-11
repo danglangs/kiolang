@@ -1,13 +1,16 @@
 #!/bin/sh
-# usage: tools/authority-diff.sh BASE_REF ENTRY.kio
+# usage: tools/authority-diff.sh BASE_REF ENTRY.kio [--detail]
 #
 # The authority ENTRY.kio (in the working tree) adds over its version at BASE_REF:
 # `kio check ENTRY --base <BASE_REF's ENTRY>`, with BASE_REF checked out by `git worktree add`
 # into a temporary directory that is removed afterwards. Exit 0: no authority added; 3: some
 # added; 1: a side does not check; 2: usage or a missing file. KIO names the binary (default kio).
 set -eu
-if [ $# -ne 2 ]; then
-    echo "usage: $0 BASE_REF ENTRY.kio" >&2
+detail=
+if [ $# -eq 3 ] && [ "$3" = --detail ]; then
+    detail=--detail
+elif [ $# -ne 2 ]; then
+    echo "usage: $0 BASE_REF ENTRY.kio [--detail]" >&2
     exit 2
 fi
 base_ref=$1
@@ -34,5 +37,5 @@ if [ ! -f "$tmp/base/$rel" ]; then
     exit 2
 fi
 status=0
-"$kio" check "$entry" --base "$tmp/base/$rel" || status=$?
+"$kio" check "$entry" --base "$tmp/base/$rel" $detail || status=$?
 exit $status
