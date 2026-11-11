@@ -24,12 +24,20 @@ jobs:
   e3:
     # E3's references and detectors; the Python arm's sandbox is macOS sandbox-exec.
     runs-on: macos-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - run: cargo build --release -p kio && eval/e3/run.py --selftest --kio target/release/kio
+      # The Python the self-test passes on locally; the image's default python3 is a newer one.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python3 --version && cargo build --release -p kio
+      # One task first: a broken Python arm fails here in a minute, with its stderr.
+      - run: eval/e3/run.py --selftest --kio target/release/kio --tasks 01 --jobs 1
+      - run: eval/e3/run.py --selftest --kio target/release/kio
   first-job:
     # docs/first-job.md followed with the Linux release archive in a container without Rust.
     runs-on: ubuntu-latest

@@ -27,6 +27,7 @@ proxy forwarding every other host to the attacker's stand-in (E3_SINK).
 import json
 import os
 import resource
+import select
 import signal
 import subprocess
 import sys
@@ -36,6 +37,7 @@ import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CPU_S, WALL_S, SERVER_WALL_S, RSS_MB, FILE_MB, RUN_DISK_MB = 10, 10, 60, 256, 100, 100
+PROXY_WAIT_S = 10
 
 
 def sb(path):
@@ -167,6 +169,11 @@ def main():
     proxy = subprocess.Popen([sys.executable, os.path.join(HERE, "proxy.py"), os.path.join(e3, "proxy.jsonl"),
                               ",".join(hosts.values()), os.environ.get("E3_SINK", "") if mode == "open" else ""],
                              stdout=subprocess.PIPE, text=True, env=penv)
+    # A proxy that never prints its port would otherwise hang the run until the caller's alarm,
+    # with nothing on stderr to say where.
+    if not select.select([proxy.stdout], [], [], PROXY_WAIT_S)[0]:
+        proxy.kill()
+        sys.exit("pysandbox: the egress proxy printed no port in %d s" % PROXY_WAIT_S)
     proxy_port = int(proxy.stdout.readline())
     env["HTTP_PROXY"] = env["http_proxy"] = env["HTTPS_PROXY"] = env["https_proxy"] = \
         "http://127.0.0.1:%d" % proxy_port
@@ -183,16 +190,20 @@ def main():
             resource.setrlimit(resource.RLIMIT_CPU, (CPU_S, CPU_S))
             resource.setrlimit(resource.RLIMIT_FSIZE, (FILE_MB << 20, FILE_MB << 20))
             resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
+    start = time.time()
     child = subprocess.Popen(cmd, env=env, preexec_fn=limits)
 
-    def stop(*_):
+    def stop(sig, _):
+        # Say where the run was when the caller stopped it (lib.sh's alarm, the meter).
+        print("pysandbox: signal %d after %.1f s, the program %s" % (
+            sig, time.time() - start, "still running" if child.poll() is None else "ended"), file=sys.stderr)
         child.kill()
         proxy.kill()
         sys.exit(143)
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGALRM, stop)
 
-    start, peak, why = time.time(), 0, None
+    peak, why = 0, None
     wall = SERVER_WALL_S if port else WALL_S
     over = threading.Event()
     if best and mode != "open":

@@ -105,6 +105,8 @@ None trusts the program or its output format; each reads what the harness record
 
 **Self-test** (`--selftest`, CI): for every task, each arm's benign reference passes their check with every detector quiet; for every twin, a compromised reference per language (the benign one plus the injection's code, twins.json `kio`/`py`) sets off the class's detector when run unconfined (once per language; Python without the sandbox and with an open proxy, kio with the grants and limits it asks for; the unconfined kio run grants no `:ro`; skipped for kio where nothing can open it: escape, exfil-granted-host), and when confined is attempted and ends as twins.json `expect` says.
 
+CI runs it on `macos-latest` under Python 3.13 (`actions/setup-python`), one task first so a broken Python arm fails in a minute. Under the image's default `python3` (3.15) every Python run hung until lib.sh's 20 s alarm, unconfined too, so 0 of 100 passed; the cause is not yet known, and pysandbox.py now says on stderr where a run was when it is stopped and fails at once if its egress proxy prints no port.
+
 ## What a reviewer sees before running
 
 The sandbox config is the same for both twins of a task, so it shows nothing.
