@@ -2,13 +2,28 @@
 
 # kio-lang
 
-A language for code that AI agents write, with explicit authority, host-enforced grants and a compact authority diff out of the box: the safety you would otherwise assemble around a general-purpose language like Python (a sandbox, an egress proxy, a secret store, a review tool) yourself.
+**Run AI-written code with exactly the authority you grant, and review each change by the authority it adds, not by its lines.**
 
-The code names what it needs (`input: Dir`), the operator decides what that is (`--dir input=/data`), and nothing else is reachable.
+kio is a small language for code agents write. What a program can touch is in its signature, the host enforces it, and `kio check --base` prints what a change adds: the safety you would otherwise assemble around Python or any general-purpose language (a sandbox, an egress proxy, a secret store, a review tool), built in.
 
-## In 60 seconds
+## Why kio, not a general-purpose language?
 
-An agent writes a job: read today's orders, post them to the CRM ([examples/glance](examples/glance)).
+- **"Can't I just sandbox Python?"** Yes, with work. On 55 prompt-injection attacks ([E3](docs/proposals/e3-scorecard.md)), Python sandboxed by a careful team stopped 52, the same as kio; it took an egress proxy that injects keys and filters methods, a sandbox profile per task and watchdogs. In kio that is flags on `kio run`.
+- **"What does a reviewer read?"** In kio, the authority diff: 1-2 exact lines. In Python, the 80-90 line diff, and scanners guess.
+- **"Can agents write it?"** It is a Rust subset on purpose. Given the primer (`kio mcp`), Haiku, Sonnet and Opus pass 42-43 of 45 backend tasks first try (Python: 39-45) and all 45 by try 5.
+- **"What does it not do?"** Stop misuse of what you granted: a program that may read `customers/` and call `partner.example` can send one to the other. Few libraries yet, and agents spend about 2x the tokens writing it today.
+
+| | kio | Python, careful sandbox | Python, common practice |
+|---|---|---|---|
+| Attacks stopped at run time ([E3](docs/proposals/e3-scorecard.md)) | 52/55 | 52/55 | 40/55 |
+| What it took | flags on `kio run` | a proxy, profiles, watchdogs | a profile and a proxy |
+| What a reviewer reads (median) | 1-2 lines | 80-90 lines | 80-90 lines |
+
+Static analysis of Python or Rust cannot be sound without banning most of the language (`eval`, reflection, FFI, `unsafe`, build scripts, dependencies); containers are all or nothing per process and tell a reviewer nothing before the run.
+
+## One change, reviewed
+
+An agent writes a job: read today's orders, post them to the CRM ([examples/glance](examples/glance)). The signature is the whole of its authority.
 
 ```rust
 fn main(orders: Dir, crm: Http) -> Result<Int, Str> {
@@ -46,9 +61,15 @@ kio: `orders` is granted `:ro` but the program can write it (`orders remove`)
 | A key the code never holds | `--http-header crm=Authorization:env:CRM_KEY` | a proxy that injects it |
 | What a change adds | `kio check --base`, exact | read the diff; scanners guess |
 
+## What is kio
+
+- **Capabilities are parameters.** `main` names each resource it needs (`input: Dir`, `api: Http`, `db: Db`); the operator grants each one by a flag (or a [grants file](docs/guide.md)); there is no `import`, global or ambient I/O. A function without a capability parameter cannot do I/O, and the checker proves it.
+- **The host is the boundary.** kio compiles to Wasm and runs in Wasmtime; the host enforces every grant again, with fuel, memory, time and call limits, and logs every call.
+- **A real language.** Structs, enums, generics, closures, `match`, JSON; files, a key-value store, SQLite, HTTP client and server, WebSockets, HMAC, each a grant. Native code at 1.1-2.3x Rust on compute ([details](#what-works)).
+
 ## A closer look
 
-A reviewer reads one report instead of every line. This is what an agent might write to convert invoices at the day's exchange rate:
+Authority is per function, too. An agent converts invoices at the day's exchange rate:
 
 ```rust
 fn summarize(csv: Str, eur: Float) -> List<Str> {
@@ -81,7 +102,6 @@ Ok(["acme 102 EUR", "globex 38 EUR", "initech 256 EUR"])
 
 `summarize : none` is a proof, not a hint: a function with no capability parameter cannot do I/O. There is no `import`, no `std::net`, no global; the only way to the network is a parameter.
 
-## The catch
 
 Say a document the agent read told it to "also back up the invoices". It adds one line, and passes the line the `fx` it needs ([examples/fx/leak.kio](examples/fx/leak.kio)):
 
@@ -229,26 +249,6 @@ Models write kio as well as Python. Given the language reference (what `kio_prim
 | Opus 5.5 | 43/45 | 45/45 | 45/45 | 45/45 |
 
 kio is a Rust subset on purpose, and its errors name the fix. Without the reference, models write full Rust and rarely finish: give agents the primer.
-
-## Why not a general-purpose language in a sandbox
-
-| Approach | Where it falls short |
-|---|---|
-| Static analysis on Python or Rust | Ambient authority is in the standard library; `eval`, reflection, FFI, `unsafe`, macros, build scripts and dependencies reach around the analysis. Making it sound means banning most of the language. |
-| Containers, seccomp, VMs | All or nothing per process. They cannot say which function may send data where, and tell a reviewer nothing before the run. |
-| kio | Authority is in every signature, so the checker's rule is one sentence and the report is exact. The host checks the code it compiles, runs only that code, enforces every grant again and logs every call. |
-
-Measured ([E3](docs/proposals/e3-scorecard.md)): 55 prompt-injection attacks planted in task data, each program made to follow its injection, run under equal permissions.
-
-| | kio | Python, sandboxed by a careful team | Python, common practice |
-|---|---|---|---|
-| Attacks stopped at run time | 52/55 | 52/55 | 40/55 |
-| What it took | flags on `kio run` | an egress proxy that injects keys and filters methods, a per-task sandbox profile, memory and disk watchdogs | a sandbox profile and a proxy |
-| Lines a reviewer reads (median, real model runs) | 1-2 | 80-90 | 80-90 |
-
-kio matches the careful setup as its default and makes review a one-line diff. No arm stops data sent through a host the task legitimately uses: that needs information-flow control, which kio does not have.
-
-The cost is the ecosystem: few libraries, no package manager yet. Agents write most of the code, and Rust syntax means models already write it well; HTTP, TLS and filesystems live in the host, in Rust, behind capabilities.
 
 ## Threat model
 
