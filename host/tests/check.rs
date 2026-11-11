@@ -1107,6 +1107,99 @@ fn http_audit_lines_stay_json() {
     assert_eq!(lines[5]["http"], "P\"OST");
 }
 
+/// A server counting the requests it gets: `/hopN` redirects to `/hop{N-1}`, `/hop0` to `/ok`.
+fn serve_counted() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::io::{BufRead, BufReader, Write};
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let grant = format!("http://{}", listener.local_addr().unwrap());
+    let count = std::sync::Arc::new(AtomicUsize::new(0));
+    let n = count.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let n = n.clone();
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(&stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                n.fetch_add(1, SeqCst);
+                let path = line.split_whitespace().nth(1).unwrap_or_default().to_string();
+                loop {
+                    line.clear();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim_end().is_empty() {
+                        break;
+                    }
+                }
+                let head = match path.strip_prefix("/hop").and_then(|n| n.parse::<u32>().ok()) {
+                    Some(0) => "307 Temporary Redirect\r\nLocation: /ok".to_string(),
+                    Some(k) => format!("307 Temporary Redirect\r\nLocation: /hop{}", k - 1),
+                    None => "200 OK".to_string(),
+                };
+                let _ = write!(
+                    &stream,
+                    "HTTP/1.1 {head}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+            });
+        }
+    });
+    (grant, count)
+}
+
+/// H25: every hop, the first request and each redirect, in any `send_all` worker, reserves a call
+/// before it is sent; one that cannot is not sent and the run stops for `--calls`. Each request's
+/// audit line records the redirects it sent. `/hop4` is five redirects, six requests.
+#[test]
+fn http_hops_reserve_calls() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let hop = r#"HttpRequest { method: "GET", path: "/hop4", headers: [], body: "".to_bytes(), timeout_ms: 0 }"#;
+    let one = r#"fn main(h: Http) -> Int { let r = h.get("/hop4"); 0 }"#;
+    let send = r#"fn main(h: Http) -> Int { let r = h.send("GET", "/hop4", [], "".to_bytes(), 0); 0 }"#;
+    let batch = |k: usize| {
+        format!(
+            "fn main(h: Http) -> Int {{ let r = h.send_all([{}]); 0 }}",
+            vec![hop; k].join(", ")
+        )
+    };
+    // (source, --calls, requests the server gets, whether the run stops)
+    let cases = [
+        (one.to_string(), 1, 1, true),
+        (send.to_string(), 1, 1, true),
+        (one.to_string(), 3, 3, true),
+        (one.to_string(), 6, 6, false),
+        (batch(3), 3, 3, true),
+        (batch(2), 6, 6, true),
+        (batch(2), 12, 12, false),
+    ];
+    for (src, calls, requests, stops) in cases {
+        let (g, count) = serve_counted();
+        let log = Log::default();
+        let mut kio = Kio::new(Limits {
+            calls,
+            ..Limits::default()
+        })
+        .unwrap();
+        kio.audit(log.clone(), vec![]);
+        let r = kio.run_with(&src, vec![], vec![("h".into(), granted(&g, ""))]);
+        let case = format!("{src} with --calls {calls}");
+        assert_eq!(count.load(SeqCst), requests, "{case}");
+        match r {
+            Err(e) => {
+                assert!(stops, "{case}: {e}");
+                let msg = format!("too many host calls (limit {calls}; raise it with --calls)");
+                assert_eq!(kio.explain(&e).unwrap(), msg);
+            }
+            Ok(r) => assert!(!stops && r.is_ok(), "{case}"),
+        }
+        // Each request's line counts the redirects it sent: with the first hops, every request.
+        let lines: Vec<serde_json::Value> = (log.lines().iter())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .filter(|v: &serde_json::Value| v["arg"] == "/hop4")
+            .collect();
+        let redirects: u64 = lines.iter().map(|v| v["redirects"].as_u64().unwrap_or(0)).sum();
+        assert_eq!(lines.len() + redirects as usize, requests, "{case}: {lines:?}");
+    }
+}
+
 /// An audit log in memory.
 #[derive(Clone, Default)]
 struct Log(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);

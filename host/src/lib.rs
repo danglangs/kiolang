@@ -595,10 +595,13 @@ struct Inbound {
     body: Vec<u8>,
 }
 
-/// A request done: the redirects followed (each a counted call), the body bytes read (charged
-/// even when refused), the time it took, and the response or the error.
+/// A request done: the redirects sent (each a call reserved before it was sent), whether one
+/// was not sent for want of a call, the body bytes read (charged even when refused), the time it
+/// took, and the response or the error.
 struct Performed {
     hops: usize,
+    /// A redirect not sent: the run had no call left to reserve for it.
+    over: bool,
     read: usize,
     ms: f64,
     /// Not sent: the process had `MAX_HTTP_WORKERS` HTTP workers alive.
@@ -660,8 +663,9 @@ fn read_body(mut r: impl Read, budget: &AtomicI64, body: &mut Vec<u8>) -> io::Re
 /// Do `req` with no proxy, connecting only to `origin`'s pinned addresses, following a redirect
 /// within the origin (GET and HEAD only, `MAX_REDIRECTS` at most). Each hop is bounded by what
 /// is left of `req.timeout` and of `deadline`; the body is read through the same cap as
-/// `Dir.read` and within `budget` (`read_body`).
-fn perform(origin: &Origin, req: &Outbound, deadline: Instant, budget: &AtomicI64) -> Performed {
+/// `Dir.read` and within `budget` (`read_body`). Each redirect reserves one of `calls`, the calls
+/// the run has left (shared by a batch's workers), before it is sent; one that cannot is not sent.
+fn perform(origin: &Origin, req: &Outbound, deadline: Instant, budget: &AtomicI64, calls: &AtomicI64) -> Performed {
     use kio::caps::net::HttpErr;
     let start = Instant::now();
     let until = deadline.min(start + req.timeout);
@@ -669,6 +673,7 @@ fn perform(origin: &Origin, req: &Outbound, deadline: Instant, budget: &AtomicI6
     let follows = matches!(req.method, "GET" | "HEAD");
     let mut done = Performed {
         hops: 0,
+        over: false,
         read: 0,
         ms: 0.0,
         busy: false,
@@ -718,6 +723,10 @@ fn perform(origin: &Origin, req: &Outbound, deadline: Instant, budget: &AtomicI6
             let location = resp.headers().get("location").and_then(|v| v.to_str().ok());
             match location.and_then(|l| origin.follow(&url, l)) {
                 Some(next) if follows && done.hops < MAX_REDIRECTS => {
+                    if calls.fetch_sub(1, Relaxed) <= 0 {
+                        done.over = true;
+                        break Err(HttpErr::Denied);
+                    }
                     done.hops += 1;
                     url = next;
                     continue;
@@ -1087,10 +1096,15 @@ impl State {
     fn count_call(&mut self) -> Result<()> {
         self.calls = self.calls.saturating_add(1);
         if self.calls > self.call_limit {
-            self.too_many_calls = true;
-            return Err(wasmtime::Error::msg("too many host calls"));
+            return Err(self.stop_calls());
         }
         Ok(())
+    }
+
+    /// Stop the run for exceeding `--calls`.
+    fn stop_calls(&mut self) -> wasmtime::Error {
+        self.too_many_calls = true;
+        wasmtime::Error::msg("too many host calls")
     }
 
     /// Count `n` bytes of I/O; the call past `io_limit` stops the run.
@@ -1463,6 +1477,20 @@ fn received(done: &Performed) -> String {
     }
 }
 
+/// The audit field of the redirects a request sent, if any.
+fn redirects(done: &Performed) -> String {
+    match done.hops {
+        0 => String::new(),
+        n => format!(r#","redirects":{n}"#),
+    }
+}
+
+/// Leave a worker the deadline left behind no bytes to read and no calls for more hops.
+fn drain(budget: &AtomicI64, calls: &AtomicI64) {
+    budget.store(0, Relaxed);
+    calls.store(0, Relaxed);
+}
+
 /// The audit field of a request not sent because the process had `MAX_HTTP_WORKERS` alive.
 const BUSY: &str = r#","busy":true"#;
 
@@ -1470,6 +1498,7 @@ const BUSY: &str = r#","busy":true"#;
 fn busy() -> Performed {
     Performed {
         hops: 0,
+        over: false,
         read: 0,
         ms: 0.0,
         busy: true,
@@ -1508,30 +1537,42 @@ impl State {
             timeout: HTTP_TIMEOUT,
             as_get: true,
         };
-        let done = self.finish(&origin, req)?;
-        self.audit_extra = origin.injected();
+        let mut extra = origin.injected();
+        let done = self.finish(&origin, req, &mut extra)?;
         if done.busy {
-            self.audit_extra += BUSY;
+            extra += BUSY;
         }
+        self.audit_extra = extra;
         Ok(done.result.map(|r| r.body))
     }
 
-    /// Do `req` on an HTTP worker, then count its hops and charge what it read; `busy` if the
-    /// process has no HTTP worker free.
-    fn finish(&mut self, origin: &Origin, req: Outbound) -> Result<Performed> {
+    /// Do `req` on an HTTP worker, then count its redirects and charge what it read; `busy` if
+    /// the process has no HTTP worker free. `extra` gets the redirects sent; if the run stops
+    /// here, it is the call's audit fields.
+    fn finish(&mut self, origin: &Origin, req: Outbound, extra: &mut String) -> Result<Performed> {
         let Some(slots) = HTTP_POOL.take(1) else {
             return Ok(busy());
         };
         let (o, deadline) = (origin.clone(), self.deadline);
         let budget = Arc::new(AtomicI64::new(self.io_left()));
-        let b = budget.clone();
-        let work: Box<dyn FnOnce() -> Performed + Send> = Box::new(move || perform(&o, &req, deadline, &b));
-        // A worker the deadline left behind stops reading at its next chunk.
-        let mut done = (self.within_all(vec![work], slots)).inspect_err(|_| budget.store(0, Relaxed))?;
+        let calls = Arc::new(AtomicI64::new(self.calls_left()));
+        let (b, c) = (budget.clone(), calls.clone());
+        let work: Box<dyn FnOnce() -> Performed + Send> = Box::new(move || perform(&o, &req, deadline, &b, &c));
+        // A worker the deadline left behind stops reading at its next chunk and sends no more hops.
+        let mut done = (self.within_all(vec![work], slots)).inspect_err(|_| drain(&budget, &calls))?;
         let done = done.pop().expect("one worker, one result");
-        self.at_deadline(std::slice::from_ref(&done))?;
-        self.settle(&done)?;
+        *extra += &redirects(&done);
+        if let Err(e) = (self.at_deadline(std::slice::from_ref(&done))).and_then(|()| self.settle(&done)) {
+            self.audit_extra = std::mem::take(extra);
+            return Err(e);
+        }
         Ok(done)
+    }
+
+    /// Calls the run may still make before `--calls` stops it: what a request's redirects reserve
+    /// from (`perform`).
+    fn calls_left(&self) -> i64 {
+        i64::from(self.call_limit) - i64::from(self.calls)
     }
 
     /// A request still in flight at the run's deadline stops the run as a timeout (H24): its
@@ -1550,11 +1591,14 @@ impl State {
         i64::try_from(self.io_limit.saturating_sub(self.io)).unwrap_or(i64::MAX)
     }
 
-    /// Count each redirect a request followed as a call, and charge the body read, even when
-    /// it was refused.
+    /// Count each redirect a request sent as a call, and charge the body read, even when it was
+    /// refused. A redirect not sent for want of a call stops the run as `--calls` does.
     fn settle(&mut self, done: &Performed) -> Result<()> {
         for _ in 0..done.hops {
             self.count_call()?;
+        }
+        if done.over {
+            return Err(self.stop_calls());
         }
         self.spend_io(done.read)
     }
@@ -1629,7 +1673,7 @@ impl State {
         };
         let r = match self.prepare(&origin, method, path, headers, body, timeout, &mut extra)? {
             Ok(req) => {
-                let done = self.finish(&origin, req)?;
+                let done = self.finish(&origin, req, &mut extra)?;
                 extra += &received(&done);
                 done.result.map(response)
             }
@@ -1640,9 +1684,10 @@ impl State {
     }
 
     /// `send_all`: every request checked as a `send`, each counted as a call (the batch's own
-    /// count is the first), issued together on workers and awaited until the run's deadline. One
-    /// audit line per request, with the batch's id and the request's index, before the batch's
-    /// own line.
+    /// count is the first), issued together on workers and awaited until the run's deadline; the
+    /// workers' redirects reserve from one count of the calls left. One audit line per request
+    /// issued or refused, with the batch's id and the request's index, before the batch's own
+    /// line, also when the batch stops the run.
     fn send_batch(
         &mut self,
         h: &Resource<kio::caps::net::Http>,
@@ -1663,8 +1708,10 @@ impl State {
             self.count_call()?;
         }
         let mut works: Vec<Box<dyn FnOnce() -> Performed + Send>> = Vec::new();
-        // One read budget for the batch's workers, set once every body is charged.
+        // One read budget for the batch's workers, set once every body is charged, and one count
+        // of the calls their redirects may reserve.
         let budget = Arc::new(AtomicI64::new(0));
+        let calls = Arc::new(AtomicI64::new(self.calls_left()));
         // Per request: its path, body bytes and audit fields, and the error that refused it, if
         // any (else its worker's result is the next of `done`).
         let mut checked = Vec::with_capacity(n);
@@ -1675,8 +1722,9 @@ impl State {
             let refused = match self.prepare(&origin, &r.method, &r.path, &r.headers, r.body, timeout, &mut extra)? {
                 Err(e) => Some(e),
                 Ok(req) => {
-                    let (o, deadline, budget) = (origin.clone(), self.deadline, budget.clone());
-                    works.push(Box::new(move || perform(&o, &req, deadline, &budget)));
+                    let (o, deadline) = (origin.clone(), self.deadline);
+                    let (budget, calls) = (budget.clone(), calls.clone());
+                    works.push(Box::new(move || perform(&o, &req, deadline, &budget, &calls)));
                     None
                 }
             };
@@ -1686,21 +1734,24 @@ impl State {
         // The batch is sent whole or, with too few HTTP workers free in the process, not at all.
         let done = match HTTP_POOL.take(works.len()) {
             None => works.iter().map(|_| busy()).collect(),
-            // Workers the deadline left behind stop reading at their next chunk.
+            // Workers the deadline left behind stop reading at their next chunk and send no more hops.
             Some(slots) => {
-                let done = (self.within_all(works, slots)).inspect_err(|_| budget.store(0, Relaxed))?;
+                let done = (self.within_all(works, slots)).inspect_err(|_| drain(&budget, &calls))?;
                 self.at_deadline(&done)?;
                 done
             }
         };
         let mut done = done.into_iter();
         let mut results = Vec::with_capacity(n);
+        // The first request whose redirects or body stop the run; each still gets its line.
+        let mut stop = Ok(());
         for (path, sent, mut extra, refused) in checked {
             let (bytes, ms, result) = match refused {
                 Some(e) => (0, 0.0, Err(e)),
                 None => {
                     let d = done.next().expect("a worker per request issued");
-                    self.settle(&d)?;
+                    stop = stop.and_then(|()| self.settle(&d));
+                    extra += &redirects(&d);
                     extra += &received(&d);
                     (sent + d.read as u64, d.ms, d.result.map(response))
                 }
@@ -1710,7 +1761,7 @@ impl State {
                 .map_err(audit_failed)?;
             results.push(result);
         }
-        Ok(results)
+        stop.map(|()| results)
     }
 }
 
