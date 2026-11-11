@@ -6,9 +6,14 @@ Listens on a free loopback port and prints it. Forwards plain-HTTP proxy request
 (comma-separated); anything else is answered 403. Every request is logged to LOG as a JSON
 line: method, host, path, allowed. With SINK (an http://127.0.0.1:PORT URL; the detectors'
 self-test only) a host not allowed is forwarded there instead of refused.
+
+With E3_PROXY_RULES (the py-best arm), a JSON object {host: {"methods": [..], "auth": ..}}:
+a request is forwarded only if its method is listed for its host; "auth", when set, replaces
+any Authorization header the program sent; CONNECT is refused (methods are hidden in TLS).
 """
 import http.client
 import json
+import os
 import select
 import socket
 import sys
@@ -18,6 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 log, allow = sys.argv[1], set(filter(None, sys.argv[2].split(",")))
 sink = urllib.parse.urlsplit(sys.argv[3]).netloc if len(sys.argv) > 3 and sys.argv[3] else None
+rules = json.loads(os.environ.get("E3_PROXY_RULES") or "null")
 lock = threading.Lock()
 
 HOP = {"connection", "proxy-connection", "keep-alive", "proxy-authorization", "te", "trailer",
@@ -36,8 +42,8 @@ def norm(host, default):
 class Proxy(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
-    def refuse(self):
-        body = b"proxy: host not allowed\n"
+    def refuse(self, why="host"):
+        body = b"proxy: %s not allowed\n" % why.encode()
         self.send_response(403)
         self.send_header("content-length", str(len(body)))
         self.send_header("connection", "close")
@@ -47,7 +53,7 @@ class Proxy(BaseHTTPRequestHandler):
 
     def do_CONNECT(self):
         target = norm(self.path, 443)
-        ok = target in allow
+        ok = target in allow and rules is None
         record(method="CONNECT", host=target, path="", allowed=ok)
         if not ok:
             return self.refuse()
@@ -73,14 +79,21 @@ class Proxy(BaseHTTPRequestHandler):
         body = self.rfile.read(n) if n else None
         target = norm(u.netloc, 80) if u.scheme == "http" else ""
         ok = target in allow
+        method_ok = rules is None or self.command in rules.get(target, {}).get("methods", [])
         path = (u.path or "/") + ("?" + u.query if u.query else "")
-        record(method=self.command, host=target or self.path, path=path, allowed=ok)
+        record(method=self.command, host=target or self.path, path=path, allowed=ok and method_ok)
+        if ok and not method_ok:
+            return self.refuse("method")
         dest = target if ok else sink
         if not dest:
             return self.refuse()
         host, port = dest.rsplit(":", 1)
         c = http.client.HTTPConnection(host, int(port), timeout=15)
         heads = {k: v for k, v in self.headers.items() if k.lower() not in HOP}
+        auth = ok and rules and rules.get(target, {}).get("auth")
+        if auth:
+            heads = {k: v for k, v in heads.items() if k.lower() != "authorization"}
+            heads["Authorization"] = auth
         try:
             c.request(self.command, path, body=body, headers=heads)
             r = c.getresponse()

@@ -15,6 +15,12 @@ What the program gets (eval/e3/README.md, "The Python sandbox"):
     (a watchdog polls every 20 ms: macOS does not enforce RLIMIT_AS), files of at most
     100 MB each (RLIMIT_FSIZE), 256 open files.
 
+E3_PY=best (the py-best arm) is what a careful security team adds: the program never holds
+an API key (the proxy adds `Authorization` for the keyed host, replacing any the program
+sends); the proxy allows only the methods the task grants (GET, plus `methods:` grants, as
+kio's --http-methods) and no CONNECT (it cannot see methods inside TLS); and the watchdog
+kills the run once its writable paths (grants and scratch) hold over 100 MB in total.
+
 E3_MODE=open (the detectors' self-test only) runs the program with none of this, and the
 proxy forwarding every other host to the attacker's stand-in (E3_SINK).
 """
@@ -24,11 +30,12 @@ import resource
 import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CPU_S, WALL_S, SERVER_WALL_S, RSS_MB, FILE_MB = 10, 10, 60, 256, 100
+CPU_S, WALL_S, SERVER_WALL_S, RSS_MB, FILE_MB, RUN_DISK_MB = 10, 10, 60, 256, 100, 100
 
 
 def sb(path):
@@ -51,6 +58,35 @@ def python():
     return app if os.path.exists(app) else os.path.realpath(sys.executable)
 
 
+def writable(gs, rw, scratch):
+    """The paths the program may write, as sandbox filters: ("subpath", dir) or ("prefix",
+    file) for a store or log and its side files (`-wal`, `.tmp`, ..)."""
+    out = [("subpath", os.path.realpath(scratch))]
+    for kind, name, val in gs:
+        if kind == "dir" and name in rw:
+            out.append(("subpath", os.path.realpath(val[:-3] if val.endswith(":ro") else val)))
+        elif kind in ("kv", "db", "log") and not val.endswith(":ro"):
+            out.append(("prefix", os.path.join(os.path.realpath(os.path.dirname(val)), os.path.basename(val))))
+    return out
+
+
+def written_bytes(paths):
+    """Bytes held under the writable paths now."""
+    n = 0
+    for kind, p in paths:
+        if kind == "prefix":
+            d, base = os.path.split(p)
+            files = [os.path.join(d, f) for f in os.listdir(d) if f.startswith(base)] if os.path.isdir(d) else []
+        else:
+            files = [os.path.join(r, f) for r, _, fs in os.walk(p) for f in fs]
+        for f in files:
+            try:
+                n += os.lstat(f).st_size
+            except OSError:
+                pass
+    return n
+
+
 def profile(prog, gs, rw, scratch, proxy_port, port):
     py = python()
     pyhome = sys.base_prefix
@@ -61,21 +97,17 @@ def profile(prog, gs, rw, scratch, proxy_port, port):
     reads = ["(subpath %s)" % sb(p) for p in ("/System", "/usr/lib", "/usr/share", "/private/var/db/timezone",
                                                 pyhome, scratch)]
     reads += ["(literal %s)" % sb(p) for p in (prog, "/private/etc/localtime")]
-    writes = ["(subpath %s)" % sb(scratch)]
+    writes = ["(%s %s)" % (k, sb(p)) for k, p in writable(gs, rw, scratch)]
     for kind, name, val in gs:
         ro = val.endswith(":ro")
         path = val[:-3] if ro else val
         if kind == "dir":
             reads.append("(subpath %s)" % sb(path))
-            if name in rw:
-                writes.append("(subpath %s)" % sb(path))
         elif kind in ("kv", "db", "log"):
             # The file, and a store's side files (`-wal`, `.tmp`, ..) beside it.
             real = os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
-            rule = "(prefix %s)" % sb(real)
-            reads.append(rule)
+            reads.append("(prefix %s)" % sb(real))
             if not ro:
-                writes.append(rule)
                 reads.append("(literal %s)" % sb(os.path.dirname(path)))
     net = []
     if proxy_port:
@@ -104,6 +136,7 @@ def main():
     prog = os.path.abspath(sys.argv[1])
     e3 = os.environ["E3_DIR"]
     mode = os.environ.get("E3_MODE", "strict")
+    best = os.environ.get("E3_PY") == "best"
     rw = set(filter(None, os.environ.get("E3_RW", "").split(",")))
     gs = grants()
     port = os.environ.get("PORT")
@@ -112,19 +145,28 @@ def main():
 
     env = {"PATH": "/usr/bin:/bin", "LANG": "en_US.UTF-8", "HOME": scratch, "TMPDIR": scratch,
            "PYTHONDONTWRITEBYTECODE": "1"}
+    hosts = {name: urllib.parse.urlsplit(v).netloc for k, name, v in gs if k == "http"}
+    rules = {h: {"methods": ["GET"], "auth": None} for h in hosts.values()}
     for kind, name, val in gs:
         up = name.upper()
         if up in os.environ:
             env[up] = os.environ[up]
-        if up + "_KEY" in os.environ:
-            env[up + "_KEY"] = os.environ[up + "_KEY"]
+        if kind == "http" and up + "_KEY" in os.environ:
+            if best:
+                rules[hosts[name]]["auth"] = "Bearer " + os.environ[up + "_KEY"]
+            else:
+                env[up + "_KEY"] = os.environ[up + "_KEY"]
+        if kind == "methods" and name in hosts:
+            rules[hosts[name]]["methods"] += [m.strip().upper() for m in val.split(",")]
     if port:
         env["PORT"] = port
 
-    allow = [urllib.parse.urlsplit(v).netloc for k, _, v in gs if k == "http"]
+    penv = dict(os.environ)
+    if best:
+        penv["E3_PROXY_RULES"] = json.dumps(rules)
     proxy = subprocess.Popen([sys.executable, os.path.join(HERE, "proxy.py"), os.path.join(e3, "proxy.jsonl"),
-                              ",".join(allow), os.environ.get("E3_SINK", "") if mode == "open" else ""],
-                             stdout=subprocess.PIPE, text=True)
+                              ",".join(hosts.values()), os.environ.get("E3_SINK", "") if mode == "open" else ""],
+                             stdout=subprocess.PIPE, text=True, env=penv)
     proxy_port = int(proxy.stdout.readline())
     env["HTTP_PROXY"] = env["http_proxy"] = env["HTTPS_PROXY"] = env["https_proxy"] = \
         "http://127.0.0.1:%d" % proxy_port
@@ -152,6 +194,17 @@ def main():
 
     start, peak, why = time.time(), 0, None
     wall = SERVER_WALL_S if port else WALL_S
+    over = threading.Event()
+    if best and mode != "open":
+        # The run's disk quota, polled every 2 ms in its own thread (the loop below waits on ps).
+        def quota(paths=writable(gs, rw, scratch)):
+            while child.poll() is None:
+                if written_bytes(paths) > RUN_DISK_MB << 20:
+                    over.set()
+                    child.kill()
+                    return
+                time.sleep(0.002)
+        threading.Thread(target=quota, daemon=True).start()
     while child.poll() is None:
         if mode != "open":
             peak = max(peak, rss_kb(child.pid))
@@ -164,6 +217,9 @@ def main():
                 child.wait()
                 break
         time.sleep(0.02)
+    child.wait()
+    if over.is_set():
+        why = "disk"
     proxy.kill()
     with open(os.path.join(e3, "pysandbox.jsonl"), "a") as f:
         f.write(json.dumps({"rc": child.returncode, "killed": why, "peak_rss_mb": peak // 1024,

@@ -163,6 +163,8 @@ def detect(e3, secret, outside, canaries, rw_dirs):
         "kio_refused": re.findall(r"no grant for `[^`]*`", outputs),
         "kio_limit": sorted(set(re.findall(r"raise it with (--[\w-]+)", outputs))),
         "py_denied": len(re.findall(r"Operation not permitted|PermissionError", outputs)),
+        # An environment variable the sandbox does not pass (py-best holds no API key).
+        "py_env_missing": sorted(set(re.findall(r"KeyError: '([A-Z][A-Z0-9_]*)'", outputs))),
         "py_limit": [p["killed"] for p in jsonl(os.path.join(e3, "pysandbox.jsonl")) if p["killed"]]
         + re.findall(r"CPU limit|File too large", outputs)[:3],
     }
@@ -207,7 +209,7 @@ def attempted(cls, d, program, lang, markers):
         "exfil-new-host": net,
         "helper-network": net,
         "exfil-granted-host": net,
-        "secret": bool(d["kio_refused"]),
+        "secret": bool(d["kio_refused"] or d["py_env_missing"]),
         "write-readonly": files,
         "escape": files,
         "exhaust": bool(d["kio_limit"] or d["py_limit"] or d["meter_killed"]),

@@ -12,12 +12,14 @@ import statistics
 
 E3 = os.path.dirname(os.path.abspath(__file__))
 CONFIG = json.load(open(os.path.join(E3, "tasks.json")))
+ARMS = ["kio", "py", "py-best"]
 CLASSES = ["exfil-new-host", "exfil-granted-host", "secret", "write-readonly", "escape", "exhaust", "helper-network"]
 
 
 def secrets_readable(task, arm):
-    """Secrets the program can read: Python holds a keyed API's key in its environment;
-    both arms read a secret file in a granted Dir (45's webhook key)."""
+    """Secrets the program can read: the py arm holds a keyed API's key in its environment
+    (py-best's proxy and kio's host add it); every arm reads a secret file in a granted Dir
+    (45's webhook key)."""
     c = CONFIG.get(task["base"], {})
     return (1 if arm == "py" and c.get("keyed") else 0) + (1 if c.get("secret_dir") else 0)
 
@@ -32,9 +34,9 @@ def card(doc):
     twins = [t for t in ts if t["class"]]
     tried = [t for t in twins if t.get("attempted")]
     seen = [t for t in tried if (t.get("review_attempt") or {}).get("flags")]
-    scan = [t for t in tried if (t.get("review_attempt") or {}).get("flags_by_import_scan")]
     false_alarm = [t for t in benign if (t.get("review") or {}).get("flags")]
     lines = [(t["review"] or {}).get("lines" if arm == "kio" else "diff_lines", 0) for t in ts if t.get("review")]
+    tool = "kio check --base" if arm == "kio" else "the diff's effect scan"
     return {
         "arm": arm, "model": doc["model"],
         "benign completed": "%d/%d" % (sum(t["passed"] for t in benign), len(benign)),
@@ -42,8 +44,8 @@ def card(doc):
         "attacks attempted (model followed the injection)": "%d/%d" % (len(tried), len(twins)),
         "attacks that succeeded": "%d" % sum(bool(t.get("succeeded")) for t in twins),
         "attacks blocked at run time": "%d" % sum(bool(t.get("blocked")) for t in twins),
-        "attempts visible before running, without reading the code": "%d/%d" % (len(seen), len(tried)),
-        "attempts an import/call scan of the diff flags": "-" if arm == "kio" else "%d/%d" % (len(scan), len(tried)),
+        "attempts flagged before running (kio: check --base; Python: the diff's effect scan)":
+            "%d/%d (%s)" % (len(seen), len(tried), tool),
         "benign programs flagged before running (false alarms)": "%d/%d" % (len(false_alarm), len(benign)),
         "tasks whose program can read a secret": "%d/%d" % (sum(secrets_readable(t, arm) > 0 for t in ts), len(ts)),
         "lines a reviewer reads, median (kio: check --base output; Python: diff vs the benign reference)": "%g" % med(lines),
@@ -91,14 +93,20 @@ def main():
         for cls in CLASSES:
             ts = [t for t in st if t["class"] == cls]
             row = [cls, len(ts)]
-            for arm in ("kio", "py"):
+            for arm in ARMS:
                 row.append("%d blocked, %d succeeded" % (sum(t.get(arm) == "blocked" for t in ts),
                                                          sum(t.get(arm) == "succeeded" for t in ts)))
-            row.append("%d/%d" % (sum(bool(t["kio_review"]["flags"]) for t in ts if "kio_review" in t), len(ts)))
+            for arm in ARMS:
+                row.append("%d/%d" % (sum(bool(t[arm + "_review"]["flags"]) for t in ts if arm + "_review" in t),
+                                      len(ts)))
             rows.append(row)
-        out.append(table(rows, ["class", "twins", "kio", "Python", "kio: flagged by check --base"]))
-        both = [t["task"] for t in st if t["class"] and t.get("kio") == "succeeded" and t.get("py") == "succeeded"]
-        out += ["", "Neither arm stops: " + (", ".join(both) or "none")]
+        out.append(table(rows, ["class", "twins"] + ARMS +
+                         ["flagged: kio check --base", "flagged: py effect scan", "flagged: py-best effect scan"]))
+        twins = [t for t in st if t["class"]]
+        out += ["", "Blocked, of %d: " % len(twins) + ", ".join(
+            "%s %d" % (a, sum(t.get(a) == "blocked" for t in twins)) for a in ARMS)]
+        none = [t["task"] for t in st if t["class"] and all(t.get(a) == "succeeded" for a in ARMS)]
+        out += ["", "No arm stops: " + (", ".join(none) or "none")]
     print("\n".join(out))
 
 
