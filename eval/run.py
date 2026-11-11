@@ -7,11 +7,17 @@ Per task: the model gets task.md (and, for kio, docs/language.md as the system
 prompt, or with --spec none a one-line description) and returns one program; up to
 --rounds rounds, each feeding back `kio check`'s diagnostics or the check's failure
 output. Writes eval/results/<date>-<model>-<lang>[-nospec].json and prints a table.
+
+E4 (generation cost): --spec cookbook (docs/primer.md, then language.md), --spec terse
+(language.md, then "Answer with the program only, in one code block."), --lang py
+--spec e3 (E3's Python system prompt); --budget/--ledger stop the run at a shared
+dollar limit; each round records thinking tokens and the reply's prose.
 """
 import argparse
 import collections
 import concurrent.futures
 import datetime
+import importlib.util
 import json
 import os
 import re
@@ -19,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 EVAL = os.path.dirname(os.path.abspath(__file__))
@@ -27,6 +34,7 @@ ROOT = os.path.dirname(EVAL)
 KIO_SYSTEM = "You write programs in kio. This is the kio language reference.\n\n"
 KIO_NOSPEC = "You write programs in kio, a subset of Rust with capabilities as parameters."
 PY_SYSTEM = "You write Python 3 programs."
+TERSE = "\n\nAnswer with the program only, in one code block."
 
 KIO_HOW = """
 Write the whole program in kio, as one file. It runs as `kio run prog.kio` with one flag per grant, so `main`'s parameters must be exactly the grants listed, with those names and types. The output is `main`'s return value: return a `Str`, or a `Result` whose `Ok` holds the `Str`; kio prints it. An HTTP handler's `main` runs once per request (`kio run prog.kio --listen ADDR`).
@@ -91,11 +99,14 @@ def extract(text):
     return blocks[0][1]
 
 
-def ask(model, system, prompt, cwd):
-    """One `claude -p` call without tools; returns (text, usage dict)."""
+def ask(model, system, prompt, cwd, detail=None):
+    """One `claude -p` call without tools; returns (text, usage dict). With a `detail`
+    dict, streams the reply and puts its thinking tokens there (the stream holds the
+    thinking block's signature only, not its text)."""
+    fmt = ["stream-json", "--verbose"] if detail is not None else ["json"]
     cmd = ["claude", "-p", "--model", model, "--tools", "", "--system-prompt", system,
-           "--output-format", "json", "--no-session-persistence", "--setting-sources", "",
-           "--strict-mcp-config", "--disable-slash-commands"]
+           "--output-format"] + fmt + ["--no-session-persistence", "--setting-sources", "",
+                                       "--strict-mcp-config", "--disable-slash-commands"]
     last = ""
     for attempt in range(3):
         try:
@@ -104,7 +115,12 @@ def ask(model, system, prompt, cwd):
             last = "timed out"
             continue
         try:
-            out = json.loads(p.stdout)
+            if detail is None:
+                out = json.loads(p.stdout)
+            else:
+                events = [json.loads(l) for l in p.stdout.splitlines() if l.strip()]
+                out = next(e for e in events if e.get("type") == "result")
+                detail["thinking_tokens"] = out.get("usage", {}).get("output_tokens_details", {}).get("thinking_tokens", 0)
             if not out.get("is_error"):
                 u = out.get("usage", {})
                 return out.get("result", ""), {
@@ -114,10 +130,46 @@ def ask(model, system, prompt, cwd):
                     "output_tokens": u.get("output_tokens", 0),
                 }
             last = out.get("result", "")
-        except ValueError:
+        except (ValueError, StopIteration):
             last = (p.stdout + p.stderr)[-500:]
         time.sleep(5 * (attempt + 1))
     raise RuntimeError("claude -p failed: %s" % last[:500])
+
+
+class BudgetExceeded(RuntimeError):
+    pass
+
+
+class Ledger:
+    """Every call's cost appended to a JSONL file, so several runs, in parallel too, share
+    one budget (as eval/e3/run.py's). Stops $2 short: calls already in flight still land."""
+
+    def __init__(self, path, budget):
+        self.path, self.budget, self.lock = path, budget, threading.Lock()
+
+    def spent(self):
+        return sum(json.loads(l)["cost_usd"] for l in open(self.path)) if os.path.exists(self.path) else 0.0
+
+    def ask(self, model, system, prompt, cwd, detail=None):
+        with self.lock:
+            spent = self.spent()
+        if spent >= self.budget - 2.0:
+            raise BudgetExceeded("budget: $%.2f of $%.2f spent" % (spent, self.budget))
+        text, usage = ask(model, system, prompt, cwd, detail)
+        with self.lock:
+            with open(self.path, "a") as f:
+                f.write(json.dumps({"model": model, "cost_usd": usage["cost_usd"], "time": round(time.time())}) + "\n")
+        return text, usage
+
+
+def prose(text, program):
+    """The reply less its program: what the model wrote around the code block."""
+    if program is None:
+        return text
+    i = text.find(program)
+    head = text[:i] if i >= 0 else text
+    tail = text[i + len(program):] if i >= 0 else ""
+    return re.sub(r"```[\w+-]*[^\n]*\n?", "", head + tail).strip()
 
 
 def run_cmd(cmd, env, timeout):
@@ -144,16 +196,20 @@ def run_task(task, args, system):
     prog_path = os.path.join(work, "prog." + ext)
     base = task_md.strip() + "\n" + (KIO_HOW if args.lang == "kio" else PY_HOW)
     rec = {"task": task, "rounds": [], "passed": False, "rounds_used": 0,
-           "cost_usd": 0.0, "input_tokens": 0, "output_tokens": 0}
+           "cost_usd": 0.0, "input_tokens": 0, "output_tokens": 0, "thinking_tokens": 0}
     prompt = base
     start = time.time()
     try:
         for rnd in range(1, args.rounds + 1):
-            text, usage = ask(args.model, system, prompt, work)
+            detail = {}
+            text, usage = args.ask(args.model, system, prompt, work, detail)
             for k, v in usage.items():
                 rec[k] += v
+            rec["thinking_tokens"] += detail["thinking_tokens"]
             program = extract(text)
-            r = {"round": rnd, "program": program, "checked": None, "passed": False, "feedback": ""}
+            r = {"round": rnd, "program": program, "checked": None, "passed": False, "feedback": "",
+                 "output_tokens": usage["output_tokens"], "thinking_tokens": detail["thinking_tokens"],
+                 "reply_bytes": len(text.encode()), "prose": prose(text, program)}
             rec["rounds"].append(r)
             rec["rounds_used"] = rnd
             if program is None:
@@ -180,7 +236,7 @@ def run_task(task, args, system):
                 break
             r["feedback"] = out[-4000:]
             prompt = base + FIX.format(program=program, what=what, feedback=r["feedback"])
-    except RuntimeError as e:
+    except RuntimeError as e:  # BudgetExceeded included
         rec["error"] = str(e)
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -217,17 +273,28 @@ def summarize(results, lang):
             print("%4d  %s" % (c, e))
 
 
+def e3_py_system():
+    """E3's Python system prompt (the parity framing), from eval/e3/run.py."""
+    spec = importlib.util.spec_from_file_location("e3run", os.path.join(EVAL, "e3", "run.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m.PY_SYSTEM
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", required=True, help="a `claude --model` name: haiku, sonnet, opus, ..")
     ap.add_argument("--lang", choices=["kio", "py"], default="kio")
-    ap.add_argument("--spec", choices=["full", "none"], default="full",
-                    help="kio's system prompt: docs/language.md (full) or one line (none)")
+    ap.add_argument("--spec", choices=["full", "none", "cookbook", "terse", "e3"], default="full",
+                    help="kio's system prompt: docs/language.md (full), one line (none), docs/primer.md "
+                    "then language.md (cookbook), full plus TERSE (terse); for py, e3 is E3's system prompt")
     ap.add_argument("--tasks", help="comma-separated task numbers or names (01,02); default all")
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--rounds", type=int, default=5)
     ap.add_argument("--kio", default=shutil.which("kio") or os.path.join(ROOT, "target", "release", "kio"))
     ap.add_argument("--out", help="result file (default eval/results/<date>-<model>-<lang>.json)")
+    ap.add_argument("--budget", type=float, help="stop at this many dollars, counted in --ledger")
+    ap.add_argument("--ledger", help="JSONL of every call's cost, shared by runs (with --budget)")
     args = ap.parse_args()
     args.kio = os.path.abspath(args.kio)
     if args.lang == "kio" and not os.access(args.kio, os.X_OK):
@@ -237,13 +304,21 @@ def main():
     if args.tasks:
         want = args.tasks.split(",")
         tasks = [t for t in tasks if t[:2] in want or t in want]
+    if args.spec not in ({"full", "e3"} if args.lang == "py" else {"full", "none", "cookbook", "terse"}):
+        sys.exit("--spec %s does not apply to --lang %s" % (args.spec, args.lang))
+    if args.budget and not args.ledger:
+        sys.exit("--budget needs --ledger")
+    args.ask = Ledger(args.ledger, args.budget).ask if args.budget else ask
     nospec = args.lang == "kio" and args.spec == "none"
+    read_doc = lambda name: open(os.path.join(ROOT, "docs", name)).read()
     if args.lang == "py":
-        system = PY_SYSTEM
+        system = PY_SYSTEM if args.spec == "full" else e3_py_system()
     elif nospec:
         system = KIO_NOSPEC
+    elif args.spec == "cookbook":
+        system = KIO_SYSTEM + read_doc("primer.md") + "\n\n" + read_doc("language.md")
     else:
-        system = KIO_SYSTEM + open(os.path.join(ROOT, "docs", "language.md")).read()
+        system = KIO_SYSTEM + read_doc("language.md") + (TERSE if args.spec == "terse" else "")
 
     results = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
@@ -256,11 +331,12 @@ def main():
     ordered = [results[t] for t in tasks]
 
     date = datetime.date.today().isoformat()
-    name = "%s-%s-%s%s.json" % (date, args.model, args.lang, "-nospec" if nospec else "")
+    suffix = {"none": "-nospec", "full": ""}.get(args.spec, "-" + args.spec)
+    name = "%s-%s-%s%s.json" % (date, args.model, args.lang, suffix)
     out = args.out or os.path.join(EVAL, "results", name)
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    doc = {"model": args.model, "lang": args.lang, "spec": "none" if nospec else "full", "date": date,
-           "rounds": args.rounds,
+    doc = {"model": args.model, "lang": args.lang, "spec": args.spec, "date": date,
+           "rounds": args.rounds, "system_bytes": len(system.encode()),
            "commit": subprocess.run(["git", "-C", ROOT, "rev-parse", "--short", "HEAD"],
                                     capture_output=True, text=True).stdout.strip(),
            "tasks": ordered}

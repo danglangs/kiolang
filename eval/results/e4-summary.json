@@ -1,0 +1,222 @@
+{
+ "kio spec": {
+  "file": "e4-sonnet-kio-spec.json",
+  "system_bytes": 36134,
+  "tasks": 45,
+  "errors": [],
+  "pass_first": 43,
+  "pass_by_5": 45,
+  "rounds": 47,
+  "output_tokens": 148187,
+  "thinking_tokens": 80382,
+  "code_tokens": 67805,
+  "prose_tokens": 0,
+  "input_tokens": 786908,
+  "cost_usd": 1.97,
+  "out_per_final_byte": 1.12,
+  "out_per_byte_first_try": 1.08,
+  "first_call_input_tokens": 16659,
+  "sample": [
+   {
+    "task": "01-word-freq",
+    "output_tokens": 1292,
+    "thinking_tokens": 790,
+    "program_bytes": 937,
+    "prose": ""
+   },
+   {
+    "task": "10-config-flatten",
+    "output_tokens": 2674,
+    "thinking_tokens": 1838,
+    "program_bytes": 1846,
+    "prose": ""
+   },
+   {
+    "task": "20-kv-rate-limit",
+    "output_tokens": 1260,
+    "thinking_tokens": 700,
+    "program_bytes": 1179,
+    "prose": ""
+   },
+   {
+    "task": "30-http-paginate",
+    "output_tokens": 1892,
+    "thinking_tokens": 861,
+    "program_bytes": 2232,
+    "prose": ""
+   },
+   {
+    "task": "40-csv-quoted",
+    "output_tokens": 5362,
+    "thinking_tokens": 2993,
+    "program_bytes": 5133,
+    "prose": ""
+   }
+  ]
+ },
+ "kio cookbook": {
+  "file": "e4-sonnet-kio-cookbook.json",
+  "system_bytes": 44907,
+  "tasks": 45,
+  "errors": [],
+  "pass_first": 45,
+  "pass_by_5": 45,
+  "rounds": 45,
+  "output_tokens": 132750,
+  "thinking_tokens": 70283,
+  "code_tokens": 62419,
+  "prose_tokens": 48,
+  "input_tokens": 938936,
+  "cost_usd": 1.62,
+  "out_per_final_byte": 1.04,
+  "out_per_byte_first_try": 1.04,
+  "first_call_input_tokens": 20865,
+  "sample": [
+   {
+    "task": "01-word-freq",
+    "output_tokens": 1049,
+    "thinking_tokens": 615,
+    "program_bytes": 834,
+    "prose": ""
+   },
+   {
+    "task": "10-config-flatten",
+    "output_tokens": 1986,
+    "thinking_tokens": 1193,
+    "program_bytes": 1710,
+    "prose": ""
+   },
+   {
+    "task": "20-kv-rate-limit",
+    "output_tokens": 932,
+    "thinking_tokens": 505,
+    "program_bytes": 878,
+    "prose": ""
+   },
+   {
+    "task": "30-http-paginate",
+    "output_tokens": 1492,
+    "thinking_tokens": 549,
+    "program_bytes": 2022,
+    "prose": ""
+   },
+   {
+    "task": "40-csv-quoted",
+    "output_tokens": 5707,
+    "thinking_tokens": 3536,
+    "program_bytes": 4590,
+    "prose": ""
+   }
+  ]
+ },
+ "kio terse": {
+  "file": "e4-sonnet-kio-terse.json",
+  "system_bytes": 36184,
+  "tasks": 45,
+  "errors": [],
+  "pass_first": 41,
+  "pass_by_5": 45,
+  "rounds": 49,
+  "output_tokens": 143231,
+  "thinking_tokens": 73570,
+  "code_tokens": 69115,
+  "prose_tokens": 546,
+  "input_tokens": 822675,
+  "cost_usd": 1.94,
+  "out_per_final_byte": 1.08,
+  "out_per_byte_first_try": 1.04,
+  "first_call_input_tokens": 16674,
+  "sample": [
+   {
+    "task": "01-word-freq",
+    "output_tokens": 1085,
+    "thinking_tokens": 563,
+    "program_bytes": 1003,
+    "prose": ""
+   },
+   {
+    "task": "10-config-flatten",
+    "output_tokens": 2089,
+    "thinking_tokens": 1269,
+    "program_bytes": 1875,
+    "prose": ""
+   },
+   {
+    "task": "20-kv-rate-limit",
+    "output_tokens": 1459,
+    "thinking_tokens": 929,
+    "program_bytes": 1117,
+    "prose": ""
+   },
+   {
+    "task": "30-http-paginate",
+    "output_tokens": 1864,
+    "thinking_tokens": 830,
+    "program_bytes": 2258,
+    "prose": ""
+   },
+   {
+    "task": "40-csv-quoted",
+    "output_tokens": 5351,
+    "thinking_tokens": 3039,
+    "program_bytes": 4940,
+    "prose": ""
+   }
+  ]
+ },
+ "python (E3)": {
+  "file": "e4-sonnet-py.json",
+  "system_bytes": 526,
+  "tasks": 45,
+  "errors": [],
+  "pass_first": 43,
+  "pass_by_5": 45,
+  "rounds": 47,
+  "output_tokens": 68497,
+  "thinking_tokens": 22649,
+  "code_tokens": 45848,
+  "prose_tokens": 0,
+  "input_tokens": 72381,
+  "cost_usd": 0.97,
+  "out_per_final_byte": 0.63,
+  "out_per_byte_first_try": 0.6,
+  "first_call_input_tokens": 1453,
+  "sample": [
+   {
+    "task": "01-word-freq",
+    "output_tokens": 186,
+    "thinking_tokens": 0,
+    "program_bytes": 398,
+    "prose": ""
+   },
+   {
+    "task": "10-config-flatten",
+    "output_tokens": 868,
+    "thinking_tokens": 374,
+    "program_bytes": 1243,
+    "prose": ""
+   },
+   {
+    "task": "20-kv-rate-limit",
+    "output_tokens": 1032,
+    "thinking_tokens": 355,
+    "program_bytes": 1888,
+    "prose": ""
+   },
+   {
+    "task": "30-http-paginate",
+    "output_tokens": 939,
+    "thinking_tokens": 258,
+    "program_bytes": 1776,
+    "prose": ""
+   },
+   {
+    "task": "40-csv-quoted",
+    "output_tokens": 2969,
+    "thinking_tokens": 1356,
+    "program_bytes": 4559,
+    "prose": ""
+   }
+  ]
+ }
+}

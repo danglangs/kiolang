@@ -30,9 +30,9 @@ eval/run.py --model sonnet --lang kio --tasks 01,26 --jobs 2
 eval/run.py --model sonnet --lang kio --spec none    # no language.md: what Rust syntax alone carries
 ```
 
-Flags: `--model` (a `claude --model` name), `--lang kio|py` (default kio), `--spec full|none` (kio's system prompt: docs/language.md, or only "You write programs in kio, a subset of Rust with capabilities as parameters."; the result file ends `-nospec`), `--tasks` (numbers or names, default all), `--jobs` (default 4), `--rounds` (default 5), `--kio` (default `kio` on PATH, else `target/release/kio`), `--out` (result file).
+Flags: `--model` (a `claude --model` name), `--lang kio|py` (default kio), `--spec full|none` (kio's system prompt: docs/language.md, or only "You write programs in kio, a subset of Rust with capabilities as parameters."; the result file ends `-nospec`); E4 adds `cookbook`, docs/primer.md then language.md, and `terse`, language.md then "Answer with the program only, in one code block.", each file ending `-SPEC`; for `--lang py`, `--spec e3` is E3's Python system prompt), `--budget USD --ledger FILE` (stop a dollar or two short of a dollar limit shared through a JSONL file, writing partial results), `--tasks` (numbers or names, default all), `--jobs` (default 4), `--rounds` (default 5), `--kio` (default `kio` on PATH, else `target/release/kio`), `--out` (result file).
 
-`run.py` needs Python 3 and a logged-in `claude` CLI (no API key; open_questions #165). Per task, up to 5 rounds: the model's program is checked with `kio check` (diagnostics are fed back), then with `check.sh` (its failure output is fed back). It writes `results/<date>-<model>-<lang>[-nospec].json` (every round's program and feedback) and prints:
+`run.py` needs Python 3 and a logged-in `claude` CLI (no API key; open_questions #165). Per task, up to 5 rounds: the model's program is checked with `kio check` (diagnostics are fed back), then with `check.sh` (its failure output is fed back). It writes `results/<date>-<model>-<lang>[-nospec].json` (every round's program, feedback, output and thinking tokens, and the reply's prose outside the code block) and prints:
 
 | Column | Meaning |
 |---|---|

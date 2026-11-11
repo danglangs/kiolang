@@ -108,7 +108,7 @@ Biases:
 
 - 52/55 is this suite's outcome (curated attacks, Python standard library only), not a general equivalence. Neither the arms' run-time cost nor the cost of maintaining each deployment was measured.
 - "Lines a reviewer reads" is output size, not reviewer effort or accuracy; reading authority alone cannot show a program handles data correctly. A human review study would test the stronger claim.
-- Generation cost: kio runs cost about twice Python's, mostly the longer system prompt (all of language.md against a paragraph).
+- Generation cost: kio runs cost about twice Python's. **Generation cost (E4)** measured why, on the 45 benign tasks with Sonnet 5.5 (eval/results/e4-summary.json): not the system prompt, which is mostly cache reads, but output. kio answers took 148k output tokens against Python's 68k for programs 1.2x longer: thinking 80k against 23k (0.60 thinking tokens per program byte against 0.21), code 68k against 46k (kio tokenizes at 0.49 tokens per byte, Python 0.40), prose ~0 in both. Asking for the program only (`terse`) changed nothing; an idioms-first primer (`cookbook`, docs/primer.md) cut output tokens 10% and cost 18% ($1.97 to $1.62) and passed 45/45 first try against 43, short of E4's 25% bar.
 
 - kio's system prompt is all of language.md; Python's a paragraph. The task text is written in kio's terms.
 - py-best's limits are polled watchdogs; a kernel quota would refuse earlier. It refuses CONNECT (no HTTPS through the proxy).
