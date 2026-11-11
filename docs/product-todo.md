@@ -73,6 +73,19 @@ operator runs it:  kio run app.kio --http stripe=… --http-header stripe=Author
 
 - [ ] **P7b. Fewer `send_all *` (precision, from P7's review).** Each over-reports today, never under-reports: follow a call of a named function returning `List<HttpRequest>` (`send_all(build())`, `let reqs = build()`) through `fn_verbs`; follow `reqs[i]` of a followed local; treat a closure literal in `xs.map(|p| HttpRequest { .. })` as a named function (`*` if a closure parameter's type carries a request); allow `sort_by`, `sort_by_key`, `filter`, `reverse` on a followed local (they cannot add a request). Done: a test per shape, and the reviewer's programs p3, p16, p18, m5, m7 report verbs.
 
+## Pilot phase (adopted 2026-11-11)
+
+Goal: a new user completes a useful, correctly granted job without installing Rust or needing help. Speed work pauses after C8c3 unless a pilot hits a limit. Publishing (release binaries, any package name) is a separate approval each time.
+
+- [ ] **D1. One complete first job.** A user with no Rust toolchain: download a `kio` binary, follow docs/first-job.md (10 minutes), run one useful job with correct grants and read its report, `--base` diff and audit log. The job: an API integration (read a CSV of orders from a `:ro` dir, POST each to a local stand-in API with an injected key, write a summary), with a grants file. Pieces:
+  - Release artifacts built in CI for macOS (arm64) and Linux (x86_64, static or glibc 2.31+): `kio` with the runtime embedded, a SHA-256 file; a `release` workflow that builds on a tag and uploads to a draft release only (not published). Tested: the artifact runs `hello.kio` and the first job on a clean machine image (CI container without Rust).
+  - docs/first-job.md and `examples/first-job/` (program, grants file, stand-in API in Python's standard library, sample data); every command in the guide runs in CI.
+  - Done: the guide followed from a clean container in CI end to end; time to first correct run recorded.
+- [ ] **D2. `kio run --json`: a result contract for orchestration** (pin before building, reviewed by me before code). One JSON object on stdout: `{"ok": bool, "value": .., "error": {"kind", "message", "file", "line", "col", "hint"}, "report": [..], "audit": path|null, "limits": {..used}}`; exit codes unchanged; check errors, grant refusals (`:ro`, verbs, H28) and run-time traps all as `error` with a `kind`. Done: tests per kind; guide.md section.
+- [ ] **D3. Python wrapper, unpublished.** `tools/kio-py/` (installed from git, not PyPI): `check(path, base=None, grants=None)`, `run(path, grants, inputs=..)` returning D2's object as dataclasses; no parsing of human text. Validated with a pilot before any name or release.
+- [ ] **W1. Workflow measurement.** D1's job and two more (a file job, a webhook) set up in kio and in careful Python (E3's py-best setup): steps and lines to configure authority, lines a reviewer reads for one permission-changing edit, time and steps to diagnose a deliberate failure (missing grant, a denied host, a trap), from a written protocol. Agent-run first, reported as such; repeated with pilot users when there are some.
+- [ ] **E3c. Held-out attacker.** An attacker agent started fresh, given only public docs (README, guide.md, language.md, the threat model) and its own kio checkout to develop against, never eval/ or E3 fixtures, writes malicious programs per attack class; they run against all three arms by the existing harness. The report states exactly what the attacker saw.
+
 ## Order
 
 E1 and P1 in parallel (eval/ and the report touch different code); S1 after P1 (both edit host/src/main.rs's flags).
