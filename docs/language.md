@@ -1,4 +1,4 @@
-# kio primer
+# kio language reference
 
 kio uses a subset of Rust syntax, so every kio program parses as Rust. Types and semantics are kio's own: there are no references or ownership, and values are copied. The Rust compiler is never involved. kio's checker and compiler read the source.
 
@@ -211,7 +211,7 @@ A WebSocket server is `fn main(msg: WsMessage, conn: WsSend, ..)` under `--liste
 
 ## Authority report
 
-One line per function: each capability parameter with the methods it may call, including through helpers and recursion. A capability passed to a helper is charged with the helper's calls. The report describes possible authority, not an execution trace.
+One line per function: each capability parameter with the methods it may call, including through helpers and recursion. A capability passed to a helper is charged with the helper's calls. The report describes possible authority, not an execution trace. An `Http` call names its method when it is a literal or a constant (`api send PUT`, `api send_all POST`) and `*` when the checker cannot see it (`api send *`); [guide.md](guide.md#http) has the rules.
 
 ```
 load      : d read

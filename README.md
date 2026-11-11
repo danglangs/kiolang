@@ -10,7 +10,7 @@ kio is an experimental language and runtime (v0) for agent-written file jobs, AP
 
 - **"Can't I just sandbox Python?"** Yes, with work. On 55 prompt-injection attacks ([E3](docs/proposals/e3-scorecard.md)), Python sandboxed by a careful team stopped 52, the same as kio; it took an egress proxy that injects keys and filters methods, a sandbox profile per task and watchdogs. In kio that is flags on `kio run`.
 - **"How do I review a change?"** Permissions through the authority diff: 1-2 exact lines in E3, against an 80-90 line source diff where scanners guess. What the program does with those permissions (an SQL statement, a payload, a deletion path) still takes code review and tests.
-- **"Can agents write it?"** It is a Rust subset on purpose. Given the primer (`kio mcp`), Haiku, Sonnet and Opus pass 42-43 of 45 backend tasks first try (Python: 39-45) and all 45 by try 5.
+- **"Can agents write it?"** It is a Rust subset on purpose. Given the language reference (`kio mcp`), Haiku, Sonnet and Opus pass 42-43 of 45 backend tasks first try (Python: 39-45) and all 45 by try 5.
 - **"What does it not do?"** Stop misuse of what you granted: a program that may read `customers/` and call `partner.example` can send one to the other. Few libraries yet, and agents spend about 2x the tokens writing it today.
 
 | | kio | Python, careful sandbox | Python, common practice |
@@ -60,6 +60,7 @@ Shipped anyway, it does not start:
 
 ```
 kio: `orders` is granted `:ro` but the program can write it (`orders remove`)
+  hint: drop `:ro`, or remove the write
 ```
 
 Review permission changes through the authority diff; use code review and tests for what the program does with them.
@@ -169,7 +170,7 @@ Models write kio as well as Python. Given the language reference (what `kio_prim
 | Sonnet 5.5 | 43/45 | 45/45 | 44/45 | 45/45 |
 | Opus 5.5 | 43/45 | 45/45 | 45/45 | 45/45 |
 
-kio is a Rust subset on purpose, and its errors name the fix. Without the reference, models write full Rust and rarely finish: give agents the primer.
+kio is a Rust subset on purpose, and its errors name the fix. Without the reference, models write full Rust and rarely finish: give agents `kio_primer`.
 
 ## Threat model
 
@@ -187,7 +188,7 @@ kio is a Rust subset on purpose, and its errors name the fix. Without the refere
 
 ## Roadmap
 
-- **Now:** allocation speed (unboxed enums, small structs and borrowed loop variables are in; fewer string copies, inlining and per-loop fuel next).
+- **Now:** allocation speed (unboxed enums and small structs, borrowed loop variables and reused conversions are in; inlining in progress; per-loop fuel, inline list buffers and cheaper reference counts next).
 - **Next:** packages (a module from another directory); `par_map` and tasks (pinned).
 - **Later:** tuples, if the eval shows models still reach for them.
 
