@@ -156,4 +156,4 @@ Lowering turns a checked `Program` into `ir::Module`, with every name resolved t
 
 - **Attenuation.** `dir.sub("invoices")` would let `main` hand a helper less than it has. It conflicts with "caps are parameters only" because it returns a cap. Options: allow it only in argument position, or make the host mint sub-handles. Deferred to v1.
 - **Relaxing second-class caps.** Storing caps in records would need flow analysis in the checker. Not until there is a program that needs it.
-- **Grant format.** CLI flags for v0. A manifest file once there are more than a handful of grants per run.
+- **Grant format.** CLI flags, or the same flags one per line in a grants file (`--grants`, P4; guide.md "Grants file").

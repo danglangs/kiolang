@@ -95,8 +95,18 @@ follow              : links get, clock now_ms
 ...
 notify              : hook send, log write
 ...
-$ kio run app.kio --kv links=links.kv --kv auth=auth.kv --dir assets=./static --rng links_rng --clock now --log log=links.log \
-    --http hook=hooks.example --http-methods hook=POST --http-header hook=Authorization:env:HOOK_AUTH --listen 127.0.0.1:8080
+$ cat app.grants
+--kv links=links.kv
+--kv auth=auth.kv
+--dir assets=./static
+--rng links_rng
+--clock now
+--log log=links.log
+--http hook=hooks.example
+--http-methods hook=POST
+--http-header hook=Authorization:env:HOOK_AUTH
+--listen 127.0.0.1:8080
+$ HOOK_AUTH='Bearer ...' kio run app.kio --grants app.grants
 ...
 listening on http://127.0.0.1:8080
 ```
@@ -112,7 +122,7 @@ step 4   + slack: Http (send_all)                               (one host, key i
 step 5   ~ db: Db (+query)                                      (retries pending events)
 ```
 
-The diffs say what the code can reach; the tests (124 checks) say what it does there.
+The diffs say what the code can reach; the tests (124 checks) say what it does there. What each grant is, the operator's half, is [app.grants](https://github.com/danglangs/kio-web/tree/main/examples/payhook/app.grants), reviewed beside the code: `kio run app.kio --grants app.grants`, and in CI `kio check app.kio --grants app.grants` binds it to `main` without running or reading a key.
 
 ## Replay
 

@@ -5,7 +5,8 @@ The operator's and user's reference: every grant, limit and output of `kio run`.
 ```
 kio check <prog.kio>             the authority report, or errors with hints
 kio check <new.kio> --base <old.kio> [--detail]   grants new adds or drops; exit 3 if any added
-kio run <prog.kio> [grants] [limits] [--audit log] [--listen addr]
+kio check <prog.kio> --grants <file> [flags]   bind the file's grants to main without running
+kio run <prog.kio> [--grants file] [grants] [limits] [--audit log] [--listen addr]
 kio mcp                          the MCP server (README, "Use from an agent")
 ```
 
@@ -183,6 +184,33 @@ listening on ws://127.0.0.1:8080
 | `--ws-origin https://app.example` | a browser may open a WebSocket only from the server's own host; this allows another origin. Clients that send no `Origin` (websocat) are not browsers and are accepted |
 
 Throughput: 73,800 requests/s with keep-alive (kio-web hello, roadmap.md "Speed today"), 17,800-20,200 without ([perf.md](perf.md)), a fresh sandbox per request.
+
+## Grants file
+
+`--grants app.grants` reads flags from a file, kept and reviewed beside the code. One flag per line, as on the command line, split at the first space with no quoting (the value is the rest of the line, spaces and quotes included); blank lines and lines starting with `#` are skipped. Any `kio run` flag but `--grants` may appear.
+
+```
+# payhook's grants (kio-web examples/payhook/app.grants)
+# The signing secret and the chat key come from the environment; the program never holds either.
+--hmac stripe=env:STRIPE_WHSEC:verify
+--clock now
+--db db=payhook.db
+--log log=payhook.log
+--http slack=https://chat.example
+--http-methods slack=POST
+--http-header slack=Authorization:env:CHAT_AUTH
+--timeout 20
+--audit audit.jsonl
+--listen 127.0.0.1:8080
+```
+
+```
+$ STRIPE_WHSEC=whsec_... CHAT_AUTH='Bearer ...' kio run app.kio --grants app.grants
+```
+
+Flags on the command line are added after the file's. A flag that takes one value for the run (`--listen`, `--audit`, a limit, `--kv-mb`, `--db-mb`) given in both, or twice in the file, is refused, naming the file's line; one grant name in both is two grants of it, refused as on the command line. The file is refused if the program could change it for its next run: inside a granted `--dir`, the `--audit`, a `--log` or a store's file, or with other hard links. Paths in it are relative to the working directory, as on the command line.
+
+`kio check app.kio --grants app.grants` binds the file's grants to `main`'s parameters and prints the report, without running: missing, extra and wrong-kind grants, a `:ro` or `:verify` grant the program would write or sign with, and every flag's syntax are errors as under `kio run`. It opens no granted path and reads no secret (an `env:` or `file:` source is checked for its form only), so it runs in CI. A pull request then shows both halves of the authority: `kio check --base` for what the code calls on each grant, the grants file's diff for what each grant is.
 
 ## Limits
 

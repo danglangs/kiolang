@@ -3,7 +3,7 @@ mod mcp;
 use kio_host::{listen, open_dir, ClockSpec, Diag, HmacKey, Kio, Limits, LogSink, Origin, RngSpec, Server, Sources};
 
 /// `kio run`'s flags.
-const USAGE: &str = "[--dir name=path]... [--http name=host]... [--http-methods name=POST,PUT,..]... [--http-header name=Header:env:VAR|file:path]... [--kv name=path[:ro]|:memory:]... [--kv-mb mb] [--db name=path[:ro]|:memory:]... [--db-mb mb] [--rng name[=seed:N]]... [--clock name[=fixed:T]]... [--log name=path|-]... [--hmac name=env:VAR|file:path[:verify]]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]...";
+const USAGE: &str = "[--grants file] [--dir name=path]... [--http name=host]... [--http-methods name=POST,PUT,..]... [--http-header name=Header:env:VAR|file:path]... [--kv name=path[:ro]|:memory:]... [--kv-mb mb] [--db name=path[:ro]|:memory:]... [--db-mb mb] [--rng name[=seed:N]]... [--clock name[=fixed:T]]... [--log name=path|-]... [--hmac name=env:VAR|file:path[:verify]]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]...";
 
 fn main() {
     // The host checks and lowers programs natively, and compiled code runs on this thread's stack
@@ -18,10 +18,11 @@ fn cli() -> i32 {
         ["check", path] => return check(path),
         ["check", path, "--base", base] => return check_base(path, base, false),
         ["check", path, "--base", base, "--detail"] => return check_base(path, base, true),
+        ["check", path, ref flags @ ..] if flags.contains(&"--grants") => return run(path, flags, true),
         ["mcp"] => return mcp::serve(),
-        ["run", path, ref flags @ ..] => return run(path, flags),
+        ["run", path, ref flags @ ..] => return run(path, flags, false),
         _ => eprintln!(
-            "kio: a capability-typed language; code names what it needs, the operator grants what that is.\n\nusage: kio check <prog.kio> [--base <old.kio> [--detail]]\n       kio mcp\n       kio run <prog.kio> {USAGE}"
+            "kio: a capability-typed language; code names what it needs, the operator grants what that is.\n\nusage: kio check <prog.kio> [--base <old.kio> [--detail]]\n       kio check <prog.kio> --grants <file> [flags]\n       kio mcp\n       kio run <prog.kio> {USAGE}"
         ),
     }
     2
@@ -109,6 +110,158 @@ fn check_base(path: &str, base: &str, detail: bool) -> i32 {
     3
 }
 
+/// Every flag of `kio run`, each with one value: what a grants file may hold.
+const RUN_FLAGS: [&str; 22] = [
+    "--dir",
+    "--http",
+    "--http-methods",
+    "--http-header",
+    "--kv",
+    "--kv-mb",
+    "--db",
+    "--db-mb",
+    "--rng",
+    "--clock",
+    "--log",
+    "--hmac",
+    "--fuel",
+    "--timeout",
+    "--memory",
+    "--stack",
+    "--calls",
+    "--io",
+    "--audit",
+    "--listen",
+    "--ws-origin",
+    "--host",
+];
+
+/// The flags that take one value for the run: in a grants file at most once, and not also on
+/// the command line.
+const ONCE: [&str; 10] = [
+    "--kv-mb",
+    "--db-mb",
+    "--fuel",
+    "--timeout",
+    "--memory",
+    "--stack",
+    "--calls",
+    "--io",
+    "--audit",
+    "--listen",
+];
+
+/// `flags` with `--grants FILE` replaced by the file's flags, ahead of the others, and the file's
+/// path. A line is one flag, split at the first space (no quoting: the value is the rest of the
+/// line); blank lines and lines starting with `#` are skipped.
+fn with_grants(flags: &[&str]) -> Result<(Vec<String>, Option<String>), i32> {
+    let mut path = None;
+    let mut rest: Vec<String> = Vec::new();
+    for pair in flags.chunks(2) {
+        match pair {
+            ["--grants", _] if path.is_some() => {
+                return Err(fail(
+                    "--grants is given twice\n  hint: keep every grant in one file".into(),
+                ))
+            }
+            ["--grants", p] => path = Some(p.to_string()),
+            _ => rest.extend(pair.iter().map(|f| f.to_string())),
+        }
+    }
+    let Some(path) = path else {
+        return Ok((rest, None));
+    };
+    let text = std::fs::read_to_string(&path).map_err(|e| fail(format!("--grants {path}: cannot read: {e}")))?;
+    let mut out: Vec<String> = Vec::new();
+    // Each `ONCE` flag in the file and its line.
+    let mut once: Vec<(&str, usize)> = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let at = format!("{path}:{}", i + 1);
+        let (flag, value) = line.split_once(' ').unwrap_or((line, ""));
+        // Not shown: a line that is not a flag could be a key pasted by mistake.
+        if !flag.starts_with("--") {
+            return Err(fail(format!(
+                "{at}: not a flag\n  hint: each line is one flag and its value, as on the command line: `--dir data=./data`"
+            )));
+        }
+        if flag == "--grants" {
+            return Err(fail(format!(
+                "{at}: a grants file cannot name another\n  hint: put those grants in this file"
+            )));
+        }
+        if !RUN_FLAGS.contains(&flag) {
+            return Err(fail(format!(
+                "{at}: unknown flag `{flag}`\n  hint: a line is one of `kio run`'s flags: {}",
+                RUN_FLAGS.join(" ")
+            )));
+        }
+        let value = value.trim_start();
+        if value.is_empty() {
+            return Err(fail(format!(
+                "{at}: `{flag}` has no value\n  hint: write it after a space: `{flag} value`"
+            )));
+        }
+        if ONCE.contains(&flag) {
+            if let Some((_, n)) = once.iter().find(|(f, _)| *f == flag) {
+                return Err(fail(format!(
+                    "`{flag}` is given twice in {path}, lines {n} and {}\n  hint: give it once",
+                    i + 1
+                )));
+            }
+            if rest.iter().step_by(2).any(|f| f == flag) {
+                return Err(fail(format!(
+                    "`{flag}` is given in {at} and on the command line\n  hint: give it in one place"
+                )));
+            }
+            once.push((flag, i + 1));
+        }
+        out.push(flag.into());
+        out.push(value.into());
+    }
+    out.extend(rest);
+    Ok((out, Some(path)))
+}
+
+/// Why the grants file `path` is refused, if it is: the program could change it, and so its own
+/// grants for the next run, were it inside a granted `--dir` (another hard link could be) or the
+/// file of a flag in `written` (`--audit`, `--log`, `--kv`, `--db`).
+fn grants_refusal(path: &str, dirs: &[(String, String)], written: &[(String, &str)]) -> Option<String> {
+    let changes = "the program could change its own grants for the next run";
+    if std::fs::metadata(path).is_ok_and(|m| std::os::unix::fs::MetadataExt::nlink(&m) > 1) {
+        return Some(format!(
+            "`--grants {path}` has other hard links; {changes} through one\n  hint: give the grants file no other links"
+        ));
+    }
+    // The file, and the name it was given: a symlink inside a `--dir` could be pointed elsewhere.
+    let p = std::path::Path::new(path);
+    let parent = p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(".".as_ref());
+    let named = std::fs::canonicalize(parent)
+        .ok()
+        .zip(p.file_name())
+        .map(|(d, f)| d.join(f));
+    let places: Vec<_> = [std::fs::canonicalize(path).ok(), named]
+        .into_iter()
+        .flatten()
+        .collect();
+    for (d, dir) in dirs {
+        if std::fs::canonicalize(dir).is_ok_and(|root| places.iter().any(|p| p.starts_with(&root))) {
+            return Some(format!(
+                "`--grants {path}` is inside `--dir {d}={dir}`; {changes}\n  hint: keep the grants file outside every granted directory"
+            ));
+        }
+    }
+    if let Some((flag, _)) = written.iter().find(|(_, f)| same_file(path, f)) {
+        return Some(format!(
+            "`--grants {path}` is the `{flag}` file; {changes}\n  hint: give the grants file a file of its own"
+        ));
+    }
+    None
+}
+
 /// Apply one `--http-header name=Header:env:VAR` or `name=Header:file:PATH` to the grant `name`:
 /// the value is read now, once. A file's one trailing newline is dropped. The file must be a
 /// regular file outside every granted `dirs` (the program could read it) and not the file of a
@@ -118,6 +271,7 @@ fn http_header(
     https: &mut [(String, Origin)],
     dirs: &[(String, String)],
     files: &[(String, &str)],
+    dry: bool,
 ) -> Result<(), String> {
     let usage = "expected name=Header:env:VAR or name=Header:file:PATH";
     let Some((name, rest)) = spec.split_once('=') else {
@@ -131,14 +285,19 @@ fn http_header(
             "no `--http {name}=host` grant\n  hint: --http-header adds a header to an Http grant of that name"
         ));
     };
-    let value = secret(source, usage, "the header's value", dirs, files)?;
+    let value = secret(source, usage, "the header's value", dirs, files, dry)?;
     origin.inject(header, value)
 }
 
 /// Grant one `--hmac name=env:VAR` or `name=file:PATH`, either ending in `:verify` to refuse
 /// `sign`: the key is read now, once, with `--http-header`'s rules (`secret`). Errors never hold
 /// the key.
-fn hmac(spec: &str, dirs: &[(String, String)], files: &[(String, &str)]) -> Result<(String, HmacKey), String> {
+fn hmac(
+    spec: &str,
+    dirs: &[(String, String)],
+    files: &[(String, &str)],
+    dry: bool,
+) -> Result<(String, HmacKey), String> {
     let usage = "expected name=env:VAR or name=file:PATH, with `:verify` at the end to refuse sign";
     let Some((name, source)) = spec.split_once('=').filter(|(n, _)| !n.is_empty()) else {
         return Err(usage.into());
@@ -147,20 +306,25 @@ fn hmac(spec: &str, dirs: &[(String, String)], files: &[(String, &str)]) -> Resu
         Some(s) => (s, true),
         None => (source, false),
     };
-    let value = secret(source, usage, "the key", dirs, files)?;
+    let value = secret(source, usage, "the key", dirs, files, dry)?;
     Ok((name.into(), HmacKey::new(value, verify_only)?))
 }
 
 /// The secret `source` names, `env:VAR` or `file:PATH` (`read_secret`), read once; `usage` for
 /// any other form; `what` names it in the hint for an empty one. Errors never hold the value.
+/// With `dry` (`kio check --grants`) only the form is checked: nothing is read, and `UNREAD`
+/// stands in for the value.
 fn secret(
     source: &str,
     usage: &str,
     what: &str,
     dirs: &[(String, String)],
     files: &[(String, &str)],
+    dry: bool,
 ) -> Result<String, String> {
     let value = match source.split_once(':') {
+        Some(("env", var)) if dry && !var.is_empty() && !var.contains(['=', '\0']) => return Ok(UNREAD.into()),
+        Some(("file", path)) if dry && !path.is_empty() => return Ok(UNREAD.into()),
         Some(("env", var)) if !var.is_empty() && !var.contains(['=', '\0']) => match std::env::var(var) {
             Ok(v) => v,
             Err(std::env::VarError::NotPresent) => {
@@ -221,6 +385,9 @@ fn read_secret(path: &str, dirs: &[(String, String)], files: &[(String, &str)]) 
     Ok(v.strip_suffix('\r').unwrap_or(v).to_string())
 }
 
+/// What `kio check --grants` passes on for a secret it does not read: a valid header value and key.
+const UNREAD: &str = "unread";
+
 /// The most of a secret read from a file (as `Origin::inject` and `HmacKey::new` allow).
 const SECRET_MAX: u64 = 8 << 10;
 
@@ -245,7 +412,14 @@ fn flag_error(flag: &str, label: &str, e: &str) -> String {
     }
 }
 
-fn run(path: &str, flags: &[&str]) -> i32 {
+/// `kio run`, or with `dry` `kio check --grants`: check the flags and bind them to `main`'s
+/// parameters, print the report and stop, reading no secret and opening no granted path.
+fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
+    let (flags, grants_file) = match with_grants(flags) {
+        Ok(f) => f,
+        Err(code) => return code,
+    };
+    let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
     let files = match read_files(path) {
         Ok(f) => f,
         Err(code) => return code,
@@ -411,11 +585,12 @@ fn run(path: &str, flags: &[&str]) -> i32 {
             },
             _ => return fail(format!("usage: kio run <prog.kio> {USAGE}")),
         };
+        dir_paths.push((name.to_string(), dir.to_string()));
+        if dry {
+            continue;
+        }
         match open_dir(dir.as_ref()) {
-            Ok(d) => {
-                dirs.push((name.to_string(), d));
-                dir_paths.push((name.to_string(), dir.to_string()));
-            }
+            Ok(d) => dirs.push((name.to_string(), d)),
             Err(e) => return fail(format!("--dir {name}={dir}: {e}")),
         }
     }
@@ -437,15 +612,24 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     let mut written: Vec<(String, &str)> = Vec::new();
     written.extend(audit.as_deref().map(|p| ("--audit".to_string(), p)));
     written.extend(log_paths.iter().map(|(n, p)| (format!("--log {n}"), p.as_str())));
+    if let Some(g) = &grants_file {
+        let stores = (kv_specs.iter().map(|(n, s)| (format!("--kv {n}"), s)))
+            .chain(db_specs.iter().map(|(n, s)| (format!("--db {n}"), s)))
+            .map(|(f, s)| (f, kio_host::kv::split_spec(s).0));
+        let written: Vec<(String, &str)> = written.iter().cloned().chain(stores).collect();
+        if let Some(why) = grants_refusal(g, &dir_paths, &written) {
+            return fail(why);
+        }
+    }
     for spec in http_headers {
-        if let Err(e) = http_header(spec, &mut https, &dir_paths, &written) {
+        if let Err(e) = http_header(spec, &mut https, &dir_paths, &written, dry) {
             return fail(flag_error("--http-header", header_label(spec), &e));
         }
     }
     // An error names the grant only: a key given inline by mistake would follow the `=`, or be
     // the whole spec when there is none.
     for spec in hmac_specs {
-        match hmac(spec, &dir_paths, &written) {
+        match hmac(spec, &dir_paths, &written, dry) {
             Ok(grant) => sources.hmacs.push(grant),
             Err(e) => {
                 let name = spec.split_once('=').map_or("", |(n, _)| n);
@@ -516,6 +700,32 @@ fn run(path: &str, flags: &[&str]) -> i32 {
     }
     if !ws && !ws_origins.is_empty() {
         return fail("--ws-origin without a WebSocket server\n  hint: --ws-origin lets browser pages from that origin connect to a `main` that takes WsMessage and WsSend; drop it".into());
+    }
+    if dry {
+        let mut named: Vec<(String, &str)> = Vec::new();
+        named.extend(dir_paths.iter().map(|(n, _)| (n.clone(), "Dir")));
+        named.extend(https.iter().map(|(n, _)| (n.clone(), "Http")));
+        named.extend(kv_specs.iter().map(|(n, _)| (n.clone(), "Kv")));
+        named.extend(db_specs.iter().map(|(n, _)| (n.clone(), "Db")));
+        named.extend(sources.rngs.iter().map(|(n, _)| (n.clone(), "Rng")));
+        named.extend(sources.clocks.iter().map(|(n, _)| (n.clone(), "Clock")));
+        named.extend(sources.logs.iter().map(|(n, _)| (n.clone(), "Log")));
+        named.extend(log_paths.iter().map(|(n, _)| (n.clone(), "Log")));
+        named.extend(sources.hmacs.iter().map(|(n, _)| (n.clone(), "Hmac")));
+        // `--listen` grants these by type, to the parameters of that type.
+        let socket = ["Incoming", "Outgoing", "WsMessage", "WsSend"];
+        for (n, ty) in params.iter().filter(|_| listen.is_some()) {
+            if let Some(kind) = socket.iter().find(|k| *k == ty) {
+                named.push((n.clone(), kind));
+            }
+        }
+        return match kio_host::bind_grants(&checked, &named) {
+            Ok(()) => {
+                println!("{}", report.lines().collect::<Vec<_>>().join("\n"));
+                0
+            }
+            Err(diags) => print_diags(&files, diags),
+        };
     }
     // The compile cache holds native code later runs load as trusted. A program granted a `Dir`
     // over it could plant an entry, so then this run does not use it (open question 75). Says

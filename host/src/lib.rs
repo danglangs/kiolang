@@ -97,6 +97,16 @@ pub fn explain(e: &wasmtime::Error) -> Option<String> {
     e.downcast_ref::<Stopped>().map(|s| s.0.clone())
 }
 
+/// Bind `grants` (`(name, kind)` each) to `program`'s `main` parameters as a run does, without
+/// running it (`kio check --grants`): the grant errors, if any.
+pub fn bind_grants(program: &lang::Program, grants: &[(String, &str)]) -> std::result::Result<(), Vec<Diag>> {
+    let params = grants::main_params(&lang::lower::lower(program, &lang::CapTable::v0()));
+    match grants::bind(&params, grants) {
+        Ok(_) => Ok(()),
+        Err(diags) => Err(diags.into_iter().map(Diag::from).collect()),
+    }
+}
+
 /// Check `files` (root first) in the host: the report, or the diagnostics.
 pub fn check_files(files: &[(String, String)]) -> std::result::Result<Report, Vec<Diag>> {
     let pairs: Vec<(&str, &str)> = files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
