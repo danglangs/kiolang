@@ -76,6 +76,7 @@ Compiled-only kio covers the whole language and every capability. What real apps
 | H26 | `kio mcp` reads each message with a 2 MB limit before parsing: a longer line is refused (`-32600`) and skipped without being held, and the server answers the next; `kio_check` sums source sizes before copying them |
 | P5 | the authority report charges a capability parameter only for a receiver or argument the checker resolved to it: a local, closure parameter, pattern binding or `for` variable of the same name is not charged, so `kio check --base` shows a later real call (#197) |
 | S3 | kio no longer loads native code from disk: the compile cache is gone, every `kio run` compiles in memory (hello about 30 ms wall, was 8 ms cached), and the host never calls `Component::deserialize`. A program granted a `Dir` over the cache could plant native code that a later run, granted nothing, would load; ownership, hashes and keys in a user-writable directory cannot tell the host's entries from a program's (#75). An old `~/.cache/kio` is left alone and never read. The store and log refusals that only protected the cache are gone. host/tests/cache.rs |
+| H27 | `--dir name=path:ro`: `write`, `create`, `remove` are `denied` in the host on both paths, and a program that can call them is refused at startup, under `--listen` and by `kio check --grants`; the audit header shows `path:ro`. E3's kio arm grants it to every read-only dir: kio stops 52/55 compromised references (was 43), write-readonly 9/9 (#203) |
 
 ## Next
 

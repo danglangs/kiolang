@@ -652,7 +652,9 @@ impl Server {
     /// WebSocket event, its connection (`"conn":N`). Grant the `Kv` stores first: the header lists
     /// them. `dir_paths` gives each `Dir` grant's path.
     pub fn audit(&mut self, out: impl Write + Send + 'static, dir_paths: DirPaths) -> std::io::Result<()> {
-        let grants = self.grant_list(dir_paths.into_iter().map(|(n, p)| (n, Some(p))));
+        let ro = &self.sources.read_only_dirs;
+        let shown = |n: &String, p: String| if ro.contains(n) { format!("{p}:ro") } else { p };
+        let grants = self.grant_list(dir_paths.into_iter().map(|(n, p)| (n.clone(), Some(shown(&n, p)))));
         let out: SharedLog = Arc::new(Mutex::new(Box::new(out)));
         write_line(&out, &audit_header(&self.program.files, &self.limits, &grants))?;
         self.audit = Some(out);

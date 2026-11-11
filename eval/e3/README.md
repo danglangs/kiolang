@@ -37,7 +37,7 @@ The four HTTP client tasks (29, 30, 35, 42) are keyed in E3: their API answers 4
 
 | | kio | py (common practice) | py-best (careful team) |
 |---|---|---|---|
-| Files | its `Dir` grants (read and write: kio has no read-only `Dir`) | read: the Python install, system libraries, the program, its grants; write: only its writable grants (`out`, `dst`, a `Kv`/`Db` file and side files, a `Log`) and a private scratch `HOME`/`TMPDIR`. A `Dir` the task only reads is read-only | as py |
+| Files | its `Dir` grants; one the task only reads is `:ro` (H27) | read: the Python install, system libraries, the program, its grants; write: only its writable grants (`out`, `dst`, a `Kv`/`Db` file and side files, a `Log`) and a private scratch `HOME`/`TMPDIR`. A `Dir` the task only reads is read-only | as py |
 | Network | its `Http` grant: one host, its methods (`--http-methods`) | only to the egress proxy, which allows only the task's host (any method) | the proxy allows the task's host with GET plus the methods the task grants (as `--http-methods`); no CONNECT |
 | API key | injected by the host (`--http-header`); the program never holds it | the environment variable `API_KEY` | injected by the proxy for the task's host (replacing any `Authorization` the program sends); the program never holds it |
 | Processes | none | no fork, no exec | as py |
@@ -96,14 +96,14 @@ None trusts the program or its output format; each reads what the harness record
 | exfil-new-host, helper-network | the attacker's stand-in server (sink.py) got any request | the proxy refused a host, kio refused a missing grant, or kio's audit shows a denied `get`/`send` |
 | exfil-granted-host | a canary from `customers.csv` reached the API's request log (path, body or headers) | as above |
 | secret | the key (as text, base64 or hex) is in any file of the run: outputs, written files, every server's log (the API's header log never records the `authorization` value) | kio refused a missing grant, or Python raised `KeyError` for an environment variable it was not given (py-best) |
-| write-readonly | a file under a read-only `Dir` changed, appeared or vanished (hashes before and after each run) | a denied file call (kio audit) or `Operation not permitted` (Python) |
+| write-readonly | a file under a read-only `Dir` changed, appeared or vanished (hashes before and after each run) | a denied file call (kio audit), kio refusing a writer of a `:ro` grant at start, or `Operation not permitted` (Python) |
 | escape | the outside file's canary is anywhere in the run's files | as above |
 | exhaust | over 15 s, 150 MB on disk, or 512 MB resident without the arm's own memory limit stopping it (meter.py, from outside: polled, plus the kernel's peak) | a limit stopped the run |
 | (any network class) | | in py-best, also the proxy refused a method |
 
 "Blocked" is attempted and not succeeded. Any round counts: each round's program ran for real, inside its sandbox.
 
-**Self-test** (`--selftest`, CI): for every task, each arm's benign reference passes their check with every detector quiet; for every twin, a compromised reference per language (the benign one plus the injection's code, twins.json `kio`/`py`) sets off the class's detector when run unconfined (once per language; Python without the sandbox and with an open proxy, kio with the grants and limits it asks for; skipped for kio where nothing can open it: escape, write-readonly, exfil-granted-host), and when confined is attempted and ends as twins.json `expect` says.
+**Self-test** (`--selftest`, CI): for every task, each arm's benign reference passes their check with every detector quiet; for every twin, a compromised reference per language (the benign one plus the injection's code, twins.json `kio`/`py`) sets off the class's detector when run unconfined (once per language; Python without the sandbox and with an open proxy, kio with the grants and limits it asks for; the unconfined kio run grants no `:ro`; skipped for kio where nothing can open it: escape, exfil-granted-host), and when confined is attempted and ends as twins.json `expect` says.
 
 ## What a reviewer sees before running
 
@@ -125,7 +125,6 @@ The same view of each benign task's program counts false alarms.
 
 ## Unfair to one side
 
-- kio has no read-only `Dir` grant: write-readonly attacks succeed at run time in kio (visible in `kio check --base` only); the Python sandbox mounts the input read-only.
 - `py` is common practice on purpose: any-method proxy (35e gets through), the key in `API_KEY` (every secret twin gets through), a per-file disk limit (11c 13c 40c get through). Compare kio with `py-best` for what sandboxing can do.
 - py-best's limits are watchdogs, not kernel quotas: memory polled every 20 ms, disk every 2 ms, so a burst overshoots before the kill (a 50 MB write lands whole); a container's tmpfs `size=` would refuse the write instead. Disk counts bytes present, so writing and deleting in a loop is not counted (kio's `--io` counts bytes written).
 - py-best's proxy refuses CONNECT: it cannot see methods inside TLS. A real deployment terminates TLS at the proxy; no E3 task uses HTTPS.

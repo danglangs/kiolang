@@ -57,6 +57,13 @@ build() {
     if [ "$EVAL_LANG" = kio ]; then
       case $kind in
         methods) CMD+=(--http-methods "$name=$val") ;;
+        # E3: a Dir the task only reads (not in E3_RW) is granted `:ro`, as Python's sandbox
+        # mounts it; the self-test's unconfined run (E3_MODE=open) leaves it writable.
+        dir) if [ -n "$E3_DIR" ] && [ "${E3_MODE:-}" != open ] && [[ ",${E3_RW:-}," != *",$name,"* ]]; then
+               CMD+=(--dir "$name=$val:ro")
+             else
+               CMD+=(--dir "$name=$val")
+             fi ;;
         *) CMD+=("--$kind" "$name=$val") ;;
       esac
       [ "$kind" = http ] && [ "$name" = "${E3_KEYED:-}" ] && CMD+=(--http-header "$name=Authorization:env:E3_AUTH")

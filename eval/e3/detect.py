@@ -159,7 +159,9 @@ def detect(e3, secret, outside, canaries, rw_dirs):
         "disk_mb": max([m["disk_mb"] for m in meter] or [0]),
         "meter_killed": [m["killed"] for m in meter if m["killed"] == "meter ceiling"],
         "kio_denied": ["%s %s %s" % (a.get("cap"), a.get("method"), a.get("result")) for a in audit
-                       if a.get("event") == "call" and a.get("result") in ("denied", "invalid-path")],
+                       if a.get("event") == "call" and a.get("result") in ("denied", "invalid-path")]
+        # A program that can write a `:ro` Dir is refused before it runs (H27).
+        + ["%s refused at start" % m for m in re.findall(r"granted `:ro` but the program can write it \(`([^`]*)`\)", outputs)],
         "kio_refused": re.findall(r"no grant for `[^`]*`", outputs),
         "kio_limit": sorted(set(re.findall(r"raise it with (--[\w-]+)", outputs))),
         "py_denied": len(re.findall(r"Operation not permitted|PermissionError", outputs)),

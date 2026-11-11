@@ -3,7 +3,7 @@ mod mcp;
 use kio_host::{listen, open_dir, ClockSpec, Diag, HmacKey, Kio, Limits, LogSink, Origin, RngSpec, Server, Sources};
 
 /// `kio run`'s flags.
-const USAGE: &str = "[--grants file] [--dir name=path]... [--http name=host]... [--http-methods name=POST,PUT,..]... [--http-header name=Header:env:VAR|file:path]... [--kv name=path[:ro]|:memory:]... [--kv-mb mb] [--db name=path[:ro]|:memory:]... [--db-mb mb] [--rng name[=seed:N]]... [--clock name[=fixed:T]]... [--log name=path|-]... [--hmac name=env:VAR|file:path[:verify]]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]...";
+const USAGE: &str = "[--grants file] [--dir name=path[:ro]]... [--http name=host]... [--http-methods name=POST,PUT,..]... [--http-header name=Header:env:VAR|file:path]... [--kv name=path[:ro]|:memory:]... [--kv-mb mb] [--db name=path[:ro]|:memory:]... [--db-mb mb] [--rng name[=seed:N]]... [--clock name[=fixed:T]]... [--log name=path|-]... [--hmac name=env:VAR|file:path[:verify]]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]...";
 
 fn main() {
     // The host checks and lowers programs natively, and compiled code runs on this thread's stack
@@ -580,8 +580,14 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
                 continue;
             }
             ["--dir", spec] => match spec.split_once('=') {
-                Some(nd) => nd,
-                None => return fail(format!("--dir {spec}: expected name=path")),
+                Some((name, dir)) => {
+                    let (path, ro) = kio_host::kv::split_spec(dir);
+                    if ro {
+                        sources.read_only_dirs.push(name.to_string());
+                    }
+                    (name, path)
+                }
+                None => return fail(format!("--dir {spec}: expected name=path or name=path:ro")),
             },
             _ => return fail(format!("usage: kio run <prog.kio> {USAGE}")),
         };
@@ -674,6 +680,15 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
         if key.verify_only() && kio_host::signs_in_report(&report, name) {
             return fail(format!(
                 "`{name}` is granted `:verify` but the program can sign with it\n  hint: drop `:verify`, or remove the `sign` call"
+            ));
+        }
+    }
+    // A `:ro` dir is refused to a program that can write it; the host also refuses any write that
+    // reaches it (H27).
+    for name in &sources.read_only_dirs {
+        if let Some(m) = kio_host::dir_write_in_report(&report, name) {
+            return fail(format!(
+                "`{name}` is granted `:ro` but the program can write it (`{name} {m}`)\n  hint: drop `:ro`, or remove the write"
             ));
         }
     }

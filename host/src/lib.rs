@@ -135,8 +135,9 @@ pub fn diff_files(
 /// The most one `Dir.read` returns; a larger file is `too-large`.
 const READ_CAP: u64 = 10 << 20;
 
-/// A granted directory in the resource table. Every guest path goes through it.
-struct Granted(RealDir);
+/// A granted directory in the resource table, and whether it is granted `:ro` (H27). Every guest
+/// path goes through it.
+struct Granted(RealDir, bool);
 
 /// The one scheme, host and port an `Http` grant reaches. Guest input never changes it. It also
 /// holds the run's pinned DNS answer; clones share it, and `for_run` gives a run its own.
@@ -1134,6 +1135,13 @@ impl State {
         g.0.try_clone().ok()
     }
 
+    /// Whether the directory behind a guest handle is granted `:ro`: `write`, `create` and
+    /// `remove` are then `denied`.
+    fn read_only(&self, h: &Resource<kio::caps::fs::Dir>) -> bool {
+        let g = self.table.get(&Resource::<Granted>::new_borrow(h.rep()));
+        g.is_ok_and(|g| g.1)
+    }
+
     /// The request behind a guest handle.
     fn request(&self, h: &Resource<kio::caps::web::Incoming>) -> Result<&Request> {
         Ok(self.table.get(&Resource::<Request>::new_borrow(h.rep()))?)
@@ -1213,7 +1221,11 @@ impl kio::caps::fs::HostDir for State {
 
     fn create(&mut self, d: Resource<kio::caps::fs::Dir>, path: String, data: Vec<u8>) -> Result<Result<(), IoErr>> {
         let arg = path.clone();
-        self.call(d.rep(), "create", &arg, |s| s.create_file(&d, path, data), outcome)
+        let create = |s: &mut Self| match s.read_only(&d) {
+            true => Ok(Err(IoErr::Denied)),
+            false => s.create_file(&d, path, data),
+        };
+        self.call(d.rep(), "create", &arg, create, outcome)
     }
 
     fn list(&mut self, d: Resource<kio::caps::fs::Dir>, path: String) -> Result<Result<Vec<String>, IoErr>> {
@@ -1223,7 +1235,11 @@ impl kio::caps::fs::HostDir for State {
 
     fn write(&mut self, d: Resource<kio::caps::fs::Dir>, path: String, data: Vec<u8>) -> Result<Result<(), IoErr>> {
         let arg = path.clone();
-        self.call(d.rep(), "write", &arg, |s| s.write_file(&d, path, data), outcome)
+        let write = |s: &mut Self| match s.read_only(&d) {
+            true => Ok(Err(IoErr::Denied)),
+            false => s.write_file(&d, path, data),
+        };
+        self.call(d.rep(), "write", &arg, write, outcome)
     }
 
     fn remove(&mut self, d: Resource<kio::caps::fs::Dir>, path: String) -> Result<Result<(), IoErr>> {
@@ -1234,7 +1250,11 @@ impl kio::caps::fs::HostDir for State {
             Some(t) if t.is_file() => dir.remove_file(path).map_err(|e| io_err(&e)),
             Some(_) => Err(IoErr::Denied),
         };
-        self.call(d.rep(), "remove", &arg, |s| s.on_dir(&d, path, work), outcome)
+        let remove = |s: &mut Self| match s.read_only(&d) {
+            true => Ok(Err(IoErr::Denied)),
+            false => s.on_dir(&d, path, work),
+        };
+        self.call(d.rep(), "remove", &arg, remove, outcome)
     }
 
     fn exists(&mut self, d: Resource<kio::caps::fs::Dir>, path: String) -> Result<Result<bool, IoErr>> {
@@ -2108,6 +2128,8 @@ pub struct Sources {
     pub logs: Vec<(String, LogSink)>,
     pub dbs: Vec<(String, Arc<db::Db>)>,
     pub hmacs: Vec<(String, HmacKey)>,
+    /// The `Dir` grants given `:ro` (H27), by name.
+    pub read_only_dirs: Vec<String>,
 }
 
 /// An `--hmac` grant: the key, and whether `sign` is refused (`:verify`). Its `Debug` never
@@ -2143,6 +2165,15 @@ impl HmacKey {
     pub fn verify_only(&self) -> bool {
         self.verify_only
     }
+}
+
+/// The first write (`write`, `create`, `remove`) an authority report's `main` line shows on the
+/// `Dir` `name`: a `:ro` grant of `name` is then refused (H27).
+pub fn dir_write_in_report(report: &str, name: &str) -> Option<&'static str> {
+    let calls = main_calls(report);
+    ["write", "create", "remove"]
+        .into_iter()
+        .find(|m| calls.contains(&(name.to_string(), m.to_string())))
 }
 
 /// Whether `main`'s report line has `name sign`: a `:verify` grant of `name` is then refused.
@@ -2624,7 +2655,8 @@ fn push_grants(
         })
     };
     for (name, dir) in dirs {
-        add(name, "Dir", s.table.push(Granted(dir))?.rep(), None);
+        let ro = sources.read_only_dirs.contains(&name);
+        add(name, "Dir", s.table.push(Granted(dir, ro))?.rep(), None);
     }
     for (name, origin) in https {
         let target = Some(origin.target());
@@ -2682,7 +2714,11 @@ fn start_audit(
         .iter()
         .map(|b| {
             let target = match b.kind {
-                "Dir" => dir_paths.iter().find(|(n, _)| *n == b.name).map(|(_, p)| p.clone()),
+                "Dir" => {
+                    let ro = s.table.get(&Resource::<Granted>::new_borrow(b.rep)).is_ok_and(|g| g.1);
+                    let path = dir_paths.iter().find(|(n, _)| *n == b.name);
+                    path.map(|(_, p)| if ro { format!("{p}:ro") } else { p.clone() })
+                }
                 _ => b.target.clone(),
             };
             (b.name.clone(), b.kind, target)

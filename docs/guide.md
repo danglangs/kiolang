@@ -22,7 +22,7 @@ examples/fx/report.kio:10: error: no grant for `fx: Http`
 
 | Type | Flag | Grants |
 |---|---|---|
-| `Dir` | `--dir name=path` | a directory: `read`, `create`, `list`, `write`, `remove`, `exists` |
+| `Dir` | `--dir name=path`, `name=path:ro` | a directory: `read`, `create`, `list`, `write`, `remove`, `exists` |
 | `Http` | `--http name=host`, `--http-methods name=POST,..`, `--http-header name=Header:env:VAR` | one host over HTTPS, GET unless more methods are granted; `--http name=http://127.0.0.1:9000` plain HTTP, for local testing |
 | `Kv` | `--kv name=path`, `name=path:ro`, `name=:memory:` | a key-value store |
 | `Db` | `--db name=path`, `name=path:ro`, `name=:memory:` | a SQLite database: `query`, `exec`, `transaction` |
@@ -40,6 +40,14 @@ A `Dir` reaches only paths beneath its root: `..`, absolute paths and symlinks o
 $ kio run examples/tour/escape.kio --dir input=examples/tour/in
 main : input read
 error: IoErr::InvalidPath
+```
+
+`path:ro` is read-only: `write`, `create` and `remove` are `Err(IoErr::Denied)` (audited `denied`), and a program whose report shows any of them on that grant is refused at startup, under `--listen` and by `kio check --grants`. The audit header shows the grant as `path:ro`.
+
+```
+$ kio run examples/fx/report.kio --dir input=examples/in:ro --dir out=examples/tour/out:ro --http fx=api.frankfurter.dev
+kio: `out` is granted `:ro` but the program can write it (`out write`)
+  hint: drop `:ro`, or remove the write
 ```
 
 ### Http
