@@ -85,8 +85,6 @@ $ kio run examples/tour/hello.kio
 hello, kio
 ```
 
-No Rust? [Your first job in 10 minutes](docs/first-job.md), with a release binary.
-
 Every flag, limit and output: [docs/guide.md](docs/guide.md).
 
 Walkthroughs: [a helper that gains the network, and the audit log](docs/tour.md#a-helper-that-gains-the-network); [replaying a run](docs/tour.md#replay).
