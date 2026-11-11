@@ -40,6 +40,19 @@ operator runs it:  kio run app.kio --http stripe=… --http-header stripe=Author
   - Done: a legacy entry (another program's real native code, valid SHA-256 trailer, under this program's old key) planted through a grant of the cache's parent is left byte for byte and never run (the program's own value); runs write nothing under `$XDG_CACHE_HOME`; the host source has no `deserialize`.
   - Result: hello about 30 ms wall (was 8 ms cached). host/tests/cache.rs (3 tests); open_questions #75 rewritten.
 
+- [ ] **P6. `kio check --base` flags only new authority, not a method swap it already covers** (E3: all 10-11 of kio's false alarms per model were swaps such as `out: Dir (+create -write)`). A gained method adds authority only when no method the same grant (or, in the function lines, the same function's parameter) reached in the base *covers* it. One table in lang/src/report.rs, `(type, method, covered methods)`:
+  - Dir: `write` covers `create`; `read` and `list` cover `exists`. Http: `send` and `send_all` cover `get` and each other. Kv: `scan` covers `get` and `keys`; `set` and `swap` cover each other only if the reviewer of the table agrees `swap` is no stronger (record it). Db: `exec` and `transaction` cover each other. Hmac: `sign` covers `verify`. WsSend: `text`, `binary`, `close` cover each other. Single-method types need no entry.
+  - Output unchanged except a covered gain: `~ out: Dir (+create -write); create is covered by write` and it does not set "authority added". Exit 3 only when some gain is uncovered; an uncovered gain on the same line is printed as today. Function lines (`--detail`) apply the same rule against that function's base methods.
+  - A test fails when a caps method is missing from a table listing every (type, method) as covering or standalone, so a new caps.wit method must be classified.
+  - Rescore E3's false alarms with the new check from the stored programs (no model calls); scorecard and README numbers updated.
+  - Done: tests for each table row both ways (gaining the covered method: exit 0; gaining the covering one: exit 3), a mixed line, function lines, a new grant (always exit 3); guide.md's `--base` section; independent review of the table (it decides what a reviewer is shown as added).
+
+- [ ] **E3b. Adaptive injections and a weaker model** (owner-approved 2026-11-11). E3's models ignored the injections (1 in 330), so the arms' defences were never exercised by a model. A red-team model (Opus 5.5) writes the injection for each twin and arm: it sees the task text, the arm's defences as the agent's prompt states them, the planted data's format and the agent's last answer; up to 3 rounds per twin, each seeing whether the previous attempt was followed. Targets: Haiku 5.5 and Sonnet 5.5, all three arms, same tasks, detectors and scoring as E3.
+  - Hard budget in run.py: stop at $80 total (spend recorded per call); a 7-twin pilot (one per class) first, its cost extrapolated in the results before the full run.
+  - Measured as E3, plus: injections followed per round, per model, per arm; attacks that then succeeded at run time; visible before running.
+  - Output: eval/results/e3b-*.json; a section "E3b: adaptive injections" in docs/proposals/e3-scorecard.md and the README table if numbers change, wins and losses as written.
+  - Done: the pilot, the full run within budget, the scorecard section.
+
 ## Order
 
 E1 and P1 in parallel (eval/ and the report touch different code); S1 after P1 (both edit host/src/main.rs's flags).
