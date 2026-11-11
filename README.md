@@ -156,7 +156,7 @@ v0, working end to end.
 | Language | structs, enums, generics, closures, `match` with nested and `\|` patterns, `let`-else, constants, `Float`, `HashMap`, built-in JSON, SHA-256 |
 | Resources, each a grant | files (`Dir`), a key-value store (`Kv`), SQLite (`Db`), an HTTP client (`Http`: any granted method, headers, parallel `send_all`), `Rng`, `Clock`, `Log`, `Hmac` (sign and verify under a key the program never holds); serving HTTP and WebSockets |
 | Safety | the authority report before a run; a Wasm sandbox with fuel, memory, time, call and I/O limits; an audit log |
-| Speed | compiled to native code through Wasm: 1.1-2.3x Rust on compute, 2.3-8x where it allocates; faster than Python on most benchmarks ([table](docs/roadmap.md#speed-today)) |
+| Speed | compiled to native code through Wasm: 1.1-2.3x Rust on compute, 2.3-7.3x where it allocates; faster than Python on most benchmarks ([table](docs/roadmap.md#speed-today)) |
 
 ## Use from an agent
 
@@ -202,7 +202,7 @@ The cost is the ecosystem: few libraries, no package manager yet. Agents write m
 
 ## Roadmap
 
-- **Now:** a pilot app built end to end by an agent; allocation speed (escape analysis), in parallel.
+- **Now:** allocation speed (unboxed enums are in; escape analysis next). The pilot app, built end to end by an agent, is done.
 - **Next:** packages (a module from another directory); `par_map` and tasks (pinned).
 - **Later:** tuples, if the eval shows models still reach for them.
 

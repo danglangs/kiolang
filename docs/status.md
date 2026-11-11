@@ -4,7 +4,7 @@ Update at the end of every task. Detail lives in the task entries; this page poi
 
 ## Now
 
-Compiled-only kio covers the whole language and every capability. What real apps needed is built, and so are the review and eval layers of direction A (P1 authority diff, S1 host-injected headers, E1 and E2 models-writing-kio evals: 45 tasks): the HTTP client (H16, H16b), SQLite (H17), `send` answering at once (H18) and `Hmac` for signed webhooks (H22), from the concurrency proposal (decided). H16-H19 and H17b are built and reviewed (fixes merged); speed work is under way with C8c: the plan is written (docs/proposals/allocation-speed.md: attribution, unit costs, nine ranked tasks C8c1-C8c9 pinned in compiler-todo.md; per-loop fuel waits on the maintainer) and C8c1 is in (unboxed `Option`/`Result`/one-slot enums: `Map` word count 28 to 24 ms, `HashMap` 23 to 19, json.kio 63 to 58; C8c2-C8c8 next). Compiled code is 1.1-2.3x Rust on compute and 2.6-7.8x where it allocates (roadmap.md "Speed today"); after C8c1-C8c8 the proposal predicts tree 1.6x, fib 1.9-2.3x, word counts ~3x (parity with Rust's own `BTreeMap`), json.kio ~5x, with the reasons where 2x is out of reach. The differential harness runs 509 programs both ways (506 agree, 3 excluded by limits, 0 leaked) and the generator 250 more per CI run.
+Compiled-only kio covers the whole language and every capability. What real apps needed is built, and so are the review and eval layers of direction A (P1 authority diff, S1 host-injected headers, E1 and E2 models-writing-kio evals: 45 tasks): the HTTP client (H16, H16b), SQLite (H17), `send` answering at once (H18) and `Hmac` for signed webhooks (H22), from the concurrency proposal (decided). H16-H19 and H17b are built and reviewed (fixes merged); speed work is under way with C8c: the plan is written (docs/proposals/allocation-speed.md: attribution, unit costs, nine ranked tasks C8c1-C8c9 pinned in compiler-todo.md; per-loop fuel waits on the maintainer) and C8c1 is in (unboxed `Option`/`Result`/one-slot enums: `Map` word count 28 to 24 ms, `HashMap` 23 to 19, json.kio 63 to 58; C8c2-C8c8 next). Compiled code is 1.1-2.3x Rust on compute and 2.3-7.3x where it allocates (roadmap.md "Speed today"); after C8c1-C8c8 the proposal predicts tree 1.6x, fib 1.9-2.3x, word counts ~3x (parity with Rust's own `BTreeMap`), json.kio ~5x, with the reasons where 2x is out of reach. The differential harness runs 509 programs both ways (506 agree, 3 excluded by limits, 0 leaked) and the generator 250 more per CI run.
 
 | Done | Result |
 |---|---|
@@ -68,19 +68,19 @@ Compiled-only kio covers the whole language and every capability. What real apps
 
 ## Next
 
-Direction A ([product-todo.md](product-todo.md)): P1, S1, E1 and E2 are done. Next, in parallel: a pilot app built end to end by an agent (to find what real use still lacks), and allocation speed (C8, escape analysis). Packages after. Tuples (proposal, below) if the pilot or the eval shows models still reach for them.
+Direction A ([product-todo.md](product-todo.md)): P1, S1, E1, E2 and the pilot P2 (payhook) are done. Next: allocation speed, C8c2-C8c8 (compiler-todo.md; the plan is proposals/allocation-speed.md), then H24 (one outcome for an `Http` call at the deadline). Packages after. Tuples if the evals show models still reach for them.
 
 Also open: C8 (roadmap.md): tree's remaining freeing (free-list pushes, a `List`'s separate buffer); tree's 4-5% from the larger size classes (#117); borrowed match bindings of a borrowed scrutinee (tree). Pinned, not started: L18 `par_map` and L19 `scope`/`spawn` (concurrency stages 2 and 3, when a program needs them).
 
 ## Waiting on the maintainer
 
-Nothing blocks work. Language additions from the evals, to be proposed with an example before any code: tuples (Opus; today a hint, L20). `Str.chars()` (L21) and `for` over `Bytes` (L22), and L24 and L25 (E2) were approved 2026-11-10.
+Nothing blocks work. Open, from the pilot (P2) and the evals: `Str.from_hex() -> Option<Bytes>` (L26: payhook wrote `unhex` by hand), a timeout argument on `Http.send` (H23, a caps.wit change; today `send_all([req])`), a grants file (design.md: a manifest once a run has more than a handful of grants), per-loop fuel (allocation-speed.md), and tuples (Opus; today a hint, L20). `Str.chars()` (L21) and `for` over `Bytes` (L22), and L24 and L25 (E2) were approved 2026-11-10.
 
-## Speed (C8b5 with C8b6 and C8b7 marked, 2026-11-09, release, run time; all in [roadmap.md](roadmap.md))
+## Speed (C8b5 with C8b6, C8b7 and C8c1 marked, 2026-11-09, release, run time; all in [roadmap.md](roadmap.md))
 
 | | fib(35) | 30 M loop | tree | JSON 1 MB | 100 k concatenations |
 |---|---|---|---|---|---|
 | Rust | 23 ms | 97 ms | 33 ms | 8.0 ms | 4.6 ms |
-| kio compiled (plus 20-25 ms compile, cached) | 53-57 ms | 106 ms | 98 ms (C8b6: 101; C8b7: 90) | 66 ms (json.kio; C8b7: 64); built-in JSON 13 ms (C8b6) | 5.2 ms (C8b6: 4.8; C8b7: 4.5) |
+| kio compiled (plus 20-25 ms compile, cached) | 53-57 ms | 106 ms | 98 ms (C8b6: 101; C8b7: 90; C8c1: 92) | 66 ms (json.kio; C8b7: 64; C8c1: 58); built-in JSON 13 ms (C8b6) | 5.2 ms (C8b6: 4.8; C8b7: 4.5) |
 | Python 3.13 | 704 ms | 933 ms | 2.87 s | 17 ms | 7.2 ms |
 | kio interpreter (the test oracle) | 1.54 s | 1.27 s | 1.03 s | 812 ms | 1.57 s |
