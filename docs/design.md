@@ -110,7 +110,7 @@ Defaults per run, or per request or WebSocket event under `--listen` (fuel 10 mi
 |---|---|---|---|
 | Fuel | 10 billion | `--fuel` | Wasm instructions, so infinite loops end; a typical program uses under 5 million |
 | Memory | 256 MB | `--memory` (MB) | guest linear memory |
-| Wasm stack | 2 MB | `--stack` (KB, at most 8 MB) | recursion: about 43,000 calls of a small function, 21,000 through a loop |
+| Wasm stack | 2 MB | `--stack` (KB, at most 8 MB) | recursion: about 43,000 calls of a small function (87,000 of one whose only recursion is itself, inlined into itself once: C8c3), 21,000 through a loop |
 | Wall clock | 10 s | `--timeout` | slow hosts and long runs |
 | Host calls | 10,000 | `--calls` | capability calls (1,000 per request under `--listen`); at most 256 timed-out file, store or database calls may still be finishing at once, process-wide (`MAX_WORKERS`; HTTP has its own pool, above) |
 | I/O | 100 MB total, 10 MB per read | `--io` | bytes read and written |

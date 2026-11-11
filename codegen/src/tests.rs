@@ -8,19 +8,87 @@ fn module(src: &str) -> Module {
 
 #[test]
 fn the_component_validates() {
-    let wasm = compile(&module("fn main() -> Int { 40 + 2 }")).unwrap();
+    let wasm = compile(&module("fn main() -> Int { let x = 40; x + 2 }")).unwrap();
     wasmparser::Validator::new().validate_all(&wasm.component).unwrap();
     assert_eq!(
         wasm.sites,
         [Site {
             span: Span {
-                start: 19,
-                end: 25,
+                start: 31,
+                end: 36,
                 file: 0
             },
             template: "Int overflow"
         }]
     );
+}
+
+/// `-literal` and `literal op literal` are folded (C8c3): no check is left to fail. One that
+/// would overflow or divide by 0 keeps its check, which reports it at run time.
+#[test]
+fn literals_are_folded_unless_they_fail() {
+    let sites = |src: &str| compile(&module(src)).unwrap().sites;
+    assert_eq!(sites("fn main() -> Int { -1 + 2 * -3 / 2 % 4 - (7 - 9) }"), []);
+    let templates = |src: &str| sites(src).iter().map(|s| s.template).collect::<Vec<_>>();
+    assert_eq!(templates("fn main() -> Int { 9223372036854775807 + 1 }"), [OVERFLOW]);
+    assert_eq!(templates("fn main() -> Int { 1 / (2 - 2) }"), [DIV_ZERO, OVERFLOW]);
+    assert_eq!(
+        templates("fn main() -> Int { -9223372036854775807 - 2 * 1 }"),
+        [OVERFLOW]
+    );
+}
+
+/// A small function is inlined at each direct call (C8c3), and its error sites keep its own
+/// span and message: here `b[i]`'s, once in `byte` itself and once per inlined call. A
+/// function calling only itself is inlined into itself once; mutually recursive functions,
+/// one with a loop and one creating a closure are called.
+#[test]
+fn an_inlined_callee_keeps_its_error_sites() {
+    let src = r#"fn byte(b: Bytes, i: Int) -> Int { b[i] }
+fn rec(n: Int) -> Int { if n == 0 { 0 } else { rec(n - 1) } }
+fn ping(n: Int) -> Int { if n == 0 { 0 } else { pong(n - 1) } }
+fn pong(n: Int) -> Int { ping(n) }
+fn looped(n: Int) -> Int { let mut s = 0; while s < n { s += 1; } s }
+fn closure(n: Int) -> Int { let f = |x: Int| x + n; f(1) }
+fn main() -> Int {
+    let b = "ab".to_bytes();
+    byte(b, 0) + byte(b, 5) + rec(1) + ping(1) + looped(1) + closure(1)
+}"#;
+    let m = module(src);
+    let name = |n: &str| m.funcs.iter().position(|f| f.name == n).unwrap();
+    let inlined = inline::inlined(&m);
+    let how = |n: &str| inlined[name(n)];
+    assert!(matches!(how("byte"), inline::Inline::Yes(_)));
+    assert!(matches!(how("rec"), inline::Inline::IntoItself(_)));
+    for n in ["ping", "pong", "looped", "closure", "main"] {
+        assert_eq!(how(n), inline::Inline::No, "{n}");
+    }
+    let wasm = compile(&m).unwrap();
+    wasmparser::Validator::new().validate_all(&wasm.component).unwrap();
+    let at = src.find("b[i]").unwrap();
+    let index = Site {
+        span: Span {
+            start: at,
+            end: at + 4,
+            file: 0,
+        },
+        template: OUT_OF_BOUNDS,
+    };
+    assert_eq!(wasm.sites.iter().filter(|s| **s == index).count(), 3);
+
+    // A function with very many calls inlines the first `BUDGET` nodes' worth, then calls.
+    let calls = "s += byte(b, 0); ".repeat(1000);
+    let src = format!(
+        "{}\nfn main() -> Int {{ let b = \"a\".to_bytes(); let mut s = 0; {calls}s }}",
+        &src[..src.find('\n').unwrap()]
+    );
+    let m = module(&src);
+    let inline::Inline::Yes(size) = inline::inlined(&m)[0] else {
+        panic!("byte is inlined")
+    };
+    let wasm = compile(&m).unwrap();
+    let index = |s: &&Site| s.template == OUT_OF_BOUNDS;
+    assert_eq!(wasm.sites.iter().filter(index).count(), 1 + inline::BUDGET / size);
 }
 
 /// Every caps.wit method, called from a program: the runtime has a wrapper for each

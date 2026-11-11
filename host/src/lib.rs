@@ -2482,9 +2482,10 @@ impl State {
 }
 
 /// Per-run limits. `stack` is bytes of Wasm stack, 2 MB by default: about 43,000 calls of a small
-/// function. Fuel is Wasm instructions: compiled code spends 10 to 60 times less than the
-/// interpreter did per program, so the defaults are a tenth of the interpreter's (C5), which keeps
-/// at least the headroom typical programs had.
+/// function (87,000 of one whose only recursion is itself, inlined into itself once: C8c3). Fuel
+/// is Wasm instructions: compiled code spends 10 to 60 times less than the interpreter did per
+/// program, so the defaults are a tenth of the interpreter's (C5), which keeps at least the
+/// headroom typical programs had.
 #[derive(Clone, Copy)]
 pub struct Limits {
     pub fuel: u64,

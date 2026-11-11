@@ -349,10 +349,11 @@ fn deep_recursion_overflows_a_small_stack() {
 }
 
 /// Raising `--stack` above the 2 MB default lets deeper recursion run (once refused by Wasmtime).
-/// About 43,000 calls of `d` fit in 2 MB and 174,000 in 8 MB.
+/// About 87,000 calls of `d` fit in 2 MB and 340,000 in 8 MB (43,000 and 174,000 before C8c3
+/// inlined `d` into itself once, halving its frames).
 #[test]
 fn a_larger_stack_runs_deeper() {
-    let deep = "fn d(n: Int) -> Int { if n == 0 { 0 } else { 1 + d(n - 1) } } fn main() -> Int { d(100000) }";
+    let deep = "fn d(n: Int) -> Int { if n == 0 { 0 } else { 1 + d(n - 1) } } fn main() -> Int { d(200000) }";
     let mut small = Kio::new(Limits::default()).unwrap();
     let err = small.run(deep, vec![]).unwrap_err();
     assert!(small.explain(&err).unwrap().starts_with("stack overflow"));

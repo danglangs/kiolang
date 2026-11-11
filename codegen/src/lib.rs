@@ -7,6 +7,7 @@
 //! module as a component.
 
 mod data;
+mod inline;
 mod moves;
 
 use anyhow::{anyhow, Context, Result};
@@ -62,8 +63,9 @@ pub fn compile(m: &Module) -> Result<Wasm> {
     let mut types: Vec<FuncSig> = Vec::new();
     let mut funcs = Vec::new();
     let lent = moves::borrowed(m, &|t| sh.owns(t));
+    let inlined = inline::inlined(m);
     for (i, f) in m.funcs.iter().enumerate() {
-        let (sig, body) = func(&rt, &sh, &mut statics, &mut types, f, &mut sites, (&lent, i));
+        let (sig, body) = func(&rt, &sh, &mut statics, &mut types, f, &mut sites, (&lent, &inlined, i));
         funcs.push((rt.types + type_index(&mut types, sig), body));
     }
     // A wrapper per function used as a value, after the program's functions, in table order.
@@ -545,6 +547,27 @@ fn root(e: &ir::Expr) -> ir::LocalId {
     }
 }
 
+/// The value of `e` if it is an `Int` literal, `-` of one, or `+ - * / %` on two, folded where
+/// nothing overflows or divides by 0 (else the code that reports it is generated).
+fn folded(e: &ir::Expr) -> Option<i64> {
+    match &e.kind {
+        ExprKind::Int(n) => Some(*n),
+        ExprKind::Unary(UnOp::Neg, x) => folded(x)?.checked_neg(),
+        ExprKind::Binary(op, a, b) if e.ty == Ty::Int => {
+            let (a, b) = (folded(a)?, folded(b)?);
+            match op {
+                BinOp::Add => a.checked_add(b),
+                BinOp::Sub => a.checked_sub(b),
+                BinOp::Mul => a.checked_mul(b),
+                BinOp::Div => a.checked_div(b),
+                BinOp::Rem => a.checked_rem(b),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 fn snake(name: &str) -> String {
     let mut s = String::new();
     for (i, c) in name.chars().enumerate() {
@@ -796,7 +819,7 @@ fn func<'m>(
     types: &mut Vec<FuncSig>,
     f: &'m ir::Func,
     sites: &mut Vec<Site>,
-    (lent, index): (&[Vec<bool>], usize),
+    (lent, inlined, index): (&[Vec<bool>], &[inline::Inline], usize),
 ) -> (FuncSig, Function) {
     // Each IR local with a value gets a Wasm local (two for an unboxed enum): parameters
     // first, as Wasm numbers them, then the others; `()` locals get none. Hidden locals follow.
@@ -840,6 +863,9 @@ fn func<'m>(
         moves: moves::moves(f, &|t| sh.owns(t)),
         lent,
         own_lent: &lent[index],
+        inlined,
+        exit: None,
+        budget: inline::BUDGET,
         depth: 0,
         loops: Vec::new(),
         code: Vec::new(),
@@ -903,6 +929,14 @@ struct FuncGen<'a, 'm> {
     /// which a call consults; then `for` variables and `match` bindings), and this function's.
     lent: &'a [Vec<bool>],
     own_lent: &'a [bool],
+    /// Which functions a direct call inlines (inline.rs).
+    inlined: &'a [inline::Inline],
+    /// Inside an inlined body: the length of `owned` at its start and the depth of its block,
+    /// which a `return` or `?` releases down to and branches to.
+    exit: Option<(usize, u32)>,
+    /// The nodes this function may still inline (`inline::BUDGET`). An inlined body's own
+    /// inlined calls are counted in its size, so only calls outside inlined bodies take from it.
+    budget: usize,
     /// Open Wasm blocks, loops and ifs that can hold kio code.
     depth: u32,
     /// For each enclosing kio loop, innermost last: the depth of its `break` and `continue`
@@ -1946,8 +1980,7 @@ impl<'m> FuncGen<'_, 'm> {
                 if let Some(e) = value {
                     self.expr(e);
                 }
-                self.release(0);
-                self.sink().return_();
+                self.exit();
             }
             StmtKind::While(cond, body) => {
                 let brk = self.open(Open::Block, BlockType::Empty);
@@ -2384,6 +2417,10 @@ impl<'m> FuncGen<'_, 'm> {
     }
 
     fn expr_kind(&mut self, e: &ir::Expr) {
+        if let Some(n) = folded(e) {
+            self.sink().i64_const(n);
+            return;
+        }
         match &e.kind {
             ExprKind::Int(n) => {
                 self.sink().i64_const(*n);
@@ -2793,8 +2830,22 @@ impl<'m> FuncGen<'_, 'm> {
             }
         }
         self.owned.truncate(mark);
-        let index = self.rt.funcs + f.0;
-        self.sink().call(index);
+        let outer = self.exit.is_none();
+        let size = match self.inlined[f.0 as usize] {
+            inline::Inline::Yes(n) => Some(n),
+            inline::Inline::IntoItself(n) if outer && std::ptr::eq(self.f, &self.m.funcs[f.0 as usize]) => Some(n),
+            _ => None,
+        };
+        let size = size.filter(|&n| !outer || n <= self.budget);
+        if let Some(n) = size {
+            if outer {
+                self.budget -= n;
+            }
+            self.inline(f);
+        } else {
+            let index = self.rt.funcs + f.0;
+            self.sink().call(index);
+        }
         // Only the call ran since the arguments: it returned (or trapped).
         for (((x, t), &here), &lent) in args.iter().zip(&temps).zip(&in_place).zip(lent) {
             match (here, *t) {
@@ -2805,6 +2856,58 @@ impl<'m> FuncGen<'_, 'm> {
                 }
                 (false, t) if lent => self.drop_val(t, &x.ty),
                 _ => {}
+            }
+        }
+    }
+
+    /// The body of `f` in place of a call to it (C8c3), its arguments on the stack: they are
+    /// bound to fresh locals, as the call would bind its parameters (an owned one owned by the
+    /// inlined scope, a borrowed one the caller's), then the body runs as `f`'s own code, with
+    /// `f`'s moves and borrowed locals, in a block that `return` and `?` branch out of. It
+    /// cannot reach the caller's locals, as a call cannot.
+    fn inline(&mut self, f: ir::FuncId) {
+        let m = self.m;
+        let callee = &m.funcs[f.0 as usize];
+        let locals: Vec<Val> = callee.locals.iter().map(|l| self.temp_val(&l.ty)).collect();
+        for &v in locals[..callee.params as usize].iter().rev() {
+            self.set_val(v);
+        }
+        let all = self.lent;
+        let sh = self.sh;
+        let saved = (
+            std::mem::replace(&mut self.f, callee),
+            std::mem::replace(&mut self.ret, &callee.ret),
+            std::mem::replace(&mut self.locals, locals),
+            std::mem::replace(&mut self.moves, moves::moves(callee, &|t| sh.owns(t))),
+            std::mem::replace(&mut self.own_lent, &all[f.0 as usize]),
+            self.exit,
+        );
+        let mark = self.owned.len();
+        for (i, l) in callee.locals[..callee.params as usize].iter().enumerate() {
+            if !self.is_lent(ir::LocalId(i as u32)) {
+                self.own(self.locals[i], &l.ty);
+            }
+        }
+        let bt = self.block_type(&callee.ret);
+        let depth = self.open(Open::Block, bt);
+        self.exit = Some((mark, depth));
+        self.block(&callee.body, sh.rep(&callee.ret) != Rep::None);
+        self.end_scope(mark);
+        self.close();
+        (self.f, self.ret, self.locals, self.moves, self.own_lent, self.exit) = saved;
+    }
+
+    /// Leaves the function, its result on the stack, releasing every owned reference; in an
+    /// inlined body, leaves its block, releasing the body's.
+    fn exit(&mut self) {
+        match self.exit {
+            None => {
+                self.release(0);
+                self.sink().return_();
+            }
+            Some((mark, depth)) => {
+                self.release(mark);
+                self.br(depth);
             }
         }
     }
@@ -3786,8 +3889,7 @@ impl<'m> FuncGen<'_, 'm> {
             }
             t => unreachable!("`?` on {t:?}"),
         }
-        self.release(0);
-        self.sink().return_();
+        self.exit();
         self.close();
         self.sink().local_get(pay);
         if borrowed.is_none() && self.sh.is_ptr(ty) {
