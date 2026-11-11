@@ -33,7 +33,7 @@ tools/capgen  generates lang/src/caps_gen.rs from caps.wit
 
 ## How to work
 
-1. **Pin before building.** A task in a `*-todo.md` states signatures, rules, error cases and "Done:" tests before any code. Split anything that spans two passes or grows large.
+1. **Pin before building.** A task in a `*-todo.md` states signatures, rules, error cases and "Done:" tests before any code. Split anything that spans two passes or grows large. Exception: a fix for an undisclosed security finding is pinned in a private, untracked file; its commit adds the `*-todo.md` entry with spec and result.
 2. **Delegate scoped work.** Well-pinned, mechanical tasks go to a cheaper model; shape-setting or subtle work (IR, codegen, security reviews) to a stronger one. Workers report ambiguities; they do not settle design.
 3. **Review every diff** before it is committed or pushed. Iterate on code later tasks inherit. Security-relevant changes get an independent adversarial review.
 4. **Decide two-way doors yourself.** Pick one, continue, and log it in docs/open_questions.md: question, choice, how to undo.
