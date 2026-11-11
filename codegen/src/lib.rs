@@ -899,7 +899,8 @@ struct FuncGen<'a, 'm> {
     /// The reads of pointer locals that are last uses (moves.rs): each hands over the local's
     /// reference and zeroes its slot, rather than adding a reference.
     moves: HashSet<*const ir::Expr>,
-    /// Each function's borrowed parameters (moves.rs `borrowed`), and this function's.
+    /// Each function's borrowed locals by `LocalId` (moves.rs `borrowed`: parameters first,
+    /// which a call consults; then `for` variables and `match` bindings), and this function's.
     lent: &'a [Vec<bool>],
     own_lent: &'a [bool],
     /// Open Wasm blocks, loops and ifs that can hold kio code.
@@ -1809,8 +1810,9 @@ impl<'m> FuncGen<'_, 'm> {
         self.locals[id.0 as usize]
     }
 
-    /// Whether local `id` is a borrowed parameter: it holds the caller's reference, so it is
-    /// never moved, assigned, changed in place or dropped here.
+    /// Whether local `id` is borrowed (moves.rs `borrowed`): a parameter holding the caller's
+    /// reference, a `for` variable that is the list's slot, or a `match` binding that is the
+    /// scrutinee's part. It is never moved, assigned, changed in place or dropped here.
     fn is_lent(&self, id: ir::LocalId) -> bool {
         self.own_lent.get(id.0 as usize) == Some(&true)
     }
@@ -2055,8 +2057,11 @@ impl<'m> FuncGen<'_, 'm> {
             }
         }
         let ty = elem(&xs.ty);
+        // A borrowed `x` (C8c8) is the slot's pointer, with no reference of its own: the list,
+        // which the loop or the caller holds, keeps the element alive through the pass.
+        let lent = self.is_lent(x);
         let x = self.local(x);
-        let x_owned = self.owned_of(x, ty);
+        let x_owned = if lent { vec![] } else { self.owned_of(x, ty) };
         self.owned.extend(x_owned.iter().copied());
         let (n, i) = (self.temp(ValType::I64), self.temp(ValType::I64));
         self.sink().local_get(list);
@@ -2071,7 +2076,7 @@ impl<'m> FuncGen<'_, 'm> {
             // In bounds: the list cannot change while the loop holds it.
             let site = self.site(span, OUT_OF_BOUNDS);
             self.list_get(list, i, site);
-            self.slot_out(ty, true);
+            self.slot_out(ty, !lent);
             self.set_val(x);
         }
         self.loops.push((brk, cont, self.owned.len()));
@@ -3679,14 +3684,21 @@ impl<'m> FuncGen<'_, 'm> {
                 if l == Val::None {
                     return;
                 }
-                if path.is_empty() {
-                    self.copy_val(s, ty);
-                } else {
+                // A borrowed binding (C8c8) is the part itself, which the scrutinee local keeps
+                // alive through the arm.
+                let lent = self.is_lent(*id);
+                if !path.is_empty() {
                     self.part_slot(s, path);
-                    self.slot_out(ty, true);
+                    self.slot_out(ty, !lent);
+                } else if lent {
+                    self.get_val(s);
+                } else {
+                    self.copy_val(s, ty);
                 }
                 self.set_val(l);
-                self.own(l, ty);
+                if !lent {
+                    self.own(l, ty);
+                }
             }
             ir::Pat::Variant(v, ps) => {
                 for (i, (p, t)) in ps.iter().zip(payload(self.m, ty, *v)).enumerate() {

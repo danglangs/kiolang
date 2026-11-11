@@ -166,7 +166,7 @@ v0, working end to end.
 | Language | structs, enums, generics, closures, `match` with nested and `\|` patterns, `let`-else, constants, `Float`, `HashMap`, built-in JSON, SHA-256 |
 | Resources, each a grant | files (`Dir`), a key-value store (`Kv`), SQLite (`Db`), an HTTP client (`Http`: any granted method, headers, parallel `send_all`), `Rng`, `Clock`, `Log`, `Hmac` (sign and verify under a key the program never holds); serving HTTP and WebSockets |
 | Safety | the authority report before a run; a Wasm sandbox with fuel, memory, time, call and I/O limits; an audit log |
-| Speed | compiled to native code through Wasm: 1.1-2.3x Rust on compute, 2.2-7.3x where it allocates; faster than Python on most benchmarks ([table](docs/roadmap.md#speed-today)) |
+| Speed | compiled to native code through Wasm: 1.1-2.3x Rust on compute, 2.1-7.3x where it allocates; faster than Python on most benchmarks ([table](docs/roadmap.md#speed-today)) |
 
 ## Use from an agent
 
@@ -212,7 +212,7 @@ The cost is the ecosystem: few libraries, no package manager yet. Agents write m
 
 ## Roadmap
 
-- **Now:** allocation speed (unboxed enums and small structs are in; fewer string copies, inlining and per-loop fuel next); a grants file reviewed beside the code.
+- **Now:** allocation speed (unboxed enums, small structs and borrowed loop variables are in; fewer string copies, inlining and per-loop fuel next); E3: kio against Python in a hardened sandbox, attack by attack.
 - **Next:** packages (a module from another directory); `par_map` and tasks (pinned).
 - **Later:** tuples, if the eval shows models still reach for them.
 

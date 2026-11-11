@@ -392,12 +392,36 @@ fn size(t: T) -> Int { match t { T::Leaf(s) => s.len(), T::Node(ks) => { let mut
 fn a(s: Str, n: Int) -> Int { if n == 0 { keep(s) } else { b(s, n - 1) } }
 fn b(s: Str, n: Int) -> Int { a(s, n) }
 fn keep(s: Str) -> Int { stored(s).len() }
+fn loops(xs: List<Str>, ys: List<Str>) -> Int {
+    let mut n = 0;
+    let mut out: List<Str> = [];
+    let mut zs = ys;
+    for p in xs { n += p.len(); }
+    for q in xs { out.push(q); }
+    for r in xs { let f = |d: Int| r.len() + d; n += f(1); }
+    for u in zs { zs.push(u + "!"); n += u.len(); }
+    for v in xs { for w in v.split(",") { n += w.len() + v.len(); } }
+    n + out.len()
+}
+fn bindings(o: Option<Str>, t: T) -> Int {
+    let mut o2 = o;
+    let a = match o2 { Some(s1) => s1.len(), None => 0 };
+    let b = match o2 { Some(s2) => { o2 = None; s2.len() }, None => 0 };
+    let c = match t { T::Leaf(s3) => s3.len(), T::Node(ks) => ks.len() };
+    let d = match returned(o.unwrap_or("")) { s4 => s4.len() };
+    let e = match o2 { Some(s5) => stored(s5).len(), None => 0 };
+    a + b + c + d + e
+}
 fn main() -> Int { 0 }
 "#,
     );
     let sh = Shapes::new(&m);
     let lent = moves::borrowed(&m, &|t| sh.owns(t));
-    let of = |name: &str| lent[m.funcs.iter().position(|f| f.name == name).unwrap()].clone();
+    let func = |name: &str| &m.funcs[m.funcs.iter().position(|f| f.name == name).unwrap()];
+    let of = |name: &str| {
+        let f = func(name);
+        lent[m.funcs.iter().position(|g| g.name == name).unwrap()][..f.params as usize].to_vec()
+    };
     assert_eq!(of("read"), [true, true, false, true, true, true]);
     assert_eq!(of("opt"), [true]);
     for owned in ["stored", "returned", "moved", "captured", "owned_arg", "a", "b", "keep"] {
@@ -407,6 +431,42 @@ fn main() -> Int { 0 }
     assert_eq!(of("size"), [true]);
     // The closure in `captured` reads its capture in place.
     assert_eq!(of("captured::{closure#0}"), [true, false]);
+    // C8c8: `for` variables and `match` bindings, by name. A variable read only in place is
+    // borrowed, also while its list is pushed to (`u`) and as an inner loop's base (`v`); one
+    // pushed, captured or `let`-bound is owned. A binding is borrowed when its scrutinee is a
+    // borrowed local (`t`) or a local no arm mentions (`o2` for `s1`); not when an arm assigns
+    // the scrutinee (`s2`), when the scrutinee is a temporary (`s4`), or when the binding is
+    // stored (`s5`).
+    let local = |name: &str, var: &str| {
+        let f = func(name);
+        let i = f
+            .locals
+            .iter()
+            .position(|l| l.name == var)
+            .unwrap_or_else(|| panic!("{name}: {var}"));
+        lent[m.funcs.iter().position(|g| g.name == name).unwrap()][i]
+    };
+    for (var, want) in [
+        ("p", true),
+        ("q", false),
+        ("r", false),
+        ("u", true),
+        ("v", true),
+        ("w", true),
+    ] {
+        assert_eq!(local("loops", var), want, "{var}");
+    }
+    for (var, want) in [
+        ("s1", true),
+        ("s2", false),
+        ("s3", true),
+        ("ks", true),
+        ("s4", false),
+        ("s5", false),
+    ] {
+        assert_eq!(local("bindings", var), want, "{var}");
+    }
+    assert!(local("size", "s") && local("size", "ks") && local("size", "k"));
 }
 
 /// A program that names no `Json` type itself still has its descriptors: `parse_json`'s result

@@ -382,9 +382,13 @@ fn each_local_block(b: &ir::Block, f: &mut impl FnMut(LocalId, bool)) {
     }
 }
 
-/// Borrowed parameters (C8b4): for each function, which of its parameters are borrowed. A
-/// borrowed parameter is passed without an `rt_inc`, the caller keeping its reference across
-/// the call, and the callee does not drop it.
+/// Borrowed locals (C8b4, C8c8): for each function, which of its locals are borrowed, by
+/// `LocalId`. A borrowed local holds a reference that is someone else's, so the function
+/// neither drops nor moves it: a borrowed parameter is passed without an `rt_inc`, the caller
+/// keeping its reference across the call; a borrowed `for` variable is the list's slot, kept by
+/// the loop's reference to the list (a change to the list inside the body copies it, since the
+/// loop holds it); a borrowed `match` binding is the scrutinee's part, kept by the scrutinee
+/// local.
 ///
 /// A pointer parameter is borrowed when its function reads it only where codegen uses a local
 /// in place, without a reference of its own: an operand of a runtime operation, `==` or `+`, an
@@ -397,11 +401,20 @@ fn each_local_block(b: &ir::Block, f: &mut impl FnMut(LocalId, bool)) {
 /// drops or replaces the reference. Arguments for borrowed parameters are borrowed reads, so
 /// this is a fixpoint: every pointer parameter starts borrowed and loses it when its function
 /// reads it elsewhere, until nothing changes.
+///
+/// A `for` variable is borrowed under the same reading rule. A `match` binding is, when also
+/// its scrutinee is a local that cannot change while the arm runs: a borrowed local itself, or
+/// one no arm's body mentions (only the function's own code can assign, move or change a local,
+/// and only the arm runs). Neither takes part in the fixpoint: a call sees only parameters.
 pub(crate) fn borrowed(m: &ir::Module, owns: &dyn Fn(&ir::Ty) -> bool) -> Vec<Vec<bool>> {
     let mut b: Vec<Vec<bool>> = m
         .funcs
         .iter()
-        .map(|f| f.locals[..f.params as usize].iter().map(|l| owns(&l.ty)).collect())
+        .map(|f| {
+            let mut v: Vec<bool> = f.locals[..f.params as usize].iter().map(|l| owns(&l.ty)).collect();
+            v.resize(f.locals.len(), false);
+            v
+        })
         .collect();
     loop {
         let mut changed = false;
@@ -409,14 +422,30 @@ pub(crate) fn borrowed(m: &ir::Module, owns: &dyn Fn(&ir::Ty) -> bool) -> Vec<Ve
             let mut u = Uses {
                 borrowed: &b,
                 owned: Live::new(f.locals.len()),
+                for_vars: Vec::new(),
+                bindings: Vec::new(),
             };
             u.block(&f.body);
-            let owned = u.owned;
-            for (p, lent) in b[i].iter_mut().enumerate() {
-                if *lent && owned.contains(LocalId(p as u32)) {
-                    *lent = false;
+            let Uses {
+                owned,
+                for_vars,
+                bindings,
+                ..
+            } = u;
+            let lent = &mut b[i];
+            for (p, l) in lent.iter_mut().enumerate().take(f.params as usize) {
+                if *l && owned.contains(LocalId(p as u32)) {
+                    *l = false;
                     changed = true;
                 }
+            }
+            let in_place = |id: LocalId| owns(&f.locals[id.0 as usize].ty) && !owned.contains(id);
+            for x in for_vars {
+                lent[x.0 as usize] = in_place(x);
+            }
+            // In program order: a binding's scrutinee is declared, so decided, before it.
+            for (id, s, mentioned) in bindings {
+                lent[id.0 as usize] = in_place(id) && (lent[s.0 as usize] || !mentioned);
             }
         }
         if !changed {
@@ -430,6 +459,11 @@ pub(crate) fn borrowed(m: &ir::Module, owns: &dyn Fn(&ir::Ty) -> bool) -> Vec<Ve
 struct Uses<'b> {
     borrowed: &'b [Vec<bool>],
     owned: Live,
+    /// The `for` variables declared, in program order.
+    for_vars: Vec<LocalId>,
+    /// The `match` bindings whose scrutinee is a read of a local, in program order: the
+    /// binding, the scrutinee's local, and whether an arm's body mentions that local.
+    bindings: Vec<(LocalId, LocalId, bool)>,
 }
 
 impl Uses<'_> {
@@ -508,6 +542,12 @@ impl Uses<'_> {
             }
             ExprKind::Match(scrut, arms) => {
                 self.borrowed(scrut);
+                if let ExprKind::Local(s) = scrut.kind {
+                    let mentioned = arms.iter().any(|arm| mentions(&arm.body, s));
+                    for arm in arms {
+                        binds(&arm.pat, &mut |id| self.bindings.push((id, s, mentioned)));
+                    }
+                }
                 arms.iter().for_each(|arm| self.owned(&arm.body));
             }
         }
@@ -541,8 +581,9 @@ impl Uses<'_> {
                     self.block(body);
                 }
                 StmtKind::Loop(body) => self.block(body),
-                StmtKind::ForList(_, xs, body) => {
+                StmtKind::ForList(x, xs, body) => {
                     self.borrowed(xs);
+                    self.for_vars.push(*x);
                     self.block(body);
                 }
                 StmtKind::ForRange(_, a, b, body) => {
