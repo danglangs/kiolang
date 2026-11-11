@@ -108,3 +108,5 @@ So: tree reaches 2x; `fib` reaches it only if one-level self-inlining works; the
 
 
 **Correction (C8c7, 2026-11-10).** Change 7 does not pay: the bench words are near-uniform, so a 64-slot `Map` cache hits 1.4% and costs fuel (+5.7%), and `HashMap` already stores each entry's hash and compares prefixes. Dropped; see compiler-todo.md C8c7.
+
+**After C8c1's review.** `Json` accessors (`get`, `at`, `as_*`) still box an unboxed receiver for each call (24 bytes allocated and freed), so the `_u` exports save the result's allocation only. A `_u` taking the receiver as `(tag, payload)` removes it; take it with C8c8 or when json.kio is profiled again. `Result<Str, ()>`-shaped enums test the tag before each count change though the payload is always a pointer or 0: one compare, for C8c2.
