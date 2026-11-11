@@ -1,4 +1,5 @@
-//! Generated programs (tools/kiogen) give the same result compiled as interpreted.
+//! Generated programs (tools/kiogen) give the same result compiled as interpreted: kiogen's
+//! general programs and its programs over one-slot enums with pointer payloads (`enums`).
 //! `KIO_GEN_N` programs (default 250) from seed `KIO_GEN_SEED` (default fixed) on; a mismatch
 //! prints the seed and the source, so `KIO_GEN_SEED=<seed> KIO_GEN_N=1` reruns it alone.
 
@@ -49,14 +50,13 @@ fn env(name: &str, default: u64) -> u64 {
     std::env::var(name).map_or(default, |v| v.parse().expect(name))
 }
 
-fn generated() {
+fn generated(program: fn(u64) -> String) {
     let n = env("KIO_GEN_N", 250);
     let first = env("KIO_GEN_SEED", 0x6b69_6f00);
     let caps = lang::CapTable::v0();
-    let features = Features::default();
     let (mut values, mut errors, mut limited) = (0, 0, 0);
     for seed in first..first + n {
-        let src = kiogen::program(seed, &features);
+        let src = program(seed);
         let fail = |what: String| -> ! { panic!("seed {seed}: {what}\n{src}") };
         if let Err(d) = lang::check(&src, &caps) {
             let line = src[..d[0].span.start].lines().count();
@@ -86,11 +86,20 @@ fn generated() {
     assert!(values >= n / 3, "too few programs ran to a value");
 }
 
+/// Wasm runs on this thread's stack, so it needs room above `--stack`, as `kio` gives it.
+fn on_big_stack(program: fn(u64) -> String) {
+    let t = std::thread::Builder::new().stack_size(4 * MAX_STACK);
+    t.spawn(move || generated(program)).unwrap().join().unwrap();
+}
+
 #[test]
 fn generated_programs_agree() {
-    // Wasm runs on this thread's stack, so it needs room above `--stack`, as `kio` gives it.
-    let t = std::thread::Builder::new().stack_size(4 * MAX_STACK);
-    t.spawn(generated).unwrap().join().unwrap();
+    on_big_stack(|seed| kiogen::program(seed, &Features::default()));
+}
+
+#[test]
+fn generated_enum_programs_agree() {
+    on_big_stack(kiogen::enums::program);
 }
 
 #[test]
@@ -100,4 +109,6 @@ fn same_seed_same_source() {
         assert_eq!(kiogen::program(seed, &f), kiogen::program(seed, &f));
     }
     assert_ne!(kiogen::program(1, &f), kiogen::program(2, &f));
+    assert_eq!(kiogen::enums::program(7), kiogen::enums::program(7));
+    assert_ne!(kiogen::enums::program(1), kiogen::enums::program(2));
 }

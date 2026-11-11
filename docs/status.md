@@ -66,6 +66,7 @@ Compiled-only kio covers the whole language and every capability. What real apps
 | P3 (product) | `kio check NEW --base OLD` prints one line per changed grant first (`+ stripe: Hmac (verify)`, `~ db: Db (+query)`, `- x: Dir (read)`), the per-function lines under `--detail` or when no grant line shows the addition; payhook's step 2 diff is 2 lines, was 6. Exit codes unchanged (#180) |
 | D2 | docs from P2, each run first: an `Http` call in flight at a `--listen` run's `--timeout` (guide.md), `--base` module resolution, which SQLite errors are `DbErr::Constraint`, unary `-` on expressions (language.md) |
 | H24 | an `Http` call (`get`, `send`, `send_all`) in flight at the run's deadline always stops the run as a timeout, `--listen` (a 500) and plain `kio run`; a request's own shorter `timeout_ms` is still `Err(Timeout)`. 50 runs, one outcome (before: 3 of 3 test runs saw `Err(Timeout)` reach the program) |
+| C8c1b | C8c1 review follow-ups: kiogen generates programs over `Option<Str>`, `Result<Str, Int>`, a mixed one-slot enum, `Option<Option<Str>>`, `List<Option<Str>>` and `Map<Str, Option<Str>>`, through helpers and closures (250 per CI run; 2,000 agree on both runtimes, no mismatch); 7 review programs in compiled.rs; the runtime is built under `OUT_DIR` (`KIO_TEST_HEAP=1` for test-heap) |
 
 ## Next
 

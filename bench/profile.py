@@ -10,6 +10,7 @@ Prints self samples per function (where time is spent) and inclusive samples (wh
 """
 import bisect
 import collections
+import glob
 import os
 import re
 import subprocess
@@ -20,7 +21,10 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KIO = os.environ.get("KIO", os.path.join(ROOT, "target/release/kio"))
 INTERP = os.path.join(ROOT, "bench/target/release/kio-interp")
-RUNTIME = os.path.join(ROOT, "target/runtime/wasm32-unknown-unknown/release/runtime.wasm")
+TARGET = os.environ.get("CARGO_TARGET_DIR", os.path.join(ROOT, "target"))
+# codegen/build.rs leaves the runtime it embedded in its OUT_DIR; the newest is the release kio's.
+RUNTIME = max(glob.glob(os.path.join(TARGET, "release/build/codegen-*/out/runtime.wasm")),
+              key=os.path.getmtime, default=None)
 
 
 def leb(d, i):
@@ -36,6 +40,8 @@ def leb(d, i):
 
 def runtime_funcs():
     """The runtime module's function count, imports included: the program's first function index."""
+    if RUNTIME is None:
+        sys.exit("no runtime.wasm under target/release/build: run cargo build --release -p kio")
     d, i, n = open(RUNTIME, "rb").read(), 8, 0
     while i < len(d):
         sid, size, i = d[i], *leb(d, i + 1)

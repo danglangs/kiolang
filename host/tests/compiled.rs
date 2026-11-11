@@ -2035,6 +2035,207 @@ fn mixed_payload_enums_drop_by_tag() {
     assert_eq!(value(&src2), "10");
 }
 
+/// C8c1's review: `main` returning `Result<Option<Str>, Str>` stops at a `?` with unboxed
+/// locals live.
+#[test]
+fn c8c1_review_main_result_err() {
+    let src = r#"fn f(i: Int) -> Result<Option<Str>, Str> { if i > 2 { Err("too big " + i.to_str()) } else if i == 0 { Ok(None) } else { Ok(Some("v" + i.to_str())) } }
+fn main() -> Result<Option<Str>, Str> {
+    let a = f(0)?;
+    let b = f(1)?;
+    let held = Some("held" + "");
+    let c = f(5)?;
+    Ok(c)
+}"#;
+    assert_eq!(outcome(src), ("too big 5".into(), true));
+}
+
+/// C8c1's review programs, each run both ways with no object left.
+#[test]
+fn c8c1_review_programs() {
+    let cases: [(&str, &str); 6] = [
+        // loop exits (`let else`, `break`, `continue`, `?` in a `for`) with unboxed temporaries live.
+        (
+            r#"fn g(i: Int) -> Option<Str> { if i % 2 == 0 { Some("g" + i.to_str()) } else { None } }
+fn h(i: Int) -> Result<Str, Str> { if i % 3 == 0 { Ok("h" + i.to_str()) } else { Err("eh" + i.to_str()) } }
+fn pass(xs: List<Result<Str, Str>>) -> Result<Int, Str> {
+    let mut n = 0;
+    for x in xs {
+        let held = "held" + n.to_str();
+        let s = x?;
+        n += s.len() + held.len();
+    }
+    Ok(n)
+}
+fn args(a: Option<Str>, b: Option<Str>, c: Option<Str>) -> Option<Str> { Some(a? + b? + c?) }
+fn join3(i: Int) -> Option<Str> { Some(args(g(i), g(i + 2), g(i + 4))? + g(i)? + ("t" + "").strip_prefix("t")? + g(i + 1)?) }
+fn main() -> Str {
+    let mut out = "";
+    for i in 0..8 {
+        let keep = g(i);
+        let Some(s) = g(i) else { out = out + "c"; continue; };
+        let Ok(t) = h(i) else { if i > 5 { break; } out = out + "b"; continue; };
+        let also = h(i + 1);
+        out = out + s + t + also.unwrap_or("-") + keep.unwrap_or("?");
+    }
+    let mut k = 0;
+    while k < 10 {
+        let o = g(k);
+        let r = h(k);
+        match o { Some(s) => { if k == 6 { break; } out = out + s; } None => { k += 1; continue; } }
+        match r { Ok(t) => { out = out + t; } Err(e) => { if k == 4 { k += 1; continue; } out = out + e; } }
+        k += 1;
+    }
+    out = out + match pass([Ok("a" + ""), Ok("bb" + ""), Err("stop" + ""), Ok("cc" + "")]) { Ok(n) => n.to_str(), Err(e) => e };
+    out = out + match pass([Ok("a" + ""), Ok("bb" + "")]) { Ok(n) => n.to_str(), Err(e) => e };
+    out = out + join3(0).unwrap_or("-") + join3(1).unwrap_or("-") + join3(2).unwrap_or("-");
+    out
+}"#,
+            "g0h0-g0cbcbcg6h6-g6cg0h0g2eh2g4stop13---",
+        ),
+        // literal and or-patterns inside `Option`, `Result` and `J` payloads, nested.
+        (
+            r#"fn cls(o: Option<Str>) -> Str { match o { Some("a") => "A", Some("b" | "c") => "BC", Some(s) => s, None => "N" } }
+fn either(r: Result<Str, Str>) -> Str { match r { Ok(x) | Err(x) => x } }
+fn nested(o: Option<Option<Int>>) -> Str { match o { Some(Some(1 | 2)) => "small", Some(Some(n)) => n.to_str(), Some(None) => "sn", None => "n" } }
+enum J { Null, N(Int), S(Str) }
+fn jj(j: J) -> Str { match j { J::Null | J::N(0) => "zero", J::N(n) => n.to_str(), J::S("x") | J::S("y") => "xy", J::S(s) => s } }
+fn main() -> Str {
+    let xs = [Some("a" + ""), Some("b" + ""), Some("c" + ""), Some("d" + ""), None];
+    let mut out = "";
+    for x in xs { out = out + cls(x); }
+    out = out + either(Ok("ok" + "")) + either(Err("err" + ""));
+    out = out + nested(Some(Some(1))) + nested(Some(Some(7))) + nested(Some(None)) + nested(None);
+    let js = [J::Null, J::N(0), J::N(3), J::S("x" + ""), J::S("y" + ""), J::S("zz" + "")];
+    for j in js { out = out + jj(j); }
+    let pair: Result<Option<Str>, Option<Str>> = Err(Some("eo" + ""));
+    out = out + match pair { Ok(Some(s)) | Err(Some(s)) => s, Ok(None) | Err(None) => "none" };
+    let pair2: Result<Option<Str>, Option<Str>> = Ok(None);
+    out = out + match pair2 { Ok(Some(s)) | Err(Some(s)) => s, Ok(None) | Err(None) => "none" };
+    let w = Some("w" + "");
+    out = out + match w { v => v.unwrap_or("?") };
+    out + if let Some("w") = w { "yes" } else { "no" }
+}"#,
+            "ABCBCdNokerrsmall7snnzerozero3xyxyzzeononewyes",
+        ),
+        // `fn` values, `Bytes`, `List` and `Map` as payloads, `Option<fn>` in a struct field.
+        (
+            r#"fn inc(n: Int) -> Int { n + 1 }
+fn dbl(n: Int) -> Int { n * 2 }
+fn pick(i: Int) -> Option<fn(Int) -> Int> { if i == 0 { Some(inc) } else if i == 1 { Some(dbl) } else if i == 2 { let k = i * 10; Some(|x| x + k) } else { None } }
+struct H { f: Option<fn(Int) -> Int>, name: Option<Str> }
+fn main() -> Str {
+    let mut out = "";
+    for i in 0..4 {
+        let f = pick(i);
+        out = out + match f { Some(g) => g(3).to_str(), None => "-" };
+        out = out + (f.unwrap_or(dbl))(5).to_str();
+        let h = H { f: f, name: f.map(|g| "named" + "") };
+        out = out + h.name.unwrap_or("anon") + match h.f { Some(g) => g(1).to_str(), None => "" };
+    }
+    let fs = [pick(0), pick(2), pick(3)];
+    let applied = fs.map(|o| o.map(|g| g(100)));
+    for a in applied { out = out + a.unwrap_or(0).to_str(); }
+    let bo: Option<Bytes> = Some("ab".to_bytes());
+    let lo: Option<List<Str>> = Some(["l" + "", "m" + ""]);
+    let mo: Option<Map<Str, Int>> = Some(Map::new());
+    out = out + bo.map(|b| b.len()).unwrap_or(0).to_str() + lo.map(|l| l.join("+")).unwrap_or("") + mo.map(|m| m.len()).unwrap_or(-1).to_str();
+    let mut mm: Map<Str, Int> = Map::new();
+    mm.insert("a", 1);
+    let mo2 = Some(mm);
+    let got = mo2.and_then(|m| m.get("a"));
+    out + got.unwrap_or(0).to_str() + match lo { Some(l) => l[1], None => "" }
+}"#,
+            "46named2610named22325named21-10anon10112002l+m01m",
+        ),
+        // 64-variant enums with one `Str` (and one `Int`) payload: copied, compared, matched.
+        (
+            r#"enum Big { V0, V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21, V22, V23, V24, V25, V26, V27, V28, V29, V30, V31, V32, V33, V34, V35, V36, V37, V38, V39, V40, V41, V42, V43, V44, V45, V46, V47, V48, V49, V50, V51, V52, V53, V54, V55, V56, V57, V58, V59, V60, V61, V62, V63(Str) }
+enum Mix { W0, W1, W2, W3, W4, W5, W6, W7, W8, W9, W10, W11, W12, W13, W14, W15, W16, W17, W18, W19, W20, W21, W22, W23, W24, W25, W26, W27, W28, W29, W30, W31, W32, W33, W34, W35, W36, W37, W38, W39, W40, W41, W42, W43, W44, W45, W46, W47, W48, W49, W50, W51, W52, W53, W54, W55, W56, W57, W58, W59, W60, W61, W62(Int), W63(Str) }
+fn show(b: Big) -> Str { match b { Big::V0 => "v0", Big::V62 => "v62", Big::V63(s) => s, _ => "other" } }
+fn showm(m: Mix) -> Str { match m { Mix::W0 => "w0", Mix::W61 => "w61", Mix::W62(n) => n.to_str(), Mix::W63(s) => s, _ => "other" } }
+fn main() -> Str {
+    let xs = [Big::V0, Big::V62, Big::V63("sixty" + "three"), Big::V5];
+    let ms = [Mix::W0, Mix::W61, Mix::W62(77), Mix::W63("w" + "63")];
+    let mut out = "";
+    for x in xs { let c = x; out = out + show(x) + show(c); }
+    for m in ms { let c = m; out = out + showm(m) + showm(c) + (m == c).to_str(); }
+    let moved = ms[3];
+    let again = moved;
+    out = out + showm(moved) + showm(again) + (xs[2] == Big::V63("sixtythree")).to_str() + (xs[0] == Big::V0).to_str() + (ms[2] == Mix::W62(77)).to_str();
+    out
+}"#,
+            "v0v0v62v62sixtythreesixtythreeotherotherw0w0truew61w61true7777truew63w63truew63w63truetruetrue",
+        ),
+        // closures capturing unboxed values, passed through `fn` parameters 2,000 times; `HashMap<Str, Option<Str>>`.
+        (
+            r#"enum C { Red, Green }
+enum J { Null, N(Int), S(Str) }
+fn pick(i: Int) -> Option<C> { if i % 3 == 0 { None } else if i % 3 == 1 { Some(C::Red) } else { Some(C::Green) } }
+fn show(o: Option<C>) -> Str { match o { Some(C::Red) => "r", Some(C::Green) => "g", None => "n" } }
+fn lvl3(f: fn(Option<Str>) -> Option<Str>, o: Option<Str>) -> Option<Str> { f(o) }
+fn lvl2(f: fn(Option<Str>) -> Option<Str>, o: Option<Str>) -> Option<Str> { lvl3(f, o).map(|s| s + "2") }
+fn lvl1(f: fn(Option<Str>) -> Option<Str>, o: Option<Str>) -> Option<Str> { lvl2(f, lvl2(f, o)) }
+fn main() -> Str {
+    let mut out = "";
+    for i in 0..6 { out = out + show(pick(i)) + (pick(i) == pick(i + 3)).to_str(); }
+    let base = Some("b" + "");
+    let j = J::S("cap" + "");
+    let jn = J::N(4);
+    let f = |o: Option<Str>| match o { Some(s) => Some(s + base.unwrap_or("") + match j { J::S(t) => t, _ => "" }), None => base };
+    let g = |o: Option<Str>| o.and_then(|s| if s.len() > 12 { None } else { Some(s + match jn { J::N(n) => n.to_str(), _ => "" }) });
+    let mut acc: Option<Str> = Some("" + "");
+    let mut n = 0;
+    for i in 0..2000 {
+        acc = lvl1(f, acc);
+        acc = g(acc);
+        if acc.is_none() { n += 1; acc = Some("" + ""); }
+        let tmp = lvl1(g, Some("x" + ""));
+        if i % 500 == 0 { out = out + tmp.unwrap_or("-"); }
+    }
+    let mut hm: HashMap<Str, Option<Str>> = HashMap::new();
+    for i in 0..300 {
+        let k = "k" + (i % 7).to_str();
+        let prev = hm.get(k).unwrap_or(None);
+        hm.insert(k, Some(prev.map(|p| if p.len() > 5 { "" + "" } else { p + "." }).unwrap_or("s" + "")));
+        if i % 11 == 0 { hm.remove(k); }
+    }
+    let mut keys = hm.keys();
+    keys.sort();
+    for k in keys { out = out + k + hm.get(k).unwrap_or(None).unwrap_or("N"); }
+    out + n.to_str() + acc.unwrap_or("-")
+}"#,
+            "ntruertruegtruentruertruegtruex4242x4242x4242x4242k0..k1s.....k2s..k4.k5s....k6s1000",
+        ),
+        // `pop` loops over `List<Option<Str>>` and `List<Str>` with `let else` and `if let`.
+        (
+            r#"fn main() -> Str {
+    let mut xs: List<Option<Str>> = [];
+    for i in 0..50 { xs.push(if i % 3 == 0 { None } else { Some("v" + i.to_str()) }); }
+    let mut out = "";
+    let mut n = 0;
+    loop {
+        let Some(top) = xs.pop() else { break; };
+        let held = Some("h" + "");
+        match top { Some(s) => { if s.len() > 2 { n += 1; continue; } out = out + s; } None => { if n > 10 { break; } } }
+        let again = xs.pop();
+        if let Some(Some(s)) = again { out = out + s.len().to_str(); }
+    }
+    let mut ys = ["a" + "", "b" + "", "c" + ""];
+    while ys.pop().is_some() { out = out + "p"; }
+    let mut zs = [Some("z" + "")];
+    while let_pop(zs).is_some() { out = out + "q"; zs.pop(); }
+    out + n.to_str() + xs.len().to_str()
+}
+fn let_pop(zs: List<Option<Str>>) -> Option<Option<Str>> { if zs.len() == 0 { None } else { Some(zs[zs.len() - 1]) } }"#,
+            "3333333333pppq1118",
+        ),
+    ];
+    for (src, want) in cases {
+        assert_eq!(value(src), want);
+    }
+}
+
 /// 100,000 `Str` keys with one hash, inserted and looked up both ways within a time bound
 /// (under a second each in a debug build). With chains only (`TREEIFY` raised), compiled runs
 /// out of its 20 G fuel and the interpreter does not finish in 100 s.

@@ -23,6 +23,8 @@
 //! `len`, `==`, `contains`, `split(..).len()` and `match` read one. A parameter is at most
 //! `PARAM_MAX` bytes and a helper's result at most `RET_MAX`.
 
+pub mod enums;
+
 /// What programs may contain. Int and Bool expressions with every operator, `let`, `let mut`,
 /// assignment, `+=`, `-=`, `if`/`else`, `return` and the constants `MAX` and `NEG` are always on.
 pub struct Features {
