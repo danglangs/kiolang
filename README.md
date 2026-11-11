@@ -227,7 +227,7 @@ source ─► check + report ─► lower ─► IR ─┬─► codegen ─► 
 
 ## Docs
 
-- [docs/guide.md](docs/guide.md): every grant, flag, limit, the audit log and cache.
+- [docs/guide.md](docs/guide.md): every grant, flag, limit and the audit log.
 - [docs/language.md](docs/language.md): the language and the rules the checker enforces.
 - [docs/design.md](docs/design.md): components, trust boundary, one run step by step.
 - [docs/codegen.md](docs/codegen.md): how a checked program becomes Wasm.

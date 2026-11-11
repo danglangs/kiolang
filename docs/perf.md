@@ -8,8 +8,8 @@ Since C5 `kio run` and `--listen` run compiled code. Measured on an Apple Silico
 
 | | before (interpreter guest) | after (compiled) |
 |---|---|---|
-| `kio run` hello, wall | 5 ms | 29-31 ms first run, 8 ms cached |
-| `kio run` primer (invoices.kio), wall | 6 ms | 30-38 ms first run, 8.5 ms cached |
+| `kio run` hello, wall | 5 ms | 29-31 ms (S3: every run compiles; no cache) |
+| `kio run` primer (invoices.kio), wall | 6 ms | 30-38 ms |
 | `kio check` primer | 5-9 ms | 3-8 ms |
 | `--listen` startup to listening | 0.93-0.96 s | 0.16-0.18 s |
 | idle `--listen` RSS after one request | 66-67 MB | 28-29 MB |
@@ -19,7 +19,7 @@ Since C5 `kio run` and `--listen` run compiled code. Measured on an Apple Silico
 | fuel, one serve request | 1.79 M | 0.13 M |
 | release binary | 34.5 MB | 24.3 MB |
 
-- A first `kio run` compiles the runtime and program with Cranelift (about 25 ms); the compiled code is cached in `~/.cache/kio` (open_questions #75), so a second run of the same program loads it. A cached run is still about 3 ms slower than the interpreter guest was: checking, codegen and loading 0.7 MB of native code.
+- Every `kio run` compiles the runtime and program with Cranelift (about 25 ms). C5 to S3 cached the native code in `~/.cache/kio` (8 ms runs); S3 removed it, since loaded native code runs as the host and a program could plant it (open_questions #75).
 - `--listen` compiles once on one thread: a parallel compile starts in about 30 ms but leaves about 20 MB more resident on macOS (W13d). On a quiet machine, before this change: startup 27 ms, idle RSS 49 MB, `ab -k` 60,600 req/s, no keep-alive 21,400 req/s.
 - Without keep-alive the ceiling is still opening a TCP connection per request; with keep-alive, a request costs about 0.2 ms in all.
 - The instance pool holds at least one instance per worker, its limits counted from the component (open_questions #135). Before, it counted core instances as if a component had one (it has three), so keep-alive clients past 21 got 503s (`ab -k -n 3000`, 16 cores: c=32 29 failed, c=64 416; with `--audit` 2,444 and 2,422); now 0 at c=32 and c=64, with or without `--audit`, RSS unchanged.

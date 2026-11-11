@@ -401,20 +401,6 @@ mod cli {
         assert_eq!(code, 0, "{err}");
     }
 
-    #[test]
-    fn an_audit_log_inside_the_compile_cache_is_refused() {
-        let t = tempfile::tempdir().unwrap();
-        let prog = t.path().join("one.kio");
-        std::fs::write(&prog, "fn main() -> Int { 1 }").unwrap();
-        let log = t.path().join("kio/a.log");
-        let (code, err) = kio(t.path(), &[prog.to_str().unwrap(), "--audit", log.to_str().unwrap()]);
-        assert_eq!(code, 2, "{err}");
-        assert_eq!(
-            err,
-            format!("kio: `--audit {}` is inside kio's compile cache\n  hint: keep the audit log outside `$XDG_CACHE_HOME/kio` (default `~/.cache/kio`)\n", log.display())
-        );
-    }
-
     /// The log is opened to append: an existing file keeps what it held, and each run adds its
     /// own header and trailer.
     #[test]

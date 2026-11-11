@@ -131,7 +131,7 @@ A SQLite database (the bundled SQLite, in the host) that outlives runs and is sh
 
 `path:ro` is read-only: a program that can call `exec` or `transaction` on it is refused at startup, and a `query` that would write is `Denied`.
 
-The connection is fenced, since the SQL is the program's and SQLite runs outside the sandbox: `ATTACH`, `DETACH`, `VACUUM`, `BEGIN`/`COMMIT`/`ROLLBACK`/`SAVEPOINT` (use `transaction`), `load_extension` and every `PRAGMA` but a few reads (`table_info`, `index_list`, `foreign_keys`, ..) are `Denied`; the schema is protected (`SQLITE_DBCONFIG_DEFENSIVE`). Limits: one statement per call, 1 MB of SQL, 8 MB per value, 4,096 parameters, 1,000 statements per `transaction`, 10,000 rows or 8 MB per `query` (else `TooLarge`); `--db-mb n` caps each database (64 MB by default, as `--kv-mb`; a write past it is `TooLarge` and changes nothing; a file already larger may not grow); a statement still running at the run's `--timeout` is interrupted and the run stops, inside `instr`, `replace`, `LIKE` and `GLOB` too (the host's versions, which give SQLite's results; `LIKE` does not use an index); SQLite's memory is capped at 256 MB per process; another process holding the file, or another request's statement holding the connection, for over 2 s is `Busy`. The database's path follows the `--kv` rules: not a symlink, not inside a granted `--dir` or the compile cache, not a store's or log's file, and not another grant's `-wal`, `-shm` or `-journal`.
+The connection is fenced, since the SQL is the program's and SQLite runs outside the sandbox: `ATTACH`, `DETACH`, `VACUUM`, `BEGIN`/`COMMIT`/`ROLLBACK`/`SAVEPOINT` (use `transaction`), `load_extension` and every `PRAGMA` but a few reads (`table_info`, `index_list`, `foreign_keys`, ..) are `Denied`; the schema is protected (`SQLITE_DBCONFIG_DEFENSIVE`). Limits: one statement per call, 1 MB of SQL, 8 MB per value, 4,096 parameters, 1,000 statements per `transaction`, 10,000 rows or 8 MB per `query` (else `TooLarge`); `--db-mb n` caps each database (64 MB by default, as `--kv-mb`; a write past it is `TooLarge` and changes nothing; a file already larger may not grow); a statement still running at the run's `--timeout` is interrupted and the run stops, inside `instr`, `replace`, `LIKE` and `GLOB` too (the host's versions, which give SQLite's results; `LIKE` does not use an index); SQLite's memory is capped at 256 MB per process; another process holding the file, or another request's statement holding the connection, for over 2 s is `Busy`. The database's path follows the `--kv` rules: not a symlink, not inside a granted `--dir`, not a store's or log's file, and not another grant's `-wal`, `-shm` or `-journal`.
 
 ```
 $ kio run examples/totals.kio --dir input=examples/in --db totals=/tmp/totals.db
@@ -232,7 +232,7 @@ out of fuel (limit 10000000000; raise it with --fuel)
 
 ## Audit log
 
-`--audit log.jsonl` records every host call: capability, method, argument, bytes and result (never a drawn random value or a log line). A call the report did not predict stops the run as a checker bug. The log is appended to, never truncated, and refused at startup if it is a `--kv` store's or `--db` database's file, inside a granted `--dir` or inside the compile cache.
+`--audit log.jsonl` records every host call: capability, method, argument, bytes and result (never a drawn random value or a log line). A call the report did not predict stops the run as a checker bug. The log is appended to, never truncated, and refused at startup if it is a `--kv` store's or `--db` database's file, or inside a granted `--dir`.
 
 ```
 $ grep denied /tmp/leak.jsonl
@@ -281,9 +281,9 @@ Each side's `mod NAME;` lines resolve to `NAME.kio` beside that side's entry, so
   run: tools/authority-diff.sh origin/${{ github.base_ref }} app.kio
 ```
 
-## Compile cache
+## Compiling
 
-`kio run` keeps compiled programs in `~/.cache/kio`, so a second run of the same program skips the compile (about 20-25 ms). A run granted a `--dir` that contains, or is inside, the cache does not use it, and a `--kv` store there is refused.
+Every `kio run` compiles the program to native code in memory (about 20-25 ms of a hello run's 30 ms); nothing compiled is kept on disk or loaded from it, since native code loaded from a file a program could write would run as the host. `--listen` compiles once at startup. Earlier versions kept compiled programs in `~/.cache/kio` (or `$XDG_CACHE_HOME/kio`); kio no longer reads that directory, and you can delete it.
 
 ## Built-ins
 

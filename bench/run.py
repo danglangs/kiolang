@@ -9,11 +9,9 @@ Run through bench/run.sh, which builds everything first. Environment:
 """
 import os
 import re
-import shutil
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 
 BENCH = os.path.dirname(os.path.abspath(__file__))
@@ -55,7 +53,7 @@ def wall(cmd, env=None, check=True):
 
 def best(cmd, env=None, runs=RUNS):
     """Best wall time of `runs` runs after one discarded warm-up run (macOS checks a new binary
-    on its first launch; the first kio run fills the compile cache). A warm-up slower than SLOW
+    on its first launch). A warm-up slower than SLOW
     is the measurement."""
     dt, out = wall(cmd, env)
     if dt > SLOW:
@@ -119,16 +117,15 @@ def load():
 def main():
     only = set(filter(None, os.environ.get("ONLY", "").split(",")))
     print(f"Machine: {machine()}. Best of {RUNS}. Load average at start {load():.1f}.", flush=True)
-    cache = tempfile.mkdtemp(prefix="kio-bench-cache-")
-    env = dict(os.environ, XDG_CACHE_HOME=cache)
+    env = dict(os.environ)
     empty = os.path.join(BUILD, "kio", "empty.kio")
     # Startup of each, subtracted from every time below so times are the work alone.
     base_kio = best([KIO, "run", empty] + LIMITS, env)[0]
     base_interp = best([INTERP, empty])[0]
     base_py = best([sys.executable, "-c", "pass"])[0]
     base_rust = best(["/usr/bin/true"])[0]
-    compile_empty = compile_time([KIO, "run", empty] + LIMITS, env)
-    print(f"Startup subtracted: kio (cached) {ms(base_kio)}, interpreter {ms(base_interp)}, python {ms(base_py)}, process {ms(base_rust)}; compiling an empty program {ms(compile_empty)}.\n")
+    compile_empty = compile_time([KIO, "run", empty] + LIMITS, env, base_rust)
+    print(f"Startup subtracted: kio (compiling an empty program) {ms(base_kio)}, interpreter {ms(base_interp)}, python {ms(base_py)}, process {ms(base_rust)}; compiling an empty program {ms(compile_empty)}.\n")
     print("| Benchmark | Rust | Python | kio compiled | compile | kio interpreted | vs Rust | vs Python | vs interpreted |")
     print("|---|---|---|---|---|---|---|---|---|")
     for name, label, data in BENCHES:
@@ -136,7 +133,7 @@ def main():
             continue
         kio, interp, rust, py = commands(name, data)
         t_kio, o_kio, _ = best(kio, env)
-        t_comp = compile_time(kio, env)
+        t_comp = compile_time(kio, env, base_rust)
         t_rust, o_rust, _ = best(rust)
         t_py, o_py, _ = best(py)
         t_int, o_int, n_int = (None, o_kio, 0) if os.environ.get("NO_INTERP") else best(interp)
@@ -149,20 +146,13 @@ def main():
         print(f"| {label} | {ms(r)} | {ms(p)} | {ms(c)} | {ms(t_comp)} | {ms(i)}{note} | {ratio(c, r)} | {ratio(c, p)} | {ratio(c, i)} |", flush=True)
     http_rows()
     print(f"\nLoad average at end {load():.1f}.")
-    shutil.rmtree(cache, ignore_errors=True)
 
 
-def compile_time(cmd, env):
-    """Compiling alone: a run with `--fuel 1` stops at once, so an empty compile cache against
-    the filled one (`env`) differs by the compile."""
+def compile_time(cmd, env, base_rust):
+    """Starting up, checking and compiling: a run with `--fuel 1` stops at once; less a
+    process's own start (`base_rust`)."""
     cmd = [("1" if a == str(10**15) else a) for a in cmd]
-    cached = min(wall(cmd, env, check=False)[0] for _ in range(RUNS))
-    fresh = []
-    for _ in range(RUNS):
-        cache = tempfile.mkdtemp(prefix="kio-bench-fresh-")
-        fresh.append(wall(cmd, dict(os.environ, XDG_CACHE_HOME=cache), check=False)[0])
-        shutil.rmtree(cache, ignore_errors=True)
-    return min(fresh) - cached
+    return min(wall(cmd, env, check=False)[0] for _ in range(RUNS)) - base_rust
 
 
 def free_port():

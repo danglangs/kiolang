@@ -21,7 +21,7 @@ Needs Rust, Python 3, `ab` (ApacheBench, on macOS by default) and a kio-web chec
 
 How times are taken:
 - Wall time of a whole process, best of `RUNS` (5) after one discarded run. Each column's startup (an empty program, `python3 -c pass`) is subtracted, so a time is the work alone.
-- `kio compiled` runs from the compile cache; `compile` is a run with an empty cache minus a cached one, both with `--fuel 1` (stops at once). Runs use `--fuel 10^15 --timeout 3600 --memory 4096`: no benchmark stops at a limit (the default `kio run` fuel is 10 billion).
+- `kio compiled` subtracts a run of an empty program, which compiles the runtime too (every `kio run` compiles; there is no cache since S3); `compile` is a run with `--fuel 1` (stops at once) minus a process's start: checking, codegen and compiling. Runs use `--fuel 10^15 --timeout 3600 --memory 4096`: no benchmark stops at a limit (the default `kio run` fuel is 10 billion).
 - `kio interpreted` is `lang::run` natively, without fuel or memory limits. A run over 10 s is timed once.
 - HTTP: `ab -k -c 12 -n 50000` against kio-web's hello example under `--listen`, a hyper server and a `http.server` one answering the same route.
 
@@ -31,6 +31,6 @@ Profiling (macOS):
 cd bench/build/kio && python3 ../../profile.py --secs 2 tree.kio --fuel 1000000000000000
 ```
 
-`sample` cannot name JIT code. `profile.py` fills a private compile cache, finds the native code's region with `vmmap`, and names addresses from the cache entry's ELF symbols (`objdump -t`): runtime functions by name, program functions by `kio-interp --names` (codegen emits them in IR order after the runtime's). `sample` stops the process for about 0.3 s as it attaches, some tens of ms into the run; those samples land on one instruction and are dropped, so the profile covers the run after the attach. Use runs of 0.5 s or more.
+`sample` cannot name JIT code. `profile.py` writes the program's native code to a file (`kio-interp --native`), finds its region with `vmmap`, and names addresses from that file's ELF symbols (`objdump -t`): runtime functions by name, program functions by `kio-interp --names` (codegen emits them in IR order after the runtime's). `sample` stops the process for about 0.3 s as it attaches, some tens of ms into the run; those samples land on one instruction and are dropped, so the profile covers the run after the attach. Use runs of 0.5 s or more.
 
 Fuel and epoch checks cannot be turned off from the command line; their cost was measured with a scratch build of `host/src/config.rs` with `consume_fuel(false)` (and `epoch_interruption(false)`), run with `KIO=path/to/that/kio`.

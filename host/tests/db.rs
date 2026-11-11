@@ -684,7 +684,7 @@ fn a_write_to_a_read_only_db_stops_the_run() {
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
-/// The path rules of a `Kv` file apply: not inside a granted `--dir` or the cache, not a `--kv`
+/// The path rules of a `Kv` file apply: not inside a granted `--dir`, not a `--kv`
 /// store's file, not the audit log's, each name once, each file once; and the grant hint.
 #[test]
 fn path_rules_and_grant_errors() {

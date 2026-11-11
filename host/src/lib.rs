@@ -27,7 +27,6 @@ mod bindings {
 }
 use bindings::kio;
 
-pub mod cache;
 mod compiled;
 mod config;
 pub mod db;
@@ -757,6 +756,17 @@ fn perform(origin: &Origin, req: &Outbound, deadline: Instant, budget: &AtomicI6
     done.cut = until == deadline && matches!(result, Err(HttpErr::Timeout));
     done.result = result;
     done
+}
+
+/// `path` with symlinks resolved, though it may not exist yet: its nearest existing ancestor made
+/// canonical, then the rest. `None` when the rest has a `..` or `.`, which could lead anywhere.
+pub fn resolve(path: &Path) -> Option<std::path::PathBuf> {
+    let path = std::path::absolute(path).ok()?;
+    let (base, rest) = path
+        .ancestors()
+        .find_map(|a| Some((std::fs::canonicalize(a).ok()?, path.strip_prefix(a).ok()?)))?;
+    let normal = rest.components().all(|c| matches!(c, std::path::Component::Normal(_)));
+    normal.then(|| base.join(rest))
 }
 
 /// Open a directory to grant: the host's only ambient filesystem call, made once per `--dir`.

@@ -3,9 +3,10 @@
 
     python3 bench/profile.py [--secs N] [--delay MS] prog.kio [kio run flags...]
 
-`sample` cannot name Wasmtime's JIT code. This runs the program once to fill a private compile
-cache, runs it again under `sample`, finds the executable region that holds the cached native
-code (`vmmap`), and names each address from the cache entry's ELF symbol table (`objdump -t`).
+`sample` cannot name Wasmtime's JIT code. This writes the program's native code to a file
+(`kio-interp --native`, the same compile as `kio run`'s), runs the program under `sample`, finds
+the executable region that holds the native code (`vmmap`), and names each address from that
+file's ELF symbol table (`objdump -t`).
 Prints self samples per function (where time is spent) and inclusive samples (what it is under).
 """
 import bisect
@@ -125,17 +126,17 @@ def main():
         else:
             delay = int(args[1]) / 1000
         args = args[2:]
-    cache = tempfile.mkdtemp(prefix="kio-prof-")
-    env = dict(os.environ, XDG_CACHE_HOME=cache)
+    work = tempfile.mkdtemp(prefix="kio-prof-")
+    env = dict(os.environ)
     cmd = [KIO, "run"] + args
-    subprocess.run(cmd, env=env, check=True, capture_output=True)
     t = time.perf_counter()
     subprocess.run(cmd, env=env, check=True, capture_output=True)
     run_secs = time.perf_counter() - t
-    entries = os.listdir(os.path.join(cache, "kio"))
     prog = next(a for a in args if a.endswith(".kio"))
-    syms, size = symbols(os.path.join(cache, "kio", entries[0]), kio_names(prog))
-    out = os.path.join(cache, "sample.txt")
+    native = os.path.join(work, "native.elf")
+    subprocess.run([INTERP, "--native", native, prog], check=True, capture_output=True)
+    syms, size = symbols(native, kio_names(prog))
+    out = os.path.join(work, "sample.txt")
     p = subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(delay)
     sampler = subprocess.Popen(["sample", str(p.pid), str(secs), "1", "-file", out], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

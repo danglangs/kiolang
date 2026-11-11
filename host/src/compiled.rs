@@ -19,7 +19,6 @@ use codegen::Site;
 use std::collections::HashSet;
 use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, PoisonError};
 use wasmtime::component::{Component, HasSelf, InstancePre, Linker, Resource};
@@ -80,17 +79,15 @@ struct Lowered {
 }
 
 /// Check, lower and compile `files` (root first) for `engine`: the program, or the checker's
-/// diagnostics. Native code comes from `cache` when it is given. `edit` changes the lowered
-/// program before codegen (tests only).
+/// diagnostics. `edit` changes the lowered program before codegen (tests only).
 fn compile(
     engine: &Engine,
     files: &[(String, String)],
     limits: &Limits,
-    cache: Option<&PathBuf>,
     edit: impl FnOnce(&mut lang::ir::Module),
 ) -> Result<std::result::Result<Program, Vec<Diag>>> {
     match lower(files, limits, edit)? {
-        Ok(lowered) => Ok(Ok(link(engine, files, lowered, cache)?)),
+        Ok(lowered) => Ok(Ok(link(engine, files, lowered)?)),
         Err(diags) => Ok(Err(diags)),
     }
 }
@@ -125,13 +122,11 @@ fn lower(
     Ok(Ok(Lowered { report, params, wasm }))
 }
 
-/// Compile `lowered` for `engine`, from `cache` when it is given.
-fn link(engine: &Engine, files: &[(String, String)], lowered: Lowered, cache: Option<&PathBuf>) -> Result<Program> {
+/// Compile `lowered` for `engine`. Native code is only ever compiled here, in this process: it is
+/// never loaded from disk (open question 75).
+fn link(engine: &Engine, files: &[(String, String)], lowered: Lowered) -> Result<Program> {
     let Lowered { report, params, wasm } = lowered;
-    let component = match cache {
-        Some(dir) => crate::cache::component(engine, &wasm.component, dir)?,
-        None => Component::new(engine, &wasm.component)?,
-    };
+    let component = Component::new(engine, &wasm.component)?;
     let mut linker = Linker::new(engine);
     World::add_to_linker::<State, HasSelf<State>>(&mut linker, |s| s)?;
     Ok(Program {
@@ -314,8 +309,6 @@ pub struct Kio {
     kvs: KvGrants,
     /// `Rng`, `Clock` and `Log` grants for the next run.
     sources: Sources,
-    /// Where compiled programs are kept between runs (cache.rs), if anywhere.
-    cache: Option<PathBuf>,
     /// Capability imports and peak memory of the last run.
     calls: u32,
     peak_memory: usize,
@@ -341,7 +334,6 @@ impl Kio {
             audit: None,
             kvs: vec![],
             sources: Sources::default(),
-            cache: None,
             calls: 0,
             peak_memory: 0,
             #[cfg(feature = "test-hooks")]
@@ -368,11 +360,6 @@ impl Kio {
         self.sources = sources;
     }
 
-    /// Keep compiled programs in `dir` and reuse them (cache.rs).
-    pub fn cache(&mut self, dir: PathBuf) {
-        self.cache = Some(dir);
-    }
-
     /// Test only: pretend the authority report lacks `cap.method`, so the call is "unexpected".
     #[cfg(feature = "test-hooks")]
     pub fn hide_from_report(&mut self, cap: &str, method: &str) {
@@ -383,6 +370,17 @@ impl Kio {
     #[cfg(feature = "test-hooks")]
     pub fn fail_writes(&mut self) {
         self.fail_writes = true;
+    }
+
+    /// Test and profiling only: the component `files` lower to, and its native code (an ELF image
+    /// with symbols) as this runner compiles it. Never loaded back.
+    #[cfg(feature = "test-hooks")]
+    pub fn wasm_and_native(&self, files: &[(String, String)]) -> Result<(Vec<u8>, Vec<u8>)> {
+        let Ok(lowered) = lower(files, &self.limits, |_| {})? else {
+            wasmtime::bail!("the program does not check");
+        };
+        let native = self.engine.precompile_component(&lowered.wasm.component)?;
+        Ok((lowered.wasm.component, native))
     }
 
     /// The message for a run that hit one of its limits, or `None` for any other error.
@@ -517,7 +515,7 @@ impl Kio {
         edit: impl FnOnce(&mut lang::ir::Module),
     ) -> Result<RunResult> {
         // Compiled before the store exists, so compiling is not charged to the run.
-        let checked = compile(&self.engine, files, &self.limits, self.cache.as_ref(), edit)?;
+        let checked = compile(&self.engine, files, &self.limits, edit)?;
         let mut store = new_store(&self.engine, &self.limits)?;
         #[cfg(feature = "test-hooks")]
         {
@@ -622,7 +620,7 @@ impl Server {
         // server idles (W13d): 28 MB idle RSS against 48 MB, for startup in about 160 ms, not 30.
         config.parallel_compilation(false);
         let engine = Engine::new(&config)?;
-        let program = link(&engine, &files, lowered, None)?;
+        let program = link(&engine, &files, lowered)?;
         let param = |ty: &str| {
             (program.params.iter())
                 .find(|(_, t, _)| t == ty)

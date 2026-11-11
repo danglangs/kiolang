@@ -727,19 +727,9 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
             Err(diags) => print_diags(&files, diags),
         };
     }
-    // The compile cache holds native code later runs load as trusted. A program granted a `Dir`
-    // over it could plant an entry, so then this run does not use it (open question 75). Says
-    // nothing: the cache is an optimization, and its path is not the program's business.
-    let cache = kio_host::cache::default_dir();
-    let resolved = cache.as_deref().and_then(kio_host::cache::resolve);
-    let apart = |c: &std::path::PathBuf| {
-        (dir_paths.iter()).all(|(_, d)| std::fs::canonicalize(d).is_ok_and(|r| !kio_host::cache::overlaps(c, &r)))
-    };
-    let use_cache = resolved.as_ref().is_some_and(apart);
     // A program that can write a store's log or a database through a `Dir` could replace or
-    // craft it; one inside the cache could likewise become an entry. `stores` is each `--kv` and
-    // `--db` file with the files beside it that are its own (a compaction's `.tmp`, SQLite's
-    // `-wal`, `-shm` and `-journal`), by flag.
+    // craft it. `stores` is each `--kv` and `--db` file with the files beside it that are its own
+    // (a compaction's `.tmp`, SQLite's `-wal`, `-shm` and `-journal`), by flag.
     let mut stores: Vec<(String, String)> = Vec::new();
     // Each grant's files, its own path first.
     let mut grants: Vec<(String, Vec<String>)> = Vec::new();
@@ -749,14 +739,6 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
             .collect()
     };
     for (flag, path) in on_disk(&kv_specs, "--kv").into_iter().chain(on_disk(&db_specs, "--db")) {
-        let store = kio_host::cache::resolve(path.as_ref());
-        if let (Some(c), Some(s)) = (&resolved, store) {
-            if s.starts_with(c) {
-                return fail(format!(
-                    "`{flag}` is inside kio's compile cache\n  hint: keep stores outside `$XDG_CACHE_HOME/kio` (default `~/.cache/kio`)"
-                ));
-            }
-        }
         let parent = std::path::Path::new(&path).parent();
         let parent = parent.filter(|p| !p.as_os_str().is_empty()).unwrap_or(".".as_ref());
         if let Ok(parent) = std::fs::canonicalize(parent) {
@@ -800,8 +782,8 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
         grants.push((flag.clone(), own.clone()));
         stores.extend(own.into_iter().map(|p| (flag.clone(), p)));
     }
-    // The audit log and each `--log` file: not a store, not inside a granted dir or the cache,
-    // and not one another's file.
+    // The audit log and each `--log` file: not a store, not inside a granted dir, and not one
+    // another's file.
     let mut taken: Vec<(String, &str)> = Vec::new();
     let mut files_to_check: Vec<(String, &str)> = Vec::new();
     if let Some(path) = &audit {
@@ -809,7 +791,7 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
     }
     files_to_check.extend(log_paths.iter().map(|(n, p)| (format!("--log {n}"), p.as_str())));
     for (flag, path) in files_to_check {
-        if let Some(why) = file_refusal(&flag, path, &stores, &dir_paths, resolved.as_deref(), &taken) {
+        if let Some(why) = file_refusal(&flag, path, &stores, &dir_paths, &taken) {
             return fail(why);
         }
         taken.push((flag, path));
@@ -844,9 +826,6 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
     }
     kio.grant_kvs(kvs);
     kio.grant_sources(sources);
-    if let Some(dir) = cache.filter(|_| use_cache) {
-        kio.cache(dir);
-    }
     match kio.run_files(&files, dirs, https) {
         Err(e) => {
             // A limit or trap is the program failing, not a usage error.
@@ -917,24 +896,23 @@ fn serve(
 fn same_file(a: &str, b: &str) -> bool {
     use std::os::unix::fs::MetadataExt;
     let id = |p: &str| std::fs::metadata(p).ok().map(|m| (m.dev(), m.ino()));
-    let resolve = |p: &str| kio_host::cache::resolve(p.as_ref());
+    let resolve = |p: &str| kio_host::resolve(p.as_ref());
     id(a).is_some() && id(a) == id(b) || resolve(a).is_some_and(|r| Some(r) == resolve(b))
 }
 
 /// Why the file `path` of `flag` (`--audit`, `--log name`) is refused, if it is: it must not be a
 /// `--kv` store's or `--db` database's file (one of `stores`; writing it would corrupt it), lie
-/// inside a granted `--dir` (the program could read or replace its own log) or inside the compile
-/// cache, or be the file of another flag in `taken`. Checked before any of them is opened.
+/// inside a granted `--dir` (the program could read or replace its own log), or be the file of
+/// another flag in `taken`. Checked before any of them is opened.
 fn file_refusal(
     flag: &str,
     path: &str,
     stores: &[(String, String)],
     dir_paths: &[(String, String)],
-    cache: Option<&std::path::Path>,
     taken: &[(String, &str)],
 ) -> Option<String> {
     let what = if flag == "--audit" { "the audit log" } else { "the log" };
-    let Some(log) = kio_host::cache::resolve(path.as_ref()) else {
+    let Some(log) = kio_host::resolve(path.as_ref()) else {
         return Some(format!(
             "`{flag} {path}` has `.` or `..` past the directories that exist\n  hint: name {what} by a plain path"
         ));
@@ -953,11 +931,6 @@ fn file_refusal(
                 "`{flag} {path}` is the same file as `{other}`\n  hint: give each log its own file"
             ));
         }
-    }
-    if cache.is_some_and(|c| log.starts_with(c)) {
-        return Some(format!(
-            "`{flag} {path}` is inside kio's compile cache\n  hint: keep {what} outside `$XDG_CACHE_HOME/kio` (default `~/.cache/kio`)"
-        ));
     }
     for (d, dir) in dir_paths {
         if std::fs::canonicalize(dir).is_ok_and(|root| log.starts_with(root)) {

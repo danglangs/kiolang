@@ -13,7 +13,7 @@ Compiled-only kio covers the whole language and every capability. What real apps
 | C3 (a-f) | runtime exports, descriptors, literals, leak check; Str, Bytes, List, Map, structs, enums, `Option`, `Result`, nested `match`, `?`, every built-in, `main` returning any type. Harness 46 to 240 ran both ways, 0 unsupported, 0 mismatches, 0 leaked; list and ADT code 4-6x faster than the interpreter |
 | C6a, C6b | generator (Int, Bool, control, calls, lists, structs/enums/`Option`/`match`/`?`): 250 programs both ways per CI run; front-end fuzzing, 210,000 inputs, no panic |
 | D1, K1 | `Dir` `list`/`write`/`remove`/`exists`; `Kv` (`--kv name=:memory:` or a file). Both adversarially reviewed, fixes merged |
-| H12 | `--kv name=path:ro`: a reader that follows another process writing the store (through its compactions), refused to a program that can write it; `--audit` under `--listen`, one log with each line's request (and WebSocket connection) number. Review: the `--listen` instance pool sized from the component (#135), no 503 below the worker count; `--audit` refused on a store's file, inside a granted dir or the cache |
+| H12 | `--kv name=path:ro`: a reader that follows another process writing the store (through its compactions), refused to a program that can write it; `--audit` under `--listen`, one log with each line's request (and WebSocket connection) number. Review: the `--listen` instance pool sized from the component (#135), no 503 below the worker count; `--audit` refused on a store's file or inside a granted dir |
 | K2 | `Kv.scan(prefix, after, limit)` pages through entries as `List<KvEntry>` (a built-in struct from a caps.wit record); `Kv.add(key, n)` counts atomically in decimal text. Both paths, authority report, audit (`after`, `limit`, `count`; `n`), read-only refusal. kio-web's links app lists with two `scan`s instead of `keys` plus a `get` per link and counts hits with one `add` (no swap loop) |
 | WS1 | WebSockets under `--listen`, a fresh sandbox per event; 7,800 echo events/s on one connection. Adversarially reviewed, fixes in (Origin check and `--ws-origin`; `close` always follows `open`) |
 | WS1b | `WsMessage.target()` and `header(name)`: every event of a connection sees its upgrade request (caps.wit, owner-approved); kio-web `examples/ws/` routes by path and checks a token |
@@ -24,7 +24,7 @@ Compiled-only kio covers the whole language and every capability. What real apps
 | L6b | closures, capturing by copy, lifted to functions in lowering; a closure cannot capture a capability; compiled in C9a |
 | L6c | `map`, `and_then`, `map_err`, `filter`, `any`, `all` on `Option`/`Result`/`List`, typed from the function; a closure argument takes its parameter type from the receiver; compiled in C9b |
 | C9a | `fn` values and closures compiled: harness 300 ran both ways, 0 unsupported, 0 mismatches (left: capabilities, C4); a call through a value costs ~10 ns over a direct call (10 M: 144 ms vs 44 ms, incl. compiling) |
-| C5 | compiled only: `kio run` and `--listen` compile; the guest crate, its world, wizer and WASI are gone; the interpreter is the native test oracle (`Interp`). On-disk compile cache; fuel defaults a tenth. `Server::handle` 170 to 32 µs, `--listen` startup 0.95 to 0.17 s, idle RSS 66 to 28 MB. |
+| C5 | compiled only: `kio run` and `--listen` compile; the guest crate, its world, wizer and WASI are gone; the interpreter is the native test oracle (`Interp`). On-disk compile cache (removed in S3); fuel defaults a tenth. `Server::handle` 170 to 32 µs, `--listen` startup 0.95 to 0.17 s, idle RSS 66 to 28 MB. |
 | C9b | L6c's built-ins taking functions compiled inline: harness 351 ran both ways, 0 unsupported, 0 mismatches, 0 leaked; kiogen generates them; 1 M `map` then `filter` 51 ms compiled vs 233 ms interpreted (a hand-written `for` 39 ms) |
 | C7a | C7 review follow-ups: hidden locals reused (17,000 calls in one function compile), more than 999 parameters a checker error, `--memory` below the initial memory reported as out of memory, a high-bits differential test over runtime slots, `Statics::desc` hashed (4,000 structs 263 to 226 ms) |
 | L7a | generic functions `fn f<T>(..)`: inferred from arguments, then the expected type, or `f::<Int>`; `T` opaque and never a capability; monomorphized in lowering (`first<Int>`), so compiled with no codegen change: harness 363 ran both ways, 0 mismatches. Adversarially reviewed (rule 1 holds) |
@@ -75,6 +75,7 @@ Compiled-only kio covers the whole language and every capability. What real apps
 | H25 | every HTTP hop, each redirect and each `send_all` request included, reserves a call before it is sent: a run sends at most `--calls` requests (before: up to six per call). A server counting requests through five redirects gets exactly `--calls` |
 | H26 | `kio mcp` reads each message with a 2 MB limit before parsing: a longer line is refused (`-32600`) and skipped without being held, and the server answers the next; `kio_check` sums source sizes before copying them |
 | P5 | the authority report charges a capability parameter only for a receiver or argument the checker resolved to it: a local, closure parameter, pattern binding or `for` variable of the same name is not charged, so `kio check --base` shows a later real call (#197) |
+| S3 | kio no longer loads native code from disk: the compile cache is gone, every `kio run` compiles in memory (hello about 30 ms wall, was 8 ms cached), and the host never calls `Component::deserialize`. A program granted a `Dir` over the cache could plant native code that a later run, granted nothing, would load; ownership, hashes and keys in a user-writable directory cannot tell the host's entries from a program's (#75). An old `~/.cache/kio` is left alone and never read. The store and log refusals that only protected the cache are gone. host/tests/cache.rs |
 
 ## Next
 
@@ -91,6 +92,6 @@ Nothing. Tuples stay deferred (today a hint, L20) unless an eval shows models st
 | | fib(35) | 30 M loop | tree | JSON 1 MB | 100 k concatenations |
 |---|---|---|---|---|---|
 | Rust | 23 ms | 97 ms | 33 ms | 8.0 ms | 4.6 ms |
-| kio compiled (plus 20-25 ms compile, cached) | 53-57 ms | 106 ms | 98 ms (C8b6: 101; C8b7: 90; C8c1: 92; C8c2: 71; C8c8: 68) | 66 ms (json.kio; C8b7: 64; C8c1: 58; C8c2: 57); built-in JSON 13 ms (C8b6) | 5.2 ms (C8b6: 4.8; C8b7: 4.5) |
+| kio compiled (plus 20-25 ms compile per run) | 53-57 ms | 106 ms | 98 ms (C8b6: 101; C8b7: 90; C8c1: 92; C8c2: 71; C8c8: 68) | 66 ms (json.kio; C8b7: 64; C8c1: 58; C8c2: 57); built-in JSON 13 ms (C8b6) | 5.2 ms (C8b6: 4.8; C8b7: 4.5) |
 | Python 3.13 | 704 ms | 933 ms | 2.87 s | 17 ms | 7.2 ms |
 | kio interpreter (the test oracle) | 1.54 s | 1.27 s | 1.03 s | 812 ms | 1.57 s |

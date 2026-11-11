@@ -164,7 +164,7 @@ impl Db {
         }
         // The path with its directories' symlinks resolved, so `NOFOLLOW` sees none (macOS's
         // `/var` is one); absolute, so SQLite reads none of it as a `file:` URI.
-        let real = crate::cache::resolve(path).ok_or_else(|| {
+        let real = crate::resolve(path).ok_or_else(|| {
             format!(
                 "{shown} has `.` or `..` past the directories that exist\n  hint: name the database by a plain path"
             )
