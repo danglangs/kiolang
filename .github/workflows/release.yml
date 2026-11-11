@@ -1,0 +1,50 @@
+name: release
+# Builds the release archives (tools/release-build.sh), follows docs/first-job.md
+# with each, and on a v* tag uploads them to a DRAFT release. Publishing the
+# draft is a manual step.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown, ${{ matrix.target }}
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: tools/release-build.sh ${{ matrix.target }}
+      - if: runner.os == 'Linux'
+        run: >
+          docker run --rm --network none -v "$PWD:/src:ro" python:3.12-slim-bookworm
+          python3 /src/tools/first-job-test.py /src/dist/kio-${{ matrix.target }}.tar.gz /src/docs/first-job.md
+      - if: runner.os == 'macOS'
+        run: python3 tools/first-job-test.py dist/kio-${{ matrix.target }}.tar.gz docs/first-job.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kio-${{ matrix.target }}
+          path: dist/kio-${{ matrix.target }}.tar.gz*
+  draft:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - run: gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "$GITHUB_REF_NAME" kio-*.tar.gz kio-*.tar.gz.sha256
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}

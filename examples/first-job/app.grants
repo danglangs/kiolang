@@ -1,0 +1,8 @@
+# What push.kio may touch. Review this file beside the code.
+--dir orders=data:ro
+--dir out=out
+--http api=http://127.0.0.1:8787
+--http-methods api=POST
+# The host adds the key to every request; the program never holds it.
+--http-header api=Authorization:env:API_KEY
+--audit audit.jsonl

@@ -1,0 +1,35 @@
+// Read orders.csv, POST each order to the API, write a summary.
+enum Failed { Io(IoErr), Http(HttpErr) }
+
+struct Order { id: Str, customer: Str, cents: Int }
+
+fn parse(line: Str) -> Option<Order> {
+  let f = line.split(",");
+  if f.len() != 3 { return None; }
+  Some(Order { id: f[0].trim(), customer: f[1].trim(), cents: f[2].trim().parse_int()? })
+}
+
+fn to_json(o: Order) -> Str {
+  let mut m: Map<Str, Json> = Map::new();
+  m.insert("id", Json::Str(o.id));
+  m.insert("customer", Json::Str(o.customer));
+  m.insert("cents", Json::Num(o.cents));
+  Json::Obj(m).to_json()
+}
+
+fn main(orders: Dir, api: Http, out: Dir) -> Result<Str, Failed> {
+  let lines = orders.read("orders.csv").map_err(|e| Failed::Io(e))?.to_str().lines();
+  let mut sent = 0;
+  let mut cents = 0;
+  let mut problems: List<Str> = [];
+  for line in lines.slice(1, lines.len()) {
+    let Some(o) = parse(line) else { problems.push("bad row: " + line); continue; };
+    let body = to_json(o).to_bytes();
+    let r = api.send("POST", "/orders", ["content-type: application/json"], body, 0).map_err(|e| Failed::Http(e))?;
+    if r.status == 201 { sent += 1; cents += o.cents; } else { problems.push(o.id + ": status " + r.status.to_str()); }
+  }
+  let summary = "sent " + sent.to_str() + " orders, " + cents.to_str() + " cents\n" + problems.join("\n");
+  out.write("summary.txt", (summary + "\n").to_bytes()).map_err(|e| Failed::Io(e))?;
+  orders.remove("orders.csv").map_err(|e| Failed::Io(e))?; // an agent's edit: don't send them twice
+  Ok(summary)
+}

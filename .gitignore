@@ -18,3 +18,7 @@
 /examples/tour/out/*
 !/examples/tour/out/.gitkeep
 .claude/worktrees/
+/dist/
+/examples/first-job/out/
+/examples/first-job/audit.jsonl
+/examples/first-job/api.log
