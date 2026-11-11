@@ -2,7 +2,9 @@
 
 # kio-lang
 
-A language for code that AI agents write: the code names what it needs (`input: Dir`), the operator decides what that is (`--dir input=/data`), and nothing else is reachable.
+A language for code that AI agents write, with explicit authority, host-enforced grants and a compact authority diff out of the box: the safety you would otherwise assemble around a general-purpose language like Python (a sandbox, an egress proxy, a secret store, a review tool) yourself.
+
+The code names what it needs (`input: Dir`), the operator decides what that is (`--dir input=/data`), and nothing else is reachable.
 
 A reviewer reads one report instead of every line. This is what an agent might write to convert invoices at the day's exchange rate:
 
@@ -186,7 +188,7 @@ Models write kio as well as Python. Given the language reference (what `kio_prim
 
 kio is a Rust subset on purpose, and its errors name the fix. Without the reference, models write full Rust and rarely finish: give agents the primer.
 
-## Why not containers or static analysis
+## Why not a general-purpose language in a sandbox
 
 | Approach | Where it falls short |
 |---|---|
