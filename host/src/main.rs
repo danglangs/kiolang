@@ -97,9 +97,8 @@ fn check_base(path: &str, base: &str, detail: bool) -> i32 {
     }
     println!("{}", out.join("\n"));
     if !diff.added {
-        // A gain a base method covers (P6) is shown but adds nothing.
-        let mut lines = diff.grants.iter().chain(&diff.funcs);
-        match lines.any(|l| l.contains(" is covered by ")) {
+        // A gain a base method covers (P6) is shown but adds nothing; judged by the lines printed.
+        match out.iter().any(|l| l.contains(" is covered by ")) {
             true => println!("no authority added"),
             false => println!("authority removed only"),
         }

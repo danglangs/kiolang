@@ -239,3 +239,20 @@ fn uncovered_function_gain_behind_covered_grant_lines_shows_functions() {
     assert!(out.contains("\n+ audit: o create\n- audit: o read\n"), "{out}");
     assert!(out.ends_with("authority added (exit 3)\n"), "{out}");
 }
+
+#[test]
+fn footer_follows_the_printed_lines() {
+    // `helper`'s covered line is hidden (a grant line shows the change), so the footer reads as
+    // the one grant line does.
+    let old = r#"fn helper(o: Dir) { let _r = o.write("a", "x".to_bytes()); }
+fn main(out: Dir) { let _r = out.remove("a"); }
+"#;
+    let new = r#"fn helper(o: Dir) { let _r = o.create("a", "x".to_bytes()); }
+fn main(out: Dir) {}
+"#;
+    let want = "~ out: Dir (-remove)\nauthority removed only\n";
+    assert_eq!(
+        diff(&[("app.kio", old)], &[("app.kio", new)]),
+        (0, want.into(), "".into())
+    );
+}

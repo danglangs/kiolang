@@ -278,7 +278,7 @@ $ kio check app.kio --base old/app.kio --detail
 authority added (exit 3)
 ```
 
-A gained method is not new authority when a method the base reached on the same grant already covers it: `write` covers `create`; `read` and `list` cover `exists`; `send` and `send_all` cover `get` and each other; `scan` covers `get` and `keys`; `exec` and `transaction` cover each other; `sign` covers `verify`; `WsSend`'s three cover each other. The line says so and adds nothing; the other direction (`create` to `write`) is added. A function line applies the rule against that function's base methods on the same parameter (same name and type).
+A gained method is not new authority when a method the base reached on the same grant already covers it: `write` covers `create`; `read` covers `exists`; `send` and `send_all` cover `get` and each other; `scan` covers `get` and `keys`; `exec` and `transaction` cover each other; `sign` covers `verify`; `WsSend`'s `text` and `binary` cover each other and `close`. The line says so and adds nothing; the other direction (`create` to `write`) is added. A function line applies the rule against that function's base methods on the same parameter (same name and type). A function new to the diff counts in full, so a covered method moved into a new helper shows on that helper's line as added.
 
 ```
 $ kio check app.kio --base old/app.kio

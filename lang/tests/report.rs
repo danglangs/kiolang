@@ -540,6 +540,23 @@ fn diff_new_grant_with_covered_methods_is_added() {
     assert!(got.added && got.grant_added);
 }
 
+#[test]
+fn diff_review_rows_that_do_not_cover() {
+    // `close` sends a code, not a payload; `list` misses symlinks and fails on large directories.
+    for (ty, from, to) in [
+        ("WsSend", "close", "text"),
+        ("WsSend", "close", "binary"),
+        ("Dir", "list", "exists"),
+    ] {
+        let got = diff(
+            &[("a.kio", &main_calling(ty, from))],
+            &[("a.kio", &main_calling(ty, to))],
+        );
+        assert_eq!(got.grants, [format!("~ x: {ty} (+{to} -{from})")]);
+        assert!(got.added, "{ty}.{to} after {from}");
+    }
+}
+
 /// Every caps.wit method is classified in `COVERS`, once, and the table names only real
 /// methods: a new method must be placed before the diff can treat it.
 #[test]
