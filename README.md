@@ -202,7 +202,7 @@ The cost is the ecosystem: few libraries, no package manager yet. Agents write m
 
 ## Roadmap
 
-- **Now:** allocation speed (unboxed enums are in; escape analysis next). The pilot app, built end to end by an agent, is done.
+- **Now:** allocation speed (unboxed enums and small structs are in; a codegen inliner and inline list buffers next). The pilot app, built end to end by an agent, is done.
 - **Next:** packages (a module from another directory); `par_map` and tasks (pinned).
 - **Later:** tuples, if the eval shows models still reach for them.
 
