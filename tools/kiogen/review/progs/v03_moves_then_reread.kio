@@ -1,0 +1,18 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+fn two(a: Str, b: Str) -> Str { a + b }
+fn main() -> Str {
+    let s = R { name: "s" + "", xs: [1, 2, 3], n: 0 };
+    let d = two(s.name, s.name) + s.xs.len().to_str();
+    let t = R { name: "t" + "", xs: [], n: 1 };
+    let mut out = "";
+    for i in 0..3 {
+        out = out + t.name + i.to_str();
+    }
+    let u = R { name: "u" + "", xs: [4], n: 2 };
+    let v = if u.n > 1 { u.name } else { "no" + "" };
+    let w = R { name: "w" + "", xs: [5], n: 3 };
+    let ws = [w.name, w.name + "2"];
+    let x = R { name: "x" + "", xs: [6], n: 4 };
+    let y = R { name: x.name, xs: x.xs, n: x.n };
+    d + out + v + ws.join(",") + y.name + y.xs.len().to_str()
+}

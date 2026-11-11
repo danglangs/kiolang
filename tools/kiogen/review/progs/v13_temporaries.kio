@@ -1,0 +1,20 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+struct N { r: R, o: Option<Str>, p: P }
+struct P { x: Int, y: Int }
+fn mk(i: Int) -> R { R { name: "m" + i.to_str(), xs: [i, i], n: i } }
+fn mkn(i: Int) -> N { N { r: mk(i), o: Some("o" + i.to_str()), p: P { x: i, y: -i } } }
+fn main() -> Str {
+    let a = mk(1).name;
+    let b = mk(2).xs.len();
+    let c = mk(3).n;
+    let d = mkn(4).r.name;
+    let e = mkn(5).o.unwrap_or("-");
+    let f = mkn(6).p.x;
+    let g = mkn(7).r;
+    let h = mkn(8).p;
+    let i = (if c > 0 { mk(9) } else { mk(10) }).name;
+    let j = [mk(11)][0].name;
+    let k = R { name: "k" + "", xs: [], n: 0 }.name;
+    let l = R { name: "l" + "", xs: [1], n: 0 }.xs;
+    a + b.to_str() + c.to_str() + d + e + f.to_str() + g.name + g.xs.len().to_str() + h.y.to_str() + i + j + k + l.len().to_str()
+}

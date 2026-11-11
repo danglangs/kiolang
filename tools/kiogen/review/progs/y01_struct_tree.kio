@@ -1,0 +1,25 @@
+struct T { kids: List<T>, name: Str, v: Int }
+struct Acc { names: Str, sum: Int, depth: Int }
+fn leaf(n: Str, v: Int) -> T { T { kids: [], name: n, v: v } }
+fn fold(t: T) -> Acc {
+    let mut a = Acc { names: t.name, sum: t.v, depth: 0 };
+    for k in t.kids {
+        let c = fold(k);
+        a.names += c.names;
+        a.sum += c.sum;
+        if c.depth + 1 > a.depth { a.depth = c.depth + 1; }
+    }
+    a
+}
+fn grow(t: T, d: Int) -> T { if d == 0 { t } else { let mut u = t; u.kids.push(grow(leaf(t.name + d.to_str(), d), d - 1)); u.kids.push(leaf("l" + "", 1)); u } }
+fn main() -> Str {
+    let t = T { kids: [leaf("a" + "", 1), T { kids: [leaf("b" + "", 2)], name: "m" + "", v: 3 }], name: "r" + "", v: 0 };
+    let a = fold(t);
+    let g = grow(leaf("g" + "", 0), 3);
+    let b = fold(g);
+    let mut c = t;
+    c.kids[1].kids.push(leaf("z" + "", 9));
+    c.kids[1].name += "!";
+    let d = fold(c);
+    a.names + a.sum.to_str() + a.depth.to_str() + b.names + b.sum.to_str() + b.depth.to_str() + d.names + d.sum.to_str() + d.depth.to_str() + fold(t).names
+}

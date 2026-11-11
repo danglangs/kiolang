@@ -1,0 +1,18 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+struct H { rs: List<R>, m: Map<Str, R> }
+fn main() -> Str {
+    let mut rs = [R { name: "a" + "", xs: [1], n: 0 }, R { name: "b" + "", xs: [], n: 1 }];
+    let snap = rs;
+    rs[0].name += "!";
+    rs[0].xs.push(2);
+    rs[1].n = 9;
+    rs[1] = R { name: "c" + "", ..rs[1] };
+    let mut h = H { rs: rs, m: Map::new() };
+    let hs = h;
+    h.rs[0].xs.push(3);
+    h.m.insert("k", rs[0]);
+    h.rs.push(snap[1]);
+    let got = h.m.get("k").unwrap_or(R { name: "-", xs: [], n: 0 });
+    snap[0].name + snap[0].xs.len().to_str() + snap[1].n.to_str() + rs[0].name + rs[0].xs.len().to_str() + rs[1].name + rs[1].n.to_str()
+      + h.rs[0].xs.len().to_str() + hs.rs[0].xs.len().to_str() + h.rs.len().to_str() + hs.rs.len().to_str() + got.name + got.xs.len().to_str() + hs.m.len().to_str()
+}

@@ -1,0 +1,17 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+struct Pair<T> { a: T, b: T }
+fn swap<T>(p: Pair<T>) -> Pair<T> { Pair { a: p.b, b: p.a } }
+fn main() -> Str {
+    let r = R { name: "r" + "", xs: [1], n: 1 };
+    let q = R { name: "q" + "", xs: [], n: 2 };
+    let pp = Pair { a: Pair { a: r, b: q }, b: Pair { a: q, b: r } };
+    let sw = swap(pp);
+    let mut ps = [Pair { a: r, b: q }, Pair { a: q, b: r }];
+    ps[0].a.name += "x";
+    ps[0].a.xs.push(5);
+    ps[1] = swap(ps[1]);
+    let op: Option<Pair<R>> = Some(ps[0]);
+    let mut inner = sw.a;
+    inner.b.name += "y";
+    pp.a.a.name + sw.a.a.name + sw.b.b.name + ps[0].a.name + ps[0].a.xs.len().to_str() + ps[1].a.name + match op { Some(p) => p.a.name + p.b.name, None => "-" } + inner.b.name + sw.a.b.name + r.name + r.xs.len().to_str()
+}

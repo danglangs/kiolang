@@ -1,0 +1,16 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+struct Pair<T> { a: T, b: T }
+fn mk() -> R { R { name: "m" + "", xs: [1], n: 9 } }
+fn main() -> Str {
+    let p = R { name: "p" + "", xs: [1, 2], n: 1 };
+    let q = R { n: 2, ..p };
+    let mut r = R { name: "r" + "", ..p };
+    r.xs.push(3);
+    let s = R { xs: [], ..mk() };
+    let t = R { name: p.name + "t", xs: p.xs, n: 3, ..p };
+    let g = Pair { a: "x" + "", b: "y" + "" };
+    let h = Pair { b: g.a, ..g };
+    let last = R { ..p };
+    p.name + p.xs.len().to_str() + p.n.to_str() + q.name + q.xs.len().to_str() + q.n.to_str() + r.name + r.xs.len().to_str() + r.n.to_str()
+      + s.name + s.xs.len().to_str() + s.n.to_str() + t.name + t.xs.len().to_str() + t.n.to_str() + h.a + h.b + g.a + g.b + last.name
+}

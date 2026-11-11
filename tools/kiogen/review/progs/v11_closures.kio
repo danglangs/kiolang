@@ -1,0 +1,23 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+fn apply(f: fn(R) -> Str, r: R) -> Str { f(r) }
+fn lentf(r: R) -> Str { r.name + r.xs.len().to_str() }
+fn ownf(r: R) -> Str { let xs = [r.name]; xs[0] + r.xs.len().to_str() }
+fn mkf(r: R) -> fn(Int) -> Str { |i| r.name + (r.n + i).to_str() }
+fn mkr(s: Str) -> fn(Int) -> R { |i| R { name: s, xs: [i], n: i } }
+fn main() -> Str {
+    let mut a = R { name: "a" + "", xs: [1], n: 1 };
+    let f1 = |r: R| r.name + r.xs.len().to_str();
+    let f2 = |r: R| { let k = [r.name]; k[0] + r.n.to_str() };
+    let cap = || a.name + a.n.to_str();
+    let capmut = |s: Str| { let mut b = a; b.name += s; b.name };
+    a.name = "A" + "";
+    a.xs.push(2);
+    let g = mkf(a);
+    let h = mkr("h" + "");
+    let r1 = h(1); let r2 = h(2);
+    let mut r3 = r2; r3.name += "3";
+    let fs: List<fn(R) -> Str> = [lentf, ownf, f1, f2];
+    let mut out = "";
+    for f in fs { out = out + f(a) + apply(f, a); }
+    out + cap() + capmut("!") + capmut("?") + g(10) + r1.name + r1.xs[0].to_str() + r2.name + r3.name + a.name + a.xs.len().to_str()
+}

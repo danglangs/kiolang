@@ -1,0 +1,2 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+fn main() -> Result<R, Str> { let r = R { name: "r" + "", xs: [1, 2], n: 3 }; let s = r; if s.n > 2 { Ok(s) } else { Err(r.name) } }

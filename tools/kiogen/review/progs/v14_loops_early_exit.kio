@@ -1,0 +1,35 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+fn find(rs: List<R>, k: Str) -> Option<R> {
+    for r in rs {
+        let copy = R { name: r.name + "!", ..r };
+        if r.name == k { return Some(copy); }
+        if r.n < 0 { continue; }
+        if r.n > 100 { break; }
+    }
+    None
+}
+fn acc(n: Int) -> R {
+    let mut s = R { name: "" + "", xs: [], n: 0 };
+    let mut i = 0;
+    while i < n {
+        let prev = s;
+        s = R { name: prev.name + i.to_str(), xs: prev.xs, n: prev.n + i };
+        s.xs.push(i);
+        if i == 3 { let t = s; s = t; }
+        i += 1;
+    }
+    loop {
+        let t = s;
+        if t.n > 1000 { break; }
+        s.n = t.n * 2 + 1;
+        if s.xs.len() > 20 { break; }
+        s.xs.push(s.n);
+    }
+    s
+}
+fn main() -> Str {
+    let rs = [R { name: "a" + "", xs: [1], n: -1 }, R { name: "b" + "", xs: [], n: 5 }, R { name: "c" + "", xs: [2], n: 200 }, R { name: "d" + "", xs: [], n: 0 }];
+    let x = find(rs, "b" + ""); let y = find(rs, "d" + ""); let z = find(rs, "a" + "");
+    let r = acc(5);
+    let o = match x { Some(r) => r.name + r.n.to_str(), None => "-" }; o + match y { Some(r) => r.name, None => "-" } + match z { Some(r) => r.name, None => "-" } + r.name + r.n.to_str() + r.xs.len().to_str()
+}

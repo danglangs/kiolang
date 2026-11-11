@@ -1,0 +1,12 @@
+struct K { b: Bytes, m: Map<Str, Int>, h: HashMap<Int, Str>, f: fn(Int) -> Int }
+fn inc(x: Int) -> Int { x + 1 }
+fn main() -> Str {
+    let mut k = K { b: "ab".to_bytes(), m: Map::new(), h: HashMap::new(), f: inc };
+    let j = k;
+    k.b.push(99);
+    k.m.insert("x", 1);
+    k.h.insert(1, "one" + "");
+    k.f = |x| x * 2;
+    let a = (k.f)(5); let b = (j.f)(5);
+    k.b.len().to_str() + j.b.len().to_str() + k.m.len().to_str() + j.m.len().to_str() + k.h.len().to_str() + j.h.len().to_str() + a.to_str() + b.to_str() + k.b.to_hex() + j.b.to_str()
+}

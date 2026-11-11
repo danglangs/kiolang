@@ -1,0 +1,19 @@
+struct A { b: B, s: Str }
+struct B { c: C, xs: List<Int> }
+struct C { d: D, name: Str }
+struct D { x: Int, ys: List<Str> }
+fn main() -> Str {
+    let mut a = A { b: B { c: C { d: D { x: 1, ys: [] }, name: "c" + "" }, xs: [] }, s: "a" + "" };
+    let snap = a;
+    a.b.c.d.x = 5;
+    a.b.c.d.ys.push("y" + "");
+    a.b.c.name += "!";
+    a.b.xs.push(1);
+    a.s += "?";
+    let mut b = a.b;
+    b.c.d.x += 10;
+    let c = b.c;
+    let d = c.d;
+    a.b.c.d.x += d.x;
+    snap.b.c.d.x.to_str() + snap.b.c.d.ys.len().to_str() + snap.b.c.name + snap.b.xs.len().to_str() + snap.s + "|" + a.b.c.d.x.to_str() + a.b.c.d.ys.len().to_str() + a.b.c.name + a.b.xs.len().to_str() + a.s + "|" + b.c.d.x.to_str() + c.d.x.to_str() + d.x.to_str() + d.ys[0]
+}

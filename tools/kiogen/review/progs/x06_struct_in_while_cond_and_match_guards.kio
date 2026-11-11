@@ -1,0 +1,12 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+fn step(r: R) -> R { R { name: r.name + "s", xs: r.xs, n: r.n - 1 } }
+fn main() -> Str {
+    let mut r = R { name: "" + "", xs: [1], n: 3 };
+    while r.n > 0 { r = step(r); }
+    let mut t = r;
+    while t.name.len() < 6 && t.xs.len() < 10 { t.name += "t"; t.xs.push(t.xs.len()); }
+    let k = match r.n { 0 => r.name, _ => "no" };
+    let o = if r.xs.len() == 1 { Some(r) } else { None };
+    let v = match o { Some(q) => q.name + q.n.to_str(), None => "-" };
+    r.name + t.name + t.xs.len().to_str() + k + v
+}

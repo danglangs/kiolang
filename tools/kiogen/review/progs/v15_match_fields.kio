@@ -1,0 +1,18 @@
+struct S { o: Option<Str>, r: Result<Str, Int>, p: P, xs: List<Str> }
+struct P { x: Int, y: Int }
+fn main() -> Str {
+    let mut s = S { o: Some("o" + ""), r: Err(3), p: P { x: 1, y: 2 }, xs: ["a" + ""] };
+    let t = s;
+    let mut out = "";
+    out = out + match s.o { Some(v) => v, None => "-" };
+    if let Some(v) = s.o { out = out + v; }
+    out = out + match s.r { Ok(v) => v, Err(n) => n.to_str() };
+    s.o = None;
+    s.r = Ok("k" + "");
+    s.p.y = 5;
+    s.xs.push("b" + "");
+    out = out + match s.o { Some(v) => v, None => "-" } + match t.o { Some(v) => v, None => "-" } + s.r.unwrap_or("?") + t.r.unwrap_or("?") + s.p.y.to_str() + t.p.y.to_str() + s.xs.len().to_str() + t.xs.len().to_str();
+    let Some(w) = t.o else { return out + "else"; };
+    out = out + w + s.o.map(|v: Str| v + "!").unwrap_or("none") + t.o.map(|v: Str| v + "!").unwrap_or("none") + s.r.map(|v: Str| v + "?").unwrap_or("e");
+    out
+}

@@ -1,0 +1,19 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+fn pick(rs: List<R>, want: Int) -> R {
+    let fallback = R { name: "fb" + "", xs: [], n: -1 };
+    for r in rs {
+        let tmp = R { name: r.name + "t", xs: r.xs, n: r.n };
+        if r.n == want {
+            let inner = tmp;
+            if inner.xs.len() > 0 { return inner; }
+            return R { name: inner.name + "e", ..fallback };
+        }
+        for i in 0..2 { let t2 = R { name: tmp.name + i.to_str(), ..tmp }; if i == 1 && r.n == want + 1 { return t2; } }
+    }
+    fallback
+}
+fn main() -> Str {
+    let rs = [R { name: "a" + "", xs: [1], n: 1 }, R { name: "b" + "", xs: [], n: 2 }, R { name: "c" + "", xs: [3], n: 3 }];
+    let a = pick(rs, 1); let b = pick(rs, 2); let c = pick(rs, 3); let d = pick(rs, 9); let e = pick(rs, 0);
+    a.name + a.xs.len().to_str() + b.name + b.n.to_str() + c.name + d.name + e.name
+}

@@ -1,0 +1,33 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+fn main() -> Str {
+    let rs = [R { name: "a" + "", xs: [1], n: 0 }, R { name: "b" + "", xs: [], n: 1 }, R { name: "c" + "", xs: [2, 3], n: 2 }, R { name: "d" + "", xs: [], n: 3 }];
+    let mut out = "";
+    for r in rs {
+        if r.n == 1 { continue; }
+        let keep = r;
+        if r.n == 3 { out = out + keep.name; break; }
+        for i in 0..2 {
+            let inner = R { name: r.name + i.to_str(), ..keep };
+            if i == 1 { out = out + inner.name; continue; }
+            out = out + inner.xs.len().to_str();
+        }
+        out = out + r.name;
+    }
+    let mut i = 0;
+    while i < rs.len() {
+        let r = rs[i];
+        i += 1;
+        if r.xs.len() == 0 { continue; }
+        let s = R { name: r.name + "w", xs: r.xs, n: i };
+        if s.n > 2 { out = out + s.name; break; }
+        out = out + s.name + s.xs.len().to_str();
+    }
+    let mut j = 0;
+    loop {
+        let r = rs[j];
+        j += 1;
+        let t = R { name: r.name, xs: [], n: 0 };
+        if j == 2 { out = out + t.name; break; }
+    }
+    out
+}

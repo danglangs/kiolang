@@ -1,0 +1,16 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+fn main() -> Str {
+    let rs = [R { name: "b" + "", xs: [1], n: 2 }, R { name: "a" + "", xs: [], n: 1 }, R { name: "c" + "", xs: [1, 2], n: 3 }];
+    let mut sorted = rs;
+    sorted.sort_by(|x: R, y: R| x.name < y.name);
+    let first = sorted[0];
+    let sl = sorted.slice(1, 3);
+    let mapped = rs.map(|r: R| R { name: r.name + r.name, xs: r.xs, n: r.n * 2 });
+    let flt = mapped.filter(|r: R| r.xs.len() > 0);
+    let mut popped = flt;
+    let last = popped.pop();
+    let last2 = popped.pop();
+    let last3 = popped.pop();
+    first.name + sl.len().to_str() + sl[0].name + mapped[2].name + mapped[2].n.to_str() + flt.len().to_str() + match last { Some(r) => r.name + r.xs.len().to_str(), None => "-" }
+      + match last2 { Some(r) => r.name, None => "-" } + match last3 { Some(r) => r.name, None => "-" } + popped.len().to_str() + rs[0].name + sorted.len().to_str()
+}

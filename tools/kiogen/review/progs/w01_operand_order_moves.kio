@@ -1,0 +1,17 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+fn g(a: R, b: R) -> Str { a.name + b.name + a.xs.len().to_str() + b.xs.len().to_str() }
+fn h(s: Str, r: R) -> Str { s + r.name }
+fn k(r: R, s: Str) -> Str { r.name + s }
+fn main() -> Str {
+    let s = R { name: "s" + "", xs: [1], n: 0 };
+    let a = g(s, s);
+    let t = R { name: "t" + "", xs: [1, 2], n: 0 };
+    let b = h(t.name, t);
+    let u = R { name: "u" + "", xs: [1, 2, 3], n: 0 };
+    let c = k(u, u.name);
+    let v = R { name: "v" + "", xs: [], n: 0 };
+    let d = [v.name, v.name, g(v, v)];
+    let w = R { name: "w" + "", xs: [], n: 0 };
+    let e = [w, w, R { name: "x", ..w }];
+    a + b + c + d.join("") + e.len().to_str() + e[2].name
+}

@@ -1,0 +1,4 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+struct E {}
+struct N { r: R, e: E, o: Option<E>, s: Option<R> }
+fn main() -> List<Option<N>> { let r = R { name: "r" + "", xs: [1, 2], n: 3 }; let n = N { r: r, e: E {}, o: Some(E {}), s: None }; let mut m = n; m.s = Some(r); m.o = None; [Some(n), None, Some(m)] }

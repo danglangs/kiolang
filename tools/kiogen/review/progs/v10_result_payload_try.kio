@@ -1,0 +1,14 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+fn parse(i: Int) -> Result<R, Str> { if i < 0 { Err("neg" + "") } else { Ok(R { name: "r" + i.to_str(), xs: [i], n: i }) } }
+fn use1(i: Int) -> Result<Str, Str> { let r = parse(i)?; Ok(r.name + r.xs.len().to_str()) }
+fn use2(i: Int) -> Result<Int, Str> { let v = parse(i); let r = v?; let s = v.unwrap_or(R { name: "-", xs: [], n: 0 }); Ok(r.n + s.n + r.xs[0]) }
+fn use3(i: Int) -> Result<Str, Str> { Ok(parse(i)?.name + parse(i)?.xs.len().to_str()) }
+fn opt(i: Int) -> Option<R> { if i == 0 { None } else { Some(R { name: "o" + "", xs: [], n: i }) } }
+fn use4(i: Int) -> Option<Str> { let r = opt(i)?; let mut t = r; t.name += "t"; Some(r.name + t.name) }
+fn main() -> Str {
+    let mut out = "";
+    for i in -1..3 {
+        out = out + use1(i).unwrap_or("E") + use2(i).unwrap_or(-1).to_str() + use3(i).unwrap_or("E") + use4(i).unwrap_or("N");
+    }
+    out
+}

@@ -1,0 +1,21 @@
+struct P { x: Int, y: Int }
+struct R { name: Str, xs: List<Int>, n: Int }
+struct S { op: Option<P>, or: Option<R>, rr: Result<R, Str>, lr: List<R> }
+fn main() -> Str {
+    let mut s = S { op: Some(P { x: 1, y: 2 }), or: None, rr: Ok(R { name: "ok" + "", xs: [1], n: 1 }), lr: [] };
+    let t = s;
+    s.op = None;
+    s.or = Some(R { name: "or" + "", xs: [], n: 0 });
+    s.rr = Err("e" + "");
+    s.lr.push(R { name: "l" + "", xs: [], n: 0 });
+    s.lr[0].xs.push(5);
+    s.lr[0].name += "!";
+    let Some(p) = t.op else { return "no"; };
+    let Some(r) = s.or else { return "no"; };
+    let mut out = p.x.to_str() + r.name;
+    out = out + match t.rr { Ok(r) => r.name + r.xs.len().to_str(), Err(e) => e } + match s.rr { Ok(r) => r.name, Err(e) => e };
+    out = out + t.lr.len().to_str() + s.lr.len().to_str() + s.lr[0].name + s.lr[0].xs.len().to_str();
+    out = out + s.or.map(|r: R| r.name + r.n.to_str()).unwrap_or("-") + t.or.map(|r: R| r.name).unwrap_or("-") + t.op.map(|p: P| p.y).unwrap_or(-1).to_str();
+    if let Some(r) = s.or { out = out + r.name; }
+    out
+}

@@ -1,0 +1,12 @@
+struct P { x: Int, y: Int }
+struct Q { a: Str, b: Str, c: List<Int> }
+fn main() -> Str {
+    let mut xs = [1, 2, 3, 4, 5, 6];
+    let p = P { y: xs.pop().unwrap_or(0), x: xs.pop().unwrap_or(0) };
+    let ps = [P { y: xs.pop().unwrap_or(0), x: xs.pop().unwrap_or(0) }];
+    let mut ss = ["a" + "", "b" + "", "c" + "", "d" + "", "e" + "", "f" + ""];
+    let q = Q { c: [xs.len()], b: ss.pop().unwrap_or("-"), a: ss.pop().unwrap_or("-") };
+    let qs = [Q { c: [ss.len()], b: ss.pop().unwrap_or("-"), a: ss.pop().unwrap_or("-") }];
+    let o = Some(Q { b: ss.pop().unwrap_or("-"), c: [], a: ss.pop().unwrap_or("-") });
+    p.x.to_str() + p.y.to_str() + ps[0].x.to_str() + ps[0].y.to_str() + q.a + q.b + q.c[0].to_str() + qs[0].a + qs[0].b + qs[0].c[0].to_str() + match o { Some(q) => q.a + q.b, None => "-" }
+}

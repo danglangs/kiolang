@@ -1,0 +1,16 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+struct P { x: Int, y: Int }
+enum Sh { Rr(R), Pp(P), Both(R, P), Nothing }
+fn area(s: Sh) -> Int { match s { Sh::Rr(r) => r.xs.len() + r.n, Sh::Pp(p) => p.x * p.y, Sh::Both(r, p) => r.n + p.x, Sh::Nothing => 0 } }
+fn name(s: Sh) -> Str { match s { Sh::Rr(r) => r.name, Sh::Pp(p) => p.x.to_str(), Sh::Both(r, p) => r.name + p.y.to_str(), Sh::Nothing => "-" } }
+fn main() -> Str {
+    let r = R { name: "r" + "", xs: [1, 2], n: 3 };
+    let p = P { x: 2, y: 5 };
+    let shs = [Sh::Rr(r), Sh::Pp(p), Sh::Both(r, p), Sh::Nothing, Sh::Rr(R { name: "q", ..r })];
+    let mut out = "";
+    for s in shs { out = out + area(s).to_str() + name(s); }
+    let mut moved = Sh::Rr(r);
+    let copy = moved;
+    moved = Sh::Nothing;
+    out + name(copy) + name(moved) + r.name + (Sh::Pp(p) == Sh::Pp(P { x: 2, y: 5 })).to_str() + (shs[0] == shs[4]).to_str()
+}

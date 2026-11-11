@@ -1,0 +1,16 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+struct H { f: fn(R) -> Str, g: fn(Int) -> R, tag: Str }
+fn show(r: R) -> Str { r.name + r.n.to_str() }
+fn main() -> Str {
+    let base = R { name: "b" + "", xs: [1], n: 1 };
+    let mut h = H { f: show, g: |i| R { name: base.name + i.to_str(), xs: base.xs, n: i }, tag: "t" + "" };
+    let h2 = h;
+    let r = (h.g)(3);
+    let s = (h.f)(r);
+    h.f = |q: R| q.name + q.xs.len().to_str() + base.n.to_str();
+    h.tag += "!";
+    let t = (h.f)(r) + (h2.f)(r);
+    let hs = [h, h2];
+    let u = (hs[0].f)(base) + (hs[1].f)(base) + (hs[1].g)(9).name;
+    s + t + u + h.tag + h2.tag
+}

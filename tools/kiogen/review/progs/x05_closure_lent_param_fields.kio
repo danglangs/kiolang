@@ -1,0 +1,15 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+struct N { r: R, s: Str }
+fn main() -> Str {
+    let f = |r: R| r.name + r.name;
+    let g = |r: R| r.xs.len() + r.n;
+    let h = |n: N| n.r.name + n.s + n.r.xs.len().to_str();
+    let k = |n: N| { let r = n.r; r.name + n.s };
+    let m = |n: N| { let mut c = n; c.r.name += "m"; c.r.name + n.r.name };
+    let r = R { name: "r" + "", xs: [1, 2], n: 3 };
+    let n = N { r: r, s: "s" + "" };
+    let fs: List<fn(N) -> Str> = [h, k, m];
+    let mut out = f(r) + g(r).to_str() + h(n) + k(n) + m(n);
+    for fun in fs { out = out + fun(n); }
+    out + r.name + n.r.name + n.s
+}

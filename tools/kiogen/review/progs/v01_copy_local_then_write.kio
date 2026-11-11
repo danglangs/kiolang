@@ -1,0 +1,21 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+struct P { x: Int, y: Int }
+struct N { p: P, r: R, o: Option<Str> }
+fn main() -> Str {
+    let a = R { name: "a" + "", xs: [1, 2], n: 1 };
+    let mut b = a;
+    b.name = "b" + "";
+    b.xs.push(3);
+    b.n = 2;
+    let mut c = a;
+    c.name += "c";
+    c.xs[0] = 9;
+    let mut n = N { p: P { x: 1, y: 2 }, r: a, o: Some("o" + "") };
+    let mut m = n;
+    m.p.x = 7;
+    m.r.name += "m";
+    m.r.xs.push(5);
+    m.o = None;
+    a.name + a.xs.len().to_str() + a.n.to_str() + "|" + b.name + b.xs.len().to_str() + b.n.to_str() + "|" + c.name + c.xs[0].to_str()
+      + "|" + n.p.x.to_str() + n.r.name + n.r.xs.len().to_str() + n.o.unwrap_or("-") + "|" + m.p.x.to_str() + m.r.name + m.r.xs.len().to_str() + m.o.unwrap_or("-")
+}

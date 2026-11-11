@@ -1,0 +1,14 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+struct N { r: R, o: Option<Str>, s: Str }
+fn main() -> Str {
+    let mut s = R { name: "s" + "", xs: [0], n: 0 };
+    let mut out = "";
+    for i in 0..3 { let x = s.name; s = R { name: x + "a", xs: s.xs, n: i }; s.xs.push(i); out = out + x; }
+    for i in 0..3 { s = R { name: s.name + "b", xs: s.xs, n: s.n + 1 }; }
+    let mut n = N { r: s, o: Some("o" + ""), s: "n" + "" };
+    for i in 0..2 { n = N { r: R { name: n.r.name + "c", ..n.r }, o: n.o, s: n.s + n.r.name.len().to_str() }; n.r.xs.push(9); }
+    let mut t = s;
+    let mut i = 0;
+    while i < 3 { let keep = t; t = R { name: keep.name + t.name, xs: keep.xs, n: t.n }; if i == 1 { t = keep; } i += 1; }
+    out + s.name + s.xs.len().to_str() + s.n.to_str() + n.r.name + n.r.xs.len().to_str() + n.o.unwrap_or("-") + n.s + t.name.len().to_str() + t.xs.len().to_str()
+}

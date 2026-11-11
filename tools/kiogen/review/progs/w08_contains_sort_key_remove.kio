@@ -1,0 +1,18 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+fn main() -> Str {
+    let a = R { name: "a" + "", xs: [1], n: 3 };
+    let b = R { name: "b" + "", xs: [], n: 1 };
+    let c = R { name: "c" + "", xs: [2], n: 2 };
+    let mut rs = [a, b, c, a];
+    let has = rs.contains(a).to_str() + rs.contains(R { name: "a", xs: [1], n: 3 }).to_str() + rs.contains(R { name: "a", xs: [], n: 3 }).to_str();
+    rs.sort_by_key(|r: R| r.n);
+    let order = rs.map(|r: R| r.name).join("");
+    rs.sort_by_key(|r: R| r.name + r.n.to_str());
+    let order2 = rs.map(|r: R| r.name).join("");
+    rs.reverse();
+    let mut m: Map<Str, R> = Map::new();
+    m.insert("x", a); m.insert("y", b);
+    m.remove("x"); let removed = m.get("y");
+    let any = rs.any(|r: R| r.xs.len() > 1).to_str() + rs.all(|r: R| r.n > 0).to_str();
+    has + order + order2 + rs[0].name + match removed { Some(r) => r.name + r.xs.len().to_str(), None => "-" } + m.len().to_str() + any + a.name + a.xs.len().to_str()
+}

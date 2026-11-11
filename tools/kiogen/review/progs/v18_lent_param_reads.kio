@@ -1,0 +1,13 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+struct N { r: R, o: Option<Str> }
+fn lent(r: R) -> Int { r.name.len() + r.xs.len() + r.xs[0] + r.n }
+fn lent2(r: R, s: Str) -> Str { if s == r.name { r.name } else { s } }
+fn lentn(n: N) -> Str { n.r.name + n.r.xs.len().to_str() + n.o.unwrap_or("-") }
+fn ownn(n: N) -> N { let mut m = n; m.r.name += "!"; m.o = Some(m.r.name); m }
+fn both(r: R) -> Str { let a = lent(r); let b = r.name; let c = lent(r); a.to_str() + b + c.to_str() }
+fn main() -> Str {
+    let r = R { name: "r" + "", xs: [3], n: 1 };
+    let n = N { r: r, o: None };
+    let m = ownn(n);
+    lent(r).to_str() + lent2(r, "r" + "") + lent2(r, "q" + "") + lentn(n) + lentn(m) + both(r) + r.name + n.r.name + m.r.name + m.o.unwrap_or("-")
+}

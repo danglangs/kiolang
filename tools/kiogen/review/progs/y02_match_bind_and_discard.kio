@@ -1,0 +1,16 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+fn mk(i: Int) -> R { R { name: "m" + i.to_str(), xs: [i], n: i } }
+fn main() -> Str {
+    let r = mk(1);
+    mk(2);
+    R { name: "lit" + "", xs: [1, 2], n: 0 };
+    if r.n > 0 { mk(3) } else { mk(4) };
+    let a = r.name + r.xs.len().to_str();
+    let b = mk(5).name;
+    let c = "w";
+    let d = match r.n { 1 => r.name, _ => "no" };
+    mk(6);
+    for i in 0..2 { mk(i); }
+    let f = |i: Int| { mk(i); i + 1 };
+    a + b + c + d + f(7).to_str() + r.name
+}

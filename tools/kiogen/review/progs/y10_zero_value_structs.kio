@@ -1,0 +1,16 @@
+struct E {}
+struct U { a: (), b: () }
+fn pick(c: Bool) -> E { if c { E {} } else { E {} } }
+fn pu(c: Bool) -> U { match c { true => U { a: (), b: () }, false => U { b: (), a: () } } }
+fn count(es: List<E>, us: List<U>) -> Int { let mut n = 0; for e in es { n += 1; } for u in us { let v = u; n += 10; } n }
+fn main() -> Str {
+    let e = pick(true); let f = e; let u = pu(false); let mut v = u;
+    v.a = ();
+    let es = [e, f, pick(false)];
+    let us = [u, v];
+    let o = if es.len() > 2 { Some(pick(true)) } else { None };
+    let w = { let t = pu(true); t };
+    let x = |c: Bool| pick(c);
+    let y = |q: E| 5;
+    count(es, us).to_str() + (e == f).to_str() + (u == v).to_str() + o.map(|q: E| 1).unwrap_or(0).to_str() + (w == u).to_str() + y(x(true)).to_str() + match o { Some(q) => "s", None => "n" }
+}

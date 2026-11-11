@@ -1,0 +1,21 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+fn firsts<T>(xs: List<T>) -> Option<T> { if xs.len() > 0 { Some(xs[0]) } else { None } }
+fn or_else<T>(o: Option<T>, d: T) -> T { match o { Some(v) => v, None => d } }
+fn main() -> Str {
+    let rs = [R { name: "a" + "", xs: [1], n: 0 }];
+    let f = firsts(rs);
+    let g = or_else(f, R { name: "d" + "", xs: [], n: 0 });
+    let h = or_else(firsts::<R>([]), R { name: "e" + "", xs: [], n: 0 });
+    let mut hm: HashMap<Int, R> = HashMap::new();
+    hm.insert(1, g);
+    hm.insert(1, h);
+    let got = hm.get(1);
+    let ors: List<Option<R>> = [f, None, Some(h)];
+    let mut out = g.name + h.name + or_else(got, g).name + ors.len().to_str();
+    for o in ors { out = out + or_else(o, R { name: "-", xs: [], n: 0 }).name; }
+    let mut m: Map<Str, List<R>> = Map::new();
+    m.insert("k", rs);
+    let mut l = or_else(m.get("k"), []);
+    l.push(g);
+    out + l.len().to_str() + or_else(m.get("k"), []).len().to_str()
+}

@@ -1,0 +1,18 @@
+struct U { a: (), b: (), c: (), s: Str }
+struct BF { b: Bool, f: Float }
+fn mku(s: Str) -> U { U { a: (), b: (), c: (), s: s } }
+fn takeu(u: ()) -> Int { 1 }
+fn main() -> List<Option<U>> {
+    let u = mku("u" + "");
+    let mut v = u;
+    v.s += "v";
+    v.b = ();
+    let w = [u.a, v.b];
+    let n = takeu(u.c) + w.len();
+    let bf = BF { b: true, f: 2.5 };
+    let mut bg = bf;
+    bg.f += 1.0;
+    bg.b = !bg.b;
+    let s = if (bf == BF { b: true, f: 2.5 }) && bf != bg { "eq" } else { "ne" };
+    [Some(u), None, Some(v), Some(U { s: s + n.to_str() + bg.f.to_str() + bg.b.to_str(), ..u })]
+}

@@ -1,0 +1,28 @@
+struct F4 { a: Str, b: (), c: Float, d: List<Str> }
+struct F5 { a: Str, b: (), c: Float, d: List<Str>, e: Int }
+struct U4 { a: (), b: (), c: (), d: () }
+struct Z {}
+fn mk4(s: Str) -> F4 { F4 { a: s, b: (), c: 1.5, d: [s + "d"] } }
+fn mk5(s: Str) -> F5 { F5 { a: s, b: (), c: 2.5, d: [s + "e"], e: 5 } }
+fn u4() -> U4 { U4 { a: (), b: (), c: (), d: () } }
+fn z() -> Z { Z {} }
+fn useu(u: U4, z: Z) -> Int { 1 }
+fn main() -> Str {
+    let f = mk4("f" + "");
+    let mut g = f;
+    g.a += "g";
+    g.c += 1.0;
+    g.d.push("x" + "");
+    g.b = ();
+    let h = mk5("h" + "");
+    let mut i = h;
+    i.a += "i";
+    i.d.push("y" + "");
+    let u = u4();
+    let v = u;
+    let zz = [z(), z()];
+    let ou = Some(u4());
+    let eq = if u == v && f != g && h != i && Some(z()) == Some(Z {}) { "eq" } else { "ne" };
+    f.a + f.c.to_str() + f.d.len().to_str() + g.a + g.c.to_str() + g.d.len().to_str() + h.a + h.d.len().to_str() + i.a + i.d.len().to_str()
+      + useu(u, zz[0]).to_str() + eq + zz.len().to_str() + match ou { Some(w) => "s", None => "n" } + if u.a == () { "u" } else { "" }
+}

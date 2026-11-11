@@ -1,0 +1,16 @@
+struct Acc { s: Str, xs: List<Int>, n: Int }
+fn go(n: Int, a: Acc) -> Acc {
+    if n == 0 { return a; }
+    let mut b = a;
+    b.s += n.to_str();
+    b.xs.push(n);
+    b.n += n;
+    let c = go(n - 1, b);
+    if n % 2 == 0 { Acc { s: c.s + "e", ..c } } else { c }
+}
+fn fib(n: Int) -> Acc { if n < 2 { Acc { s: "f" + "", xs: [n], n: n } } else { let a = fib(n - 1); let b = fib(n - 2); Acc { s: a.s, xs: a.xs, n: a.n + b.n } } }
+fn main() -> Str {
+    let a = go(6, Acc { s: "" + "", xs: [], n: 0 });
+    let f = fib(10);
+    a.s + a.xs.len().to_str() + a.n.to_str() + f.s + f.xs.len().to_str() + f.n.to_str()
+}

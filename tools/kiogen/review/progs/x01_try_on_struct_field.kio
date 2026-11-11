@@ -1,0 +1,11 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+struct S { rr: Result<R, Str>, or: Option<R>, s: Str, k: Int }
+fn f(s: S) -> Result<Str, Str> { let r = s.rr?; let t = s.rr?; Ok(r.name + t.xs.len().to_str() + s.s) }
+fn g(s: S) -> Option<Int> { let r = s.or?; Some(r.n + s.k) }
+fn h(s: S) -> Result<Str, Str> { let mut t = s; t.rr = Err("h" + ""); let r = s.rr?; let u = t.rr?; Ok(r.name + u.name) }
+fn main() -> Str {
+    let r = R { name: "r" + "", xs: [1], n: 2 };
+    let a = S { rr: Ok(r), or: Some(r), s: "a" + "", k: 10 };
+    let b = S { rr: Err("e" + ""), or: None, s: "b" + "", k: 20 };
+    f(a).unwrap_or("E") + f(b).unwrap_or("E") + g(a).unwrap_or(-1).to_str() + g(b).unwrap_or(-1).to_str() + h(a).unwrap_or("E") + h(b).unwrap_or("E") + a.s + r.name
+}

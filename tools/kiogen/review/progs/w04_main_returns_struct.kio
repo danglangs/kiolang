@@ -1,0 +1,2 @@
+struct R { name: Str, xs: List<Int>, n: Int, u: () }
+fn main() -> R { let r = R { name: "r" + "", xs: [1, 2], n: 3, u: () }; let s = r; R { name: s.name + r.name, ..s } }

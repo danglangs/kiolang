@@ -1,0 +1,10 @@
+struct R { name: Str, xs: List<Int>, names: List<Str> }
+fn main() -> Str {
+    let mut r = R { name: "r" + "", xs: [1, 2, 3], names: ["a" + "", "b" + ""] };
+    let mut out = "";
+    for x in r.xs { r.xs.push(x * 10); out = out + x.to_str(); }
+    for s in r.names { r.names.push(s + "!"); r.name += s; }
+    let mut i = 0;
+    while i < r.xs.len() { if r.xs[i] > 5 { r.xs[i] = 0; } i += 1; }
+    out + r.xs.len().to_str() + r.names.join(",") + r.name + r.xs.map(|v: Int| v.to_str()).join("")
+}

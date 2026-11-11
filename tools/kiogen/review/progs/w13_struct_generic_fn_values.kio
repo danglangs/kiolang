@@ -1,0 +1,20 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+struct Pair<T> { a: T, b: T }
+fn id<T>(x: T) -> T { x }
+fn pick<T>(p: Pair<T>, first: Bool) -> T { if first { p.a } else { p.b } }
+fn apply<T, U>(f: fn(T) -> U, x: T) -> U { f(x) }
+fn twice<T>(f: fn(T) -> T, x: T) -> T { f(f(x)) }
+fn bump(r: R) -> R { R { n: r.n + 1, name: r.name + "+", ..r } }
+fn main() -> Str {
+    let r = R { name: "r" + "", xs: [1], n: 0 };
+    let p = Pair { a: r, b: bump(r) };
+    let a = id(r); let b = id(p);
+    let c = pick(p, true); let d = pick(p, false);
+    let e = apply(bump, r); let f = twice(bump, r);
+    let g = apply(|x: R| x.name, r);
+    let h = apply(id::<R>, r);
+    let fs: List<fn(R) -> R> = [bump, id::<R>, |x: R| R { name: "l", ..x }];
+    let mut out = "";
+    for fun in fs { let z = fun(r); out = out + z.name + z.n.to_str(); }
+    a.name + b.a.name + b.b.name + c.name + d.name + d.n.to_str() + e.name + f.name + f.n.to_str() + g + h.name + out + r.name + r.xs.len().to_str()
+}

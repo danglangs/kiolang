@@ -1,0 +1,13 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+struct N { r: R, o: Option<R>, s: Str }
+fn mk(i: Int) -> Option<N> { if i == 0 { None } else { Some(N { r: R { name: "r" + i.to_str(), xs: [i], n: i }, o: if i > 1 { Some(R { name: "in" + "", xs: [], n: 0 }) } else { None }, s: "s" + "" }) } }
+fn main() -> Str {
+    let mut out = "";
+    for i in 0..3 {
+        match mk(i) { Some(n) => { out = out + n.r.name + n.r.xs.len().to_str() + match n.o { Some(r) => r.name, None => "-" } + n.s; let mut m = n; m.r.name += "!"; m.o = Some(m.r); out = out + m.r.name + match m.o { Some(r) => r.name, None => "-" } + n.r.name; } None => { out = out + "N"; } }
+        if let Some(n) = mk(i) { let o = n.o; out = out + o.map(|r: R| r.n.to_str()).unwrap_or("x"); }
+    }
+    let ns = [mk(1), mk(2)];
+    let picked = ns[1];
+    out + match picked { Some(n) => n.r.name + n.o.map(|r: R| r.name).unwrap_or("-"), None => "N" } + ns.len().to_str()
+}

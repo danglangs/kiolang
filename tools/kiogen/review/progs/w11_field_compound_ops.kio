@@ -1,0 +1,16 @@
+struct P { x: Int, f: Float, s: Str, b: Bool }
+fn main() -> Str {
+    let mut p = P { x: 1, f: 1.5, s: "s" + "", b: false };
+    let q = p;
+    p.x += p.x;
+    p.x -= 1;
+    p.x += q.x * 10;
+    p.f += p.f;
+    p.f -= 0.5;
+    p.s += p.s;
+    p.s += q.s + p.s;
+    p.b = !p.b;
+    p.x = p.x + p.x;
+    p.s = p.s + p.s;
+    p.x.to_str() + p.f.to_str() + p.s + p.b.to_str() + q.x.to_str() + q.f.to_str() + q.s + q.b.to_str()
+}

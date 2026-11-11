@@ -1,0 +1,25 @@
+struct Pair<T> { a: T, b: T }
+struct P { x: Int, y: Int }
+struct Box<T> { v: T, tag: Str }
+fn swap<T>(p: Pair<T>) -> Pair<T> { Pair { a: p.b, b: p.a } }
+fn first<T>(p: Pair<T>) -> T { p.a }
+fn wrap<T>(v: T, t: Str) -> Box<T> { Box { v: v, tag: t } }
+fn main() -> Str {
+    let a = Pair { a: "x" + "", b: "y" + "" };
+    let b = swap(a);
+    let c = Pair { a: [1], b: [2, 3] };
+    let d = swap(c);
+    let e = Pair { a: Some("s" + ""), b: None };
+    let f = swap(e);
+    let g = Pair { a: P { x: 1, y: 2 }, b: P { x: 3, y: 4 } };
+    let h = swap(g);
+    let i = Pair { a: Pair { a: "n" + "", b: "m" + "" }, b: Pair { a: "o" + "", b: "p" + "" } };
+    let j = swap(i);
+    let k = wrap(a, "k" + "");
+    let l = wrap(wrap(1, "one" + ""), "two" + "");
+    let mut m = k;
+    m.v.a += "!";
+    m.tag += "?";
+    a.a + a.b + b.a + b.b + first(c).len().to_str() + d.a.len().to_str() + e.a.unwrap_or("-") + f.a.unwrap_or("-") + f.b.unwrap_or("-")
+      + g.a.x.to_str() + h.a.x.to_str() + first(j).a + j.b.b + k.v.a + k.tag + l.v.v.to_str() + l.v.tag + l.tag + m.v.a + m.tag
+}

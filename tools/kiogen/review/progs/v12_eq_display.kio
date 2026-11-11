@@ -1,0 +1,15 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+struct P { x: Int, y: Int }
+struct N { p: P, r: R, o: Option<Str>, f: Float }
+fn main() -> List<N> {
+    let p = P { x: 1, y: 2 };
+    let r = R { name: "r" + "", xs: [1, 2], n: 3 };
+    let n = N { p: p, r: r, o: Some("o" + ""), f: 0.5 };
+    let mut m = n;
+    m.p.x = 9;
+    m.r.xs.push(3);
+    let eqs = [n == m, n == n, p == P { x: 1, y: 2 }, r == R { name: "r", xs: [1, 2], n: 3 }, n.p == m.p, n.r != m.r];
+    let mut out = n;
+    out.o = Some(eqs.map(|b: Bool| b.to_str()).join(","));
+    [n, m, out]
+}

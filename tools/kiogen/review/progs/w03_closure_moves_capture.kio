@@ -1,0 +1,11 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+fn main() -> Str {
+    let c = R { name: "c" + "", xs: [1], n: 1 };
+    let f = || { let x = c.name; let y = c.xs; x + y.len().to_str() };
+    let g = || c.name;
+    let h = || { let mut d = c; d.name += "h"; d.xs.push(2); d };
+    let k = |s: Str| { let inner = || c.name + s; inner() + c.n.to_str() };
+    let m = |r: R| { let n = || r.name + c.name; n() };
+    let r1 = h(); let r2 = h();
+    f() + f() + g() + g() + r1.name + r1.xs.len().to_str() + r2.name + k("k" + "") + k("K" + "") + m(c) + m(r1) + c.name + c.xs.len().to_str()
+}

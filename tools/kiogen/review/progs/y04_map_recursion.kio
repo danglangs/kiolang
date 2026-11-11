@@ -1,0 +1,13 @@
+struct Node { kids: Map<Str, Node>, v: Int }
+fn total(n: Node) -> Int { let mut s = n.v; for k in n.kids.keys() { s += total(n.kids.get(k).unwrap_or(Node { kids: Map::new(), v: 0 })); } s }
+fn main() -> Str {
+    let mut root = Node { kids: Map::new(), v: 1 };
+    let mut a = Node { kids: Map::new(), v: 2 };
+    a.kids.insert("c", Node { kids: Map::new(), v: 4 });
+    root.kids.insert("a", a);
+    root.kids.insert("b", Node { kids: Map::new(), v: 8 });
+    let snap = root;
+    a.v = 100;
+    root.kids.insert("a", a);
+    total(snap).to_str() + total(root).to_str() + total(a).to_str()
+}

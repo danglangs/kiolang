@@ -1,0 +1,24 @@
+struct Small { xs: List<Int>, name: Str }
+struct Inner { x: Int, s: Str }
+struct Big { a: Small, b: Small, inner: Inner, e: Int, f: Str }
+struct Wrap { big: Big, small: Small }
+fn main() -> Str {
+    let s = Small { xs: [1], name: "s" + "" };
+    let big = Big { a: s, b: s, inner: Inner { x: 1, s: "i" + "" }, e: 0, f: "f" + "" };
+    let mut w = Wrap { big: big, small: s };
+    let snap = w;
+    w.big.a.xs.push(2);
+    w.big.b.name += "b";
+    w.big.inner.x = 7;
+    w.big.inner.s += "!";
+    w.big.e += 1;
+    w.big.f = w.big.f + w.big.inner.s;
+    w.small.xs.push(3);
+    w.small.name = w.big.a.name + w.big.b.name;
+    let mut b2 = w.big;
+    b2.a.xs.push(4);
+    b2.e += 10;
+    snap.big.a.xs.len().to_str() + snap.big.b.name + snap.big.inner.x.to_str() + snap.big.e.to_str() + snap.small.xs.len().to_str() + "|"
+      + w.big.a.xs.len().to_str() + w.big.b.name + w.big.inner.x.to_str() + w.big.inner.s + w.big.e.to_str() + w.big.f + w.small.xs.len().to_str() + w.small.name + "|"
+      + b2.a.xs.len().to_str() + b2.e.to_str() + s.xs.len().to_str() + s.name
+}

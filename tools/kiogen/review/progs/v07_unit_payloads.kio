@@ -1,0 +1,26 @@
+enum E { A(()), B(Str), C(Int) }
+enum F { U(()), S(Str) }
+fn f(i: Int) -> Result<(), Str> { if i == 0 { Ok(()) } else { Err("e" + i.to_str()) } }
+fn g(i: Int) -> Result<Str, ()> { if i == 0 { Err(()) } else { Ok("g" + i.to_str()) } }
+fn h(i: Int) -> Option<()> { if i == 0 { None } else { Some(()) } }
+fn e(i: Int) -> E { if i == 0 { E::A(()) } else if i == 1 { E::B("b" + "") } else { E::C(i) } }
+fn k(i: Int) -> F { if i == 0 { F::U(()) } else { F::S("s" + "") } }
+fn thru(i: Int) -> Result<Int, Str> { let u = f(i)?; Ok(1) }
+fn main() -> Str {
+    let mut out = "";
+    for i in 0..3 {
+        out = out + match f(i) { Ok(u) => "ok", Err(s) => s };
+        out = out + g(i).unwrap_or("-");
+        out = out + match h(i) { Some(u) => "u", None => "n" };
+        out = out + match e(i) { E::A(u) => "A", E::B(s) => s, E::C(n) => n.to_str() };
+        out = out + match k(i) { F::U(u) => "U", F::S(s) => s };
+        out = out + thru(i).unwrap_or(-1).to_str();
+    }
+    let a = e(0); let b = a; let c = e(1); let d = c;
+    let xs = [a, b, c, d, e(2)];
+    let eq = if a == b && c == d && a != c && f(0) == f(0) && g(0) == g(0) && g(1) != g(2) && h(0) == h(0) && h(1) == h(1) { "eq" } else { "ne" };
+    let ks = [k(0), k(1), k(0)];
+    let mut m: Map<Str, Result<Str, ()>> = Map::new();
+    m.insert("x", g(0)); m.insert("y", g(1));
+    out + eq + xs.len().to_str() + ks.len().to_str() + m.get("x").unwrap_or(Ok("?" + "")).unwrap_or("E") + m.get("y").unwrap_or(Err(())).unwrap_or("E")
+}

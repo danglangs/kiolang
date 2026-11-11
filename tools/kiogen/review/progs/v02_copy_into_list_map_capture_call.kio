@@ -1,0 +1,21 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+fn take(r: R) -> Int { r.xs.len() + r.name.len() }
+fn keep(r: R) -> R { r }
+fn main() -> Str {
+    let mut a = R { name: "a" + "", xs: [1], n: 1 };
+    let xs = [a];
+    let mut m: Map<Str, R> = Map::new();
+    m.insert("k", a);
+    let f = || a.name + a.xs.len().to_str();
+    let t = take(a);
+    let k = keep(a);
+    a.name += "A";
+    a.xs.push(2);
+    a.n = 5;
+    let o = Some(a);
+    a.name = "z" + "";
+    a.xs.push(3);
+    let got = m.get("k").unwrap_or(R { name: "-", xs: [], n: 0 });
+    xs[0].name + xs[0].xs.len().to_str() + "|" + got.name + got.xs.len().to_str() + "|" + f() + "|" + t.to_str() + "|" + k.name + k.xs.len().to_str()
+      + "|" + match o { Some(r) => r.name + r.xs.len().to_str(), None => "-" } + "|" + a.name + a.xs.len().to_str() + a.n.to_str()
+}

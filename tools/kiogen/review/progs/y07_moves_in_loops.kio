@@ -1,0 +1,15 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+fn consume(r: R) -> Str { let l = [r]; l[0].name }
+fn main() -> Str {
+    let r = R { name: "r" + "", xs: [1], n: 0 };
+    let mut out = "";
+    for i in 0..3 { if i == 2 { out = out + consume(r); } else { out = out + r.name; } }
+    let s = R { name: "s" + "", xs: [], n: 0 };
+    loop { let x = s.name; out = out + x; break; }
+    let t = R { name: "t" + "", xs: [], n: 0 };
+    let mut i = 0;
+    while i < 2 { let u = R { name: t.name + i.to_str(), ..t }; out = out + consume(u); i += 1; }
+    let v = R { name: "v" + "", xs: [], n: 0 };
+    for q in [v, v] { out = out + consume(q) + q.name; }
+    out + r.name + s.name + t.name + v.name
+}

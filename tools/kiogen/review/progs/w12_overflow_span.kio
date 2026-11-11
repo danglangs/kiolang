@@ -1,0 +1,2 @@
+struct P { x: Int, s: Str }
+fn main() -> Int { let mut p = P { x: -9223372036854775807, s: "s" + "" }; p.x -= 1; p.x -= 1; p.x }

@@ -1,0 +1,29 @@
+struct P { x: Int, y: Int }
+struct S { o: Option<Str>, p: P, r: Result<Str, Int>, e: E }
+enum E { A, B(Str), C(Int) }
+fn main() -> Str {
+    let s = S { o: Some("o" + ""), p: P { x: 1, y: 2 }, r: Ok("ok" + ""), e: E::B("e" + "") };
+    let mut os: List<Option<Str>> = [];
+    os.push(s.o);
+    os.push(s.o);
+    let mut ps: List<P> = [];
+    ps.push(s.p);
+    let mut m: Map<Str, Result<Str, Int>> = Map::new();
+    m.insert("a", s.r);
+    m.insert("b", s.r);
+    let mut es = [E::A];
+    es[0] = s.e;
+    let t = S { o: s.o, p: s.p, r: s.r, e: s.e };
+    let mut ps2 = [P { x: 0, y: 0 }];
+    ps2[0] = t.p;
+    let u = S { o: None, p: P { x: 5, y: 6 }, r: Err(1), e: E::C(3) };
+    os.push(u.o);
+    ps.push(u.p);
+    let mut out = "";
+    for o in os { out = out + o.unwrap_or("-"); }
+    for p in ps { out = out + p.x.to_str(); }
+    out = out + m.get("a").unwrap_or(Err(0)).unwrap_or("-") + m.get("b").unwrap_or(Err(0)).unwrap_or("-");
+    out = out + match es[0] { E::A => "A", E::B(s) => s, E::C(n) => n.to_str() };
+    out = out + ps2[0].y.to_str() + t.o.unwrap_or("-") + match t.e { E::B(s) => s, _ => "?" } + s.o.unwrap_or("-") + s.p.x.to_str();
+    out
+}

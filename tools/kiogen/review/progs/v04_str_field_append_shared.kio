@@ -1,0 +1,13 @@
+struct R { name: Str, xs: List<Int>, n: Int }
+fn main() -> Str {
+    let mut a = R { name: "a" + "", xs: [], n: 0 };
+    let b = a;
+    a.name += "1";
+    a.name += a.name;
+    let c = a;
+    a.name = a.name + "2" + a.name;
+    let xs = [a];
+    a.name += "3";
+    a.name = "p" + a.name;
+    b.name + "|" + c.name + "|" + xs[0].name + "|" + a.name
+}
