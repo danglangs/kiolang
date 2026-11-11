@@ -20,3 +20,12 @@ jobs:
       - run: cargo build -p runtime --target wasm32-unknown-unknown --release
       - run: cargo test -p codegen
       - run: cargo run -p capgen && git diff --exit-code lang/src/caps_gen.rs
+  e3:
+    # E3's references and detectors; the Python arm's sandbox is macOS sandbox-exec.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - run: cargo build --release -p kio && eval/e3/run.py --selftest --kio target/release/kio

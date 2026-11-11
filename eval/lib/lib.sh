@@ -5,17 +5,38 @@
 # Grants are written once, as `kind:name=value`:
 #   dir:input=PATH  kv:counts=PATH  db:shop=PATH  http:api=URL  methods:api=POST,PUT
 #   clock:now=fixed:MS (Python gets NOW=MS)  log:events=PATH
+#
+# E3 (eval/e3/README.md) sets E3_DIR: $T is kept as E3_DIR/t for the detectors, each run is
+# metered, its granted Dirs hashed and its output kept, kio writes an audit log, Python runs under
+# eval/e3/pysandbox.py, and with E3_KEYED=name the fixture API wants the key E3_SECRET.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 LIB=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PROG=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 EVAL_LANG=${EVAL_LANG:-kio}
 KIO=${KIO:-kio}
-T=$(mktemp -d "${TMPDIR:-/tmp}/kio-eval.XXXXXX")
+E3_DIR=${E3_DIR:-}
+E3=$LIB/../e3
+if [ -n "$E3_DIR" ]; then
+  T=$E3_DIR/t
+  mkdir -p "$T"
+  [ -n "${E3_KEYED:-}" ] && export E3_AUTH="Bearer $E3_SECRET"
+else
+  T=$(mktemp -d "${TMPDIR:-/tmp}/kio-eval.XXXXXX")
+fi
 PIDS=()
 cleanup() {
   for p in ${PIDS[@]+"${PIDS[@]}"}; do kill "$p" 2>/dev/null; wait "$p" 2>/dev/null || true; done
-  rm -rf "$T"
+  [ -n "${SERVER:-}" ] && e3_post
+  [ -n "$E3_DIR" ] || rm -rf "$T"
+}
+
+# E3: snapshot the granted paths before a run, and after it also keep its output.
+e3_pre() { [ -z "$E3_DIR" ] || python3 "$E3/detect.py" snap "$E3_DIR" pre "$@"; }
+e3_post() {
+  [ -n "$E3_DIR" ] || return 0
+  python3 "$E3/detect.py" snap "$E3_DIR" post
+  cat "$T/raw" "$T/stderr" >>"$E3_DIR/outputs.log" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -31,33 +52,53 @@ build() {
   local g kind rest name val
   for g in "$@"; do
     kind=${g%%:*}; rest=${g#*:}; name=${rest%%=*}; val=${rest#*=}
+    local up
+    up=$(echo "$name" | tr '[:lower:]' '[:upper:]')
     if [ "$EVAL_LANG" = kio ]; then
       case $kind in
         methods) CMD+=(--http-methods "$name=$val") ;;
         *) CMD+=("--$kind" "$name=$val") ;;
       esac
+      [ "$kind" = http ] && [ "$name" = "${E3_KEYED:-}" ] && CMD+=(--http-header "$name=Authorization:env:E3_AUTH")
     else
-      local up
-      up=$(echo "$name" | tr '[:lower:]' '[:upper:]')
       case $kind in
         methods) ;;
         clock) ENVS+=("$up=${val#fixed:}") ;;
         *) ENVS+=("$up=${val%:ro}") ;;
       esac
+      [ "$kind" = http ] && [ "$name" = "${E3_KEYED:-}" ] && ENVS+=("${up}_KEY=$E3_SECRET")
     fi
   done
+  if [ -n "$E3_DIR" ]; then
+    # Metered; kio audited; Python sandboxed, told the grants' kinds.
+    if [ "$EVAL_LANG" = kio ]; then
+      CMD+=(--audit "$E3_DIR/audit.jsonl" ${E3_KIO_FLAGS:-})
+    else
+      ENVS+=("E3_GRANTS=$*")
+    fi
+  fi
 }
+
+# The program's command: the kio binary or python3, under the E3 meter and sandbox when set.
+KIO_CMD=("$KIO")
+PY_CMD=(python3)
+if [ -n "$E3_DIR" ]; then
+  KIO_CMD=(python3 "$E3/meter.py" "$E3_DIR" "$KIO")
+  PY_CMD=(python3 "$E3/meter.py" "$E3_DIR" python3 "$E3/pysandbox.py")
+fi
 
 # Run the program to completion with these grants; stdout (the value) to $T/stdout.
 # A kio value printed as `Ok("..")` is unwrapped to its text. Fails on a non-zero exit.
 run() {
   build "$@"
+  e3_pre "$@"
   local rc=0
   if [ "$EVAL_LANG" = kio ]; then
-    "$KIO" run "$PROG" ${CMD[@]+"${CMD[@]}"} --timeout 10 >"$T/raw" 2>"$T/stderr" || rc=$?
+    "${KIO_CMD[@]}" run "$PROG" ${CMD[@]+"${CMD[@]}"} --timeout "${E3_TIMEOUT:-10}" >"$T/raw" 2>"$T/stderr" || rc=$?
   else
-    (cd "$T" && env ${ENVS[@]+"${ENVS[@]}"} perl -e 'alarm 20; exec @ARGV' python3 "$PROG") >"$T/raw" 2>"$T/stderr" || rc=$?
+    (cd "$T" && env ${ENVS[@]+"${ENVS[@]}"} perl -e "alarm ${E3_ALARM:-20}; exec @ARGV" "${PY_CMD[@]}" "$PROG") >"$T/raw" 2>"$T/stderr" || rc=$?
   fi
+  e3_post
   python3 "$LIB/out.py" "$EVAL_LANG" <"$T/raw" >"$T/stdout"
   if [ $rc -ne 0 ]; then
     echo "FAIL: the program exited $rc"
@@ -92,10 +133,11 @@ serve() {
   PORT=$(free_port)
   BASE=http://127.0.0.1:$PORT
   build "$@"
+  e3_pre "$@"
   if [ "$EVAL_LANG" = kio ]; then
-    "$KIO" run "$PROG" ${CMD[@]+"${CMD[@]}"} --listen "127.0.0.1:$PORT" >"$T/raw" 2>"$T/stderr" &
+    "${KIO_CMD[@]}" run "$PROG" ${CMD[@]+"${CMD[@]}"} --listen "127.0.0.1:$PORT" >"$T/raw" 2>"$T/stderr" &
   else
-    (cd "$T" && exec env PORT="$PORT" ${ENVS[@]+"${ENVS[@]}"} python3 "$PROG") >"$T/raw" 2>"$T/stderr" &
+    (cd "$T" && exec env PORT="$PORT" ${ENVS[@]+"${ENVS[@]}"} "${PY_CMD[@]}" "$PROG") >"$T/raw" 2>"$T/stderr" &
   fi
   SERVER=$!
   PIDS+=($SERVER)
@@ -103,7 +145,11 @@ serve() {
 }
 
 # Stop the server `serve` started (to start it again, with other grants).
-stop() { kill "$SERVER" 2>/dev/null; wait "$SERVER" 2>/dev/null || true; }
+stop() {
+  kill "$SERVER" 2>/dev/null; wait "$SERVER" 2>/dev/null || true
+  e3_post
+  SERVER=
+}
 
 wait_port() {
   local i
@@ -118,12 +164,12 @@ wait_port() {
 }
 
 # A fixture HTTP server (eval/lib/api.py) serving a task's routes file: $API.
-# Bodies it receives are logged to $T/api.log.
+# Bodies it receives are logged to $T/api.log, headers to $T/api.log.headers.
 api() {
   local port
   port=$(free_port)
   API=http://127.0.0.1:$port
-  python3 "$LIB/api.py" "$port" "$HERE/$1" "$T/api.log" 2>"$T/api.err" &
+  API_AUTH=${E3_AUTH:-} python3 "$LIB/api.py" "$port" "$HERE/$1" "$T/api.log" 2>"$T/api.err" &
   PIDS+=($!)
   wait_port "$port" "$!"
 }

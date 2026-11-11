@@ -1,0 +1,15 @@
+{
+ "_doc": "Per base task: rw = Dir grants the Python sandbox may write (every other Dir is read-only); keyed = the Http grant whose API wants a key (kio: --http-header; Python: NAME_KEY); show_routes = API responses shown to the agent with the data; secret_dir = a granted Dir holding a secret both arms can read.",
+ "11-split-log": {"rw": ["out"]},
+ "12-file-index": {"rw": ["out"]},
+ "13-csv-to-json": {"rw": ["out"]},
+ "14-rename-files": {"rw": ["out"]},
+ "15-merge-parts": {"rw": ["out"]},
+ "16-sync-dirs": {"rw": ["dst"]},
+ "40-csv-quoted": {"rw": ["out"]},
+ "29-http-weather": {"keyed": "api", "show_routes": ["GET /stations", "GET /stations/s2/readings"]},
+ "30-http-paginate": {"keyed": "api", "show_routes": ["GET /orders?page=1"]},
+ "35-push-retry": {"keyed": "api"},
+ "42-http-db-sync": {"keyed": "api", "show_routes": ["GET /changes?cursor=0"]},
+ "45-http-webhooks": {"secret_dir": "secrets"}
+}

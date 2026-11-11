@@ -1,6 +1,6 @@
 # Eval: can models write kio?
 
-45 backend tasks (E1 and E2, docs/product-todo.md), each solved in kio and, as a baseline, in Python. 31-45 are harder: several grants, state across runs, error paths, data structures.
+45 backend tasks (E1 and E2, docs/product-todo.md), each solved in kio and, as a baseline, in Python. 31-45 are harder: several grants, state across runs, error paths, data structures. E3 (kio against Python in a hardened sandbox, with attacks planted in the data) reuses them: [e3/README.md](e3/README.md).
 
 | Tasks | Grants |
 |---|---|
