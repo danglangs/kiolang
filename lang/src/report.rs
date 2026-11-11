@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::check::{key, module_of, Program};
+use crate::check::{key, module_of, Program, Ty};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Methods reachable on each capability parameter, keyed by (function, parameter).
@@ -142,14 +142,9 @@ pub fn authority(p: &Program) -> Authority {
         for (name, f) in &p.funcs {
             let mut found = Vec::new();
             // Rule 1: a capability is only a parameter name, as a receiver or a whole argument.
-            // A name that is not a capability parameter finds no entry in `uses` and is skipped.
             walk_block(&f.body, &mut |e| match &e.kind {
                 ExprKind::Method(recv, m, _) => {
-                    // Only a method the capability has: a local shadowing the parameter
-                    // (`let d = 5; d.to_str()`) names no capability method.
-                    let Some(d) = recv_name(recv) else { return };
-                    let Some(ty) = cap_type(f, d) else { return };
-                    if p.cap_methods.contains_key(&(ty.to_string(), m.clone())) {
+                    if let Some(d) = cap_param(p, recv) {
                         found.push((d.to_string(), m.clone()));
                     }
                 }
@@ -167,8 +162,8 @@ pub fn authority(p: &Program) -> Authority {
                     };
                     let Some(g_fn) = p.funcs.get(&g) else { return };
                     for (arg, param) in args.iter().zip(&g_fn.params) {
-                        if let (ExprKind::Name(d), Some(ms)) = (&arg.kind, uses.get(&(g.clone(), param.name.clone()))) {
-                            found.extend(ms.iter().map(|m| (d.clone(), m.clone())));
+                        if let (Some(d), Some(ms)) = (cap_param(p, arg), uses.get(&(g.clone(), param.name.clone()))) {
+                            found.extend(ms.iter().map(|m| (d.to_string(), m.clone())));
                         }
                     }
                 }
@@ -305,18 +300,13 @@ fn walk(e: &Expr, visit: &mut dyn FnMut(&Expr)) {
     }
 }
 
-fn recv_name(e: &Expr) -> Option<&str> {
-    match &e.kind {
-        ExprKind::Name(d) => Some(d),
-        _ => None,
-    }
-}
-
-/// The capability type of `f`'s parameter `d`, if it is one.
-fn cap_type<'a>(f: &'a Fn, d: &str) -> Option<&'a str> {
-    let param = f.params.iter().find(|x| x.name == d)?;
-    match &param.ty.kind {
-        TypeKind::Named(n, a) if a.is_empty() => Some(n.as_str()),
+/// The capability parameter `e` names, as the checker resolved it. The checker records a
+/// capability type only for a name bound to a parameter of the function it is in (rule 1), so
+/// a local, closure parameter, pattern binding or loop variable that shadows the parameter's
+/// name is not charged to it.
+fn cap_param<'a>(p: &Program, e: &'a Expr) -> Option<&'a str> {
+    match (&e.kind, p.types.get(&e.span)?) {
+        (ExprKind::Name(d), Ty::Cap(_)) => Some(d),
         _ => None,
     }
 }

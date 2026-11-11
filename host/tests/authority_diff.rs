@@ -111,6 +111,19 @@ fn new_that_fails_to_check_exits_1_and_names_the_new_side() {
     );
 }
 
+#[test]
+fn a_real_call_after_a_shadowing_baseline_exits_3() {
+    // The baseline's `api.get` is a local `Map`'s, so the real `Http.get` is added authority.
+    let shadow = r#"{ let api: Map<Str, Int> = Map::new(); let _v = api.get("x"); }"#;
+    let old = format!("fn main(api: Http) {shadow}");
+    let new = format!(r#"fn main(api: Http) {{ {shadow} let _r = api.get("/x"); }}"#);
+    let want = "~ api: Http (+get)\nauthority added (exit 3); --detail lists each function\n";
+    assert_eq!(
+        diff(&[("app.kio", &old)], &[("app.kio", &new)]),
+        (3, want.into(), "".into())
+    );
+}
+
 /// The shape of kio-web's links app: a handler, a module with the HTTP helper, and a webhook
 /// added to `main` as `hook: Http`. Modules resolve beside each side's entry.
 const LINKS_OLD: &str = r#"mod http;

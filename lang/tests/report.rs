@@ -151,6 +151,55 @@ fn a_shadowed_capability_is_not_charged_with_other_methods() {
     assert_eq!(report(&p).trim(), "main : none");
 }
 
+/// A local `Map` named like the `Http` parameter, whose `get` shares a name with `Http.get`.
+const SHADOW: &str = r#"let api: Map<Str, Int> = Map::new(); let _v = api.get("x");"#;
+
+#[test]
+fn a_shadowing_local_is_not_charged() {
+    let src = format!("fn main(api: Http) {{ {SHADOW} }}");
+    assert_eq!(rep(&src), "main : none");
+}
+
+#[test]
+fn shadowing_follows_scopes() {
+    let m = r#"let m: Map<Str, Int> = Map::new();"#;
+    let real = r#"let _r = api.get("/x");"#;
+    let none = [
+        // Nested blocks.
+        format!(r#"{{ {SHADOW} {{ let _w = api.get("y"); {{ let _z = api.get("z"); }} }} }}"#),
+        // A closure parameter.
+        format!(r#"{m} let f = |api: Map<Str, Int>| api.get("x"); let _v = f(m);"#),
+        // A match arm binding.
+        format!(r#"{m} let _v = match Some(m) {{ Some(api) => api.get("x"), None => None }};"#),
+        // An if-let binding.
+        format!(r#"{m} if let Some(api) = Some(m) {{ let _v = api.get("x"); }}"#),
+        // A for variable.
+        format!(r#"{m} for api in [m] {{ let _v = api.get("x"); }}"#),
+    ];
+    for body in none {
+        assert_eq!(
+            rep(&format!("fn main(api: Http) {{ {body} }}")),
+            "main : none",
+            "{body}"
+        );
+    }
+    // The real call after the shadow's block ends is charged.
+    let after = format!("fn main(api: Http) {{ {{ {SHADOW} }} {real} }}");
+    assert_eq!(rep(&after), "main : api get");
+    let after = format!("fn main(api: Http) {{ for api in [1] {{ let _s = api.to_str(); }} {real} }}");
+    assert_eq!(rep(&after), "main : api get");
+}
+
+#[test]
+fn a_module_function_parameter_of_the_same_name_is_not_charged() {
+    let root = r#"mod web;
+fn main(api: Http) { let m: Map<Str, Int> = Map::new(); let _v = web::look(m); let _r = api.get("/x"); }"#;
+    let web = r#"pub fn look(api: Map<Str, Int>) -> Option<Int> { api.get("x") }"#;
+    let caps = common::caps();
+    let p = lang::check_files(&[("a.kio", root), ("web.kio", web)], &caps).unwrap();
+    assert_eq!(report(&p), "main      : api get\nweb::look : none");
+}
+
 /// `lang::report_diff` of two programs, each `(name, source)` files with the root first.
 fn diff(old: &[(&str, &str)], new: &[(&str, &str)]) -> lang::AuthorityDiff {
     let caps = common::caps();
@@ -166,6 +215,17 @@ fn want(grants: &[&str], funcs: &[&str], added: bool) -> lang::AuthorityDiff {
         funcs: own(funcs),
         added,
     }
+}
+
+#[test]
+fn diff_a_real_call_after_a_shadowing_baseline() {
+    // The shadowing baseline charges nothing, so the real call is new authority.
+    let old = format!("fn main(api: Http) {{ {SHADOW} }}");
+    let new = format!(r#"fn main(api: Http) {{ {{ {SHADOW} }} let _r = api.get("/x"); }}"#);
+    assert_eq!(
+        diff(&[("a.kio", &old)], &[("a.kio", &new)]),
+        want(&["~ api: Http (+get)"], &["+ main: api get"], true)
+    );
 }
 
 const CREATE: &str = r#"fn create(links: Kv, log: Log) -> Result<(), KvErr> { links.set("k", "v".to_bytes())?; let _w = log.write("made"); Ok(()) }"#;

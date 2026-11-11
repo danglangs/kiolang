@@ -74,10 +74,11 @@ Compiled-only kio covers the whole language and every capability. What real apps
 | P4 | `--grants app.grants`: `kio run`'s flags one per line (split at the first space, `#` comments), ahead of the command line's; a once-only flag in both is refused; a file the program could change (inside a `--dir`, a log or store, hard-linked) is refused. `kio check app.kio --grants app.grants` binds them without running or reading a secret, for CI. payhook and links ship `app.grants` (guide.md "Grants file", #189-#192) |
 | H25 | every HTTP hop, each redirect and each `send_all` request included, reserves a call before it is sent: a run sends at most `--calls` requests (before: up to six per call). A server counting requests through five redirects gets exactly `--calls` |
 | H26 | `kio mcp` reads each message with a 2 MB limit before parsing: a longer line is refused (`-32600`) and skipped without being held, and the server answers the next; `kio_check` sums source sizes before copying them |
+| P5 | the authority report charges a capability parameter only for a receiver or argument the checker resolved to it: a local, closure parameter, pattern binding or `for` variable of the same name is not charged, so `kio check --base` shows a later real call (#197) |
 
 ## Next
 
-Direction A ([product-todo.md](product-todo.md)): P1, S1, E1, E2 and the pilot P2 (payhook) are done. C8c8 (borrowed loop variables), L26 (`Str.from_hex`) and H23 are done (`Http.send` takes `timeout_ms`). P4 (`--grants` file) is done. Then allocation speed in this order: C8c4, C8c3, C8c9 (per-loop fuel), C8c5, C8c6 (compiler-todo.md; the plan is proposals/allocation-speed.md). Packages after. Tuples if the evals show models still reach for them.
+Direction A ([product-todo.md](product-todo.md)): P1, S1, E1, E2 and the pilot P2 (payhook) are done. C8c8 (borrowed loop variables), L26 (`Str.from_hex`) and H23 are done (`Http.send` takes `timeout_ms`). P4 (`--grants` file) and P5 (report follows checked bindings) are done. Then allocation speed in this order: C8c4, C8c3, C8c9 (per-loop fuel), C8c5, C8c6 (compiler-todo.md; the plan is proposals/allocation-speed.md). Packages after. Tuples if the evals show models still reach for them.
 
 Also open: C8 (roadmap.md): tree's remaining freeing (free-list pushes, a `List`'s separate buffer); tree's 4-5% from the larger size classes (#117); borrowed match bindings of a borrowed scrutinee (tree). Pinned, not started: L18 `par_map` and L19 `scope`/`spawn` (concurrency stages 2 and 3, when a program needs them).
 

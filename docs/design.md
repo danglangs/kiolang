@@ -8,7 +8,7 @@
 | Enforced: host and limits | Can it touch anything else? | host, Wasmtime | Done: G1 to G5, fuel and every quota |
 | Recorded: audit log | What did it touch, this run? | host | Done: `kio run --audit log.jsonl`; under `--listen`, one log with each line's request number |
 
-Each layer holds without the one above it. The host enforces every guarantee even if the checker is wrong; the log records every call even if the program is hostile, because the host writes it. The log also checks the checker: every logged call must appear in the report, so a call the report did not predict is flagged as a checker bug.
+Each layer holds without the one above it. The host enforces every guarantee even if the checker is wrong; the log records every call even if the program is hostile, because the host writes it. The log also checks the checker: every logged call must appear in the report, so a call the report did not predict is flagged as a checker bug. Per-function authority is a static report for review; runtime enforcement is program-wide, the `(grant, method)` set of `main`'s line.
 
 ## Components
 
