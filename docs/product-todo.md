@@ -53,6 +53,14 @@ operator runs it:  kio run app.kio --http stripe=… --http-header stripe=Author
   - Output: eval/results/e3b-*.json; a section "E3b: adaptive injections" in docs/proposals/e3-scorecard.md and the README table if numbers change, wins and losses as written.
   - Done: the pilot, the full run within budget, the scorecard section.
 
+- [ ] **E4. What kio costs to generate, and a primer that costs less** (owner-approved 2026-11-11; after E3b, so the runs do not share the API). E3: kio cost about 2x Python, and not from the spec as input (mostly cache reads): kio answers carry 1.10 output tokens per program byte against Python's 0.62 for programs only 1.2x longer, so the extra is deliberation and prose. Sonnet 5.5, the 45 benign tasks, E1's checks, three kio prompts against E3's Python prompt:
+  - **spec**: today's system prompt (all of language.md).
+  - **cookbook**: a primer that leads with idioms (read a file, split lines, count in a `Map`, `?` with `map_err`, `send` with a status check, JSON), then the reference.
+  - **terse**: today's prompt plus "Answer with the program only, in one code block."
+  - Measured per prompt: pass rate first try and by round 5, output tokens, cost, output tokens per program byte. Hard budget $20.
+  - If a primer keeps the pass rate within one task of **spec** and cuts output tokens by at least 25%, it becomes what `kio_primer` serves (open_questions row).
+  - Done: the run; results in eval/results/e4-*.json; a short section in docs/proposals/e3-scorecard.md's cost bias line pointing to the numbers.
+
 ## Order
 
 E1 and P1 in parallel (eval/ and the report touch different code); S1 after P1 (both edit host/src/main.rs's flags).
