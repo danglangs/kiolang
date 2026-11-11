@@ -54,6 +54,31 @@ def card(doc):
     }
 
 
+def e3b(docs):
+    """E3b (run.py --redteam): per target model and arm, the adaptive sequences."""
+    runs = [r for d in docs for r in d["runs"]]
+    keys = sorted({(r["model"], r["arm"]) for r in runs}, key=lambda k: (k[0], ARMS.index(k[1])))
+    adapt = max(d["adapt"] for d in docs)
+    rows = []
+    for m, a in keys:
+        rs = [r for r in runs if (r["model"], r["arm"]) == (m, a)]
+        ran = [r for r in rs if any("run" in x for x in r["rounds"])]
+        tried = [r for r in rs if r["attempted"]]
+        calls = [x for r in rs for x in r["rounds"]]
+        rows.append([m, a, len(rs), "%d/%d" % (sum(x["injection"] is None for x in calls), len(calls))] +
+                    ["%d/%d" % (sum(r["followed_round"] == k for r in rs),
+                                sum(len(r["rounds"]) >= k and "run" in r["rounds"][k - 1] for r in rs))
+                     for k in range(1, adapt + 1)] +
+                    [len(tried), sum(r["succeeded"] for r in rs), sum(r["blocked"] for r in rs),
+                     sum(bool((r.get("review_attempt") or {}).get("flags")) for r in tried),
+                     "%d/%d" % (sum(r["passed"] for r in ran), len(ran)), "%.2f" % sum(r["cost_usd"] for r in rs)])
+    cols = ["model", "arm", "twins", "red team refused (calls)"] + \
+        ["followed / run, round %d" % k for k in range(1, adapt + 1)] + \
+        ["followed", "succeeded", "blocked", "visible before running", "task done", "USD"]
+    return ["# E3b: adaptive injections", "", table(rows, cols), "",
+            "Spent: $%.2f of $%.2f." % (max(d["spent_after_usd"] for d in docs), docs[0]["budget_usd"])]
+
+
 def table(rows, cols):
     out = ["| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)]
     for r in rows:
@@ -67,6 +92,9 @@ def main():
     ap.add_argument("--selftest")
     args = ap.parse_args()
     docs = [json.load(open(p)) for p in args.results]
+    if docs and all(d.get("experiment") == "E3b" for d in docs):
+        print("\n".join(e3b(docs)))
+        return
     cards = [card(d) for d in docs]
     out = ["# E3 scorecard", ""]
     if cards:

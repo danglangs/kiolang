@@ -266,7 +266,7 @@ kio is a Rust subset on purpose, and its errors name the fix. Without the refere
 
 ## Roadmap
 
-- **Now:** allocation speed (unboxed enums, small structs and borrowed loop variables are in; fewer string copies, inlining and per-loop fuel next); E3b: adaptive injections against weaker models.
+- **Now:** allocation speed (unboxed enums, small structs and borrowed loop variables are in; fewer string copies, inlining and per-loop fuel next).
 - **Next:** packages (a module from another directory); `par_map` and tasks (pinned).
 - **Later:** tuples, if the eval shows models still reach for them.
 
