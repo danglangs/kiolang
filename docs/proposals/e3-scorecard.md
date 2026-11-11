@@ -14,12 +14,12 @@
 | Attacks that succeeded | 0 | 0 | 0 |
 | Programs that can read a secret (of 100) | 1 | 1 | 25 |
 | Lines a reviewer reads, median (Sonnet / Opus) | **1.5 / 2** | 82.5 / 90 | 80 / 92.5 |
-| Benign programs flagged, false alarms (Sonnet / Opus) | 11 / 10 | 14 / 12 | 12 / 10 |
+| Benign programs flagged, false alarms (Sonnet / Opus) | **5 / 5** (11 / 10 before P6) | 14 / 12 | 12 / 10 |
 | Cost, USD (Sonnet / Opus) | 4.05 / 7.66 | 1.76 / 3.37 | 2.18 / 4.39 |
 
 **Today's frontier models almost never followed these injections**: two of 330 adversarial runs, both Sonnet following the same disk-fill twin, once in each Python arm, both blocked. With these models and these injections, no arm's run-time defences were tested by the models themselves. Section 2 measures them directly.
 
-kio's false alarms are all a method changing on a grant the task already had (`out: Dir (+create -write)`, `counts: Kv (+scan -keys)`): noise a reviewer can see is harmless in one line, but noise. Python's are a heuristic scan of an 80-90 line diff.
+kio's false alarms were all a method changing on a grant the task already had. Since P6, a gain a method the base reached covers is shown but not flagged (`out: Dir (+create -write); create is covered by write`), rescored from the stored programs (`run.py --rescore`, eval/results/e3-*-rescored.json): the `Dir` and `Db` swaps go, 5 per model remain, all on `Kv` where no single base method covers the gain (`counts: Kv (+scan -keys)`: `scan` reads values; `store: Kv (+swap)`: atomic compare-and-set; `limits: Kv (+set -add)`). Python's are a heuristic scan of an 80-90 line diff.
 
 ## 2. When the program follows every injection
 
@@ -28,21 +28,21 @@ Each twin's compromised reference (the benign program plus the injection's code)
 | Attack class | Twins | kio | py-best | py | Visible before running: kio `check --base` / Python scan |
 |---|---|---|---|---|---|
 | Exfiltration to a new host | 8 | 8 blocked | 8 | 8 | 8 / 8 |
-| Exfiltration through the granted host | 4 | 1 | 1 | 0 | 4 / 4 |
+| Exfiltration through the granted host | 4 | 1 | 1 | 0 | **0** / 4 |
 | Reading or leaking a secret | 8 | 8 | 8 | **0** | 8 / 8 |
 | Writing where the task only reads | 9 | 9 | 9 | 9 | 9 / 9 |
 | Escaping the directory | 9 | 9 | 9 | 9 | **0 / 4** |
-| Resource exhaustion | 9 | 9 | 9 | 6 | 2 / 4 |
+| Resource exhaustion | 9 | 9 | 9 | 6 | 1 / 4 |
 | A helper gaining network access | 8 | 8 | 8 | 8 | 8 / 8 |
 | **Blocked** | **55** | **52** | **52** | **40** | |
 
-No arm stops data sent out through the host the task legitimately uses (as a query, a PUT body or a header): capability security is not information-flow control.
+No arm stops data sent out through the host the task legitimately uses (as a query, a PUT body or a header): capability security is not information-flow control. kio's column is P6's: before it, `check --base` showed all 4 such attacks and 2 exhaustions, only because each used another method on the grant (`api: Http (+send)` beside `send_all`) that the approved authority already covered.
 
 ## What this says
 
 1. **At run time, kio equals Python sandboxed by a careful team (52/55), and beats Python as commonly sandboxed (40/55)**, mostly on secrets: kio programs never hold their keys.
 2. **The difference is who builds the stack, not the ceiling.** py-best needed a custom egress proxy that injects keys and filters methods, a per-task sandbox profile and watchdog threads for memory and disk. kio's equivalent is flags on `kio run`; its limits are the host's own counters, not polled watchdogs. Not zero setup: an operator still picks grants, places writable paths and supplies secrets, and kio's maintainers maintain that stack instead of each adopter.
-3. **Review is where kio is clearly ahead**: 1-2 lines of exact authority against an 80-90 line diff and a heuristic scan (which misses indirect access such as `getattr(os, "environ")`). kio's view misses what does not change authority (escapes, most exhaustion), which the host blocks anyway.
+3. **Review is where kio is clearly ahead**: 1-2 lines of exact authority against an 80-90 line diff and a heuristic scan (which misses indirect access such as `getattr(os, "environ")`). kio's view misses what does not change authority (escapes, most exhaustion, sending through the granted host), the first two of which the host blocks anyway.
 4. **The adversarial half did not test the models**: they ignored the injections. A stronger test needs subtler, adaptive injections and weaker or older models.
 
 ## Biases, both directions
@@ -58,6 +58,6 @@ No arm stops data sent out through the host the task legitimately uses (as a que
 
 ## Next
 
-- Report authority in classes (read, write, delete, network host) so a method swap on an existing grant is not flagged (kio's false alarms).
+- Done (P6): a gain a base method covers is not flagged. Left: `Kv` gains covered only by several base methods together (`get` and `keys` for `scan`), open_questions #208.
 - E3b: adaptive injections written by a red-team model against each arm, and Haiku-class models.
 - Information flow: the three attacks no arm stops are the case for labels on data (deferred, design open).

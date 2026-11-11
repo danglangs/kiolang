@@ -186,3 +186,56 @@ fn payhook_step_2_is_two_lines() {
     let want = format!("{summary}\n{funcs}authority added (exit 3)\n");
     assert_eq!(diff_with(&old, &new, &["--detail"]), (3, want, "".into()));
 }
+
+/// E3's false alarm (P6): `create` for `write` on the same grant is covered, so exit 0.
+const SAVE_OLD: &str = r#"fn save(out: Dir) -> Result<(), IoErr> { out.write("a", "x".to_bytes()) }
+fn main(out: Dir) -> Result<(), IoErr> { save(out) }
+"#;
+
+#[test]
+fn covered_swap_exits_0() {
+    let new = SAVE_OLD.replace("out.write(", "out.create(");
+    let (old, new) = ([("app.kio", SAVE_OLD)], [("app.kio", new.as_str())]);
+    let line = "~ out: Dir (+create -write); create is covered by write\n";
+    assert_eq!(diff(&old, &new), (0, format!("{line}no authority added\n"), "".into()));
+    let funcs = "+ main: out create; create is covered by write\n- main: out write\n+ save: out create; create is covered by write\n- save: out write\n";
+    let want = format!("{line}\n{funcs}no authority added\n");
+    assert_eq!(diff_with(&old, &new, &["--detail"]), (0, want, "".into()));
+}
+
+#[test]
+fn covering_swap_exits_3() {
+    let new = SAVE_OLD.replace("out.write(", "out.create(");
+    let want = "~ out: Dir (+write -create)\nauthority added (exit 3); --detail lists each function\n";
+    assert_eq!(
+        diff(&[("app.kio", &new)], &[("app.kio", SAVE_OLD)]),
+        (3, want.into(), "".into())
+    );
+}
+
+#[test]
+fn uncovered_gain_beside_a_covered_one_exits_3() {
+    let new = SAVE_OLD.replace(
+        r#"out.write("a", "x".to_bytes())"#,
+        r#"out.remove("b")?; out.create("a", "x".to_bytes())"#,
+    );
+    let want = "~ out: Dir (+create +remove -write); create is covered by write\nauthority added (exit 3); --detail lists each function\n";
+    assert_eq!(
+        diff(&[("app.kio", SAVE_OLD)], &[("app.kio", &new)]),
+        (3, want.into(), "".into())
+    );
+}
+
+#[test]
+fn uncovered_function_gain_behind_covered_grant_lines_shows_functions() {
+    // The grant line's gain is covered, but `audit` (not called by `main`) gains `create` on a
+    // parameter its base only read: exit 3, with the function lines shown.
+    let old = format!("{SAVE_OLD}fn audit(o: Dir) -> Int {{ let _r = o.read(\"a\"); 0 }}\n");
+    let new = old
+        .replace("out.write(", "out.create(")
+        .replace(r#"o.read("a");"#, r#"o.create("b", "y".to_bytes());"#);
+    let (code, out, _) = diff(&[("app.kio", &old)], &[("app.kio", &new)]);
+    assert_eq!(code, 3);
+    assert!(out.contains("\n+ audit: o create\n- audit: o read\n"), "{out}");
+    assert!(out.ends_with("authority added (exit 3)\n"), "{out}");
+}

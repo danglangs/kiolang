@@ -87,8 +87,7 @@ fn check_base(path: &str, base: &str, detail: bool) -> i32 {
         println!("no change in authority");
         return 0;
     }
-    // A grant line adds authority when it has a `+`: no name, type or method has one.
-    let funcs = detail || (diff.added && !diff.grants.iter().any(|l| l.contains('+'))) || diff.grants.is_empty();
+    let funcs = detail || (diff.added && !diff.grant_added) || diff.grants.is_empty();
     let mut out = diff.grants.clone();
     if funcs {
         if !out.is_empty() {
@@ -98,7 +97,12 @@ fn check_base(path: &str, base: &str, detail: bool) -> i32 {
     }
     println!("{}", out.join("\n"));
     if !diff.added {
-        println!("authority removed only");
+        // A gain a base method covers (P6) is shown but adds nothing.
+        let mut lines = diff.grants.iter().chain(&diff.funcs);
+        match lines.any(|l| l.contains(" is covered by ")) {
+            true => println!("no authority added"),
+            false => println!("authority removed only"),
+        }
         return 0;
     }
     let hint = if funcs || diff.funcs.is_empty() {

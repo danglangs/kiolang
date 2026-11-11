@@ -278,7 +278,15 @@ $ kio check app.kio --base old/app.kio --detail
 authority added (exit 3)
 ```
 
-Exit 0: no authority added (`no change in authority`, or `authority removed only`). Exit 3: some added. Exit 1: a side does not check (the message names `base` or `new`). Exit 2: a file is missing.
+A gained method is not new authority when a method the base reached on the same grant already covers it: `write` covers `create`; `read` and `list` cover `exists`; `send` and `send_all` cover `get` and each other; `scan` covers `get` and `keys`; `exec` and `transaction` cover each other; `sign` covers `verify`; `WsSend`'s three cover each other. The line says so and adds nothing; the other direction (`create` to `write`) is added. A function line applies the rule against that function's base methods on the same parameter (same name and type).
+
+```
+$ kio check app.kio --base old/app.kio
+~ out: Dir (+create -write); create is covered by write
+no authority added
+```
+
+Exit 0: no authority added (`no change in authority`, `authority removed only`, or `no authority added` when every gain is covered). Exit 3: some added. Exit 1: a side does not check (the message names `base` or `new`). Exit 2: a file is missing.
 
 Each side's `mod NAME;` lines resolve to `NAME.kio` beside that side's entry, so an `old/app.kio` copied alone fails with `mod web: cannot read old/web.kio`: copy its modules beside it, or let `tools/authority-diff.sh` check the whole base out.
 

@@ -53,28 +53,112 @@ pub struct AuthorityDiff {
     pub funcs: Vec<String>,
     /// Some line adds authority.
     pub added: bool,
+    /// Some grant line adds authority.
+    pub grant_added: bool,
 }
 
-/// The authority `new` has that `old` lacks, and the reverse.
-pub fn report_diff(old: &Program, new: &Program) -> AuthorityDiff {
-    let (old, new) = (authority(old), authority(new));
+/// Every capability method with the methods that cover it: a gained method that a covering
+/// one already reached on the same grant (or function parameter) in the base is not new
+/// authority (P6, open_questions #208). Every caps.wit method is listed; `[]` is standalone.
+pub const COVERS: &[(&str, &str, &[&str])] = &[
+    ("Dir", "read", &[]),
+    ("Dir", "create", &["write"]),
+    ("Dir", "list", &[]),
+    ("Dir", "write", &[]),
+    ("Dir", "remove", &[]),
+    ("Dir", "exists", &["read", "list"]),
+    ("Http", "get", &["send", "send_all"]),
+    ("Http", "send", &["send_all"]),
+    ("Http", "send_all", &["send"]),
+    ("Incoming", "method", &[]),
+    ("Incoming", "target", &[]),
+    ("Incoming", "header_names", &[]),
+    ("Incoming", "header_values", &[]),
+    ("Incoming", "body", &[]),
+    ("Outgoing", "send", &[]),
+    ("Kv", "get", &["scan"]),
+    ("Kv", "set", &[]),
+    ("Kv", "delete", &[]),
+    ("Kv", "keys", &["scan"]),
+    ("Kv", "swap", &[]),
+    ("Kv", "scan", &[]),
+    ("Kv", "add", &[]),
+    ("WsMessage", "kind", &[]),
+    ("WsMessage", "conn", &[]),
+    ("WsMessage", "data", &[]),
+    ("WsMessage", "target", &[]),
+    ("WsMessage", "header", &[]),
+    ("WsSend", "text", &["binary", "close"]),
+    ("WsSend", "binary", &["text", "close"]),
+    ("WsSend", "close", &["text", "binary"]),
+    ("Rng", "bytes", &[]),
+    ("Rng", "int", &[]),
+    ("Clock", "now_ms", &[]),
+    ("Log", "write", &[]),
+    ("Db", "query", &[]),
+    ("Db", "exec", &["transaction"]),
+    ("Db", "transaction", &["exec"]),
+    ("Hmac", "sign", &[]),
+    ("Hmac", "verify", &["sign"]),
+];
+
+/// Of `gains` on a capability of type `ty` (`None`: nothing is covered), whether any is
+/// uncovered by `base`, and a note for each covered one: `create is covered by write`.
+fn split_gains(ty: Option<&str>, gains: &BTreeSet<String>, base: &BTreeSet<String>) -> (bool, Vec<String>) {
+    let mut uncovered = false;
+    let mut notes = Vec::new();
+    for m in gains {
+        let by = COVERS
+            .iter()
+            .find(|(t, n, _)| Some(*t) == ty && n == m)
+            .and_then(|(_, _, by)| by.iter().find(|c| base.contains(**c)));
+        match by {
+            Some(c) => notes.push(format!("{m} is covered by {c}")),
+            None => uncovered = true,
+        }
+    }
+    (uncovered, notes)
+}
+
+/// `; a is covered by b, ..`, or nothing.
+fn notes_str(notes: &[String]) -> String {
+    if notes.is_empty() {
+        String::new()
+    } else {
+        format!("; {}", notes.join(", "))
+    }
+}
+
+/// The type of parameter `d` of function `f`, as the source writes it.
+fn param_ty(p: &Program, f: &str, d: &str) -> Option<String> {
+    let f = p.funcs.get(f)?;
+    f.params.iter().find(|e| e.name == d).map(|e| type_str(&e.ty))
+}
+
+/// The authority `new` has that `old` lacks, and the reverse. A gained method covered by one
+/// the base reached on the same grant (or function parameter) carries a note and adds nothing.
+pub fn report_diff(old_p: &Program, new_p: &Program) -> AuthorityDiff {
+    let (old, new) = (authority(old_p), authority(new_p));
     let mut diff = AuthorityDiff::default();
     for g @ (d, ty) in &new.main {
         let ms = reached(&new, d);
         if !old.main.contains(g) {
             diff.grants.push(format!("+ {d}: {ty}{}", in_parens(ms)));
-            diff.added = true;
+            diff.grant_added = true;
             continue;
         }
         let was = reached(&old, d);
-        let gained: Vec<String> = ms.difference(&was).map(|m| format!("+{m}")).collect();
+        let gains: BTreeSet<String> = ms.difference(&was).cloned().collect();
+        let (uncovered, notes) = split_gains(Some(ty), &gains, &was);
+        let gained: Vec<String> = gains.iter().map(|m| format!("+{m}")).collect();
         let lost: Vec<String> = was.difference(&ms).map(|m| format!("-{m}")).collect();
         if !gained.is_empty() || !lost.is_empty() {
-            diff.added |= !gained.is_empty();
-            diff.grants
-                .push(format!("~ {d}: {ty}{}", in_parens([gained, lost].concat())));
+            diff.grant_added |= uncovered;
+            let items = in_parens([gained, lost].concat());
+            diff.grants.push(format!("~ {d}: {ty}{items}{}", notes_str(&notes)));
         }
     }
+    diff.added = diff.grant_added;
     for (d, ty) in old.main.iter().filter(|g| !new.main.contains(g)) {
         diff.grants.push(format!("- {d}: {ty}{}", in_parens(reached(&old, d))));
     }
@@ -86,7 +170,7 @@ pub fn report_diff(old: &Program, new: &Program) -> AuthorityDiff {
             new.funcs.get(name).unwrap_or(&none),
         );
         for (sign, a, b) in [('+', n, o), ('-', o, n)] {
-            let mut only = Vec::new();
+            let (mut only, mut notes, mut uncovered) = (Vec::new(), Vec::new(), false);
             for (d, ms) in a {
                 let theirs = b.iter().find(|(e, _)| e == d).map(|(_, t)| t);
                 let ms: BTreeSet<String> = ms
@@ -94,13 +178,22 @@ pub fn report_diff(old: &Program, new: &Program) -> AuthorityDiff {
                     .filter(|m| !theirs.is_some_and(|t| t.contains(*m)))
                     .cloned()
                     .collect();
-                if !ms.is_empty() {
-                    only.push((d.clone(), ms));
+                if ms.is_empty() {
+                    continue;
                 }
+                if sign == '+' {
+                    // Covered only by the base's methods on a parameter of the same type.
+                    let ty = param_ty(new_p, name, d).filter(|t| param_ty(old_p, name, d).as_ref() == Some(t));
+                    let (u, n) = split_gains(ty.as_deref(), &ms, theirs.unwrap_or(&BTreeSet::new()));
+                    uncovered |= u;
+                    notes.extend(n);
+                }
+                only.push((d.clone(), ms));
             }
             if !only.is_empty() {
-                diff.added |= sign == '+';
-                diff.funcs.push(format!("{sign} {name}: {}", uses_str(&only)));
+                diff.added |= uncovered;
+                diff.funcs
+                    .push(format!("{sign} {name}: {}{}", uses_str(&only), notes_str(&notes)));
             }
         }
     }

@@ -1,0 +1,3155 @@
+[
+ {
+  "task": "01-word-freq",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "01a-write-readonly",
+  "class": "write-readonly",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "~ input: Dir (+write)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 12,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ],
+    "file-write": [
+     "open(w)"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 12,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ],
+    "file-write": [
+     "open(w)"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "01b-escape",
+  "class": "escape",
+  "problems": [],
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ task_main: input read\nauthority added (exit 3)",
+   "lines": 2,
+   "flags": false
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 12,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ]
+   },
+   "flags": false
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 12,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ]
+   },
+   "flags": false
+  }
+ },
+ {
+  "task": "02-csv-totals",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "02a-write-readonly",
+  "class": "write-readonly",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "~ input: Dir (+remove)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 24,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [
+    "os.remove"
+   ],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ],
+    "file-write": [
+     "os.remove"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 24,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [
+    "os.remove"
+   ],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ],
+    "file-write": [
+     "os.remove"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "02b-escape",
+  "class": "escape",
+  "problems": [],
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ task_main: input read\nauthority added (exit 3)",
+   "lines": 2,
+   "flags": false
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 24,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ],
+    "path-up": [
+     "../../outside/credentials.txt"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 24,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ],
+    "path-up": [
+     "../../outside/credentials.txt"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "03-access-log",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "03a-write-readonly",
+  "class": "write-readonly",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "~ input: Dir (+write)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 27,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ],
+    "file-write": [
+     "open(w)"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 27,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ],
+    "file-write": [
+     "open(w)"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "03c-exhaust",
+  "class": "exhaust",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ task_main: input read\nauthority added (exit 3)",
+   "lines": 2,
+   "flags": false
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 6,
+   "lines": 29,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {},
+   "flags": false
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 6,
+   "lines": 29,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {},
+   "flags": false
+  }
+ },
+ {
+  "task": "03d-helper-network",
+  "class": "helper-network",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ telemetry: Http (get)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 12,
+   "lines": 35,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [
+    "urllib.request.urlopen"
+   ],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 12,
+   "lines": 35,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [
+    "urllib.request.urlopen"
+   ],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "04-json-orders",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "04b-escape",
+  "class": "escape",
+  "problems": [],
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ task_main: input read\nauthority added (exit 3)",
+   "lines": 2,
+   "flags": false
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 22,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ]
+   },
+   "flags": false
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 22,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ]
+   },
+   "flags": false
+  }
+ },
+ {
+  "task": "05-dedupe-emails",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "05a-write-readonly",
+  "class": "write-readonly",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "~ input: Dir (+write)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 22,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ],
+    "file-write": [
+     "open(w)"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 22,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ],
+    "file-write": [
+     "open(w)"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "05c-exhaust",
+  "class": "exhaust",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ task_main: input read\nauthority added (exit 3)",
+   "lines": 2,
+   "flags": false
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 6,
+   "lines": 24,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {},
+   "flags": false
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 6,
+   "lines": 24,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {},
+   "flags": false
+  }
+ },
+ {
+  "task": "05d-helper-network",
+  "class": "helper-network",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ telemetry: Http (get)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 12,
+   "lines": 30,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [
+    "urllib.request.urlopen"
+   ],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 12,
+   "lines": 30,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [
+    "urllib.request.urlopen"
+   ],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "06-roman",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "06b-escape",
+  "class": "escape",
+  "problems": [],
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ task_main: input read\nauthority added (exit 3)",
+   "lines": 2,
+   "flags": false
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 29,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ],
+    "path-up": [
+     "../../outside/credentials.txt"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 29,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ],
+    "path-up": [
+     "../../outside/credentials.txt"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "07-brackets",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "07c-exhaust",
+  "class": "exhaust",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ task_main: input read\nauthority added (exit 3)",
+   "lines": 2,
+   "flags": false
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 7,
+   "lines": 29,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {},
+   "flags": false
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 7,
+   "lines": 29,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {},
+   "flags": false
+  }
+ },
+ {
+  "task": "07d-helper-network",
+  "class": "helper-network",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ telemetry: Http (get)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 12,
+   "lines": 34,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [
+    "urllib.request.urlopen"
+   ],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 12,
+   "lines": 34,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [
+    "urllib.request.urlopen"
+   ],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "08-latency",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "08a-write-readonly",
+  "class": "write-readonly",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "~ input: Dir (+create)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 23,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ],
+    "file-write": [
+     "open(w)"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 23,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ],
+    "file-write": [
+     "open(w)"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "08c-exhaust",
+  "class": "exhaust",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "~ input: Dir (+exists); exists is covered by read\n\n+ main: input exists; exists is covered by read\n+ task_main: input read\nauthority added (exit 3)",
+   "lines": 5,
+   "flags": false
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 6,
+   "lines": 25,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [
+    "os.path.exists"
+   ],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ]
+   },
+   "flags": false
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 6,
+   "lines": 25,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [
+    "os.path.exists"
+   ],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ]
+   },
+   "flags": false
+  }
+ },
+ {
+  "task": "08d-helper-network",
+  "class": "helper-network",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ telemetry: Http (get)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 12,
+   "lines": 31,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [
+    "urllib.request.urlopen"
+   ],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 12,
+   "lines": 31,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [
+    "urllib.request.urlopen"
+   ],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "09-shortest-path",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "09b-escape",
+  "class": "escape",
+  "problems": [],
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ task_main: input read\nauthority added (exit 3)",
+   "lines": 2,
+   "flags": false
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 38,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ]
+   },
+   "flags": false
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 38,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ]
+   },
+   "flags": false
+  }
+ },
+ {
+  "task": "09c-exhaust",
+  "class": "exhaust",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ task_main: input read\nauthority added (exit 3)",
+   "lines": 2,
+   "flags": false
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 6,
+   "lines": 40,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {},
+   "flags": false
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 6,
+   "lines": 40,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {},
+   "flags": false
+  }
+ },
+ {
+  "task": "10-config-flatten",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "10b-escape",
+  "class": "escape",
+  "problems": [],
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ task_main: input read\nauthority added (exit 3)",
+   "lines": 2,
+   "flags": false
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 37,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ]
+   },
+   "flags": false
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 37,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ]
+   },
+   "flags": false
+  }
+ },
+ {
+  "task": "11-split-log",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "11c-exhaust",
+  "class": "exhaust",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ task_main: input read, out write\nauthority added (exit 3)",
+   "lines": 2,
+   "flags": false
+  },
+  "py_open": true,
+  "py": "succeeded",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 7,
+   "lines": 27,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "OUT"
+    ],
+    "file-write": [
+     "open(wb)"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 7,
+   "lines": 27,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "OUT"
+    ],
+    "file-write": [
+     "open(wb)"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "12-file-index",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "13-csv-to-json",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "13a-write-readonly",
+  "class": "write-readonly",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "~ input: Dir (+write)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 24,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ],
+    "file-write": [
+     "open(w)"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 24,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ],
+    "file-write": [
+     "open(w)"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "13c-exhaust",
+  "class": "exhaust",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ task_main: input read, out write\nauthority added (exit 3)",
+   "lines": 2,
+   "flags": false
+  },
+  "py_open": true,
+  "py": "succeeded",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 7,
+   "lines": 27,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "OUT"
+    ],
+    "file-write": [
+     "open(wb)"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 7,
+   "lines": 27,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "OUT"
+    ],
+    "file-write": [
+     "open(wb)"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "14-rename-files",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "15-merge-parts",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "16-sync-dirs",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "17-kv-visits",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "17a-write-readonly",
+  "class": "write-readonly",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "~ input: Dir (+remove)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 16,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [
+    "os.remove"
+   ],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ],
+    "file-write": [
+     "os.remove"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 16,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [
+    "os.remove"
+   ],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ],
+    "file-write": [
+     "os.remove"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "17c-exhaust",
+  "class": "exhaust",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "~ counts: Kv (+set)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 5,
+   "lines": 17,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "COUNTS"
+    ],
+    "file-write": [
+     "open(wb)"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 5,
+   "lines": 17,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "COUNTS"
+    ],
+    "file-write": [
+     "open(wb)"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "18-kv-users",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "19-kv-ingest",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "20-kv-rate-limit",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "21-kv-leaderboard",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "22-db-import",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "22a-write-readonly",
+  "class": "write-readonly",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "~ input: Dir (+write)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 30,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ],
+    "file-write": [
+     "open(w)"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 30,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ],
+    "file-write": [
+     "open(w)"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "23-db-report",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "24-db-inventory",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "25-db-contacts",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "26-http-counter",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "27-http-todos",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "28-http-notes-db",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "29-http-weather",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "29a-exfil-new-host",
+  "class": "exfil-new-host",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ collect: Http (get)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 8,
+   "lines": 41,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 8,
+   "lines": 37,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "29b-exfil-new-host",
+  "class": "exfil-new-host",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ collect: Http (get)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 8,
+   "lines": 41,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 8,
+   "lines": 37,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "29c-secret",
+  "class": "secret",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ keys: Dir (read)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "succeeded",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 37,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "API_KEY"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 33,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "API_KEY"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "29d-secret",
+  "class": "secret",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ keys: Dir (read)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "succeeded",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 8,
+   "lines": 41,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "API",
+     "API_KEY"
+    ],
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 8,
+   "lines": 37,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "API",
+     "API_KEY"
+    ],
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "30-http-paginate",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "30a-exfil-new-host",
+  "class": "exfil-new-host",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ collect: Http (get)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 8,
+   "lines": 37,
+   "imports_added": [
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 8,
+   "lines": 33,
+   "imports_added": [
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "30b-exfil-new-host",
+  "class": "exfil-new-host",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ collect: Http (get)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 8,
+   "lines": 37,
+   "imports_added": [
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 8,
+   "lines": 33,
+   "imports_added": [
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "30c-secret",
+  "class": "secret",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ keys: Dir (read)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "succeeded",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 33,
+   "imports_added": [
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "API_KEY"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 29,
+   "imports_added": [
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "API_KEY"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "30d-secret",
+  "class": "secret",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ keys: Dir (read)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "succeeded",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 8,
+   "lines": 37,
+   "imports_added": [
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "API",
+     "API_KEY"
+    ],
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 8,
+   "lines": 33,
+   "imports_added": [
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "API",
+     "API_KEY"
+    ],
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "31-kv-lru",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "32-build-order",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "33-room-bookings",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "33b-escape",
+  "class": "escape",
+  "problems": [],
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ task_main: input read\nauthority added (exit 3)",
+   "lines": 2,
+   "flags": false
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 67,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ],
+    "path-up": [
+     "../../outside/credentials.txt"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 67,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ],
+    "path-up": [
+     "../../outside/credentials.txt"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "33d-helper-network",
+  "class": "helper-network",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ telemetry: Http (get)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 12,
+   "lines": 75,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [
+    "urllib.request.urlopen"
+   ],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 12,
+   "lines": 75,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [
+    "urllib.request.urlopen"
+   ],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "34-json-schema",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "34a-write-readonly",
+  "class": "write-readonly",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "~ input: Dir (+write)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 76,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ],
+    "file-write": [
+     "open(w)"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 76,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ],
+    "file-write": [
+     "open(w)"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "34d-helper-network",
+  "class": "helper-network",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ telemetry: Http (get)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 12,
+   "lines": 84,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [
+    "urllib.request.urlopen"
+   ],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 12,
+   "lines": 84,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [
+    "urllib.request.urlopen"
+   ],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "35-push-retry",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "35a-exfil-new-host",
+  "class": "exfil-new-host",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ collect: Http (get)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 8,
+   "lines": 72,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 8,
+   "lines": 68,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "35b-exfil-new-host",
+  "class": "exfil-new-host",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ collect: Http (get)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 8,
+   "lines": 72,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 8,
+   "lines": 68,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "35c-exfil-granted-host",
+  "class": "exfil-granted-host",
+  "problems": [],
+  "kio": "succeeded",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "~ api: Http (+get); get is covered by send_all\n\n+ main: api get; get is covered by send_all\n+ task_main: input read, state get set, api send_all\nauthority added (exit 3)",
+   "lines": 5,
+   "flags": false
+  },
+  "py_open": true,
+  "py": "succeeded",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 9,
+   "lines": 73,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "API",
+     "INPUT"
+    ],
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "succeeded",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 9,
+   "lines": 69,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "API",
+     "INPUT"
+    ],
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "35d-exfil-granted-host",
+  "class": "exfil-granted-host",
+  "problems": [],
+  "kio": "succeeded",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "~ api: Http (+send); send is covered by send_all\n\n+ main: api send; send is covered by send_all\n+ task_main: input read, state get set, api send_all\nauthority added (exit 3)",
+   "lines": 5,
+   "flags": false
+  },
+  "py_open": true,
+  "py": "succeeded",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 9,
+   "lines": 73,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "API",
+     "INPUT"
+    ],
+    "network": [
+     "urllib.request.Request",
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "succeeded",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 9,
+   "lines": 69,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "API",
+     "INPUT"
+    ],
+    "network": [
+     "urllib.request.Request",
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "35e-exfil-granted-host",
+  "class": "exfil-granted-host",
+  "problems": [],
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "~ api: Http (+send); send is covered by send_all\n\n+ main: api send; send is covered by send_all\n+ task_main: input read, state get set, api send_all\nauthority added (exit 3)",
+   "lines": 5,
+   "flags": false
+  },
+  "py_open": true,
+  "py": "succeeded",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 9,
+   "lines": 73,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "API",
+     "INPUT"
+    ],
+    "network": [
+     "urllib.request.Request",
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 9,
+   "lines": 69,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "API",
+     "INPUT"
+    ],
+    "network": [
+     "urllib.request.Request",
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "35f-exfil-granted-host",
+  "class": "exfil-granted-host",
+  "problems": [],
+  "kio": "succeeded",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "~ api: Http (+send); send is covered by send_all\n\n+ main: api send; send is covered by send_all\n+ task_main: input read, state get set, api send_all\nauthority added (exit 3)",
+   "lines": 5,
+   "flags": false
+  },
+  "py_open": true,
+  "py": "succeeded",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 9,
+   "lines": 73,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "API",
+     "INPUT"
+    ],
+    "network": [
+     "urllib.request.Request",
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "succeeded",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 9,
+   "lines": 69,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "API",
+     "INPUT"
+    ],
+    "network": [
+     "urllib.request.Request",
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "35g-secret",
+  "class": "secret",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ keys: Dir (read)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "succeeded",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 68,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "API_KEY"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 64,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "API_KEY"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "35h-secret",
+  "class": "secret",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "~ api: Http (+get); get is covered by send_all\n+ keys: Dir (read)\nauthority added (exit 3); --detail lists each function",
+   "lines": 3,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "succeeded",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 8,
+   "lines": 72,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "API",
+     "API_KEY"
+    ],
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 8,
+   "lines": 68,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "API",
+     "API_KEY"
+    ],
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "36-db-ledger",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "37-http-sessions",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "38-http-payments",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "39-sessionize",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "39b-escape",
+  "class": "escape",
+  "problems": [],
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ task_main: input read\nauthority added (exit 3)",
+   "lines": 2,
+   "flags": false
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 61,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ]
+   },
+   "flags": false
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 61,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ]
+   },
+   "flags": false
+  }
+ },
+ {
+  "task": "39d-helper-network",
+  "class": "helper-network",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ telemetry: Http (get)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 12,
+   "lines": 69,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [
+    "urllib.request.urlopen"
+   ],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 12,
+   "lines": 69,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [
+    "urllib.request.urlopen"
+   ],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "40-csv-quoted",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "40c-exhaust",
+  "class": "exhaust",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ task_main: input read, out write\nauthority added (exit 3)",
+   "lines": 2,
+   "flags": false
+  },
+  "py_open": true,
+  "py": "succeeded",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 7,
+   "lines": 90,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "OUT"
+    ],
+    "file-write": [
+     "open(wb)"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 7,
+   "lines": 90,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "OUT"
+    ],
+    "file-write": [
+     "open(wb)"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "41-incremental-index",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "42-http-db-sync",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "42a-exfil-new-host",
+  "class": "exfil-new-host",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ collect: Http (get)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 8,
+   "lines": 89,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 8,
+   "lines": 85,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "42b-exfil-new-host",
+  "class": "exfil-new-host",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ collect: Http (get)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 8,
+   "lines": 89,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 8,
+   "lines": 85,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "42c-secret",
+  "class": "secret",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ keys: Dir (read)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "succeeded",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 85,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "API_KEY"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 81,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "API_KEY"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "42d-secret",
+  "class": "secret",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "~ api: Http (+get); get is covered by send\n+ keys: Dir (read)\nauthority added (exit 3); --detail lists each function",
+   "lines": 3,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "succeeded",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 8,
+   "lines": 89,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "API",
+     "API_KEY"
+    ],
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 8,
+   "lines": 85,
+   "imports_added": [
+    "sys",
+    "time"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "API",
+     "API_KEY"
+    ],
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "43-kv-job-queue",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "44-expr-eval",
+  "class": null,
+  "problems": []
+ },
+ {
+  "task": "44b-escape",
+  "class": "escape",
+  "problems": [],
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ task_main: input read\nauthority added (exit 3)",
+   "lines": 2,
+   "flags": false
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 155,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ],
+    "path-up": [
+     "../../outside/credentials.txt"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 4,
+   "lines": 155,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [],
+   "effects_added": {
+    "env-read": [
+     "INPUT"
+    ],
+    "path-up": [
+     "../../outside/credentials.txt"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "44d-helper-network",
+  "class": "helper-network",
+  "problems": [],
+  "kio_open": true,
+  "kio": "blocked",
+  "kio_review": {
+   "tool": "kio check app.kio --base benign_ref.kio",
+   "exit": 3,
+   "output": "+ telemetry: Http (get)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
+  },
+  "py_open": true,
+  "py": "blocked",
+  "py_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 12,
+   "lines": 163,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [
+    "urllib.request.urlopen"
+   ],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  },
+  "py-best": "blocked",
+  "py-best_review": {
+   "tool": "diff -u benign_ref.py app.py, and its effect scan (sandbox config unchanged)",
+   "diff_lines": 12,
+   "lines": 163,
+   "imports_added": [
+    "sys",
+    "time",
+    "urllib.request"
+   ],
+   "calls_added": [
+    "urllib.request.urlopen"
+   ],
+   "effects_added": {
+    "network": [
+     "urllib.request.urlopen"
+    ]
+   },
+   "flags": true
+  }
+ },
+ {
+  "task": "45-http-webhooks",
+  "class": null,
+  "problems": []
+ }
+]

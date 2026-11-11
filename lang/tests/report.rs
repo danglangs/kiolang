@@ -210,10 +210,13 @@ fn diff(old: &[(&str, &str)], new: &[(&str, &str)]) -> lang::AuthorityDiff {
 /// The diff with these grant and function lines.
 fn want(grants: &[&str], funcs: &[&str], added: bool) -> lang::AuthorityDiff {
     let own = |ls: &[&str]| ls.iter().map(|l| l.to_string()).collect();
+    // No line here carries a covered gain, so a grant line adds when it shows a `+`.
+    let grant_added = grants.iter().any(|l| l.starts_with('+') || l.contains("(+"));
     lang::AuthorityDiff {
         grants: own(grants),
         funcs: own(funcs),
         added,
+        grant_added,
     }
 }
 
@@ -395,4 +398,172 @@ fn main(log: Log, stripe: Hmac, now: Clock) { let _w = log.write(receive(stripe,
             "+ receive: stripe verify, now now_ms",
         ]
     );
+}
+
+/// A call of each capability method on `x`, for the coverage tests (P6).
+fn call(ty: &str, m: &str) -> String {
+    let args = match (ty, m) {
+        ("Dir", "create" | "write") => r#""a", "x".to_bytes()"#,
+        ("Dir", "list") => r#""""#,
+        ("Dir", _) => r#""a""#,
+        ("Http", "get") => r#""/""#,
+        ("Http", "send") => r#""POST", "/", [], "x".to_bytes(), 0"#,
+        ("Http", "send_all") => "[]",
+        ("Kv", "set") => r#""k", "v".to_bytes()"#,
+        ("Kv", "swap") => r#""k", None, None"#,
+        ("Kv", "scan") => r#""", None, 10"#,
+        ("Kv", "add") => r#""k", 1"#,
+        ("Kv", "keys") => r#""""#,
+        ("Kv", _) => r#""k""#,
+        ("Db", "transaction") => "[], []",
+        ("Db", _) => r#""select 1", []"#,
+        ("Hmac", "sign") => r#""m".to_bytes()"#,
+        ("Hmac", "verify") => r#""m".to_bytes(), "m".to_bytes()"#,
+        ("WsSend", "text") => r#""hi""#,
+        ("WsSend", "binary") => r#""hi".to_bytes()"#,
+        ("WsSend", "close") => "1000",
+        _ => panic!("no call for {ty}.{m}"),
+    };
+    format!("let _r = x.{m}({args});")
+}
+
+fn main_calling(ty: &str, m: &str) -> String {
+    format!("fn main(x: {ty}) {{ {} }}", call(ty, m))
+}
+
+fn covers(ty: &str, by: &str, m: &str) -> bool {
+    lang::COVERS
+        .iter()
+        .any(|(t, n, b)| *t == ty && *n == m && b.contains(&by))
+}
+
+#[test]
+fn diff_covered_gain_adds_nothing_and_covering_gain_does() {
+    for (ty, m, by) in lang::COVERS {
+        for c in *by {
+            // Swapping `c` for `m`, which `c` covers: shown, not added.
+            let got = diff(&[("a.kio", &main_calling(ty, c))], &[("a.kio", &main_calling(ty, m))]);
+            let line = format!("~ x: {ty} (+{m} -{c}); {m} is covered by {c}");
+            assert_eq!(got.grants, [line.as_str()], "{ty}.{m} by {c}");
+            assert_eq!(
+                got.funcs,
+                [
+                    format!("+ main: x {m}; {m} is covered by {c}"),
+                    format!("- main: x {c}")
+                ]
+            );
+            assert!(!got.added && !got.grant_added, "{line}");
+            // Swapping `m` for `c`: added unless `m` covers `c` too.
+            let got = diff(&[("a.kio", &main_calling(ty, m))], &[("a.kio", &main_calling(ty, c))]);
+            let back = covers(ty, m, c);
+            assert_eq!((got.added, got.grant_added), (!back, !back), "{ty}.{c} after {m}");
+        }
+    }
+}
+
+#[test]
+fn diff_mixed_line_adds_the_uncovered_gain() {
+    let old = r#"fn main(out: Dir) { let _r = out.write("a", "x".to_bytes()); }"#;
+    let new = r#"fn main(out: Dir) { let _r = out.create("a", "x".to_bytes()); let _s = out.remove("b"); }"#;
+    let got = diff(&[("a.kio", old)], &[("a.kio", new)]);
+    assert_eq!(
+        got.grants,
+        ["~ out: Dir (+create +remove -write); create is covered by write"]
+    );
+    assert_eq!(
+        got.funcs,
+        [
+            "+ main: out create remove; create is covered by write",
+            "- main: out write"
+        ]
+    );
+    assert!(got.added && got.grant_added);
+}
+
+#[test]
+fn diff_covered_gain_beside_the_covering_method() {
+    // The base still reaches `read` and now also `exists`: covered, nothing lost.
+    let old = r#"fn main(d: Dir) { let _r = d.read("a"); }"#;
+    let new = r#"fn main(d: Dir) { let _r = d.read("a"); let _e = d.exists("a"); }"#;
+    let got = diff(&[("a.kio", old)], &[("a.kio", new)]);
+    assert_eq!(got.grants, ["~ d: Dir (+exists); exists is covered by read"]);
+    assert!(!got.added);
+}
+
+#[test]
+fn diff_function_lines_use_that_functions_base_methods() {
+    // `save` swaps `write` for `create`: covered. `log_it` gains `create` on a parameter whose
+    // base only read: added, though `main` (through `save`) reached `write`.
+    let old = r#"
+fn save(o: Dir) { let _r = o.write("a", "x".to_bytes()); }
+fn log_it(o: Dir) { let _r = o.read("a"); }
+fn main(out: Dir) { save(out); log_it(out); }
+"#;
+    let new = old
+        .replace(r#"o.write("a", "x".to_bytes())"#, r#"o.create("a", "x".to_bytes())"#)
+        .replace(
+            r#"o.read("a")"#,
+            r#"o.read("a"); let _c = o.create("b", "y".to_bytes())"#,
+        );
+    let got = diff(&[("a.kio", old)], &[("a.kio", &new)]);
+    assert_eq!(got.grants, ["~ out: Dir (+create -write); create is covered by write"]);
+    assert_eq!(
+        got.funcs,
+        [
+            "+ log_it: o create",
+            "+ main: out create; create is covered by write",
+            "- main: out write",
+            "+ save: o create; create is covered by write",
+            "- save: o write",
+        ]
+    );
+    assert!(got.added && !got.grant_added);
+}
+
+#[test]
+fn diff_function_line_renamed_parameter_is_not_covered() {
+    // Parameters match by name: `y` is new to `f`, so nothing in the base covers its gain.
+    let old = r#"fn f(x: Dir) { let _r = x.write("a", "x".to_bytes()); } fn main(d: Dir) { f(d); }"#;
+    let new = r#"fn f(y: Dir) { let _r = y.create("a", "x".to_bytes()); } fn main(d: Dir) { f(d); }"#;
+    let got = diff(&[("a.kio", old)], &[("a.kio", new)]);
+    assert_eq!(got.funcs[0], "+ f: y create");
+    assert!(got.added && !got.grant_added);
+}
+
+#[test]
+fn diff_new_grant_with_covered_methods_is_added() {
+    let got = diff(
+        &[("a.kio", "fn main() -> Int { 1 }")],
+        &[("a.kio", &main_calling("Dir", "create"))],
+    );
+    assert_eq!(got.grants, ["+ x: Dir (create)"]);
+    assert!(got.added && got.grant_added);
+}
+
+/// Every caps.wit method is classified in `COVERS`, once, and the table names only real
+/// methods: a new method must be placed before the diff can treat it.
+#[test]
+fn covers_lists_every_caps_method() {
+    let caps = common::caps();
+    let real: Vec<(String, String)> = caps
+        .caps
+        .iter()
+        .flat_map(|c| c.methods.iter().map(move |(m, _, _)| (c.name.clone(), m.clone())))
+        .collect();
+    for (ty, m) in &real {
+        let n = lang::COVERS.iter().filter(|(t, n, _)| t == ty && n == m).count();
+        assert_eq!(
+            n, 1,
+            "{ty}.{m} must appear once in lang::COVERS (covering or standalone)"
+        );
+    }
+    for (ty, m, by) in lang::COVERS {
+        assert!(!by.contains(m), "{ty}.{m} covers itself");
+        for x in std::iter::once(m).chain(by.iter()) {
+            assert!(
+                real.contains(&(ty.to_string(), x.to_string())),
+                "{ty}.{x} is not a caps method"
+            );
+        }
+    }
 }
