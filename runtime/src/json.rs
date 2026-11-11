@@ -541,6 +541,15 @@ fn quote(out: &mut Vec<u8>, s: &[u8]) {
 /// # Safety
 /// The module's contract; `k` is a `Str`; `none` is null or a `None` of `opt`.
 pub unsafe fn get(t: &Table, opt: u32, none: *mut Header, j: *mut Header, k: *mut Header) -> *mut Header {
+    // SAFETY: the caller's guarantee.
+    unsafe { obj::option(t, opt, none, get_opt(j, k)) }
+}
+
+/// `get`'s payload, a new reference, without the `Option` object (C8c1).
+///
+/// # Safety
+/// The module's contract; `k` is a `Str`.
+pub unsafe fn get_opt(j: *mut Header, k: *mut Header) -> Option<u64> {
     // SAFETY: the caller's guarantee; `k` outlives the probe.
     unsafe {
         let (v, x) = parts(j);
@@ -550,8 +559,7 @@ pub unsafe fn get(t: &Table, opt: u32, none: *mut Header, j: *mut Header, k: *mu
                 .map(Cell::get),
             _ => None,
         };
-        found.inspect(|&f| obj::inc(from_slot(f)));
-        obj::option(t, opt, none, found)
+        found.inspect(|&f| obj::inc(from_slot(f)))
     }
 }
 
@@ -560,6 +568,15 @@ pub unsafe fn get(t: &Table, opt: u32, none: *mut Header, j: *mut Header, k: *mu
 /// # Safety
 /// The module's contract; `none` is null or a `None` of `opt`.
 pub unsafe fn at(t: &Table, opt: u32, none: *mut Header, j: *mut Header, i: i64) -> *mut Header {
+    // SAFETY: the caller's guarantee.
+    unsafe { obj::option(t, opt, none, at_opt(j, i)) }
+}
+
+/// `at`'s payload, a new reference, without the `Option` object (C8c1).
+///
+/// # Safety
+/// The module's contract.
+pub unsafe fn at_opt(j: *mut Header, i: i64) -> Option<u64> {
     // SAFETY: the caller's guarantee.
     unsafe {
         let (v, x) = parts(j);
@@ -570,8 +587,7 @@ pub unsafe fn at(t: &Table, opt: u32, none: *mut Header, j: *mut Header, i: i64)
                 .copied(),
             _ => None,
         };
-        found.inspect(|&f| obj::inc(from_slot(f)));
-        obj::option(t, opt, none, found)
+        found.inspect(|&f| obj::inc(from_slot(f)))
     }
 }
 
@@ -584,9 +600,19 @@ pub unsafe fn at(t: &Table, opt: u32, none: *mut Header, j: *mut Header, i: i64)
 /// `None` of it.
 pub unsafe fn as_variant(t: &Table, opt: u32, none: *mut Header, j: *mut Header, want: u32) -> *mut Header {
     // SAFETY: the caller's guarantee.
+    unsafe { obj::option(t, opt, none, as_variant_opt(j, want)) }
+}
+
+/// `as_variant`'s payload (a new reference when it is an object) without the `Option` object
+/// (C8c1).
+///
+/// # Safety
+/// The module's contract.
+pub unsafe fn as_variant_opt(j: *mut Header, want: u32) -> Option<u64> {
+    // SAFETY: the caller's guarantee.
     unsafe {
         let (v, x) = parts(j);
-        let found = match v {
+        match v {
             _ if v == want => {
                 if matches!(v, STR | ARR | OBJ) {
                     obj::inc(from_slot(x));
@@ -595,7 +621,6 @@ pub unsafe fn as_variant(t: &Table, opt: u32, none: *mut Header, j: *mut Header,
             }
             NUM if want == FLOAT => Some((x as i64 as f64).to_bits()),
             _ => None,
-        };
-        obj::option(t, opt, none, found)
+        }
     }
 }

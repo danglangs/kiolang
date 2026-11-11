@@ -38,8 +38,8 @@ pub struct Statics<'m> {
     base: u32,
     literals: Vec<u8>,
     strs: HashMap<String, u32>,
-    /// The address of the pinned object of each (descriptor, payload-free variant) used.
-    pins: HashMap<(u32, u32), u32>,
+    /// The address of each enum descriptor's table of pinned variants (`pins`).
+    pins: HashMap<u32, u32>,
     /// The descriptor of each type that has one beyond the scalars, by the type's `Debug` text
     /// (`ir::Ty` has no `Hash`; its `Debug` is structural, so equal types have equal text).
     tys: HashMap<String, u32>,
@@ -164,17 +164,41 @@ impl<'m> Statics<'m> {
     }
 
     /// The address of the pinned object for variant `variant`, which has no payload, of enum
-    /// type `t`, added if new.
+    /// type `t`: its entry in the type's table (`pins`).
     pub fn pinned(&mut self, t: &Ty, variant: u32) -> u32 {
+        self.pins(t) + 16 * variant
+    }
+
+    /// The address of enum type `t`'s table of pinned variants, added if new: a 16-byte entry
+    /// per variant, in order, a pinned object `[u32::MAX][desc][variant][0]` for a payload-free
+    /// variant and zeros (never used: such a variant is allocated) for one with a payload.
+    /// Generated code boxes an unboxed enum's payload-free variant by indexing it (C8c1).
+    pub fn pins(&mut self, t: &Ty) -> u32 {
         let desc = self.desc(t);
-        if let Some(&a) = self.pins.get(&(desc, variant)) {
+        if let Some(&a) = self.pins.get(&desc) {
             return a;
         }
         let a = self.base + self.literals.len() as u32;
-        for w in [u32::MAX, desc, variant, 0] {
-            self.literals.extend(w.to_le_bytes());
+        let payloads: Vec<bool> = match t {
+            Ty::Option(_) => vec![false, true],
+            Ty::Result(..) => vec![true, true],
+            Ty::Enum(id) => self.m.enums[id.0 as usize]
+                .variants
+                .iter()
+                .map(|(_, ts)| !ts.is_empty())
+                .collect(),
+            t => unreachable!("{t:?} is not an enum"),
+        };
+        for (v, has_payload) in payloads.into_iter().enumerate() {
+            let words = match has_payload {
+                true => [0; 4],
+                false => [u32::MAX, desc, v as u32, 0],
+            };
+            for w in words {
+                self.literals.extend(w.to_le_bytes());
+            }
         }
-        self.pins.insert((desc, variant), a);
+        self.pins.insert(desc, a);
         a
     }
 

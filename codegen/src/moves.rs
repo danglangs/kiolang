@@ -14,11 +14,12 @@
 use lang::ir::{self, Expr, ExprKind, LocalId, Pat, PlaceStep, StmtKind};
 use std::collections::HashSet;
 
-/// The reads (`ExprKind::Local` nodes, by address) of `f` that may move.
-pub(crate) fn moves(f: &ir::Func, is_ptr: fn(&ir::Ty) -> bool) -> HashSet<*const Expr> {
+/// The reads (`ExprKind::Local` nodes, by address) of `f` that may move; `owns` says which
+/// types hold a reference.
+pub(crate) fn moves(f: &ir::Func, owns: &dyn Fn(&ir::Ty) -> bool) -> HashSet<*const Expr> {
     let mut a = Analysis {
         f,
-        is_ptr,
+        owns,
         moves: HashSet::new(),
         loops: Vec::new(),
     };
@@ -56,7 +57,7 @@ impl Live {
 
 struct Analysis<'f> {
     f: &'f ir::Func,
-    is_ptr: fn(&ir::Ty) -> bool,
+    owns: &'f dyn Fn(&ir::Ty) -> bool,
     moves: HashSet<*const Expr>,
     /// For each enclosing loop, innermost last: what is live at the end of a pass.
     loops: Vec<Live>,
@@ -191,7 +192,7 @@ impl Analysis<'_> {
     fn expr(&mut self, e: &Expr, live: &mut Live) {
         match &e.kind {
             ExprKind::Local(id) => {
-                if !live.contains(*id) && (self.is_ptr)(&e.ty) {
+                if !live.contains(*id) && (self.owns)(&e.ty) {
                     self.moves.insert(e);
                 }
                 live.insert(*id);
@@ -396,11 +397,11 @@ fn each_local_block(b: &ir::Block, f: &mut impl FnMut(LocalId, bool)) {
 /// drops or replaces the reference. Arguments for borrowed parameters are borrowed reads, so
 /// this is a fixpoint: every pointer parameter starts borrowed and loses it when its function
 /// reads it elsewhere, until nothing changes.
-pub(crate) fn borrowed(m: &ir::Module, is_ptr: fn(&ir::Ty) -> bool) -> Vec<Vec<bool>> {
+pub(crate) fn borrowed(m: &ir::Module, owns: &dyn Fn(&ir::Ty) -> bool) -> Vec<Vec<bool>> {
     let mut b: Vec<Vec<bool>> = m
         .funcs
         .iter()
-        .map(|f| f.locals[..f.params as usize].iter().map(|l| is_ptr(&l.ty)).collect())
+        .map(|f| f.locals[..f.params as usize].iter().map(|l| owns(&l.ty)).collect())
         .collect();
     loop {
         let mut changed = false;

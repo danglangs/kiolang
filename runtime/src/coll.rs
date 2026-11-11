@@ -219,6 +219,15 @@ pub unsafe fn map_keys(t: &Table, p: *mut Header, list_desc: u32) -> *mut Header
 /// `none` is null or a `None` of it.
 pub unsafe fn map_get(t: &Table, p: *mut Header, k: u64, option_desc: u32, none: *mut Header) -> *mut Header {
     // SAFETY: the caller's guarantee.
+    unsafe { obj::option(t, option_desc, none, map_lookup(t, p, k)) }
+}
+
+/// `m.get(k)`'s value, a new reference, without the `Option` object (C8c1); `k` as `map_get`'s.
+///
+/// # Safety
+/// `p` is a map; `k` is a key of its key type.
+pub unsafe fn map_lookup(t: &Table, p: *mut Header, k: u64) -> Option<u64> {
+    // SAFETY: the caller's guarantee.
     unsafe {
         let (key, value, hashed) = kv(t, p);
         let k = probe(key, k);
@@ -232,7 +241,7 @@ pub unsafe fn map_get(t: &Table, p: *mut Header, k: u64, option_desc: u32, none:
                 e.map(|(_, v)| v.get())
             }
         };
-        obj::option(t, option_desc, none, v.map(|v| share(t, value, v)))
+        v.map(|v| share(t, value, v))
     }
 }
 

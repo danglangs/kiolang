@@ -235,7 +235,16 @@ pub fn float_to_str(x: f64) -> *mut Header {
 /// The module's contract; `none` is null or a `None` of `opt`.
 pub unsafe fn parse_float(t: &Table, opt: u32, none: *mut Header, s: *mut Header) -> *mut Header {
     // SAFETY: the caller's guarantee.
-    unsafe { obj::option(t, opt, none, str_of(s).parse::<f64>().ok().map(f64::to_bits)) }
+    unsafe { obj::option(t, opt, none, parse_float_opt(s)) }
+}
+
+/// `parse_float`'s payload (the bits) without the `Option` object (C8c1).
+///
+/// # Safety
+/// The module's contract.
+pub unsafe fn parse_float_opt(s: *mut Header) -> Option<u64> {
+    // SAFETY: the caller's guarantee.
+    unsafe { str_of(s).parse::<f64>().ok().map(f64::to_bits) }
 }
 
 /// Offsets `a..b` as a range within `len`; `SliceBounds` unless `0 <= a <= b <= len`.
@@ -384,7 +393,16 @@ pub unsafe fn starts_with(s: *mut Header, prefix: *mut Header) -> bool {
 /// The module's contract; `none` is null or a `None` of `opt`.
 pub unsafe fn parse_int(t: &Table, opt: u32, none: *mut Header, s: *mut Header) -> *mut Header {
     // SAFETY: the caller's guarantee.
-    unsafe { obj::option(t, opt, none, str_of(s).parse::<i64>().ok().map(|n| n as u64)) }
+    unsafe { obj::option(t, opt, none, parse_int_opt(s)) }
+}
+
+/// `parse_int`'s payload without the `Option` object (C8c1).
+///
+/// # Safety
+/// The module's contract.
+pub unsafe fn parse_int_opt(s: *mut Header) -> Option<u64> {
+    // SAFETY: the caller's guarantee.
+    unsafe { str_of(s).parse::<i64>().ok().map(|n| n as u64) }
 }
 
 /// `Str.ends_with(suffix)`.
@@ -402,10 +420,16 @@ pub unsafe fn ends_with(s: *mut Header, suffix: *mut Header) -> bool {
 /// The module's contract; `none` is null or a `None` of `opt`.
 pub unsafe fn strip_prefix(t: &Table, opt: u32, none: *mut Header, s: *mut Header, p: *mut Header) -> *mut Header {
     // SAFETY: the caller's guarantee.
-    unsafe {
-        let r = str_of(s).strip_prefix(str_of(p));
-        obj::option(t, opt, none, r.map(|r| to_slot(new_str(r))))
-    }
+    unsafe { obj::option(t, opt, none, strip_prefix_opt(s, p)) }
+}
+
+/// `strip_prefix`'s payload, a new `Str`, without the `Option` object (C8c1).
+///
+/// # Safety
+/// The module's contract.
+pub unsafe fn strip_prefix_opt(s: *mut Header, p: *mut Header) -> Option<u64> {
+    // SAFETY: the caller's guarantee.
+    unsafe { str_of(s).strip_prefix(str_of(p)).map(|r| to_slot(new_str(r))) }
 }
 
 /// `Str.strip_suffix(p)`: an `Option<Str>` with descriptor `opt`; `none` as `obj::option`'s.
@@ -414,10 +438,16 @@ pub unsafe fn strip_prefix(t: &Table, opt: u32, none: *mut Header, s: *mut Heade
 /// The module's contract; `none` is null or a `None` of `opt`.
 pub unsafe fn strip_suffix(t: &Table, opt: u32, none: *mut Header, s: *mut Header, p: *mut Header) -> *mut Header {
     // SAFETY: the caller's guarantee.
-    unsafe {
-        let r = str_of(s).strip_suffix(str_of(p));
-        obj::option(t, opt, none, r.map(|r| to_slot(new_str(r))))
-    }
+    unsafe { obj::option(t, opt, none, strip_suffix_opt(s, p)) }
+}
+
+/// `strip_suffix`'s payload, a new `Str`, without the `Option` object (C8c1).
+///
+/// # Safety
+/// The module's contract.
+pub unsafe fn strip_suffix_opt(s: *mut Header, p: *mut Header) -> Option<u64> {
+    // SAFETY: the caller's guarantee.
+    unsafe { str_of(s).strip_suffix(str_of(p)).map(|r| to_slot(new_str(r))) }
 }
 
 /// `Str.find(sub)`: the byte offset of the first match, an `Option<Int>` with descriptor `opt`;
@@ -427,7 +457,16 @@ pub unsafe fn strip_suffix(t: &Table, opt: u32, none: *mut Header, s: *mut Heade
 /// The module's contract; `none` is null or a `None` of `opt`.
 pub unsafe fn find(t: &Table, opt: u32, none: *mut Header, s: *mut Header, sub: *mut Header) -> *mut Header {
     // SAFETY: the caller's guarantee.
-    unsafe { obj::option(t, opt, none, str_of(s).find(str_of(sub)).map(|i| i as u64)) }
+    unsafe { obj::option(t, opt, none, find_opt(s, sub)) }
+}
+
+/// `find`'s payload without the `Option` object (C8c1).
+///
+/// # Safety
+/// The module's contract.
+pub unsafe fn find_opt(s: *mut Header, sub: *mut Header) -> Option<u64> {
+    // SAFETY: the caller's guarantee.
+    unsafe { str_of(s).find(str_of(sub)).map(|i| i as u64) }
 }
 
 /// `Str.replace(from, to)`: every non-overlapping match, left to right; an empty `from`

@@ -44,6 +44,30 @@ fn registered() -> &'static Table<'static> {
     unsafe { &*TABLE.0.get() }
 }
 
+/// The payload of the last `_u` operation's `Option` result (C8c1), which generated code reads
+/// after the call.
+struct Scratch(UnsafeCell<u64>);
+
+// SAFETY: one thread, as `Registered`.
+unsafe impl Sync for Scratch {}
+
+static SCRATCH: Scratch = Scratch(UnsafeCell::new(0));
+
+/// The address of the 8-byte word the `_u` operations write an `Option`'s payload to. Codegen
+/// reads it from this body, which must stay a single `i32.const`.
+#[no_mangle]
+pub extern "C" fn rt_scratch() -> u32 {
+    SCRATCH.0.get().expose_provenance() as u32
+}
+
+/// An `Option` result unboxed (C8c1): 1 for `Some`, with the payload (owned, as the boxed
+/// result's would be) in the scratch word; 0 for `None`, with 0 there.
+fn unboxed(v: Option<u64>) -> u32 {
+    // SAFETY: one thread; the word is written here and read by generated code after the call.
+    unsafe { *SCRATCH.0.get() = v.unwrap_or(0) };
+    v.is_some() as u32
+}
+
 pub(crate) fn ptr(a: u32) -> *mut Header {
     core::ptr::with_exposed_provenance_mut(a as usize)
 }
@@ -576,6 +600,92 @@ pub unsafe extern "C" fn rt_map_remove(m: u32, k: i64) {
     // SAFETY: the group's contract.
     unsafe { coll::map_remove(table(), ptr(m), k as u64) }
 }
+
+// Unboxed `Option` results (C8c1): each `_u` operation is its boxed namesake without the
+// `Option` object, returning the tag and leaving the payload in `rt_scratch`'s word, so a hit
+// allocates nothing. The boxed exports stay.
+
+/// `m.get(k)`; `k` is an `Int` or a `Str` pointer.
+#[no_mangle]
+pub unsafe extern "C" fn rt_map_get_u(m: u32, k: i64) -> u32 {
+    // SAFETY: the group's contract.
+    unboxed(unsafe { coll::map_lookup(table(), ptr(m), k as u64) })
+}
+
+/// `l.pop()` on a unique list: the element moves into the payload.
+#[no_mangle]
+pub unsafe extern "C" fn rt_list_pop_u(l: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unboxed(unsafe { obj::list_mut(ptr(l)) }.pop())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_str_parse_int_u(s: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unboxed(unsafe { text::parse_int_opt(ptr(s)) })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_str_parse_float_u(s: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unboxed(unsafe { text::parse_float_opt(ptr(s)) })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_str_strip_prefix_u(s: u32, p: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unboxed(unsafe { text::strip_prefix_opt(ptr(s), ptr(p)) })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_str_strip_suffix_u(s: u32, p: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unboxed(unsafe { text::strip_suffix_opt(ptr(s), ptr(p)) })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_str_find_u(s: u32, sub: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unboxed(unsafe { text::find_opt(ptr(s), ptr(sub)) })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_float_to_int_u(x: f64) -> u32 {
+    unboxed(float::to_int_opt(x))
+}
+
+/// `j.get(k)`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_json_get_u(j: u32, k: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unboxed(unsafe { json::get_opt(ptr(j), ptr(k)) })
+}
+
+/// `j.at(i)`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_json_at_u(j: u32, i: i64) -> u32 {
+    // SAFETY: the group's contract.
+    unboxed(unsafe { json::at_opt(ptr(j), i) })
+}
+
+macro_rules! json_as_u {
+    ($($name:ident: $variant:ident),*) => {$(
+        #[no_mangle]
+        pub unsafe extern "C" fn $name(j: u32) -> u32 {
+            // SAFETY: the group's contract.
+            unboxed(unsafe { json::as_variant_opt(ptr(j), json::$variant) })
+        }
+    )*};
+}
+
+json_as_u!(
+    rt_json_as_str_u: STR,
+    rt_json_as_int_u: NUM,
+    rt_json_as_float_u: FLOAT,
+    rt_json_as_bool_u: BOOL,
+    rt_json_as_list_u: ARR,
+    rt_json_as_map_u: OBJ
+);
 
 fn index_trap(site: u32, e: coll::Error) -> ! {
     let coll::Error::Index { index, len } = e;

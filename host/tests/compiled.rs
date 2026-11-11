@@ -1914,6 +1914,127 @@ fn hash_map_grows_and_compacts() {
     assert_eq!(value(src), "key 2990key 29991020012999");
 }
 
+/// C8c1: an unboxed enum (`Option`, `Result`, a one-slot user enum) in every position: returned,
+/// passed owned and borrowed, stored in a list, a field and a map, captured, compared, displayed
+/// by `main`, matched, `?`, nested (`Option<Option<Int>>`, `Some(None)`), assigned, popped,
+/// iterated, and from every runtime operation that gives one. Each run checks no object is left.
+#[test]
+fn unboxed_enums_in_every_position() {
+    let src = r#"struct P { o: Option<Str>, r: Result<Int, Str> }
+        enum J { Null, N(Int), S(Str), L(List<J>) }
+        enum C { Red, Green }
+        fn some(s: Str) -> Option<Str> { Some(s + "!") }
+        fn pass(o: Option<Str>, d: Str) -> Str { o.unwrap_or(d) }
+        fn lent(o: Option<Str>) -> Int { match o { Some(s) => s.len(), None => -1 } }
+        fn q(o: Option<Str>) -> Option<Int> { let s = o?; Some(s.len()) }
+        fn r(x: Result<Str, Int>) -> Result<Int, Int> { let s = x?; Ok(s.len()) }
+        fn show(j: J) -> Str { match j { J::Null => "null", J::N(n) => n.to_str(), J::S(s) => s, J::L(xs) => xs.map(show).join(",") } }
+        fn main() -> Str {
+            let k = "k" + "";
+            let a = some(k);
+            let b: Option<Str> = None;
+            let p = P { o: a, r: Err("bad" + "") };
+            let xs = [a, b, p.o, Some("z" + "")];
+            let mut m: Map<Str, Option<Str>> = Map::new();
+            m.insert("x", a);
+            m.insert("y", b);
+            let f = |d: Str| pass(a, d) + pass(b, d);
+            let bad: Result<Int, Str> = Err("bad");
+            let eq = if a == xs[0] && a != b && p.r == bad && xs[1] == b { "eq" } else { "ne" };
+            let n = q(a).unwrap_or(-1) + q(b).unwrap_or(-1) + r(Ok("abc" + "")).unwrap_or(0) + r(Err(7)).unwrap_or(0);
+            let nested: Option<Option<Int>> = Some(None);
+            let deep = match nested { Some(Some(x)) => x, Some(None) => -2, None => -3 };
+            let deeper = match Some(Some(5)) { Some(Some(x)) => x, _ => 0 };
+            let mut c = Some("c" + "");
+            c = None;
+            c = Some("d" + "");
+            let mut ys = ["p" + "", "q" + ""];
+            let popped = ys.pop().unwrap_or("-") + ys.pop().unwrap_or("-") + ys.pop().unwrap_or("-");
+            let mut count = 0;
+            for o in xs { if o.is_some() { count += 1; } }
+            let j = J::L([J::N(1), J::S("s" + ""), J::Null, J::L([])]);
+            let js = [J::N(2), J::Null];
+            let colors = [C::Red, C::Green, C::Red];
+            let ceq = if C::Red == C::Green || colors[0] != C::Red { "x" } else { "" };
+            let parsed = "12".parse_int().unwrap_or(0) + "x".parse_int().unwrap_or(-100)
+                + "a-b".find("-").unwrap_or(-1) + "ab".strip_prefix("a").unwrap_or("?").len()
+                + "1.5".parse_float().unwrap_or(0.0).to_int().unwrap_or(0);
+            let ok: Result<Str, Str> = Ok("o" + "");
+            let err: Result<Str, Str> = Err("e" + "");
+            let conv = ok.ok().unwrap_or("-") + err.err().unwrap_or("-") + ok.err().unwrap_or("-")
+                + a.ok_or("none").unwrap_or("-") + b.ok_or("none" + "").unwrap_or_else(|e| e + "!")
+                + a.map(|s| s + s).unwrap_or("-") + b.and_then(|s| Some(s)).unwrap_or("-")
+                + err.map_err(|e| e + e).unwrap_or_else(|e| e);
+            let contains = if xs.contains(None) && !xs.contains(Some("w")) { "has" } else { "lacks" };
+            f("D") + eq + n.to_str() + deep.to_str() + deeper.to_str() + c.unwrap_or("-")
+                + popped + count.to_str() + show(j) + show(js[0]) + show(js[1]) + colors.len().to_str() + ceq
+                + lent(p.o).to_str() + lent(xs[1]).to_str() + parsed.to_str() + conv + contains
+                + m.get("x").unwrap_or(None).unwrap_or("-") + m.get("y").unwrap_or(Some("w")).unwrap_or("-")
+                + m.get("z").unwrap_or(Some("w")).unwrap_or("-")
+        }"#;
+    assert_eq!(
+        value(src),
+        "k!Deq4-25dqp-31,s,null,2null32-1-85oe-k!none!k!k!-eehask!-w"
+    );
+    // Displayed by `main`: boxed for the runtime, every variant shape.
+    assert_eq!(value("fn main() -> Option<Int> { Some(3) }"), "Some(3)");
+    assert_eq!(value(r#"fn main() -> Result<Str, Int> { Err(4) }"#), "4");
+    assert_eq!(
+        value(r#"fn main() -> Result<Option<Str>, Str> { Ok(Some("s" + "")) }"#),
+        r#"Ok(Some("s"))"#
+    );
+    assert_eq!(value("enum C { Red, Green } fn main() -> C { C::Green }"), "C::Green");
+    assert_eq!(
+        value("enum J { N(Int), S(Str) } fn main() -> J { J::S(\"x\" + \"\") }"),
+        r#"J::S("x")"#
+    );
+    assert_eq!(value("fn main() -> Option<Option<Int>> { Some(None) }"), "Some(None)");
+    assert_eq!(
+        outcome(r#"fn main() -> Result<Int, Str> { let e: Result<Int, Str> = Err("no" + ""); let x = e?; Ok(x) }"#),
+        ("no".into(), true)
+    );
+}
+
+/// C8c1: an unboxed value whose variants carry a pointer or a scalar (`Result<Str, Int>`, a
+/// `Json`-like enum) is dropped by its tag, so an `Int` payload is never treated as a pointer,
+/// through every exit: scope end, `return`, `break`, `?`, reassignment, and a move.
+#[test]
+fn mixed_payload_enums_drop_by_tag() {
+    let src = r#"enum J { Null, N(Int), S(Str) }
+        fn pick(i: Int) -> Result<Str, Int> { if i % 2 == 0 { Ok("s" + i.to_str()) } else { Err(i * 1000003) } }
+        fn early(i: Int) -> Int {
+            let a = pick(i);
+            let b = pick(i + 1);
+            let j = if i == 0 { J::N(77) } else { J::S("t" + "") };
+            if i == 0 { return 1; }
+            match a { Ok(s) => s.len(), Err(n) => { let c = pick(3); n % 7 } }
+        }
+        fn run(i: Int) -> Result<Int, Int> {
+            let a = pick(i);
+            let mut j = J::N(i * 99991);
+            j = J::S("x" + "");
+            j = J::Null;
+            let r = pick(i + 1)?;
+            Ok(r.len() + early(i) + a.unwrap_or("").len())
+        }
+        fn main() -> Int {
+            let mut total = 0;
+            for i in 0..6 {
+                total += run(i).unwrap_or(-1);
+                if i == 4 { let z = pick(2); break; }
+            }
+            let moved = pick(1);
+            let m2 = moved;
+            total + m2.unwrap_or("").len()
+        }"#;
+    assert_eq!(value(src), "10");
+    let src2 = src.replace(
+        "fn main() -> Int {",
+        "fn main() -> Int { let keep = pick(1); let kept = keep;",
+    );
+    assert_eq!(value(&src2), "10");
+}
+
 /// 100,000 `Str` keys with one hash, inserted and looked up both ways within a time bound
 /// (under a second each in a debug build). With chains only (`TREEIFY` raised), compiled runs
 /// out of its 20 G fuel and the interpreter does not finish in 100 s.

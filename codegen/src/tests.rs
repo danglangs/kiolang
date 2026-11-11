@@ -168,6 +168,23 @@ fn the_runtime_exports_every_operation() {
         "rt_json_as_bool",
         "rt_json_as_list",
         "rt_json_as_map",
+        "rt_scratch",
+        "rt_map_get_u",
+        "rt_list_pop_u",
+        "rt_str_parse_int_u",
+        "rt_str_parse_float_u",
+        "rt_str_strip_prefix_u",
+        "rt_str_strip_suffix_u",
+        "rt_str_find_u",
+        "rt_float_to_int_u",
+        "rt_json_get_u",
+        "rt_json_at_u",
+        "rt_json_as_str_u",
+        "rt_json_as_int_u",
+        "rt_json_as_float_u",
+        "rt_json_as_bool_u",
+        "rt_json_as_list_u",
+        "rt_json_as_map_u",
     ];
     let missing: Vec<_> = ops.iter().filter(|op| !rt.exports.contains_key(**op)).collect();
     assert!(missing.is_empty(), "{missing:?}");
@@ -363,7 +380,7 @@ fn read(s: Str, xs: List<Int>, n: Int, p: P, f: fn(Int) -> Int, o: Option<Str>) 
     for x in xs { m += x; }
     s.len() + xs[0] + m + p.name.len() + f(1) + k.len() + if s == "a" { 1 } else { 0 }
 }
-fn opt(o: Option<Int>) -> Option<Int> { let x = o?; Some(x) }
+fn opt(o: Option<Str>) -> Option<Str> { let x = o?; Some(x) }
 fn stored(s: Str) -> List<Str> { [s] }
 fn returned(s: Str) -> Str { s }
 fn moved(xs: List<Int>) -> List<Int> { let mut ys = xs; ys.push(1); ys }
@@ -377,7 +394,8 @@ fn keep(s: Str) -> Int { stored(s).len() }
 fn main() -> Int { 0 }
 "#,
     );
-    let lent = moves::borrowed(&m, is_ptr);
+    let sh = Shapes::new(&m);
+    let lent = moves::borrowed(&m, &|t| sh.owns(t));
     let of = |name: &str| lent[m.funcs.iter().position(|f| f.name == name).unwrap()].clone();
     assert_eq!(of("read"), [true, true, false, true, true, true]);
     assert_eq!(of("opt"), [true]);

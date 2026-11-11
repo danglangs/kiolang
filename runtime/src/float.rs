@@ -39,8 +39,12 @@ pub fn round(x: f64) -> f64 {
 /// # Safety
 /// `none` is null or a `None` of `opt`.
 pub unsafe fn to_int(t: &Table, opt: u32, none: *mut Header, x: f64) -> *mut Header {
-    const LIMIT: f64 = 9_223_372_036_854_775_808.0; // 2^63
-    let n = (-LIMIT..LIMIT).contains(&x).then_some(x as i64 as u64);
     // SAFETY: the caller's guarantee.
-    unsafe { obj::option(t, opt, none, n) }
+    unsafe { obj::option(t, opt, none, to_int_opt(x)) }
+}
+
+/// `to_int`'s payload without the `Option` object (C8c1).
+pub fn to_int_opt(x: f64) -> Option<u64> {
+    const LIMIT: f64 = 9_223_372_036_854_775_808.0; // 2^63
+    (-LIMIT..LIMIT).contains(&x).then_some(x as i64 as u64)
 }
