@@ -56,7 +56,7 @@ kio: `out` is granted `:ro` but the program can write it (`out write`)
 
 `--http api=api.example` grants one host over HTTPS, GET only; `--http api=http://127.0.0.1:9000` allows plain HTTP for local testing. `--http-methods api=POST,PUT,PATCH,DELETE` adds methods (also `HEAD`, `OPTIONS`).
 
-The report names each call's method when it is a literal or a constant: `api send PUT`, `api send_all POST` (every `HttpRequest` literal's `method` in the program), `api send *` when the checker cannot see it (a variable, a parameter, a computed string). A program whose report shows a literal method the grant does not allow is refused at startup, under `--listen` and by `kio check --grants`; a `*` is checked per request, as every request is.
+The report names each call's method when it is a literal or a constant: `api send PUT`, `api send_all POST` (every request that call sends is a POST: its argument is built from `HttpRequest` literals, named functions that build them (`xs.map(f)` too) and locals filled with those), `api send *` when the checker cannot see it (a variable, a parameter, a computed string). A program whose report shows a literal method the grant does not allow, or capitals that are not a method (`"PUTX"`), is refused at startup, under `--listen` and by `kio check --grants`; a `*` is checked per request, as every request is.
 
 ```
 $ kio run push.kio --http crm=api.crm.example --http-methods crm=POST    # main : crm send PUT
@@ -286,7 +286,7 @@ $ kio check app.kio --base old/app.kio --detail
 authority added (exit 3)
 ```
 
-A gained method is not new authority when a method the base reached on the same grant already covers it: `write` covers `create`; `read` covers `exists`; `send V` and `send_all V` cover each other, `send *` and `send_all *` cover every method and `get`, `send GET` covers `get` (a new method is never covered by another, and `*` never by literal ones: `~ api: Http (+send PUT -send_all POST)` adds); `scan` covers `get` and `keys`; `exec` and `transaction` cover each other; `sign` covers `verify`; `WsSend`'s `text` and `binary` cover each other and `close`. The line says so and adds nothing; the other direction (`create` to `write`) is added. A function line applies the rule against that function's base methods on the same parameter (same name and type). A function new to the diff counts in full, so a covered method moved into a new helper shows on that helper's line as added.
+A gained method is not new authority when a method the base reached on the same grant already covers it: `write` covers `create`; `read` covers `exists`; `send V` and `send_all V` cover each other (`send_all V`: every request that call sends is V, so a request built but never sent, or sent on another grant, covers nothing), `send *` and `send_all *` cover every method and `get`, `send GET` covers `get` (a new method is never covered by another, and `*` never by literal ones: `~ api: Http (+send PUT -send_all POST)` adds); `scan` covers `get` and `keys`; `exec` and `transaction` cover each other; `sign` covers `verify`; `WsSend`'s `text` and `binary` cover each other and `close`. The line says so and adds nothing; the other direction (`create` to `write`) is added. A function line applies the rule against that function's base methods on the same parameter (same name and type). A function new to the diff counts in full, so a covered method moved into a new helper shows on that helper's line as added.
 
 ```
 $ kio check app.kio --base old/app.kio

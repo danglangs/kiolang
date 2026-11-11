@@ -16,7 +16,7 @@ pub mod sort;
 
 pub use check::{check, check_files, CapTable, Program};
 pub use eval::{run, Caps, Key, RunErr, Value};
-pub use report::{authority, report, report_diff, Authority, AuthorityDiff, COVERS};
+pub use report::{authority, main_http_verbs, report, report_diff, Authority, AuthorityDiff, COVERS, HTTP_METHODS};
 
 /// Byte offsets `start..end` into source file number `file`; 0 is the root.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]

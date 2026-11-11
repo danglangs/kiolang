@@ -649,25 +649,112 @@ fn http_send_all_struct_literals() {
         http(&send_all(&[r#""POST""#, r#""PUT""#])),
         "main : api send_all POST PUT"
     );
-    // Built in a helper and mapped, as E3's task 35 does: still every literal the program has.
-    let mapped = format!(
-        "fn put(p: Str) -> HttpRequest {{ {} }} fn main(api: Http) {{ let _a = api.send_all([\"/a\"].map(put)); }}",
+    // Built in a named function and mapped, as E3's task 35 does.
+    let put = format!(
+        "fn put(p: Str) -> HttpRequest {{ {} }}",
         req(r#""PUT""#).replace(r#"path: "/""#, "path: p")
     );
+    let mapped = format!("{put} fn main(api: Http) {{ let _a = api.send_all([\"/a\"].map(put)); }}");
     assert_eq!(rep(&mapped), "main : api send_all PUT\nput  : none");
+    // Called in the list, through a second named function.
+    let called = format!(
+        "{put} fn mk() -> HttpRequest {{ put(\"/b\") }} fn main(api: Http) {{ let _a = api.send_all([mk(), {}]); }}",
+        req(r#""POST""#)
+    );
+    assert_eq!(rep(&called), "main : api send_all POST PUT\nmk   : none\nput  : none");
     // One unseen method, or none at all, is `*`.
     let unseen = format!(r#"let m = "PO" + "ST"; {}"#, send_all(&[r#""PUT""#, "m"]));
     assert_eq!(http(&unseen), "main : api send_all *");
     assert_eq!(http("let _a = api.send_all([]);"), "main : api send_all *");
-    // An assignment to a request's `method` counts as a literal does.
+}
+
+#[test]
+fn http_send_all_follows_locals() {
+    let (post, del) = (req(r#""POST""#), req(r#""DELETE""#));
+    // What E3's models write: an empty list, pushed to.
+    let pushed = format!("let mut reqs: List<HttpRequest> = []; reqs.push({post}); let _a = api.send_all(reqs);");
+    assert_eq!(http(&pushed), "main : api send_all POST");
+    // A request in a local; a list in a local of another local.
+    let local = format!("let r = {del}; let rs = [r]; let _a = api.send_all(rs);");
+    assert_eq!(http(&local), "main : api send_all DELETE");
+    // Every way into the list counts: `xs = ..`, `xs[i] = ..`, `xs[i].method = ..`, push.
+    for (change, want) in [
+        (format!("reqs = [{del}];"), "DELETE POST"),
+        (format!("reqs[0] = {del};"), "DELETE POST"),
+        (r#"reqs[0].method = "PATCH";"#.to_string(), "PATCH POST"),
+        (r#"reqs[0].method = "PA" + "TCH";"#.to_string(), "*"),
+        ("reqs[0].path = \"/b\";".to_string(), "POST"),
+        ("reqs = reqs.filter(|r: HttpRequest| r.path != \"\");".to_string(), "*"),
+    ] {
+        let src = format!("let mut reqs = [{post}]; {change} let _a = api.send_all(reqs);");
+        assert_eq!(http(&src), format!("main : api send_all {want}"), "{change}");
+    }
+    // A copy changed after it was taken does not change the original.
+    let copy =
+        format!("let mut a = [{post}]; let mut b = a; b.push({del}); let _a = api.send_all(a); let _b = b.len();");
+    assert_eq!(http(&copy), "main : api send_all POST");
+    // A parameter, a loop variable or a pattern of that name is `*`.
+    let param = format!("fn go(api: Http, reqs: List<HttpRequest>) {{ let _a = api.send_all(reqs); }} fn main(api: Http) {{ go(api, [{post}]); }}");
+    assert_eq!(rep(&param), "go   : api send_all *\nmain : api send_all *");
+    let from_param = format!("fn go(api: Http, rs: List<HttpRequest>) {{ let reqs = rs; let _a = api.send_all(reqs); }} fn main(api: Http) {{ go(api, [{post}]); }}");
+    assert_eq!(rep(&from_param), "go   : api send_all *\nmain : api send_all *");
+    let looped = format!("for reqs in [[{post}]] {{ let _a = api.send_all(reqs); }}");
+    assert_eq!(http(&looped), "main : api send_all *");
+    let shadowed = format!("let reqs = [{post}]; let d: Option<List<HttpRequest>> = None; if let Some(reqs) = d {{ let _a = api.send_all(reqs); }} let _b = api.send_all(reqs);");
+    assert_eq!(http(&shadowed), "main : api send_all *");
+    // In a named function, an assignment to a request's `method` counts as a literal does.
     let set = |v: &str| {
         format!(
-            "let mut r = {}; r.method = {v}; let _a = api.send_all([r]);",
+            "fn mk() -> HttpRequest {{ let mut r = {}; r.method = {v}; r }} fn main(api: Http) {{ let _a = api.send_all([mk()]); }}",
             req(r#""POST""#)
         )
     };
-    assert_eq!(http(&set(r#""PATCH""#)), "main : api send_all PATCH POST");
-    assert_eq!(http(&set(r#""PA" + "TCH""#)), "main : api send_all *");
+    assert_eq!(rep(&set(r#""PATCH""#)), "main : api send_all PATCH POST\nmk   : none");
+    assert_eq!(rep(&set(r#""PA" + "TCH""#)), "main : api send_all *\nmk   : none");
+    // A function that takes a request, or a function, could pass any method through.
+    for (param, arg) in [
+        ("f: fn(Int) -> Int", "|n: Int| n"),
+        ("rs: List<HttpRequest>", "[]"),
+        ("o: Option<HttpRequest>", "None"),
+    ] {
+        let src = format!(
+            "fn mk({param}) -> HttpRequest {{ {} }} fn main(api: Http) {{ let _a = api.send_all([mk({arg})]); }}",
+            req(r#""PUT""#)
+        );
+        assert_eq!(rep(&src), "main : api send_all *\nmk   : none", "{param}");
+    }
+    let through = format!(
+        "fn keep(r: HttpRequest) -> HttpRequest {{ r }} fn main(api: Http) {{ let _a = api.send_all([{}].map(keep)); }}",
+        req(r#""PUT""#)
+    );
+    assert_eq!(rep(&through), "keep : none\nmain : api send_all *");
+    // A request built but never sent covers nothing.
+    let dead = format!("let _r = {}; {}", req(r#""DELETE""#), send_all(&[r#""POST""#]));
+    assert_eq!(http(&dead), "main : api send_all POST");
+}
+
+#[test]
+fn http_send_all_verbs_are_per_call() {
+    // Two grants: each `send_all` shows its own verbs.
+    let body = format!(
+        "{} {}",
+        send_all(&[r#""POST""#]).replace("api.", "a."),
+        send_all(&[r#""PUT""#]).replace("api.", "b.").replace("_a =", "_b =")
+    );
+    let src = format!("fn main(a: Http, b: Http) {{ {body} }}");
+    assert_eq!(rep(&src), "main : a send_all POST, b send_all PUT");
+    // The 35d attack on the first grant adds.
+    let attack = send(r#""PUT""#).replace("api.", "a.");
+    let new = format!("fn main(a: Http, b: Http) {{ {body} {attack} }}");
+    let got = diff(&[("a.kio", &src)], &[("a.kio", &new)]);
+    assert_eq!(got.grants, ["~ a: Http (+send PUT)"]);
+    assert!(got.added);
+}
+
+#[test]
+fn http_capital_literal_is_its_verb() {
+    // Not an HTTP method: the report shows it, and the host refuses it at start.
+    assert_eq!(http(&send(r#""PUTX""#)), "main : api send PUTX");
 }
 
 #[test]

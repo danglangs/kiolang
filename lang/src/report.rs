@@ -257,7 +257,6 @@ pub fn authority(p: &Program) -> Authority {
             uses.insert((name.clone(), d.name.clone()), BTreeSet::new());
         }
     }
-    let requests = request_verbs(p);
     // Sets only grow and are bounded by the method names, so this stops.
     let mut grown = true;
     while grown {
@@ -273,8 +272,9 @@ pub fn authority(p: &Program) -> Authority {
                             let http = matches!(p.types.get(&recv.span), Some(Ty::Cap(t)) if t == "Http");
                             match (http, m.as_str(), args.first()) {
                                 (true, "send", Some(v)) => found.push((d.to_string(), format!("send {}", verb(p, v)))),
-                                (true, "send_all", _) => {
-                                    found.extend(requests.iter().map(|v| (d.to_string(), format!("send_all {v}"))))
+                                (true, "send_all", Some(l)) => {
+                                    let verbs = send_all_verbs(p, f, l);
+                                    found.extend(verbs.iter().map(|v| (d.to_string(), format!("send_all {v}"))))
                                 }
                                 _ => found.push((d.to_string(), m.clone())),
                             }
@@ -344,7 +344,11 @@ fn type_str(t: &Type) -> String {
 /// `*` too and a report's words stay unambiguous.
 fn verb(p: &Program, e: &Expr) -> String {
     let lit = match &e.kind {
-        ExprKind::Name(_) | ExprKind::Module(..) => p.const_uses.get(&e.span).map(|k| &p.consts[k].value.kind),
+        ExprKind::Name(_) | ExprKind::Module(..) => p
+            .item_uses
+            .get(&e.span)
+            .and_then(|k| p.consts.get(k))
+            .map(|c| &c.value.kind),
         k => Some(k),
     };
     match lit {
@@ -353,52 +357,262 @@ fn verb(p: &Program, e: &Expr) -> String {
     }
 }
 
-/// Every verb an `HttpRequest` of the program may carry: the `method` of each `HttpRequest`
-/// literal and each assignment to one's `method`, the only ways to make or change one. Any
-/// `send_all` sends only these (#220); `*` when one is not visible, or there are none.
-fn request_verbs(p: &Program) -> BTreeSet<String> {
-    let is_request = |e: &Expr| matches!(p.types.get(&e.span), Some(Ty::Struct(n, _)) if n == "HttpRequest");
-    let mut verbs = BTreeSet::new();
-    for f in p.funcs.values() {
-        walk_block(&f.body, &mut |n| match n {
-            Node::Expr(e) => {
-                if let (ExprKind::StructLit(_, fields, _), true) = (&e.kind, is_request(e)) {
-                    verbs.extend(fields.iter().filter(|(f, _)| f == "method").map(|(_, v)| verb(p, v)));
-                }
-            }
-            Node::Assign(target, op, value) => {
-                if let ExprKind::Field(base, f) = &target.kind {
-                    if f == "method" && is_request(base) {
-                        verbs.insert(if op == "=" { verb(p, value) } else { "*".into() });
-                    }
-                }
-            }
-        });
-    }
-    if verbs.is_empty() || verbs.contains("*") {
+/// The verbs a `send_all` of `arg`, in function `home`, may send (#220): what `list_verbs`
+/// finds, or `*` if any is unseen or there is none.
+fn send_all_verbs(p: &Program, home: &Fn, arg: &Expr) -> BTreeSet<String> {
+    let mut cx = Cx {
+        p,
+        home,
+        verbs: BTreeSet::new(),
+        fns: BTreeSet::new(),
+        locals: BTreeSet::new(),
+    };
+    cx.list_verbs(arg);
+    if cx.verbs.is_empty() || cx.verbs.contains("*") {
         return BTreeSet::from(["*".to_string()]);
     }
-    verbs
+    cx.verbs
 }
 
-/// What `walk_block` visits: each expression, and each assignment `target op value` before the
-/// expressions in it.
+/// The verbs found for one `send_all`, and the functions and locals already followed.
+struct Cx<'a> {
+    p: &'a Program,
+    home: &'a Fn,
+    verbs: BTreeSet<String>,
+    fns: BTreeSet<&'a str>,
+    locals: BTreeSet<(&'a str, bool)>,
+}
+
+impl<'a> Cx<'a> {
+    fn star(&mut self) {
+        self.verbs.insert("*".into());
+    }
+
+    /// A `List<HttpRequest>`: a list literal of requests, `xs.map(f)` with `f` a named function,
+    /// or a local of `home`; `*` for anything else.
+    fn list_verbs(&mut self, e: &'a Expr) {
+        match &e.kind {
+            ExprKind::List(items) => items.iter().for_each(|e| self.request_verbs(e)),
+            ExprKind::Method(_, m, args) if m == "map" && args.len() == 1 => match named_fn(self.p, &args[0]) {
+                Some(f) => fn_verbs(self.p, f, &mut self.verbs, &mut self.fns),
+                None => self.star(),
+            },
+            ExprKind::Name(n) if !self.p.item_uses.contains_key(&e.span) => self.local_verbs(n, true),
+            _ => self.star(),
+        }
+    }
+
+    /// An `HttpRequest`: a literal's `method` (or its base's), what a named function returns, or
+    /// a local of `home`; `*` for anything else.
+    fn request_verbs(&mut self, e: &'a Expr) {
+        match &e.kind {
+            ExprKind::StructLit(_, fields, base) => match (fields.iter().find(|(f, _)| f == "method"), base) {
+                (Some((_, v)), _) => _ = self.verbs.insert(verb(self.p, v)),
+                (None, Some(b)) => self.request_verbs(b),
+                (None, None) => self.star(),
+            },
+            ExprKind::Call(callee, _) => match named_fn(self.p, callee) {
+                Some(f) => fn_verbs(self.p, f, &mut self.verbs, &mut self.fns),
+                None => self.star(),
+            },
+            ExprKind::Name(n) if !self.p.item_uses.contains_key(&e.span) => self.local_verbs(n, false),
+            _ => self.star(),
+        }
+    }
+
+    /// Local `name` of `home` (a `List<HttpRequest>` if `list`, else an `HttpRequest`): every
+    /// `let name = ..`, assignment to it or into it, and `name.push(..)` in `home`, whichever
+    /// variable of that name each is. `*` if a parameter or a pattern, `for` or closure binds the
+    /// name, or another method that could add a request is called on it. Values are copied, so
+    /// nothing else can change it.
+    fn local_verbs(&mut self, name: &'a str, list: bool) {
+        if !self.locals.insert((name, list)) {
+            return;
+        }
+        if self.home.params.iter().any(|d| d.name == name) {
+            return self.star();
+        }
+        enum Src<'a> {
+            Whole(&'a Expr),
+            Elem(&'a Expr),
+            Verb(&'a Expr),
+            Star,
+        }
+        let p = self.p;
+        let mut found = Vec::new();
+        walk_block(&self.home.body, &mut |n| match n {
+            Node::Let(n, init) if n == name => found.push(Src::Whole(init)),
+            Node::Bind(n) if n == name => found.push(Src::Star),
+            Node::Assign(target, op, value) if root(target) == Some(name) => {
+                let src = match &target.kind {
+                    _ if op != "=" => Src::Star,
+                    ExprKind::Name(_) => Src::Whole(value),
+                    ExprKind::Index(b, _) if list && matches!(b.kind, ExprKind::Name(_)) => Src::Elem(value),
+                    ExprKind::Field(_, f) if f == "method" => Src::Verb(value),
+                    _ => return,
+                };
+                found.push(src);
+            }
+            Node::Expr(e) => {
+                let ExprKind::Method(recv, m, args) = &e.kind else {
+                    return;
+                };
+                if !matches!(&recv.kind, ExprKind::Name(n) if n == name) {
+                    return;
+                }
+                let carry = |a: &Expr| p.types.get(&a.span).is_none_or(|t| carries(p, t, &mut BTreeSet::new()));
+                match (m.as_str(), args.as_slice()) {
+                    ("push", [v]) if list => found.push(Src::Elem(v)),
+                    _ if args.iter().any(carry) => found.push(Src::Star),
+                    _ => {}
+                }
+            }
+            _ => {}
+        });
+        for src in found {
+            match src {
+                Src::Whole(e) if list => self.list_verbs(e),
+                Src::Whole(e) | Src::Elem(e) => self.request_verbs(e),
+                Src::Verb(v) => _ = self.verbs.insert(verb(p, v)),
+                Src::Star => self.star(),
+            }
+        }
+    }
+}
+
+/// The local a place (`x`, `x.f`, `x[i].f`) is rooted at.
+fn root(e: &Expr) -> Option<&str> {
+    match &e.kind {
+        ExprKind::Name(n) => Some(n),
+        ExprKind::Field(b, _) | ExprKind::Index(b, _) => root(b),
+        _ => None,
+    }
+}
+
+/// Adds the verbs of every `HttpRequest` function `k` may return: its body's `HttpRequest`
+/// literals and assignments to a `method`, and those of every named function it names. An
+/// `HttpRequest` can come only from those or from a parameter: `*` if a parameter could carry
+/// one (an `HttpRequest`, a function or a type parameter, or a type holding one).
+fn fn_verbs<'a>(p: &'a Program, k: &'a str, verbs: &mut BTreeSet<String>, seen: &mut BTreeSet<&'a str>) {
+    if !seen.insert(k) {
+        return;
+    }
+    if p.sigs[k].params.iter().any(|t| carries(p, t, &mut BTreeSet::new())) {
+        verbs.insert("*".into());
+        return;
+    }
+    let mut named = Vec::new();
+    walk_block(&p.funcs[k].body, &mut |n| match n {
+        Node::Expr(e) => {
+            if let (ExprKind::StructLit(_, fields, _), true) = (&e.kind, is_request(p, e)) {
+                verbs.extend(fields.iter().filter(|(f, _)| f == "method").map(|(_, v)| verb(p, v)));
+            }
+            named.extend(named_fn(p, e));
+        }
+        Node::Assign(target, op, value) => {
+            if let ExprKind::Field(base, f) = &target.kind {
+                if f == "method" && is_request(p, base) {
+                    verbs.insert(if op == "=" { verb(p, value) } else { "*".into() });
+                }
+            }
+        }
+        Node::Let(..) | Node::Bind(_) => {}
+    });
+    for g in named {
+        fn_verbs(p, g, verbs, seen);
+    }
+}
+
+fn is_request(p: &Program, e: &Expr) -> bool {
+    matches!(p.types.get(&e.span), Some(Ty::Struct(n, _)) if n == "HttpRequest")
+}
+
+/// The function `e` names (called or as a value), as the checker resolved it.
+fn named_fn<'a>(p: &'a Program, e: &Expr) -> Option<&'a str> {
+    p.item_uses
+        .get(&e.span)
+        .map(String::as_str)
+        .filter(|k| p.funcs.contains_key(*k))
+}
+
+/// Whether a value of type `t` could hold an `HttpRequest` or make one (a function, or a type
+/// parameter that may be either).
+fn carries(p: &Program, t: &Ty, seen: &mut BTreeSet<String>) -> bool {
+    match t {
+        Ty::Fn(..) | Ty::Param(_) => true,
+        Ty::Struct(k, args) | Ty::Enum(k, args) => {
+            if k == "HttpRequest" || args.iter().any(|a| carries(p, a, seen)) {
+                return true;
+            }
+            if !seen.insert(k.clone()) {
+                return false;
+            }
+            let fields = p.fields.get(k).into_iter().flatten().map(|(_, t)| t);
+            let payloads = p.variants.get(k).into_iter().flatten().flat_map(|(_, ts)| ts);
+            fields.chain(payloads).any(|t| carries(p, t, seen))
+        }
+        Ty::Option(a) | Ty::List(a) => carries(p, a, seen),
+        Ty::Result(a, b) | Ty::Map(a, b) | Ty::HashMap(a, b) => carries(p, a, seen) || carries(p, b, seen),
+        _ => false,
+    }
+}
+
+/// `main`'s literal HTTP verbs, as `(parameter, verb)` in report order: what the host checks
+/// against `--http-methods` at start (P7). `*` is left to the per-request check.
+pub fn main_http_verbs(a: &Authority) -> Vec<(String, String)> {
+    let main = a.funcs.get("main").map_or(&[][..], Vec::as_slice);
+    let mut out = Vec::new();
+    for (d, ms) in main {
+        for m in ms {
+            if let (_, Some(v)) = split_verb(m) {
+                if v != "*" {
+                    out.push((d.clone(), v.to_string()));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The HTTP methods a request may use; the host refuses any other as `Invalid`.
+pub const HTTP_METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
+
+/// What `walk_block` visits: each expression; each assignment `target op value`, and each
+/// `let name = init`, before the expressions in it; and each other name bound (a pattern, a
+/// `for` variable, a closure parameter).
 enum Node<'a> {
     Expr(&'a Expr),
     Assign(&'a Expr, &'a str, &'a Expr),
+    Let(&'a str, &'a Expr),
+    Bind(&'a str),
+}
+
+/// Calls `visit` with `Node::Bind` for each name `pat` binds.
+fn bind_pat<'a>(pat: &'a Pat, visit: &mut dyn FnMut(Node<'a>)) {
+    match &pat.kind {
+        PatKind::Name(n) => visit(Node::Bind(n)),
+        PatKind::Variant(_, _, ps) | PatKind::Or(ps) => ps.iter().for_each(|q| bind_pat(q, visit)),
+        PatKind::Module(_, q) => bind_pat(q, visit),
+        PatKind::Wild | PatKind::Int(_) | PatKind::Str(_) | PatKind::Bool(_) => {}
+    }
 }
 
 /// Calls `visit` on every expression in the block, outer before inner.
-fn walk_block(b: &Block, visit: &mut dyn FnMut(Node)) {
+fn walk_block<'a>(b: &'a Block, visit: &mut dyn FnMut(Node<'a>)) {
     for s in &b.stmts {
         match &s.kind {
-            StmtKind::Let { init: e, .. } | StmtKind::Return(Some(e)) | StmtKind::Expr(e) => walk(e, visit),
+            StmtKind::Let { name, init, .. } => {
+                visit(Node::Let(name, init));
+                walk(init, visit);
+            }
+            StmtKind::Return(Some(e)) | StmtKind::Expr(e) => walk(e, visit),
             StmtKind::Assign { target, op, value } => {
                 visit(Node::Assign(target, op, value));
                 walk(target, visit);
                 walk(value, visit);
             }
-            StmtKind::LetElse { init, els, .. } => {
+            StmtKind::LetElse { pat, init, els, .. } => {
+                bind_pat(pat, visit);
                 walk(init, visit);
                 walk_block(els, visit);
             }
@@ -407,7 +621,8 @@ fn walk_block(b: &Block, visit: &mut dyn FnMut(Node)) {
                 walk(cond, visit);
                 walk_block(body, visit);
             }
-            StmtKind::For { iter, body, .. } => {
+            StmtKind::For { name, iter, body } => {
+                visit(Node::Bind(name));
                 match iter {
                     Iter::List(e) => walk(e, visit),
                     Iter::Range(a, b) => {
@@ -425,18 +640,18 @@ fn walk_block(b: &Block, visit: &mut dyn FnMut(Node)) {
     }
 }
 
-fn walk(e: &Expr, visit: &mut dyn FnMut(Node)) {
+fn walk<'a>(e: &'a Expr, visit: &mut dyn FnMut(Node<'a>)) {
     visit(Node::Expr(e));
     match &e.kind {
         // A closure's body is charged to the function it is written in. It can reach no
         // capability (the checker refuses a capture of one), so this only keeps the report an
         // upper bound should that rule ever fail.
         // `web::Row { b: d.read("a") }` is a module path around a struct literal: walk into it.
-        ExprKind::Unary(_, a)
-        | ExprKind::Try(a)
-        | ExprKind::Field(a, _)
-        | ExprKind::Closure(_, a)
-        | ExprKind::Module(_, a) => walk(a, visit),
+        ExprKind::Unary(_, a) | ExprKind::Try(a) | ExprKind::Field(a, _) | ExprKind::Module(_, a) => walk(a, visit),
+        ExprKind::Closure(ps, a) => {
+            ps.iter().for_each(|q| visit(Node::Bind(&q.name)));
+            walk(a, visit);
+        }
         ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) => {
             walk(a, visit);
             walk(b, visit);
@@ -448,7 +663,8 @@ fn walk(e: &Expr, visit: &mut dyn FnMut(Node)) {
                 walk(els, visit);
             }
         }
-        ExprKind::IfLet(_, s, then, els) => {
+        ExprKind::IfLet(pat, s, then, els) => {
+            bind_pat(pat, visit);
             walk(s, visit);
             walk_block(then, visit);
             if let Some(els) = els {
@@ -471,7 +687,10 @@ fn walk(e: &Expr, visit: &mut dyn FnMut(Node)) {
         }
         ExprKind::Match(s, arms) => {
             walk(s, visit);
-            arms.iter().for_each(|a| walk(&a.body, visit));
+            for a in arms {
+                bind_pat(&a.pat, visit);
+                walk(&a.body, visit);
+            }
         }
         ExprKind::Int(_)
         | ExprKind::Float(_)

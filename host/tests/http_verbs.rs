@@ -114,3 +114,65 @@ fn the_35d_shape_exits_3_under_check_base() {
     let (_, out, _) = kio(&["check", &new]);
     assert_eq!(out, "main : api send PUT send_all POST\n");
 }
+
+const REQ: &str = r#"HttpRequest { method: "M", path: "/", headers: [], body: "x".to_bytes(), timeout_ms: 0 }"#;
+
+/// `g.send_all([HttpRequest { method: "M", .. }])` for grant `g` and verb `m`.
+fn all(g: &str, m: &str) -> String {
+    format!(
+        "let _{g} = {g}.send_all([{}]);",
+        REQ.replace("\"M\"", &format!("\"{m}\""))
+    )
+}
+
+#[test]
+fn each_send_all_has_its_own_verbs() {
+    // The 35d attack on a second grant: `a` PUTs, as only `b` did before.
+    let t = tempfile::tempdir().unwrap();
+    let body = format!("{} {}", all("a", "POST"), all("b", "PUT"));
+    let old = write(t.path(), "old.kio", &format!("fn main(a: Http, b: Http) {{ {body} }}"));
+    let attack = r#"let _x = a.send("PUT", "/exfil", [], "s".to_bytes(), 0);"#;
+    let new = write(
+        t.path(),
+        "new.kio",
+        &format!("fn main(a: Http, b: Http) {{ {body} {attack} }}"),
+    );
+    let want = "~ a: Http (+send PUT)\nauthority added (exit 3); --detail lists each function\n";
+    assert_eq!(kio(&["check", &new, "--base", &old]), (3, want.into(), String::new()));
+    // Each grant needs only its own method to start.
+    let b = format!(
+        "fn main(a: Http, b: Http) -> Int {{ {} {} 0 }}",
+        all("a", "POST"),
+        all("b", "DELETE")
+    );
+    let prog = write(t.path(), "b.kio", &b);
+    let (a_, b_) = ("a=http://127.0.0.1:9", "b=http://127.0.0.1:9");
+    let flags = [
+        "--http",
+        a_,
+        "--http",
+        b_,
+        "--http-methods",
+        "a=POST",
+        "--http-methods",
+        "b=DELETE",
+    ];
+    let (code, out, err) = kio(&[&["run", &prog][..], &flags].concat());
+    assert_eq!((code, out.as_str()), (0, "0\n"), "{err}");
+    let (code, _, err) = kio(&[&["run", &prog][..], &flags[..6]].concat());
+    assert_eq!(
+        (code, err.as_str()),
+        (2, "kio: `b` sends DELETE but `--http b` grants only GET\n  hint: add `--http-methods b=DELETE`, or remove the call\n")
+    );
+}
+
+#[test]
+fn a_capital_literal_that_is_not_a_method_is_refused() {
+    let t = tempfile::tempdir().unwrap();
+    starts(
+        t.path(),
+        &send(r#""PUTX""#),
+        &["--http-methods", "api=PUT"],
+        Some("kio: `api` sends PUTX, not an HTTP method\n  hint: a method is one of GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS\n"),
+    );
+}

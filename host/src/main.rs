@@ -735,15 +735,20 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
     }
     // A literal verb the grant does not allow is refused (P7); one the report shows as `*` is
     // checked per request, as every request is.
-    for (name, origin) in &https {
-        let verbs = kio_host::http_verbs_in_report(&report, name);
-        let Some(v) = verbs
-            .iter()
-            .find(|v| kio_host::METHODS.contains(&v.as_str()) && !origin.allows(v))
-        else {
+    for (name, v) in lang::main_http_verbs(&lang::authority(&checked)) {
+        if !lang::HTTP_METHODS.contains(&v.as_str()) {
+            return fail(format!(
+                "`{name}` sends {v}, not an HTTP method\n  hint: a method is one of {}",
+                lang::HTTP_METHODS.join(", ")
+            ));
+        }
+        let Some((_, origin)) = https.iter().find(|(n, _)| *n == name) else {
             continue;
         };
-        return fail(match http_methods.iter().find(|(n, _)| n == name) {
+        if origin.allows(&v) {
+            continue;
+        }
+        return fail(match http_methods.iter().find(|(n, _)| *n == name) {
             Some((_, list)) => format!(
                 "`{name}` sends {v} but `--http-methods {name}={list}` grants only {}\n  hint: add {v} to --http-methods, or remove the call",
                 list.to_ascii_uppercase()
