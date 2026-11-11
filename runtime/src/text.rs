@@ -177,13 +177,37 @@ pub unsafe fn append(t: &Table, a: *mut Header, b: *mut Header) -> *mut Header {
     }
 }
 
+/// The capacity of a `Bytes` that `to_bytes` makes from a `Str` under 16 bytes: `push`'s first
+/// growth, so one `push` does not regrow it (C8c4).
+pub const BYTES_START: usize = 16;
+
 /// `Str.to_bytes()`.
 ///
 /// # Safety
 /// The module's contract.
 pub unsafe fn to_bytes(s: *mut Header) -> *mut Header {
     // SAFETY: the caller's guarantee.
-    unsafe { new_bytes(obj::bytes(s)) }
+    let b = unsafe { obj::bytes(s) };
+    obj::new_bytes_cap(desc::BYTES, b, b.len().max(BYTES_START))
+}
+
+/// `Str.to_bytes()` taking `s`'s reference (C8c4): if it is the only one, `s` becomes the
+/// `Bytes` (the layouts are one: only the descriptor word changes); otherwise (shared or
+/// pinned) the result is `to_bytes`'s copy and `s` is dropped.
+///
+/// # Safety
+/// The module's contract.
+pub unsafe fn to_bytes_owned(t: &Table, s: *mut Header) -> *mut Header {
+    // SAFETY: the caller's guarantee; with count 1 nothing else sees the descriptor change.
+    unsafe {
+        if (*s).rc == 1 {
+            (*s).desc = desc::BYTES;
+            return s;
+        }
+        let b = to_bytes(s);
+        obj::dec(t, s);
+        b
+    }
 }
 
 /// `Bytes.to_str()`; `InvalidUtf8` unless the bytes are UTF-8.
@@ -195,6 +219,28 @@ pub unsafe fn to_str(b: *mut Header) -> Result<*mut Header, Err> {
     match core::str::from_utf8(unsafe { obj::bytes(b) }) {
         Ok(s) => Ok(new_str(s)),
         Err(_) => Err(Err::InvalidUtf8),
+    }
+}
+
+/// `Bytes.to_str()` taking `b`'s reference (C8c4): the bytes are checked as `to_str`'s; if the
+/// reference is the only one, `b` becomes the `Str`, otherwise the result is a copy and `b` is
+/// dropped. On `InvalidUtf8` the reference stays the caller's (which traps).
+///
+/// # Safety
+/// The module's contract.
+pub unsafe fn to_str_owned(t: &Table, b: *mut Header) -> Result<*mut Header, Err> {
+    // SAFETY: the caller's guarantee; with count 1 nothing else sees the descriptor change.
+    unsafe {
+        if core::str::from_utf8(obj::bytes(b)).is_err() {
+            return Err(Err::InvalidUtf8);
+        }
+        if (*b).rc == 1 {
+            (*b).desc = desc::STR;
+            return Ok(b);
+        }
+        let s = obj::new_bytes(desc::STR, obj::bytes(b));
+        obj::dec(t, b);
+        Ok(s)
     }
 }
 

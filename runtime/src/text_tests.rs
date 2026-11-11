@@ -249,6 +249,95 @@ fn bytes_and_str_conversions() {
     assert_eq!(obj::live(), base);
 }
 
+/// The capacity of a `Str` or `Bytes`.
+fn cap(p: *mut Header) -> u32 {
+    // SAFETY: a live `Str` or `Bytes`, `cap` at 12.
+    unsafe { *obj::field::<u32>(p, 12) }
+}
+
+#[test]
+fn conversions_adopt_an_only_reference() {
+    let _g = lock();
+    let base = obj::live();
+    // SAFETY: live objects of the right kinds, each reference passed once.
+    unsafe {
+        // Count 1: the object itself, bytes and count kept, the descriptor rewritten.
+        let a = s("h\u{e9}llo");
+        let b = text::to_bytes_owned(&T, a);
+        assert_eq!((b, (*b).rc, (*b).desc), (a, 1, desc::BYTES));
+        assert_eq!(obj::bytes(b), "h\u{e9}llo".as_bytes());
+        let c = text::to_str_owned(&T, b).unwrap();
+        assert_eq!((c, (*c).rc, (*c).desc), (a, 1, desc::STR));
+        assert_eq!(take(c), "h\u{e9}llo");
+
+        // Shared: a copy, the operand keeps its bytes and loses the passed reference.
+        let a = s("shared");
+        obj::inc(a);
+        let b = text::to_bytes_owned(&T, a);
+        assert_ne!(b, a);
+        assert_eq!(((*a).rc, (*a).desc, (*b).desc), (1, desc::STR, desc::BYTES));
+        assert_eq!(obj::bytes(b), b"shared");
+        obj::inc(b);
+        let c = text::to_str_owned(&T, b).unwrap();
+        assert_ne!(c, b);
+        assert_eq!(((*b).rc, (*b).desc, (*c).desc), (1, desc::BYTES, desc::STR));
+        assert_eq!(take(c), "shared");
+        dec(b);
+        assert_eq!(take(a), "shared");
+
+        // Pinned: a copy, the static untouched.
+        let p = s("lit");
+        (*p).rc = obj::PINNED;
+        let b = text::to_bytes_owned(&T, p);
+        assert_ne!(b, p);
+        assert_eq!(((*p).rc, (*p).desc), (obj::PINNED, desc::STR));
+        dec(b);
+        (*p).rc = 1;
+        dec(p);
+
+        // Invalid UTF-8 errors and leaves the reference, and the descriptor, to the caller.
+        let bad = text::new_bytes(&[0x68, 0xff]);
+        assert_eq!(text::to_str_owned(&T, bad), Err(Err::InvalidUtf8));
+        assert_eq!(((*bad).rc, (*bad).desc), (1, desc::BYTES));
+        dec(bad);
+    }
+    assert_eq!(obj::live(), base);
+}
+
+#[test]
+fn to_bytes_of_a_short_str_has_room_for_16() {
+    let _g = lock();
+    let base = obj::live();
+    // SAFETY: live objects of the right kinds.
+    unsafe {
+        for (x, want) in [
+            ("", 16),
+            ("abc", 16),
+            ("fifteen bytes..", 16),
+            ("sixteen bytes...", 16),
+            ("seventeen bytes..", 17),
+        ] {
+            let a = s(x);
+            let b = text::to_bytes(a);
+            assert_eq!((text::len(b), cap(b)), (x.len() as i64, want), "{x:?}");
+            // One `push` stays in the object.
+            let c = text::push(&T, b, 1).unwrap();
+            assert_eq!(c == b, x.len() < 16, "{x:?}");
+            dec(c);
+            dec(a);
+        }
+        // The copy path of the owned conversion too.
+        let p = s("");
+        (*p).rc = obj::PINNED;
+        let b = text::to_bytes_owned(&T, p);
+        assert_eq!(cap(b), 16);
+        dec(b);
+        (*p).rc = 1;
+        dec(p);
+    }
+    assert_eq!(obj::live(), base);
+}
+
 #[test]
 fn concat_eq_int_to_str() {
     let _g = lock();

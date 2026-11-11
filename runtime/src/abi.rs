@@ -211,6 +211,13 @@ pub unsafe extern "C" fn rt_str_to_bytes(s: u32) -> u32 {
     unsafe { addr(text::to_bytes(ptr(s))) }
 }
 
+/// `s.to_bytes()` taking `s`'s reference: `s` itself when that was its only one (C8c4).
+#[no_mangle]
+pub unsafe extern "C" fn rt_str_to_bytes_owned(s: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unsafe { addr(text::to_bytes_owned(table(), ptr(s))) }
+}
+
 /// `desc` is `List<Str>`. Error: an empty separator; `a` and `b` are 0.
 #[no_mangle]
 pub unsafe extern "C" fn rt_str_split(desc: u32, s: u32, sep: u32, site: u32) -> u32 {
@@ -360,6 +367,17 @@ pub unsafe extern "C" fn rt_bytes_len(b: u32) -> i64 {
 pub unsafe extern "C" fn rt_bytes_to_str(b: u32, site: u32) -> u32 {
     // SAFETY: the group's contract.
     match unsafe { text::to_str(ptr(b)) } {
+        Ok(p) => addr(p),
+        Err(_) => rt_trap(site, 0, 0),
+    }
+}
+
+/// `b.to_str()` taking `b`'s reference: `b` itself when that was its only one (C8c4). Error:
+/// invalid UTF-8; `a` and `b` are 0.
+#[no_mangle]
+pub unsafe extern "C" fn rt_bytes_to_str_owned(b: u32, site: u32) -> u32 {
+    // SAFETY: the group's contract.
+    match unsafe { text::to_str_owned(table(), ptr(b)) } {
         Ok(p) => addr(p),
         Err(_) => rt_trap(site, 0, 0),
     }

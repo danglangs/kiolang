@@ -2542,6 +2542,21 @@ impl<'m> FuncGen<'_, 'm> {
             ExprKind::Builtin(Builtin::ResultOk, recv, _) => self.result_variant(recv, 0, &e.ty),
             ExprKind::Builtin(Builtin::ResultErr, recv, _) => self.result_variant(recv, 1, &e.ty),
             ExprKind::Builtin(Builtin::OptionOkOr, recv, args) => self.ok_or(recv, &args[0], &e.ty),
+            // A conversion takes an operand that holds a reference of its own (a last use, a
+            // temporary), and the runtime reuses the object when that is its only one (C8c4); a
+            // local read that is not a move is borrowed as by any runtime operation.
+            ExprKind::Builtin(b @ (Builtin::StrToBytes | Builtin::BytesToStr), recv, _)
+                if recv.ty != Ty::Never && (!matches!(recv.kind, ExprKind::Local(_)) || self.moves_out(recv)) =>
+            {
+                self.expr(recv);
+                if *b == Builtin::BytesToStr {
+                    let site = self.site(e.span, "invalid UTF-8");
+                    self.sink().i32_const(site as i32);
+                    self.call_rt("rt_bytes_to_str_owned");
+                } else {
+                    self.call_rt("rt_str_to_bytes_owned");
+                }
+            }
             ExprKind::Builtin(b, recv, args) => {
                 use Pre::{Desc, Nothing};
                 // An `Option` result comes unboxed from a `_u` operation (`rt_scratch`); any
