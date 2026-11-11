@@ -117,7 +117,16 @@ class Proxy(BaseHTTPRequestHandler):
         pass
 
 
-srv = ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
+class Server(ThreadingHTTPServer):
+    # HTTPServer.server_bind resolves the bound address with socket.getfqdn, a reverse DNS
+    # lookup that hangs for tens of seconds on GitHub's macOS runners. The name is unused.
+    def server_bind(self):
+        self.socket.bind(self.server_address)
+        self.server_address = self.socket.getsockname()
+        self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
+
+
+srv = Server(("127.0.0.1", 0), Proxy)
 srv.daemon_threads = True
 print(srv.server_address[1], flush=True)
 srv.serve_forever()
