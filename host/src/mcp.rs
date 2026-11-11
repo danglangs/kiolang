@@ -5,7 +5,13 @@ use crate::locate;
 use serde_json::{json, Value};
 use std::io::{BufRead, Read};
 
-const PRIMER: &str = include_str!("../../docs/language.md");
+/// Idioms first, then the reference: E4 measured 45/45 first try (43 with the reference alone)
+/// and 18% lower cost (open question 218).
+const PRIMER: &str = concat!(
+    include_str!("../../docs/primer.md"),
+    "\n\n",
+    include_str!("../../docs/language.md")
+);
 const VERSION: &str = "2025-06-18";
 /// Source `kio_check` accepts per call, names and sources together: checking runs in the host,
 /// outside any sandbox, so its input is bounded (with the checker's own budgets, open question 58).

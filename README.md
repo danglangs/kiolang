@@ -234,7 +234,7 @@ v0, working end to end.
 
 ## Use from an agent
 
-`kio mcp` is an MCP server on stdio with two tools: `kio_primer` (the language guide) and `kio_check` (errors come back as `{file, line, message, hint}`). There is no run tool: grants are the operator's decision.
+`kio mcp` is an MCP server on stdio with two tools: `kio_primer` (idioms, then the language reference) and `kio_check` (errors come back as `{file, line, message, hint}`). There is no run tool: grants are the operator's decision.
 
 ```json
 { "mcpServers": { "kio": { "command": "kio", "args": ["mcp"] } } }
