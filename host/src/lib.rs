@@ -803,6 +803,136 @@ pub fn open_dir(path: &Path) -> io::Result<RealDir> {
     RealDir::open_ambient_dir(path, ambient_authority())
 }
 
+/// A file's device and inode. A granted directory is compared by the identity of the handle
+/// opened for it: the path it was opened by may name another directory by now.
+pub type FileId = (u64, u64);
+
+/// The identity of the opened directory `dir`.
+pub fn dir_id(dir: &RealDir) -> io::Result<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    let m = dir.try_clone()?.into_std_file().metadata()?;
+    Ok((m.dev(), m.ino()))
+}
+
+/// The identity of what `path` names, symlinks followed.
+pub fn path_id(path: &Path) -> io::Result<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(path)?;
+    Ok((m.dev(), m.ino()))
+}
+
+/// The identities of every directory `path` is reached through: each ancestor of the path as
+/// given (made absolute; from its last `..` on), and for each name in the symlink chain from it,
+/// each ancestor of that name in its resolved directory, and of the file the chain ends at.
+/// Empty when nothing is at `path`.
+pub fn reached_through(path: &Path) -> Vec<FileId> {
+    let Ok(mut name) = std::path::absolute(path) else {
+        return vec![];
+    };
+    let mut places = vec![];
+    // 40 links, as Linux follows: a longer chain does not resolve.
+    for _ in 0..40 {
+        if std::fs::symlink_metadata(&name).is_err() {
+            break;
+        }
+        places.push(name.clone());
+        let Some((dir, file)) = name
+            .parent()
+            .and_then(|p| std::fs::canonicalize(p).ok())
+            .zip(name.file_name())
+        else {
+            break;
+        };
+        let named = dir.join(file);
+        places.push(named.clone());
+        let Ok(target) = std::fs::read_link(&named) else {
+            break;
+        };
+        name = dir.join(target);
+    }
+    if !places.is_empty() {
+        places.extend(std::fs::canonicalize(path).ok());
+    }
+    // Up to a `..`, a name is not one the file is in: `d/../app.kio` is not in `d`.
+    let ancestors = places.iter().flat_map(|p| {
+        let comps: Vec<_> = p.components().collect();
+        let up = comps
+            .iter()
+            .rposition(|c| *c == std::path::Component::ParentDir)
+            .unwrap_or(0);
+        p.ancestors().skip(1).take_while(move |a| a.components().count() > up)
+    });
+    ancestors.filter_map(|a| path_id(a).ok()).collect()
+}
+
+/// Whether `dir` is a directory `place` is reached through (`reached_through`).
+pub fn within(place: &Path, dir: FileId) -> bool {
+    reached_through(place).contains(&dir)
+}
+
+/// The directories each of a program's `files` (root first, then each module beside it, as
+/// `Kio::run_files` takes them) is reached through, with its name as given. A name with nothing
+/// on disk at it has none.
+pub fn source_places(files: &[(String, String)]) -> Vec<(FileId, String)> {
+    let Some((root, _)) = files.first() else {
+        return vec![];
+    };
+    let dir = Path::new(root).parent().unwrap_or(".".as_ref());
+    let paths = std::iter::once(Path::new(root).to_path_buf()).chain(files[1..].iter().map(|(n, _)| dir.join(n)));
+    paths
+        .flat_map(|p| {
+            reached_through(&p)
+                .into_iter()
+                .map(move |id| (id, p.display().to_string()))
+        })
+        .collect()
+}
+
+/// Why a writable `Dir` grant is refused, if one is: it is a directory one of the program's
+/// files is reached through (`places`, from `source_places`), so the program could rewrite
+/// itself for the next run. `dirs` is each grant's `(name, path, identity)`, the path for the
+/// message only (empty when unknown); a `:ro` grant (one of `read_only`) cannot write.
+pub fn source_refusal(
+    places: &[(FileId, String)],
+    dirs: &[(String, String, FileId)],
+    read_only: &[String],
+) -> Option<String> {
+    for (d, path, id) in dirs.iter().filter(|(d, _, _)| !read_only.contains(d)) {
+        if let Some((_, file)) = places.iter().find(|(p, _)| p == id) {
+            let grant = if path.is_empty() {
+                d.clone()
+            } else {
+                format!("{d}={path}")
+            };
+            return Some(format!(
+                "`--dir {grant}` contains the program's own source (`{file}`); it could rewrite itself for the next run\n  hint: keep the program outside every granted directory"
+            ));
+        }
+    }
+    None
+}
+
+/// Why a `:ro` `Dir` grant (one of `read_only`) is refused, if one is: the authority `report`
+/// shows a write to it (H27). The host also refuses any write that reaches it.
+pub fn read_only_refusal(report: &str, read_only: &[String]) -> Option<String> {
+    read_only.iter().find_map(|name| {
+        dir_write_in_report(report, name).map(|m| {
+            format!("`{name}` is granted `:ro` but the program can write it (`{name} {m}`)\n  hint: drop `:ro`, or remove the write")
+        })
+    })
+}
+
+/// A grant refused before the run: a writable `Dir` holding the program's source, or a `:ro`
+/// one the program can write.
+#[derive(Debug)]
+pub struct Refused(pub String);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Store state. `calls` counts every capability import the guest made.
 pub struct State {
     pub calls: u32,

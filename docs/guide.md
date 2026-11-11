@@ -45,7 +45,7 @@ error: IoErr::InvalidPath
 
 `path:ro` is read-only: `write`, `create` and `remove` are `Err(IoErr::Denied)` (audited `denied`), and a program whose report shows any of them on that grant is refused at startup, under `--listen` and by `kio check --grants`. The audit header shows the grant as `path:ro`.
 
-A writable `--dir` that contains the program's own source (the root file or a module file, also through a symlink) is refused by `kio run`, `--listen` and `kio check --grants`: the program could rewrite itself for the next run. Keep the program outside every granted directory, or grant that directory `:ro`.
+A writable `--dir` that contains the program's own source (the root file or a module file, also through any link of a symlink chain or a symlinked directory) is refused by `kio run`, `--listen` and `kio check --grants`: the program could rewrite itself for the next run. Keep the program outside every granted directory, or grant that directory `:ro`.
 
 ```
 $ kio run examples/fx/report.kio --dir input=examples/in:ro --dir out=examples/tour/out:ro --http fx=api.frankfurter.dev

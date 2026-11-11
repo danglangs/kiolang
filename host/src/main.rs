@@ -1,7 +1,7 @@
 mod mcp;
 
 use kio_host::{
-    listen, open_dir, ClockSpec, Diag, HmacKey, Kio, Limits, LogSink, Origin, RngSpec, Server, Sources, Used,
+    listen, open_dir, ClockSpec, Diag, FileId, HmacKey, Kio, Limits, LogSink, Origin, RngSpec, Server, Sources, Used,
 };
 use serde_json::json;
 use std::cell::RefCell;
@@ -306,28 +306,18 @@ fn with_grants(flags: &[&str]) -> Result<(Vec<String>, Option<String>), i32> {
 }
 
 /// Why the grants file `path` is refused, if it is: the program could change it, and so its own
-/// grants for the next run, were it inside a granted `--dir` (another hard link could be) or the
-/// file of a flag in `written` (`--audit`, `--log`, `--kv`, `--db`).
-fn grants_refusal(path: &str, dirs: &[(String, String)], written: &[(String, &str)]) -> Option<String> {
+/// grants for the next run, were it reached through a granted `--dir` (`kio_host::within`;
+/// another hard link could be) or the file of a flag in `written` (`--audit`, `--log`, `--kv`,
+/// `--db`).
+fn grants_refusal(path: &str, dirs: &[Granted], written: &[(String, &str)]) -> Option<String> {
     let changes = "the program could change its own grants for the next run";
     if std::fs::metadata(path).is_ok_and(|m| std::os::unix::fs::MetadataExt::nlink(&m) > 1) {
         return Some(format!(
             "`--grants {path}` has other hard links; {changes} through one\n  hint: give the grants file no other links"
         ));
     }
-    // The file, and the name it was given: a symlink inside a `--dir` could be pointed elsewhere.
-    let p = std::path::Path::new(path);
-    let parent = p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(".".as_ref());
-    let named = std::fs::canonicalize(parent)
-        .ok()
-        .zip(p.file_name())
-        .map(|(d, f)| d.join(f));
-    let places: Vec<_> = [std::fs::canonicalize(path).ok(), named]
-        .into_iter()
-        .flatten()
-        .collect();
-    for (d, dir) in dirs {
-        if std::fs::canonicalize(dir).is_ok_and(|root| places.iter().any(|p| p.starts_with(&root))) {
+    for (d, dir, id) in dirs {
+        if kio_host::within(path.as_ref(), *id) {
             return Some(format!(
                 "`--grants {path}` is inside `--dir {d}={dir}`; {changes}\n  hint: keep the grants file outside every granted directory"
             ));
@@ -341,39 +331,14 @@ fn grants_refusal(path: &str, dirs: &[(String, String)], written: &[(String, &st
     None
 }
 
-/// Why a writable `--dir` is refused, if one is: it contains one of the program's `files` (the
-/// root file, then each module beside it), so the program could rewrite itself for the next run.
-/// The file and the name it was given are both checked: a symlink inside a `--dir` could be
-/// pointed elsewhere. A `:ro` dir (one of `read_only`) cannot write and is not refused.
-fn source_refusal(files: &[(String, String)], dirs: &[(String, String)], read_only: &[String]) -> Option<String> {
-    let root = std::path::Path::new(&files[0].0);
-    let dir = root.parent().unwrap_or(".".as_ref());
-    let paths = std::iter::once(root.to_path_buf()).chain(files[1..].iter().map(|(n, _)| dir.join(n)));
-    let places: Vec<_> = paths
-        .flat_map(|p| {
-            let parent = p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(".".as_ref());
-            let named = std::fs::canonicalize(parent)
-                .ok()
-                .zip(p.file_name())
-                .map(|(d, f)| d.join(f));
-            [std::fs::canonicalize(&p).ok(), named]
-                .into_iter()
-                .flatten()
-                .map(move |r| (r, p.clone()))
-        })
-        .collect();
-    for (d, path) in dirs.iter().filter(|(d, _)| !read_only.contains(d)) {
-        let Ok(granted) = std::fs::canonicalize(path) else {
-            continue;
-        };
-        if let Some((_, file)) = places.iter().find(|(r, _)| r.starts_with(&granted)) {
-            return Some(format!(
-                "`--dir {d}={path}` contains the program's own source (`{}`); it could rewrite itself for the next run\n  hint: keep the program outside every granted directory",
-                file.display()
-            ));
-        }
-    }
-    None
+/// A granted `--dir`: its name, its path as given and the identity of the directory opened for
+/// it (or, for `kio check --grants`, which opens nothing, of what the path names now).
+type Granted = (String, String, FileId);
+
+/// Whether the granted directory `id` holds `path`, which may not exist yet: compared by
+/// identity along `path` resolved (`kio_host::resolve`).
+fn holds(id: FileId, path: &str) -> bool {
+    kio_host::resolve(path.as_ref()).is_some_and(|r| r.ancestors().any(|a| kio_host::path_id(a).is_ok_and(|i| i == id)))
 }
 
 /// Apply one `--http-header name=Header:env:VAR` or `name=Header:file:PATH` to the grant `name`:
@@ -383,7 +348,7 @@ fn source_refusal(files: &[(String, String)], dirs: &[(String, String)], read_on
 fn http_header(
     spec: &str,
     https: &mut [(String, Origin)],
-    dirs: &[(String, String)],
+    dirs: &[Granted],
     files: &[(String, &str)],
     dry: bool,
 ) -> Result<(), String> {
@@ -406,12 +371,7 @@ fn http_header(
 /// Grant one `--hmac name=env:VAR` or `name=file:PATH`, either ending in `:verify` to refuse
 /// `sign`: the key is read now, once, with `--http-header`'s rules (`secret`). Errors never hold
 /// the key.
-fn hmac(
-    spec: &str,
-    dirs: &[(String, String)],
-    files: &[(String, &str)],
-    dry: bool,
-) -> Result<(String, HmacKey), String> {
+fn hmac(spec: &str, dirs: &[Granted], files: &[(String, &str)], dry: bool) -> Result<(String, HmacKey), String> {
     let usage = "expected name=env:VAR or name=file:PATH, with `:verify` at the end to refuse sign";
     let Some((name, source)) = spec.split_once('=').filter(|(n, _)| !n.is_empty()) else {
         return Err(usage.into());
@@ -432,7 +392,7 @@ fn secret(
     source: &str,
     usage: &str,
     what: &str,
-    dirs: &[(String, String)],
+    dirs: &[Granted],
     files: &[(String, &str)],
     dry: bool,
 ) -> Result<String, String> {
@@ -463,7 +423,7 @@ fn secret(
 /// dropped. The file must be a regular file outside every granted `dirs` (the program could
 /// read it) and not the file of a flag in `files` (`--audit`, `--log`). At most `SECRET_MAX` + 2
 /// bytes are read: a longer value is refused by `Origin::inject` and `HmacKey::new`.
-fn read_secret(path: &str, dirs: &[(String, String)], files: &[(String, &str)]) -> Result<String, String> {
+fn read_secret(path: &str, dirs: &[Granted], files: &[(String, &str)]) -> Result<String, String> {
     let cannot =
         |e: &dyn std::fmt::Display| format!("cannot read {path}: {e}\n  hint: the file holds the secret alone");
     // A FIFO or device would block or never end: check before opening.
@@ -478,9 +438,8 @@ fn read_secret(path: &str, dirs: &[(String, String)], files: &[(String, &str)]) 
             "`{path}` has other hard links; the program could read one\n  hint: give kio a key file of its own"
         ));
     }
-    let real = std::fs::canonicalize(path).map_err(|e| cannot(&e))?;
-    for (d, dir) in dirs {
-        if std::fs::canonicalize(dir).is_ok_and(|root| real.starts_with(root)) {
+    for (d, dir, id) in dirs {
+        if kio_host::within(path.as_ref(), *id) {
             return Err(format!(
                 "`{path}` is inside `--dir {d}={dir}`; the program could read it\n  hint: keep the key outside every granted directory"
             ));
@@ -717,7 +676,22 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
             Err(e) => return refuse(format!("--dir {name}={dir}: {e}")),
         }
     }
-    if let Some(why) = source_refusal(&files, &dir_paths, &sources.read_only_dirs) {
+    // Each grant compared by the directory opened for it, not by its path, which may name
+    // another by now. `kio check --grants` opens nothing: what each path names now.
+    let mut granted: Vec<Granted> = Vec::new();
+    for (i, (name, path)) in dir_paths.iter().enumerate() {
+        let id = match dirs.get(i) {
+            Some((_, d)) => kio_host::dir_id(d),
+            None => kio_host::path_id(path.as_ref()),
+        };
+        match id {
+            Ok(id) => granted.push((name.clone(), path.clone(), id)),
+            Err(e) if !dry => return refuse(format!("--dir {name}={path}: {e}")),
+            Err(_) => {}
+        }
+    }
+    let places = kio_host::source_places(&files);
+    if let Some(why) = kio_host::source_refusal(&places, &granted, &sources.read_only_dirs) {
         return refuse(why);
     }
     for (i, (name, list)) in http_methods.iter().enumerate() {
@@ -743,19 +717,19 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
             .chain(db_specs.iter().map(|(n, s)| (format!("--db {n}"), s)))
             .map(|(f, s)| (f, kio_host::kv::split_spec(s).0));
         let written: Vec<(String, &str)> = written.iter().cloned().chain(stores).collect();
-        if let Some(why) = grants_refusal(g, &dir_paths, &written) {
+        if let Some(why) = grants_refusal(g, &granted, &written) {
             return refuse(why);
         }
     }
     for spec in http_headers {
-        if let Err(e) = http_header(spec, &mut https, &dir_paths, &written, dry) {
+        if let Err(e) = http_header(spec, &mut https, &granted, &written, dry) {
             return refuse(flag_error("--http-header", header_label(spec), &e));
         }
     }
     // An error names the grant only: a key given inline by mistake would follow the `=`, or be
     // the whole spec when there is none.
     for spec in hmac_specs {
-        match hmac(spec, &dir_paths, &written, dry) {
+        match hmac(spec, &granted, &written, dry) {
             Ok(grant) => sources.hmacs.push(grant),
             Err(e) => {
                 let name = spec.split_once('=').map_or("", |(n, _)| n);
@@ -806,12 +780,8 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
     }
     // A `:ro` dir is refused to a program that can write it; the host also refuses any write that
     // reaches it (H27).
-    for name in &sources.read_only_dirs {
-        if let Some(m) = kio_host::dir_write_in_report(&report, name) {
-            return refuse(format!(
-                "`{name}` is granted `:ro` but the program can write it (`{name} {m}`)\n  hint: drop `:ro`, or remove the write"
-            ));
-        }
+    if let Some(why) = kio_host::read_only_refusal(&report, &sources.read_only_dirs) {
+        return refuse(why);
     }
     // A literal verb the grant does not allow is refused (P7); one the report shows as `*` is
     // checked per request, as every request is.
@@ -901,16 +871,10 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
             .collect()
     };
     for (flag, path) in on_disk(&kv_specs, "--kv").into_iter().chain(on_disk(&db_specs, "--db")) {
-        let parent = std::path::Path::new(&path).parent();
-        let parent = parent.filter(|p| !p.as_os_str().is_empty()).unwrap_or(".".as_ref());
-        if let Ok(parent) = std::fs::canonicalize(parent) {
-            for (d, dir) in &dir_paths {
-                if std::fs::canonicalize(dir).is_ok_and(|root| parent.starts_with(root)) {
-                    return refuse(format!(
-                        "`{flag}` is inside `--dir {d}`\n  hint: keep stores outside granted directories"
-                    ));
-                }
-            }
+        if let Some((d, _, _)) = granted.iter().find(|(_, _, id)| holds(*id, &path)) {
+            return refuse(format!(
+                "`{flag}` is inside `--dir {d}`\n  hint: keep stores outside granted directories"
+            ));
         }
         // A database granted on a store's file (or the other way round) would corrupt it.
         if let Some((other, _)) = stores
@@ -953,7 +917,7 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
     }
     files_to_check.extend(log_paths.iter().map(|(n, p)| (format!("--log {n}"), p.as_str())));
     for (flag, path) in files_to_check {
-        if let Some(why) = file_refusal(&flag, path, &stores, &dir_paths, &taken) {
+        if let Some(why) = file_refusal(&flag, path, &stores, &granted, &taken) {
             return refuse(why);
         }
         taken.push((flag, path));
@@ -994,6 +958,7 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
     let result = kio.run_files(&files, dirs, https);
     set_json(|o| o.used = kio.used());
     match result {
+        Err(e) if e.downcast_ref::<kio_host::Refused>().is_some() => refuse(format!("{e}")),
         Err(e) => {
             // A limit or trap is the program failing, not a usage error.
             match kio.explain(&e) {
@@ -1088,15 +1053,15 @@ fn file_refusal(
     flag: &str,
     path: &str,
     stores: &[(String, String)],
-    dir_paths: &[(String, String)],
+    dirs: &[Granted],
     taken: &[(String, &str)],
 ) -> Option<String> {
     let what = if flag == "--audit" { "the audit log" } else { "the log" };
-    let Some(log) = kio_host::resolve(path.as_ref()) else {
+    if kio_host::resolve(path.as_ref()).is_none() {
         return Some(format!(
             "`{flag} {path}` has `.` or `..` past the directories that exist\n  hint: name {what} by a plain path"
         ));
-    };
+    }
     let same = |p: &str| same_file(path, p);
     for (other, p) in stores {
         if same(p) {
@@ -1112,8 +1077,8 @@ fn file_refusal(
             ));
         }
     }
-    for (d, dir) in dir_paths {
-        if std::fs::canonicalize(dir).is_ok_and(|root| log.starts_with(root)) {
+    for (d, _, id) in dirs {
+        if holds(*id, path) {
             return Some(format!(
                 "`{flag} {path}` is inside `--dir {d}`\n  hint: keep {what} outside granted directories, where the program cannot read or replace it"
             ));

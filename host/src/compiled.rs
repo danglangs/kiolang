@@ -9,10 +9,10 @@
 use crate::bindings::{Compiled as World, CompiledImports, Grant};
 use crate::ws::{WsEvent, WsFrame};
 use crate::{
-    audit_header, config, end_audit, grants, limit_message, main_calls, named, new_store, on_run_stack, push_grants,
-    set_stack, single, spawn_ticker, start_audit, web_grants, write_line, ws_grants, Audit, Bound, Diag, DirPaths,
-    Handles, KvGrants, Limits, Origin, Outcome, Report, Request, Response, RunResult, SharedLog, Sources, State,
-    Stopped, Used,
+    audit_header, config, dir_id, end_audit, grants, limit_message, main_calls, named, new_store, on_run_stack,
+    push_grants, read_only_refusal, set_stack, single, source_places, source_refusal, spawn_ticker, start_audit,
+    web_grants, write_line, ws_grants, Audit, Bound, Diag, DirPaths, FileId, Handles, KvGrants, Limits, Origin,
+    Outcome, Refused, Report, Request, Response, RunResult, SharedLog, Sources, State, Stopped, Used,
 };
 use cap_std::fs::Dir as RealDir;
 use codegen::Site;
@@ -428,16 +428,35 @@ impl Kio {
         dirs: Vec<(String, RealDir)>,
         https: Vec<(String, Origin)>,
     ) -> Result<RunResult> {
-        self.run_files(&[single(source)], dirs, https)
+        self.run_inner(&[single(source)], dirs, https, |_| Ok(Handles::default()), |_| {})
     }
 
-    /// Like `run_with` for `(name, source)` files, root first.
+    /// Like `run_with` for `(name, source)` files, root first, each name the path the file was
+    /// read from (a module's beside the root's). Refused (`Refused`) as `kio run` refuses them:
+    /// a writable dir any of the files is reached through (the program could rewrite itself for
+    /// the next run), and a `:ro` dir the program can write.
     pub fn run_files(
         &mut self,
         files: &[(String, String)],
         dirs: Vec<(String, RealDir)>,
         https: Vec<(String, Origin)>,
     ) -> Result<RunResult> {
+        let paths = self.audit.as_ref().map_or(&[][..], |(_, p)| p.as_slice());
+        let mut granted = Vec::new();
+        for (name, dir) in &dirs {
+            let path = paths
+                .iter()
+                .find(|(n, _)| n == name)
+                .map_or(String::new(), |(_, p)| p.clone());
+            granted.push((name.clone(), path, dir_id(dir)?));
+        }
+        let ro = &self.sources.read_only_dirs;
+        let report = || crate::check_files(files).map_or(String::new(), |r| r.lines.join("\n"));
+        let why = source_refusal(&source_places(files), &granted, ro)
+            .or_else(|| (!ro.is_empty()).then(|| read_only_refusal(&report(), ro)).flatten());
+        if let Some(why) = why {
+            return Err(wasmtime::Error::msg(Refused(why)));
+        }
         self.run_inner(files, dirs, https, |_| Ok(Handles::default()), |_| {})
     }
 
@@ -608,6 +627,9 @@ pub struct Server {
     /// (requests and WebSocket events, from 1).
     audit: Option<SharedLog>,
     requests: AtomicU64,
+    /// The directories the program's files are reached through (`source_places`): a writable
+    /// `Dir` grant of one is refused.
+    places: Vec<(FileId, String)>,
 }
 
 /// Requests `--listen` runs at once by default (`ListenLimits::workers`): two per core.
@@ -673,6 +695,7 @@ impl Server {
             http,
             audit: None,
             requests: AtomicU64::new(0),
+            places: source_places(&files),
         }))
     }
 
@@ -852,6 +875,17 @@ impl Server {
         grant: impl FnOnce(&mut State) -> Result<Handles>,
     ) -> std::result::Result<std::result::Result<Outcome, String>, String> {
         let start = |e: wasmtime::Error| format!("cannot start instance: {e:#}");
+        let mut granted = Vec::new();
+        for (name, dir) in &dirs {
+            let id = dir_id(dir).map_err(|e| format!("cannot start instance: {e}"))?;
+            granted.push((name.clone(), String::new(), id));
+        }
+        let ro = &self.sources.read_only_dirs;
+        if let Some(why) =
+            source_refusal(&self.places, &granted, ro).or_else(|| read_only_refusal(&self.program.report, ro))
+        {
+            return Err(why);
+        }
         let mut store = new_store(&self.engine, &self.limits).map_err(start)?;
         store.data_mut().allowed = self.program.allowed.clone();
         let handles = grant(store.data_mut()).map_err(start)?;
