@@ -3,31 +3,61 @@
 
 use crate::locate;
 use serde_json::{json, Value};
-use std::io::BufRead;
+use std::io::{BufRead, Read};
 
 const PRIMER: &str = include_str!("../../docs/language.md");
 const VERSION: &str = "2025-06-18";
 /// Source `kio_check` accepts per call, names and sources together: checking runs in the host,
 /// outside any sandbox, so its input is bounded (with the checker's own budgets, open question 58).
 const MAX_SOURCE: usize = 1 << 20;
+/// Bytes of one message, read no further: room for `MAX_SOURCE` escaped in JSON.
+const MAX_MESSAGE: usize = 2 << 20;
 
-/// Answer requests from stdin until EOF. A bad message gets an error reply, never an exit.
+/// Answer requests from stdin until EOF. A bad message gets an error reply, never an exit; a
+/// line over `MAX_MESSAGE` is refused unparsed and skipped without being held.
 pub fn serve() -> i32 {
-    for line in std::io::stdin().lock().lines() {
-        let Ok(line) = line else { break };
-        if line.trim().is_empty() {
-            continue;
+    let mut stdin = std::io::stdin().lock();
+    loop {
+        let mut line = Vec::new();
+        match (&mut stdin).take(MAX_MESSAGE as u64 + 1).read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
         }
-        if let Some(reply) = handle(&line) {
+        let reply = if line.len() > MAX_MESSAGE && line.last() != Some(&b'\n') {
+            if skip_line(&mut stdin).is_err() {
+                break;
+            }
+            Some(error(Value::Null, -32600, "a message takes at most 2 MB"))
+        } else if line.iter().all(u8::is_ascii_whitespace) {
+            None
+        } else {
+            handle(&line)
+        };
+        if let Some(reply) = reply {
             println!("{reply}");
         }
     }
     0
 }
 
+/// Drop input through the next newline, a buffer at a time.
+fn skip_line(r: &mut impl BufRead) -> std::io::Result<()> {
+    loop {
+        let buf = r.fill_buf()?;
+        let (n, end) = match buf.iter().position(|&b| b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (buf.len(), buf.is_empty()),
+        };
+        r.consume(n);
+        if end {
+            return Ok(());
+        }
+    }
+}
+
 /// The reply to one line, or `None` for a notification.
-fn handle(line: &str) -> Option<Value> {
-    let Ok(msg) = serde_json::from_str::<Value>(line) else {
+fn handle(line: &[u8]) -> Option<Value> {
+    let Ok(msg) = serde_json::from_slice::<Value>(line) else {
         return Some(error(Value::Null, -32700, "parse error"));
     };
     let id = msg.get("id")?.clone();
@@ -101,17 +131,15 @@ fn call(params: &Value) -> Result<Value, &'static str> {
 fn check(list: &[Value]) -> Option<Result<(String, bool), &'static str>> {
     let files = list
         .iter()
-        .map(|f| {
-            Some((
-                f.get("name")?.as_str()?.to_string(),
-                f.get("source")?.as_str()?.to_string(),
-            ))
-        })
+        .map(|f| Some((f.get("name")?.as_str()?, f.get("source")?.as_str()?)))
         .collect::<Option<Vec<_>>>()
         .filter(|f| !f.is_empty())?;
     if files.iter().map(|(n, s)| n.len() + s.len()).sum::<usize>() > MAX_SOURCE {
         return Some(Err("kio_check takes at most 1 MB of source per call"));
     }
+    let files: Vec<(String, String)> = (files.into_iter())
+        .map(|(n, s)| (n.to_string(), s.to_string()))
+        .collect();
     Some(Ok(match kio_host::check_files(&files) {
         Ok(report) => (report.lines.join("\n"), false),
         Err(diags) => {

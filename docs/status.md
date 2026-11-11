@@ -73,6 +73,7 @@ Compiled-only kio covers the whole language and every capability. What real apps
 | C8c1b | C8c1 review follow-ups: kiogen generates programs over `Option<Str>`, `Result<Str, Int>`, a mixed one-slot enum, `Option<Option<Str>>`, `List<Option<Str>>` and `Map<Str, Option<Str>>`, through helpers and closures (250 per CI run; 2,000 agree on both runtimes, no mismatch); 7 review programs in compiled.rs; the runtime is built under `OUT_DIR` (`KIO_TEST_HEAP=1` for test-heap) |
 | P4 | `--grants app.grants`: `kio run`'s flags one per line (split at the first space, `#` comments), ahead of the command line's; a once-only flag in both is refused; a file the program could change (inside a `--dir`, a log or store, hard-linked) is refused. `kio check app.kio --grants app.grants` binds them without running or reading a secret, for CI. payhook and links ship `app.grants` (guide.md "Grants file", #189-#192) |
 | H25 | every HTTP hop, each redirect and each `send_all` request included, reserves a call before it is sent: a run sends at most `--calls` requests (before: up to six per call). A server counting requests through five redirects gets exactly `--calls` |
+| H26 | `kio mcp` reads each message with a 2 MB limit before parsing: a longer line is refused (`-32600`) and skipped without being held, and the server answers the next; `kio_check` sums source sizes before copying them |
 
 ## Next
 

@@ -101,6 +101,18 @@ fn kio_check_refuses_over_a_megabyte() {
     assert_eq!(replies[1]["result"]["isError"], false, "{}", replies[1]);
 }
 
+/// H26: a message over 2 MB is refused unparsed, and the next one is answered.
+#[test]
+fn a_message_over_two_megabytes_is_refused() {
+    let long = format!("{{\"id\":1,\"x\":\"{}\"}}", "x".repeat(10 << 20));
+    let replies = session(&[long, req(2, "ping", json!({}))]);
+    assert_eq!(replies.len(), 2, "{replies:?}");
+    assert_eq!(replies[0]["error"]["code"], -32600);
+    assert_eq!(replies[0]["error"]["message"], "a message takes at most 2 MB");
+    assert_eq!(replies[1]["id"], 2);
+    assert_eq!(replies[1]["result"], json!({}));
+}
+
 /// L23: every parse error comes back, each with its line.
 #[test]
 fn kio_check_returns_every_parse_error() {
