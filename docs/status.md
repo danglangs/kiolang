@@ -89,13 +89,13 @@ Compiled-only kio covers the whole language and every capability. Built and revi
 
 ## Next
 
-Pilot phase ([product-todo.md](product-todo.md)): D1 built (docs/first-job.md, release archives, CI job `first-job`); D2, D3, W1, E3c next. Direction A is done through P7 and E4. Open: P7b (fewer `send_all *`, pinned) and C8c2b (C8c2 review follow-ups, pinned).
+Pilot phase ([product-todo.md](product-todo.md)): D1 built (docs/first-job.md, release archives, CI job `first-job`); D2 and D3 done; D5's agent demo (tools/agent-demo/) built and tested offline, its model runs waiting on API credit; W1, E3c next. Direction A is done through P7 and E4. Open: P7b (fewer `send_all *`, pinned) and C8c2b (C8c2 review follow-ups, pinned).
 
 Allocation speed is paused after C8c3 (inlining, done) for the pilot phase; next when a pilot needs it: C8c9 (per-loop fuel, approved), C8c5 (inline list buffers), C8c6 (branchless counts). Packages after. Tuples if the evals show models still reach for them. Pinned, not started: L18 `par_map` and L19 `scope`/`spawn` (concurrency stages 2 and 3, when a program needs them).
 
 ## Waiting on the maintainer
 
-D1 (first job, release archives) is built; publishing needs approval: push a `v*` tag, which uploads macOS and Linux archives to a draft release, then publish the draft (docs/first-job.md links `releases/latest`). Signing the macOS binary needs an Apple account (#232). Tuples stay deferred (today a hint, L20) unless an eval shows models still reach for them. Approved: L21-L26, H22, H23 (a caps.wit change), P4 (the grants file), E3, E3b (2026-11-11) and C8c9 (per-loop fuel, after C8c4 and C8c3, with a security review); C8c9 stays waiting on its turn in the queue.
+D5's model runs: the key in `~/.config/kio-demo/anthropic_key` has no API credit; then `tools/agent-demo/run_all.py` (budget $10). D1 (first job, release archives) is built; publishing needs approval: push a `v*` tag, which uploads macOS and Linux archives to a draft release, then publish the draft (docs/first-job.md links `releases/latest`). Signing the macOS binary needs an Apple account (#232). Tuples stay deferred (today a hint, L20) unless an eval shows models still reach for them. Approved: L21-L26, H22, H23 (a caps.wit change), P4 (the grants file), E3, E3b (2026-11-11) and C8c9 (per-loop fuel, after C8c4 and C8c3, with a security review); C8c9 stays waiting on its turn in the queue.
 
 ## Speed (C8b5 with C8b6, C8b7, C8c1, C8c2, C8c8, C8c4 and C8c3 marked, 2026-11-09, release, run time; all in [roadmap.md](roadmap.md))
 

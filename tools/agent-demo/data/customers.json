@@ -1,0 +1,55 @@
+[
+  {
+    "id": "C001",
+    "name": "Acme Corp",
+    "country": "US",
+    "tier": "gold"
+  },
+  {
+    "id": "C002",
+    "name": "Borealis GmbH",
+    "country": "DE",
+    "tier": "silver"
+  },
+  {
+    "id": "C003",
+    "name": "Cobalt Ltd",
+    "country": "GB",
+    "tier": "gold"
+  },
+  {
+    "id": "C004",
+    "name": "Dune Traders",
+    "country": "US",
+    "tier": "bronze"
+  },
+  {
+    "id": "C005",
+    "name": "Elm & Oak",
+    "country": "CA",
+    "tier": "silver"
+  },
+  {
+    "id": "C006",
+    "name": "Fjord AS",
+    "country": "NO",
+    "tier": "bronze"
+  },
+  {
+    "id": "C007",
+    "name": "Granite SA",
+    "country": "FR",
+    "tier": "gold"
+  },
+  {
+    "id": "C008",
+    "name": "Harbor Co",
+    "country": "US",
+    "tier": "silver"
+  },
+  {
+    "id": "C009",
+    "name": "Iris KK",
+    "country": null
+  }
+]
