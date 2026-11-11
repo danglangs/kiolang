@@ -1,7 +1,8 @@
-//! `sha256`, `to_hex` and `ct_eq` (L11, C14): one source for the interpreter and the compiled
+//! `sha256`, `to_hex`, `from_hex` and `ct_eq` (L11, C14, L26): one source for the interpreter and the compiled
 //! runtime, which includes this file by path. `core` and `alloc` only, no `unsafe`.
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
 const K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98,
@@ -80,6 +81,24 @@ pub fn to_hex(data: &[u8]) -> String {
         s.push(DIGITS[(b & 15) as usize] as char);
     }
     s
+}
+
+/// The bytes `s` spells as hexadecimal digits, two a byte, either case; `None` for an odd
+/// length or any other character (`to_hex`'s inverse).
+pub fn from_hex(s: &[u8]) -> Option<Vec<u8>> {
+    fn digit(c: u8) -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _ => None,
+        }
+    }
+    let (pairs, odd) = s.as_chunks::<2>();
+    if !odd.is_empty() {
+        return None;
+    }
+    pairs.iter().map(|&[a, b]| Some(digit(a)? << 4 | digit(b)?)).collect()
 }
 
 /// `a == b` in time that depends on the lengths only: different lengths are unequal at once;

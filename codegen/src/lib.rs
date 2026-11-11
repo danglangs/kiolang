@@ -2607,6 +2607,7 @@ impl<'m> FuncGen<'_, 'm> {
                     Builtin::StrToUppercase => ("rt_str_to_uppercase", Nothing, None),
                     Builtin::StrSha256 | Builtin::BytesSha256 => ("rt_sha256", Nothing, None),
                     Builtin::BytesToHex => ("rt_bytes_to_hex", Nothing, None),
+                    Builtin::StrFromHex => ("rt_str_from_hex_u", Nothing, None),
                     Builtin::StrCtEq | Builtin::BytesCtEq => ("rt_ct_eq", Nothing, None),
                     Builtin::IntMin | Builtin::IntMax | Builtin::FloatMin | Builtin::FloatMax => {
                         unreachable!("min_max")

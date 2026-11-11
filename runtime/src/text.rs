@@ -559,6 +559,15 @@ pub unsafe fn to_hex(p: *mut Header) -> *mut Header {
     new_str(&crate::digest::to_hex(unsafe { obj::bytes(p) }))
 }
 
+/// `Str.from_hex()`'s payload, a new `Bytes` (digest.rs), without the `Option` object.
+///
+/// # Safety
+/// The module's contract.
+pub unsafe fn from_hex_opt(s: *mut Header) -> Option<u64> {
+    // SAFETY: the caller's guarantee.
+    crate::digest::from_hex(unsafe { obj::bytes(s) }).map(|b| to_slot(new_bytes(&b)))
+}
+
 /// `ct_eq` of two `Str`s or two `Bytes` (digest.rs).
 ///
 /// # Safety

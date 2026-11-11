@@ -1195,6 +1195,10 @@ fn builtin(recv: &Value, b: Builtin, (arg, arg2): Args, span: Span) -> Res {
         (B::StrSha256, Value::Str(s)) => Value::Bytes(Rc::new(crate::digest::sha256(s.as_bytes()).to_vec())),
         (B::BytesSha256, Value::Bytes(v)) => Value::Bytes(Rc::new(crate::digest::sha256(v).to_vec())),
         (B::BytesToHex, Value::Bytes(v)) => Value::Str(crate::digest::to_hex(v).into()),
+        (B::StrFromHex, Value::Str(s)) => match crate::digest::from_hex(s.as_bytes()) {
+            Some(b) => some(Value::Bytes(Rc::new(b))),
+            None => none(),
+        },
         (B::StrCtEq, Value::Str(s)) => Value::Bool(crate::digest::ct_eq(s.as_bytes(), str_arg(arg).as_bytes())),
         (B::BytesCtEq, Value::Bytes(v)) => match arg {
             Some(Value::Bytes(w)) => Value::Bool(crate::digest::ct_eq(v, &w)),

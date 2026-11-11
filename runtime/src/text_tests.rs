@@ -738,6 +738,23 @@ fn l11_text() {
         let e = text::new_bytes(&[]);
         assert_eq!(take(text::to_hex(e)), "");
         dec(e);
+        // L26: `from_hex`, the inverse.
+        for (x, want) in [
+            ("", Some(&[][..])),
+            ("00fF1a", Some(&[0, 255, 26][..])),
+            ("abc", None),
+            ("0g", None),
+        ] {
+            let p = s(x);
+            let got = text::from_hex_opt(p).map(|v| {
+                let b = from_slot(v);
+                let r = obj::bytes(b).to_vec();
+                dec(b);
+                r
+            });
+            assert_eq!(got.as_deref(), want);
+            dec(p);
+        }
     }
     assert_eq!(obj::live(), base);
 }

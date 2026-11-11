@@ -337,6 +337,7 @@ pub enum Builtin {
     BytesSha256,
     StrSha256,
     BytesToHex,
+    StrFromHex,
     BytesCtEq,
     StrCtEq,
 }

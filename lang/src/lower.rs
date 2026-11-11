@@ -922,6 +922,7 @@ impl<'a> Lowerer<'a> {
                     (T::Bytes, "sha256") => Builtin::BytesSha256,
                     (T::Str, "sha256") => Builtin::StrSha256,
                     (T::Bytes, "to_hex") => Builtin::BytesToHex,
+                    (T::Str, "from_hex") => Builtin::StrFromHex,
                     (T::Bytes, "ct_eq") => Builtin::BytesCtEq,
                     (T::Str, "ct_eq") => Builtin::StrCtEq,
                     _ => unreachable!("checked method"),

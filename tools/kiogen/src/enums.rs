@@ -294,7 +294,7 @@ impl G {
                     (format!("{a}.unwrap_or_else(|n: Int| n.to_str())"), x.max(INT_STR))
                 }
             },
-            T::Os => match self.rng.below(12) {
+            T::Os => match self.rng.below(13) {
                 0 => self.leaf(t, scope),
                 1 => {
                     let (s, x) = self.e(T::Str, scope, d1, f);
@@ -341,6 +341,18 @@ impl G {
                     let (a, _) = self.arg(T::Os, scope, d1, f);
                     let (k, _) = self.e(T::Int, scope, d1, f);
                     (format!("h_os({a}, {k})"), self.helper[0])
+                }
+                // L26: `from_hex` on any string (mostly `None`), or on `to_hex`'s output.
+                11 => {
+                    let (a, x) = self.e(T::Str, scope, d1, f);
+                    if self.rng.below(2) == 0 {
+                        (format!("({a}).from_hex().map(|b: Bytes| b.to_hex())"), x)
+                    } else {
+                        (
+                            format!("({a}).to_bytes().to_hex().from_hex().map(|b: Bytes| b.to_str())"),
+                            x,
+                        )
+                    }
                 }
                 _ => {
                     let (a, _) = self.e(T::Rs, scope, d1, f);

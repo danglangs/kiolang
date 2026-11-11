@@ -358,6 +358,26 @@ fn main() -> List<Str> {
     assert_eq!(shows(src), r#"["", "00ff1009ab", "417a"]"#);
 }
 
+/// L26: `Str.from_hex()`, `to_hex`'s inverse: an even number of hex digits, either case.
+#[test]
+fn from_hex() {
+    let src = r#"
+fn main() -> List<Str> {
+    let mut b = "".to_bytes();
+    b.push(0); b.push(255); b.push(16); b.push(9); b.push(171);
+    let show = |o: Option<Bytes>| match o { Some(x) => x.len().to_str() + ":" + x.to_hex(), None => "none" };
+    [show("".from_hex()), show("00fF1a".from_hex()), show("ABCDEF".from_hex()), show("abc".from_hex()),
+     show("0g".from_hex()), show("0x00".from_hex()), show(" 00".from_hex()), show("é0".from_hex()),
+     show(b.to_hex().from_hex()), (b.to_hex().from_hex() == Some(b)).to_str()]
+}"#;
+    assert_eq!(
+        shows(src),
+        r#"["0:", "3:00ff1a", "3:abcdef", "none", "none", "none", "none", "none", "5:00ff1009ab", "true"]"#
+    );
+    let (msg, _) = rejects("fn main() { \"00\".to_bytes().from_hex(); }");
+    assert_eq!(msg, "no method `from_hex` on Bytes");
+}
+
 #[test]
 fn ct_eq() {
     let src = r#"
