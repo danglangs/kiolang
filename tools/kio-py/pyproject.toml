@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# Provisional name: not published, no PyPI name claimed.
+name = "kio-run"
+version = "0.0.0"
+description = "Run and check kio programs from Python (unpublished, provisional)"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
