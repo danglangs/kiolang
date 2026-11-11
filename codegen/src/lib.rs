@@ -215,43 +215,36 @@ fn type_index(types: &mut Vec<FuncSig>, sig: FuncSig) -> u32 {
 fn value_sig(sh: &Shapes, params: &[Ty], ret: &Ty) -> FuncSig {
     let mut ps = vec![ValType::I32];
     for p in params {
-        ps.extend(sh.rep(p).types());
+        ps.extend(sh.types(p));
     }
-    (ps, sh.rep(ret).types().to_vec())
+    (ps, sh.types(ret))
 }
 
-/// How a kio type is held in Wasm: no value (`()`, `!`), one, or an unboxed enum's tag (`i32`)
-/// and payload (an `i64` slot) (C8c1).
+/// How a kio type is held in Wasm: no value (`()`, `!`), one, an unboxed enum's tag (`i32`)
+/// and payload (an `i64` slot) (C8c1), or an unboxed struct's fields, one value each (C8c2).
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Rep {
     None,
     One(ValType),
     Two,
+    Fields(ir::StructId),
 }
 
 /// An unboxed enum's two values.
 const TWO: [ValType; 2] = [ValType::I32, ValType::I64];
 
-impl Rep {
-    fn types(self) -> &'static [ValType] {
-        match self {
-            Rep::None => &[],
-            Rep::One(ValType::I32) => &[ValType::I32],
-            Rep::One(ValType::I64) => &[ValType::I64],
-            Rep::One(ValType::F64) => &[ValType::F64],
-            Rep::One(t) => unreachable!("{t:?} is not a kio value type"),
-            Rep::Two => &TWO,
-        }
-    }
-}
+/// The most fields an unboxed struct has (`Val::Fields`).
+const MAX_FIELDS: usize = 4;
 
-/// Where a value is held: nowhere (`()`, `!`), in one Wasm local, or in an unboxed enum's tag
-/// and payload locals.
+/// Where a value is held: nowhere (`()`, `!`), in one Wasm local, in an unboxed enum's tag and
+/// payload locals, or in an unboxed struct's field locals (one per field, by declaration index;
+/// a `()` field's entry is unused).
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Val {
     None,
     One(u32),
     Two(u32, u32),
+    Fields(ir::StructId, [u32; MAX_FIELDS]),
 }
 
 /// A local holding an owned reference: a pointer, or an unboxed enum's payload (`slot`: an
@@ -275,13 +268,14 @@ impl Owned {
     }
 }
 
-/// An unboxed enum's variants: how many, which carry a payload (bit `v` for variant `v`), and
-/// which carry a pointer.
+/// An unboxed enum's variants: how many, which carry a payload (bit `v` for variant `v`), which
+/// carry a pointer, and which carry a `()` (a slot that is always 0).
 #[derive(Clone, Copy, Debug)]
 struct Masks {
     n: u32,
     payload: u64,
     ptr: u64,
+    unit: u64,
 }
 
 impl Masks {
@@ -294,18 +288,20 @@ impl Masks {
     }
 
     /// The mask a count change on the payload must test the tag against, if any: some variant
-    /// carries a pointer and another a non-zero scalar. Otherwise the payload is a pointer or 0,
-    /// and `inc`/`dec` of 0 do nothing.
+    /// carries a pointer and another a non-zero scalar. Otherwise the payload is a pointer or 0
+    /// (a payload-free or `()` variant's), and `inc`/`dec` of 0 do nothing.
     fn tested(self) -> Option<u64> {
-        (self.ptr != 0 && self.ptr != self.payload).then_some(self.ptr)
+        (self.ptr != 0 && self.ptr != self.payload & !self.unit).then_some(self.ptr)
     }
 }
 
-/// How each type is held (C8c1): `Option`, `Result` and every user enum whose variants carry
-/// at most one slot (`small`) are unboxed outside slots.
+/// How each type is held: `Option`, `Result` and every user enum whose variants carry at most
+/// one slot (`small`) are unboxed outside slots (C8c1); so is every struct of at most
+/// `MAX_FIELDS` fields (`flat`), one Wasm value per field (C8c2).
 struct Shapes<'m> {
     m: &'m Module,
     small: Vec<bool>,
+    flat: Vec<bool>,
 }
 
 impl<'m> Shapes<'m> {
@@ -315,7 +311,8 @@ impl<'m> Shapes<'m> {
             .iter()
             .map(|e| e.variants.len() <= 64 && e.variants.iter().all(|(_, ts)| ts.len() <= 1))
             .collect();
-        Shapes { m, small }
+        let flat = m.structs.iter().map(|s| s.fields.len() <= MAX_FIELDS).collect();
+        Shapes { m, small, flat }
     }
 
     /// Whether a value of `t` is a tag and a payload rather than a pointer.
@@ -327,11 +324,25 @@ impl<'m> Shapes<'m> {
         }
     }
 
+    /// The struct whose fields a value of `t` is held as, if `t` is an unboxed struct.
+    fn fields(&self, t: &Ty) -> Option<ir::StructId> {
+        match t {
+            Ty::Struct(id) if self.flat[id.0 as usize] => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// The field types of struct `id`.
+    fn field_tys(&self, id: ir::StructId) -> impl DoubleEndedIterator<Item = &'m Ty> + ExactSizeIterator {
+        self.m.structs[id.0 as usize].fields.iter().map(|(_, t)| t)
+    }
+
     fn rep(&self, t: &Ty) -> Rep {
         match t {
             Ty::Int => Rep::One(ValType::I64),
             Ty::Bool => Rep::One(ValType::I32),
             Ty::Float => Rep::One(ValType::F64),
+            Ty::Struct(id) if self.flat[id.0 as usize] => Rep::Fields(*id),
             Ty::Str | Ty::Bytes | Ty::List(_) | Ty::Map(..) | Ty::HashMap(..) | Ty::Struct(_) | Ty::Fn(..) => {
                 Rep::One(ValType::I32)
             }
@@ -343,25 +354,58 @@ impl<'m> Shapes<'m> {
         }
     }
 
-    /// Whether a value of `t` is one pointer to a counted object.
-    fn is_ptr(&self, t: &Ty) -> bool {
-        slot_ptr(t) && !self.unboxed(t)
+    /// How a field of an unboxed struct is held: a scalar as its value, anything else (a pointer,
+    /// an enum, a struct) as the `i32` pointer its slot would hold, so one level is unboxed.
+    fn field_rep(&self, t: &Ty) -> Rep {
+        match t {
+            Ty::Int | Ty::Bool | Ty::Float | Ty::Unit | Ty::Never => self.rep(t),
+            _ => Rep::One(ValType::I32),
+        }
     }
 
-    /// Whether a value of `t` holds a reference: a pointer, or an unboxed enum a variant of
-    /// which carries one.
+    /// The Wasm value types a value of `t` is held as.
+    fn types(&self, t: &Ty) -> Vec<ValType> {
+        match self.rep(t) {
+            Rep::None => vec![],
+            Rep::One(vt) => vec![vt],
+            Rep::Two => TWO.to_vec(),
+            Rep::Fields(id) => self
+                .field_tys(id)
+                .filter_map(|t| match self.field_rep(t) {
+                    Rep::One(vt) => Some(vt),
+                    _ => None,
+                })
+                .collect(),
+        }
+    }
+
+    /// Whether a value of `t` is one pointer to a counted object.
+    fn is_ptr(&self, t: &Ty) -> bool {
+        slot_ptr(t) && !self.unboxed(t) && self.fields(t).is_none()
+    }
+
+    /// Whether a value of `t` holds a reference: a pointer, an unboxed enum a variant of which
+    /// carries one, or an unboxed struct a field of which does.
     fn owns(&self, t: &Ty) -> bool {
-        self.is_ptr(t) || (self.unboxed(t) && self.masks(t).ptr != 0)
+        self.is_ptr(t)
+            || (self.unboxed(t) && self.masks(t).ptr != 0)
+            || self.fields(t).is_some_and(|id| self.field_tys(id).any(slot_ptr))
+    }
+
+    /// Whether a local of type `t` is read in place where codegen borrows: it holds a pointer,
+    /// or an unboxed enum or struct.
+    fn lendable(&self, t: &Ty) -> bool {
+        self.is_ptr(t) || self.unboxed(t) || self.fields(t).is_some()
     }
 
     /// The variants of unboxed enum type `t`.
     fn masks(&self, t: &Ty) -> Masks {
         let bit = |v: usize, ts: &[Ty]| match ts {
-            [t] => (1 << v, u64::from(slot_ptr(t)) << v),
-            _ => (0, 0),
+            [t] => (1 << v, u64::from(slot_ptr(t)) << v, u64::from(*t == Ty::Unit) << v),
+            _ => (0, 0, 0),
         };
-        let (n, bits): (usize, Vec<(u64, u64)>) = match t {
-            Ty::Option(x) => (2, vec![(0, 0), bit(1, &[(**x).clone()])]),
+        let (n, bits): (usize, Vec<(u64, u64, u64)>) = match t {
+            Ty::Option(x) => (2, vec![(0, 0, 0), bit(1, &[(**x).clone()])]),
             Ty::Result(x, e) => (2, vec![bit(0, &[(**x).clone()]), bit(1, &[(**e).clone()])]),
             Ty::Enum(id) => {
                 let vs = &self.m.enums[id.0 as usize].variants;
@@ -369,11 +413,14 @@ impl<'m> Shapes<'m> {
             }
             t => unreachable!("{t:?} is not an unboxed enum"),
         };
-        let (payload, ptr) = bits.iter().fold((0, 0), |(p, q), &(a, b)| (p | a, q | b));
+        let (payload, ptr, unit) = bits
+            .iter()
+            .fold((0, 0, 0), |(p, q, u), &(a, b, c)| (p | a, q | b, u | c));
         Masks {
             n: n as u32,
             payload,
             ptr,
+            unit,
         }
     }
 }
@@ -523,7 +570,68 @@ fn slot_out(s: &mut InstructionSink, rep: Rep) {
         Rep::None => {
             s.drop();
         }
-        Rep::Two => unreachable!("an unboxed enum is unboxed by FuncGen"),
+        Rep::Two | Rep::Fields(_) => unreachable!("an unboxed value is unboxed by FuncGen"),
+    }
+}
+
+/// Unboxes the struct object (of unboxed struct `id`) in `i32` local `o` (C8c2): pushes each
+/// field in order, a pointer field gaining a reference when `own`. `p` and `r` are scratch
+/// `i32` locals; the object keeps its own reference.
+fn unbox_struct(
+    s: &mut InstructionSink,
+    rt: &Runtime,
+    sh: &Shapes,
+    id: ir::StructId,
+    o: u32,
+    own: bool,
+    [p, r]: [u32; 2],
+) {
+    for (i, t) in sh.field_tys(id).enumerate() {
+        let rep = sh.field_rep(t);
+        if rep == Rep::None {
+            continue;
+        }
+        s.local_get(o).i64_load(slot_at(RECORD_SLOTS + 8 * i as u64));
+        slot_out(s, rep);
+        if own && slot_ptr(t) {
+            s.local_tee(p);
+            inc(s, rt, p, r);
+        }
+    }
+}
+
+/// The locals of a value of unboxed struct `id`: `next` gives one for each field that has a
+/// value (in field order, with its type); a `()` field's entry is unused.
+fn field_locals(sh: &Shapes, id: ir::StructId, mut next: impl FnMut(ValType) -> u32) -> [u32; MAX_FIELDS] {
+    let mut fl = [u32::MAX; MAX_FIELDS];
+    for (i, t) in sh.field_tys(id).enumerate() {
+        if let Rep::One(vt) = sh.field_rep(t) {
+            fl[i] = next(vt);
+        }
+    }
+    fl
+}
+
+/// Boxes the fields of unboxed struct `id` held in locals `fl` into the object in `i32` local
+/// `o`, which `rt_alloc` or `FuncGen::alloc` made with its slots unwritten or zero: each field
+/// as a slot (a `()` field's stays 0), the object taking the fields' references.
+fn store_fields(s: &mut InstructionSink, sh: &Shapes, id: ir::StructId, fl: &[u32; MAX_FIELDS], o: u32) {
+    for (i, t) in sh.field_tys(id).enumerate() {
+        let rep = sh.field_rep(t);
+        if rep == Rep::None {
+            continue;
+        }
+        s.local_get(o).local_get(fl[i]);
+        match rep {
+            Rep::One(ValType::I64) => {}
+            Rep::One(ValType::F64) => {
+                s.i64_reinterpret_f64();
+            }
+            _ => {
+                s.i64_extend_i32_u();
+            }
+        }
+        s.i64_store(slot_at(RECORD_SLOTS + 8 * i as u64));
     }
 }
 
@@ -699,11 +807,15 @@ fn func<'m>(
         let at = (params.len() + decls.len()) as u32;
         let rep = sh.rep(&l.ty);
         let into = if i < f.params as usize { &mut params } else { &mut decls };
-        into.extend(rep.types());
+        into.extend(sh.types(&l.ty));
         locals.push(match rep {
             Rep::None => Val::None,
             Rep::One(_) => Val::One(at),
             Rep::Two => Val::Two(at, at + 1),
+            Rep::Fields(id) => {
+                let mut next = at;
+                Val::Fields(id, field_locals(sh, id, |_| (next, next += 1).0))
+            }
         });
     }
     let mut g = FuncGen {
@@ -745,7 +857,7 @@ fn func<'m>(
     g.sink().end();
     let mut body = Function::new_with_locals_types(g.decls);
     body.raw(g.code);
-    ((params, ret.types().to_vec()), body)
+    ((params, sh.types(&f.ret)), body)
 }
 
 struct FuncGen<'a, 'm> {
@@ -832,7 +944,7 @@ const SLICE_BOUNDS: &str = "slice {a}..{b} out of bounds for length {c}";
 const RNG_BYTES: &str = "Rng.bytes({a}): the count must be 0 to 65536";
 const RNG_INT: &str = "Rng.int({a}, {b}): lo must be less than hi";
 
-impl FuncGen<'_, '_> {
+impl<'m> FuncGen<'_, 'm> {
     fn sink(&mut self) -> InstructionSink<'_> {
         InstructionSink::new(&mut self.code)
     }
@@ -1001,6 +1113,11 @@ impl FuncGen<'_, '_> {
             Val::Two(tag, pay) => {
                 self.sink().local_get(tag).local_get(pay);
             }
+            Val::Fields(id, fl) => {
+                for (l, _) in self.field_vals(id, fl) {
+                    self.sink().local_get(l);
+                }
+            }
         }
     }
 
@@ -1014,7 +1131,23 @@ impl FuncGen<'_, '_> {
             Val::Two(tag, pay) => {
                 self.sink().local_set(pay).local_set(tag);
             }
+            Val::Fields(id, fl) => {
+                for (l, _) in self.field_vals(id, fl).into_iter().rev() {
+                    self.sink().local_set(l);
+                }
+            }
         }
+    }
+
+    /// The field locals of unboxed struct `id` held in `fl` that have a value, in field order,
+    /// each with its field's type.
+    fn field_vals(&self, id: ir::StructId, fl: [u32; MAX_FIELDS]) -> Vec<(u32, &'m Ty)> {
+        self.sh
+            .field_tys(id)
+            .enumerate()
+            .filter(|(_, t)| self.sh.field_rep(t) != Rep::None)
+            .map(|(i, t)| (fl[i], t))
+            .collect()
     }
 
     /// Hidden locals for a value of type `t`.
@@ -1023,35 +1156,63 @@ impl FuncGen<'_, '_> {
             Rep::None => Val::None,
             Rep::One(vt) => Val::One(self.temp(vt)),
             Rep::Two => Val::Two(self.temp(ValType::I32), self.temp(ValType::I64)),
+            Rep::Fields(id) => {
+                let sh = self.sh;
+                Val::Fields(id, field_locals(sh, id, |vt| self.temp(vt)))
+            }
         }
     }
 
-    /// The owned reference a value of type `t` held in `v` has, if any.
-    fn owned_of(&self, v: Val, t: &Ty) -> Option<Owned> {
+    /// The owned references a value of type `t` held in `v` has: at most one, except an unboxed
+    /// struct's, one per pointer field.
+    fn owned_of(&self, v: Val, t: &Ty) -> Vec<Owned> {
         match v {
-            Val::One(l) if self.sh.is_ptr(t) => Some(Owned::ptr(l)),
+            Val::One(l) if self.sh.is_ptr(t) => vec![Owned::ptr(l)],
             Val::Two(tag, pay) => {
                 let m = self.sh.masks(t);
-                (m.ptr != 0).then(|| Owned {
-                    local: pay,
-                    slot: true,
-                    test: m.tested().map(|mask| (tag, mask)),
-                })
+                (m.ptr != 0)
+                    .then(|| Owned {
+                        local: pay,
+                        slot: true,
+                        test: m.tested().map(|mask| (tag, mask)),
+                    })
+                    .into_iter()
+                    .collect()
             }
-            _ => None,
+            Val::Fields(id, fl) => self
+                .field_vals(id, fl)
+                .into_iter()
+                .filter(|(_, t)| slot_ptr(t))
+                .map(|(l, _)| Owned::ptr(l))
+                .collect(),
+            _ => vec![],
         }
     }
 
-    /// Registers the reference held in `v`, of type `t`, in `owned`.
+    /// Registers the references held in `v`, of type `t`, in `owned`.
     fn own(&mut self, v: Val, t: &Ty) {
-        if let Some(o) = self.owned_of(v, t) {
-            self.owned.push(o);
+        let os = self.owned_of(v, t);
+        self.owned.extend(os);
+    }
+
+    /// The references local `id` holds.
+    fn local_owned(&self, id: ir::LocalId) -> Vec<Owned> {
+        self.owned_of(self.local(id), &self.f.locals[id.0 as usize].ty)
+    }
+
+    /// Drops the references in `os`.
+    fn dec_all(&mut self, os: &[Owned]) {
+        for &o in os {
+            self.dec_owned(o);
         }
     }
 
-    /// The reference local `id` holds, if any.
-    fn local_owned(&self, id: ir::LocalId) -> Option<Owned> {
-        self.owned_of(self.local(id), &self.f.locals[id.0 as usize].ty)
+    /// Drops the references in `os` and empties their locals.
+    fn dec_and_zero(&mut self, os: &[Owned]) {
+        for &o in os {
+            self.dec_owned(o);
+            self.zero(o);
+        }
     }
 
     /// Drops the reference in `o`.
@@ -1082,11 +1243,10 @@ impl FuncGen<'_, '_> {
         }
     }
 
-    /// Drops the reference a value of type `t` held in `v` has.
+    /// Drops the references a value of type `t` held in `v` has.
     fn drop_val(&mut self, v: Val, t: &Ty) {
-        if let Some(o) = self.owned_of(v, t) {
-            self.dec_owned(o);
-        }
+        let os = self.owned_of(v, t);
+        self.dec_all(&os);
     }
 
     /// Drops the value of type `t` on the stack.
@@ -1102,6 +1262,11 @@ impl FuncGen<'_, '_> {
                 self.set_val(Val::Two(tag, pay));
                 self.drop_val(Val::Two(tag, pay), t);
             }
+            Rep::Fields(_) => {
+                let v = self.temp_val(t);
+                self.set_val(v);
+                self.drop_val(v, t);
+            }
         }
     }
 
@@ -1110,6 +1275,11 @@ impl FuncGen<'_, '_> {
         match v {
             Val::One(l) if self.sh.is_ptr(t) => self.inc(l),
             Val::Two(tag, pay) => self.inc_payload(tag, pay, t),
+            Val::Fields(..) => {
+                for o in self.owned_of(v, t) {
+                    self.inc(o.local);
+                }
+            }
             _ => {}
         }
         self.get_val(v);
@@ -1195,12 +1365,55 @@ impl FuncGen<'_, '_> {
         unbox(&mut self.sink(), rt, m, o, own, [tag, pay, q, r]);
     }
 
-    /// Unboxes the owned (+1) enum object on the stack and drops the object: its payload's
-    /// reference becomes ours.
+    /// Unboxes the owned (+1) enum or struct object on the stack and drops the object: its
+    /// payload's or fields' references become ours.
     fn unbox_owned_top(&mut self, t: &Ty) {
+        if self.sh.fields(t).is_some() {
+            let o = self.temp(ValType::I32);
+            self.sink().local_tee(o);
+            self.unbox_struct_top(t, true);
+            self.dec(o);
+            return;
+        }
         let [o, _, _] = self.enum_scratch();
         self.unbox_top(t, true);
         self.dec(o);
+    }
+
+    /// Boxes the unboxed struct of type `t` on the stack (its fields, whose references the
+    /// object takes) into a new object (C8c2).
+    fn box_struct_top(&mut self, t: &Ty) {
+        let Val::Fields(id, fl) = self.temp_val(t) else {
+            unreachable!("an unboxed struct")
+        };
+        self.set_val(Val::Fields(id, fl));
+        let desc = self.statics.desc(t);
+        let o = self.temp(ValType::I32);
+        let n = self.m.structs[id.0 as usize].fields.len();
+        // Every slot is written below (a `()` field's with 0) before anything reads the object.
+        self.alloc(desc, Tag::Const(0), RECORD_SLOTS, n, &[], o);
+        let sh = self.sh;
+        store_fields(&mut self.sink(), sh, id, &fl, o);
+        for (i, ty) in sh.field_tys(id).enumerate() {
+            if sh.field_rep(ty) == Rep::None {
+                self.sink()
+                    .local_get(o)
+                    .i64_const(0)
+                    .i64_store(slot_at(RECORD_SLOTS + 8 * i as u64));
+            }
+        }
+        self.sink().local_get(o);
+    }
+
+    /// Unboxes the struct object (of type `t`) on the stack into its fields, each pointer field
+    /// +1 when `own`. The object keeps its own reference.
+    fn unbox_struct_top(&mut self, t: &Ty, own: bool) {
+        let id = self.sh.fields(t).expect("an unboxed struct");
+        let o = self.temp(ValType::I32);
+        let [p, r] = self.rc_scratch();
+        let (rt, sh) = (self.rt, self.sh);
+        self.sink().local_set(o);
+        unbox_struct(&mut self.sink(), rt, sh, id, o, own, [p, r]);
     }
 
     /// Pushes the payload the last `_u` runtime operation left in `rt_scratch`'s word.
@@ -1209,9 +1422,9 @@ impl FuncGen<'_, '_> {
         self.sink().i32_const(0).i64_load(at);
     }
 
-    /// Pushes operand `x`, held in `t` (an unboxed enum), boxed, and returns the hidden local
-    /// holding the object, for the caller to drop after use. A borrowed operand's payload is
-    /// copied into the object; an evaluated one's moves (its local emptied).
+    /// Pushes operand `x`, held in `t` (an unboxed enum or struct), boxed, and returns the hidden
+    /// local holding the object, for the caller to drop after use. A borrowed operand's payload
+    /// or fields are copied into the object; an evaluated one's move (its locals emptied).
     fn box_operand(&mut self, x: &ir::Expr, t: Val, borrowed: bool) -> u32 {
         let b = self.temp(ValType::I32);
         match t {
@@ -1225,6 +1438,17 @@ impl FuncGen<'_, '_> {
                 }
                 self.box_top(&x.ty);
             }
+            Val::Fields(..) => {
+                if borrowed {
+                    self.copy_val(t, &x.ty);
+                } else {
+                    self.get_val(t);
+                    for o in self.owned_of(t, &x.ty) {
+                        self.zero(o);
+                    }
+                }
+                self.box_struct_top(&x.ty);
+            }
             // `!`: nothing after it runs.
             _ => {
                 self.sink().unreachable();
@@ -1234,12 +1458,20 @@ impl FuncGen<'_, '_> {
         b
     }
 
+    /// Whether a value of type `t` is boxed for a runtime operation (`box_operand`).
+    fn boxes(&self, t: &Ty) -> bool {
+        self.sh.unboxed(t) || self.sh.fields(t).is_some()
+    }
+
     /// The Wasm block type for a value of type `t`.
     fn block_type(&mut self, t: &Ty) -> BlockType {
         match self.sh.rep(t) {
             Rep::None => BlockType::Empty,
             Rep::One(vt) => BlockType::Result(vt),
-            Rep::Two => BlockType::FunctionType(self.rt.types + type_index(self.types, (vec![], TWO.to_vec()))),
+            Rep::Two | Rep::Fields(_) => {
+                let results = self.sh.types(t);
+                BlockType::FunctionType(self.rt.types + type_index(self.types, (vec![], results)))
+            }
         }
     }
 
@@ -1300,13 +1532,7 @@ impl FuncGen<'_, '_> {
     /// Evaluates `xs` in order, each into new hidden locals, and returns them (`Val::None` for
     /// `()` and `!`). An owned reference among them is in `owned` from the returned mark on, so
     /// that an exit while a later one runs releases it; the caller truncates `owned` to the
-    /// mark once it has used them.
-    fn operands(&mut self, xs: &[&ir::Expr]) -> (usize, Vec<Val>) {
-        let (mark, temps, _) = self.operands_borrowing(xs, |_| false);
-        (mark, temps)
-    }
-
-    /// `operands`, except that an operand `i` for which `borrow(i)` holds and which is a read
+    /// mark once it has used them. An operand `i` for which `borrow(i)` holds and which is a read
     /// of a pointer or unboxed-enum local that no later operand mentions is not evaluated: its
     /// hidden locals are the local's own, borrowed (C8b2). The third result flags those, which
     /// the caller must not drop and may use only until it runs code other than these operands.
@@ -1314,6 +1540,19 @@ impl FuncGen<'_, '_> {
     /// assignment, a place write or a read in a later operand's own code could (a call cannot
     /// reach the caller's locals), and none mentions it.
     fn operands_borrowing(&mut self, xs: &[&ir::Expr], borrow: impl Fn(usize) -> bool) -> (usize, Vec<Val>, Vec<bool>) {
+        self.operands_slotting(xs, borrow, |_| false)
+    }
+
+    /// `operands_borrowing`, except that an operand `i` for which `slot(i)` holds is evaluated
+    /// as a slot (`slot_expr`: a variant, struct literal or boxed field written out is the
+    /// object itself, no unboxing and boxing again) into one `i64` hidden local, which the
+    /// caller pushes as is, without `slot_in`.
+    fn operands_slotting(
+        &mut self,
+        xs: &[&ir::Expr],
+        borrow: impl Fn(usize) -> bool,
+        slot: impl Fn(usize) -> bool,
+    ) -> (usize, Vec<Val>, Vec<bool>) {
         let mark = self.owned.len();
         let mut temps = Vec::new();
         let mut borrowed = Vec::new();
@@ -1321,16 +1560,31 @@ impl FuncGen<'_, '_> {
             if let ExprKind::Local(id) = x.kind {
                 let later = || xs[i + 1..].iter().any(|y| moves::mentions(y, id));
                 let v = self.local(id);
-                if borrow(i) && v != Val::None && (self.sh.is_ptr(&x.ty) || self.sh.unboxed(&x.ty)) && !later() {
+                if borrow(i) && v != Val::None && self.sh.lendable(&x.ty) && !later() {
                     temps.push(v);
                     borrowed.push(true);
                     continue;
                 }
             }
-            self.expr(x);
-            let t = self.temp_val(&x.ty);
-            self.set_val(t);
-            self.own(t, &x.ty);
+            let t = if slot(i) {
+                self.slot_expr(x);
+                let l = self.temp(ValType::I64);
+                self.sink().local_set(l);
+                if slot_ptr(&x.ty) {
+                    self.owned.push(Owned {
+                        local: l,
+                        slot: true,
+                        test: None,
+                    });
+                }
+                Val::One(l)
+            } else {
+                self.expr(x);
+                let t = self.temp_val(&x.ty);
+                self.set_val(t);
+                self.own(t, &x.ty);
+                t
+            };
             temps.push(t);
             borrowed.push(false);
         }
@@ -1390,7 +1644,7 @@ impl FuncGen<'_, '_> {
             }
             let mut boxes = Vec::new();
             for (i, (x, t)) in xs.iter().zip(temps).enumerate() {
-                if g.sh.unboxed(&x.ty) {
+                if g.boxes(&x.ty) {
                     boxes.push(g.box_operand(x, *t, borrowed[i]));
                     if slots && i > 0 {
                         g.sink().i64_extend_i32_u();
@@ -1431,15 +1685,20 @@ impl FuncGen<'_, '_> {
                 self.box_top(t);
                 self.sink().i64_extend_i32_u();
             }
+            Rep::Fields(_) => {
+                self.box_struct_top(t);
+                self.sink().i64_extend_i32_u();
+            }
         }
     }
 
     /// Evaluates `x` as a slot: its value through `slot_in`, except that an unboxed enum's
-    /// variant written out (`xs.push(Some(v))`, `[Tree::Leaf(1)]`) is built as the object
-    /// directly rather than unboxed and boxed again.
+    /// variant or an unboxed struct's literal written out (`xs.push(Some(v))`,
+    /// `[Tree::Leaf(1)]`, `[P { x: 1 }]`) is built as the object directly rather than unboxed
+    /// and boxed again.
     fn slot_expr(&mut self, x: &ir::Expr) {
-        if let ExprKind::Variant(_, v, args) = &x.kind {
-            if self.sh.unboxed(&x.ty) {
+        match &x.kind {
+            ExprKind::Variant(_, v, args) if self.sh.unboxed(&x.ty) => {
                 match args.as_slice() {
                     [] => {
                         let a = self.statics.pinned(&x.ty, *v);
@@ -1452,22 +1711,46 @@ impl FuncGen<'_, '_> {
                     _ => unreachable!("an unboxed enum's variants carry at most one slot"),
                 }
                 self.sink().i64_extend_i32_u();
-                return;
+            }
+            ExprKind::StructLit(_, inits) if self.sh.fields(&x.ty).is_some() => {
+                let desc = self.statics.desc(&x.ty);
+                let inits: Vec<(u32, &ir::Expr)> = inits.iter().map(|(f, x)| (*f, x)).collect();
+                self.object(desc, 0, RECORD_SLOTS, &inits);
+                self.sink().i64_extend_i32_u();
+            }
+            // A boxed enum or struct in an unboxed struct local's field is the object itself:
+            // moved out at the local's last use, else +1.
+            ExprKind::Field(base, f) if self.boxes(&x.ty) && self.field_local(base, *f).is_some() => {
+                let l = self.field_local(base, *f).expect("checked");
+                self.sink().local_get(l);
+                if self.moves_out(base) {
+                    self.sink().i32_const(0).local_set(l);
+                } else {
+                    self.inc(l);
+                }
+                self.sink().i64_extend_i32_u();
+            }
+            _ => {
+                self.expr(x);
+                self.slot_in(&x.ty);
             }
         }
-        self.expr(x);
-        self.slot_in(&x.ty);
     }
 
     /// Turns a slot on the stack into a value of type `t`, which gains a reference when `own`
-    /// (a pointer +1; an unboxed enum's payload +1, the object untouched). Without `own`, a
-    /// pointer is the slot's reference and an enum a borrowed view.
+    /// (a pointer +1; an unboxed enum's payload or an unboxed struct's pointer fields +1, the
+    /// object untouched). Without `own`, a pointer is the slot's reference and an enum or
+    /// struct a borrowed view.
     fn slot_out(&mut self, t: &Ty, own: bool) {
         let rep = self.sh.rep(t);
         match rep {
             Rep::Two => {
                 self.sink().i32_wrap_i64();
                 self.unbox_top(t, own);
+            }
+            Rep::Fields(_) => {
+                self.sink().i32_wrap_i64();
+                self.unbox_struct_top(t, own);
             }
             Rep::One(ValType::I32) if own && self.sh.is_ptr(t) => {
                 let [p, _] = self.rc_scratch();
@@ -1613,9 +1896,8 @@ impl FuncGen<'_, '_> {
                         // The value first, then the old one dropped.
                         None => {
                             self.expr(value);
-                            if let Some(o) = self.local_owned(place.root) {
-                                self.dec_owned(o);
-                            }
+                            let os = self.local_owned(place.root);
+                            self.dec_all(&os);
                         }
                     },
                     (Some(BinOp::Concat), Val::One(l)) => {
@@ -1775,7 +2057,7 @@ impl FuncGen<'_, '_> {
         let ty = elem(&xs.ty);
         let x = self.local(x);
         let x_owned = self.owned_of(x, ty);
-        self.owned.extend(x_owned);
+        self.owned.extend(x_owned.iter().copied());
         let (n, i) = (self.temp(ValType::I64), self.temp(ValType::I64));
         self.sink().local_get(list);
         self.call_rt("rt_list_len");
@@ -1796,10 +2078,7 @@ impl FuncGen<'_, '_> {
         self.block(body, false);
         self.loops.pop();
         self.close();
-        if let Some(o) = x_owned {
-            self.dec_owned(o);
-            self.zero(o);
-        }
+        self.dec_and_zero(&x_owned);
         self.sink().local_get(i).i64_const(1).i64_add().local_set(i);
         self.br(top);
         self.close();
@@ -1812,10 +2091,15 @@ impl FuncGen<'_, '_> {
     /// unique along its path, then the last step's slot (bounds-checked for an index) and the
     /// write, which drops the old value. An overflow reports `span`, the statement's.
     fn assign_element(&mut self, place: &ir::Place, op: Option<BinOp>, value: &ir::Expr, span: Span) {
+        if let (Val::Fields(id, fl), [ir::PlaceStep::Field(f)]) = (self.local(place.root), place.steps.as_slice()) {
+            let fty = &self.m.structs[id.0 as usize].fields[*f as usize].1;
+            return self.assign_field_local(fl[*f as usize], fty, op, value, span);
+        }
         let (mut xs, sites) = self.indexes(place);
         let n = xs.len();
         xs.push(value);
-        let (mark, temps) = self.operands(&xs);
+        // A stored value is evaluated as the slot it becomes.
+        let (mark, temps, _) = self.operands_slotting(&xs, |_| false, |i| i == n && op.is_none());
         let last = place.steps.len() - 1;
         let mut k = 0;
         let (cur, a) = self.walk(place, &temps, &sites, last, &mut k);
@@ -1830,7 +2114,6 @@ impl FuncGen<'_, '_> {
                 }
                 self.sink().local_get(a);
                 self.get(value, v);
-                self.slot_in(&value.ty);
                 self.sink().i64_store(SLOT);
                 if let Some(old) = old {
                     self.dec(old);
@@ -1839,7 +2122,7 @@ impl FuncGen<'_, '_> {
             (Some(_), Val::None) => {
                 self.sink().unreachable();
             }
-            (Some(op), Val::Two(..)) => unreachable!("{op:?} on an enum"),
+            (Some(op), Val::Two(..) | Val::Fields(..)) => unreachable!("{op:?} on an enum or struct"),
             (Some(op), Val::One(v)) => {
                 self.sink().local_get(a).local_get(a).i64_load(SLOT);
                 if op == BinOp::Concat {
@@ -1863,6 +2146,49 @@ impl FuncGen<'_, '_> {
         self.owned.truncate(mark);
     }
 
+    /// `s.f = v`, `+=` and `-=` on field `l` (of type `fty`) of an unboxed struct local (C8c2):
+    /// the value first, then the field's local is written, with no `unique` check; a boxed enum
+    /// or struct field is boxed into it, and the old object dropped after the value is made.
+    fn assign_field_local(&mut self, l: u32, fty: &Ty, op: Option<BinOp>, value: &ir::Expr, span: Span) {
+        match op {
+            None => {
+                self.expr(value);
+                if self.sh.field_rep(fty) == Rep::None {
+                    return;
+                }
+                self.box_field(fty);
+                if slot_ptr(fty) {
+                    self.dec(l);
+                }
+                self.sink().local_set(l);
+            }
+            Some(BinOp::Concat) => {
+                // `rt_str_append` takes the field's reference (growing the string in place if it
+                // was the only one) and borrows the value, which is then dropped.
+                let v = self.temp(ValType::I32);
+                self.expr(value);
+                self.sink().local_set(v).local_get(l).local_get(v);
+                self.call_rt("rt_str_append");
+                self.sink().local_set(l);
+                self.dec(v);
+            }
+            Some(op @ (BinOp::FAdd | BinOp::FSub)) => {
+                let v = self.temp(ValType::F64);
+                self.expr(value);
+                self.sink().local_set(v).local_get(l).local_get(v);
+                self.float_op(op);
+                self.sink().local_set(l);
+            }
+            Some(op) => {
+                self.expr(value);
+                let v = self.scratch()[0];
+                self.sink().local_set(v).local_get(l).local_get(v);
+                self.int_op(op, span);
+                self.sink().local_set(l);
+            }
+        }
+    }
+
     /// `push`, `insert`, `remove`, `sort` and `pop` (of type `ty`) on a place: the indexes,
     /// then the arguments, then the place made unique along its path, and the change.
     fn mutate(&mut self, place: &ir::Place, op: Mut, args: &[ir::Expr], ty: &Ty, span: Span) {
@@ -1875,7 +2201,9 @@ impl FuncGen<'_, '_> {
             op,
             Mut::MapInsert | Mut::MapRemove | Mut::ListSortBy | Mut::ListSortByKey
         );
-        let (mark, temps, borrowed) = self.operands_borrowing(&xs, |i| key && i == n);
+        // A pushed or inserted value is evaluated as the slot it becomes.
+        let stored = |i: usize| (op == Mut::ListPush && i == n) || (op == Mut::MapInsert && i == n + 1);
+        let (mark, temps, borrowed) = self.operands_slotting(&xs, |i| key && i == n, stored);
         let (cur, slot) = self.walk(place, &temps, &sites, place.steps.len(), &mut 0);
         let args: Vec<(&ir::Expr, Val)> = args.iter().zip(temps[n..].iter().copied()).collect();
         if op == Mut::ListPop {
@@ -1937,9 +2265,11 @@ impl FuncGen<'_, '_> {
         } else {
             // The value becomes the container's; a key is borrowed, then dropped.
             self.sink().local_get(cur);
-            for &(x, t) in &args {
+            for (i, &(x, t)) in args.iter().enumerate() {
                 self.get(x, t);
-                self.slot_in(&x.ty);
+                if !stored(n + i) {
+                    self.slot_in(&x.ty);
+                }
             }
             self.call_rt(match op {
                 Mut::ListPush => "rt_list_push",
@@ -1974,19 +2304,28 @@ impl FuncGen<'_, '_> {
     /// value there unique and stores it back, and descends. Returns the local holding the
     /// container reached, and one holding the address of its slot unless it is the root.
     fn walk(&mut self, place: &ir::Place, temps: &[Val], sites: &[u32], n: usize, k: &mut usize) -> (u32, Option<u32>) {
-        let Val::One(root) = self.local(place.root) else {
-            unreachable!("a container local")
-        };
         debug_assert!(!self.is_lent(place.root), "a borrowed parameter changed in place");
+        let (root, steps) = match self.local(place.root) {
+            Val::One(root) => (root, &place.steps[..n]),
+            // An unboxed struct's field local holds the first container (C8c2): the struct
+            // itself needs no `unique` check.
+            Val::Fields(_, fl) => {
+                let ir::PlaceStep::Field(f) = place.steps[0] else {
+                    unreachable!("a struct's step is a field")
+                };
+                (fl[f as usize], &place.steps[1..n])
+            }
+            v => unreachable!("{v:?} is not a container local"),
+        };
         self.sink().local_get(root);
         self.unique_top();
         self.sink().local_set(root);
-        if n == 0 {
+        if steps.is_empty() {
             return (root, None);
         }
         let (cur, a) = (self.temp(ValType::I32), self.temp(ValType::I32));
         self.sink().local_get(root).local_set(cur);
-        for step in &place.steps[..n] {
+        for step in steps {
             self.step_slot(step, cur, a, temps, sites, k);
             self.sink().local_get(a).local_get(a).i64_load(SLOT).i32_wrap_i64();
             self.unique_top();
@@ -2065,7 +2404,7 @@ impl FuncGen<'_, '_> {
                     // The last use: the reference moves out, and the local is left empty, so
                     // the scope's end and every exit drop nothing (`rt_dec(0)`).
                     self.get_val(v);
-                    if let Some(o) = self.owned_of(v, &e.ty) {
+                    for o in self.owned_of(v, &e.ty) {
                         self.zero(o);
                     }
                 } else {
@@ -2105,7 +2444,7 @@ impl FuncGen<'_, '_> {
                     g.sink().i32_const(desc as i32);
                     let mut boxes = Vec::new();
                     for (i, (x, t)) in [a, b].into_iter().zip(temps).enumerate() {
-                        if g.sh.unboxed(&x.ty) {
+                        if g.boxes(&x.ty) {
                             boxes.push(g.box_operand(x, *t, borrowed[i]));
                         } else {
                             g.get(x, *t);
@@ -2295,7 +2634,7 @@ impl FuncGen<'_, '_> {
                 self.rt_op_slots(name, &pre, &xs, &sites, slots);
                 if name.ends_with("_u") {
                     self.scratch_payload();
-                } else if self.sh.unboxed(&e.ty) {
+                } else if self.boxes(&e.ty) {
                     self.unbox_owned_top(&e.ty);
                 }
             }
@@ -2345,6 +2684,26 @@ impl FuncGen<'_, '_> {
                 self.call_rt("rt_map_new");
             }
             ExprKind::Mutate(place, op, args) => self.mutate(place, *op, args, &e.ty, e.span),
+            // An unboxed struct's literal is its fields: the values in source order, each held as
+            // an operand, then pushed in field order (an enum or struct value boxed, as its field
+            // local holds it); no object for the struct itself (C8c2).
+            ExprKind::StructLit(id, inits) if self.sh.fields(&e.ty).is_some() => {
+                let xs: Vec<&ir::Expr> = inits.iter().map(|(_, x)| x).collect();
+                let fields = &self.m.structs[id.0 as usize].fields;
+                let boxed: Vec<bool> = inits.iter().map(|(g, _)| self.boxes(&fields[*g as usize].1)).collect();
+                let (mark, temps, _) = self.operands_slotting(&xs, |_| false, |i| boxed[i]);
+                for f in 0..fields.len() {
+                    let i = inits
+                        .iter()
+                        .position(|(g, _)| *g as usize == f)
+                        .expect("every field written");
+                    self.get(xs[i], temps[i]);
+                    if boxed[i] {
+                        self.sink().i32_wrap_i64();
+                    }
+                }
+                self.owned.truncate(mark);
+            }
             ExprKind::StructLit(_, inits) => {
                 let desc = self.statics.desc(&e.ty);
                 let inits: Vec<(u32, &ir::Expr)> = inits.iter().map(|(f, x)| (*f, x)).collect();
@@ -2419,9 +2778,9 @@ impl FuncGen<'_, '_> {
         for (((x, t), &here), &lent) in args.iter().zip(&temps).zip(&in_place).zip(lent) {
             match (here, *t) {
                 (true, _) if self.moves_out(x) => {
-                    let o = self.local_owned(root(x)).expect("a local holding a reference");
-                    self.dec_owned(o);
-                    self.zero(o);
+                    let os = self.local_owned(root(x));
+                    debug_assert!(!os.is_empty(), "a local holding a reference");
+                    self.dec_and_zero(&os);
                 }
                 (false, t) if lent => self.drop_val(t, &x.ty),
                 _ => {}
@@ -2451,7 +2810,7 @@ impl FuncGen<'_, '_> {
             g.sink().i32_const(desc as i32).local_get(h);
             let mut boxes = Vec::new();
             for (i, (x, t)) in xs.iter().zip(temps).enumerate() {
-                if g.sh.unboxed(&x.ty) {
+                if g.boxes(&x.ty) {
                     boxes.push(g.box_operand(x, *t, borrowed[i]));
                 } else {
                     g.get(x, *t);
@@ -2462,7 +2821,7 @@ impl FuncGen<'_, '_> {
                 g.dec(b);
             }
         });
-        if self.sh.unboxed(ty) {
+        if self.boxes(ty) {
             self.unbox_owned_top(ty);
         }
     }
@@ -2994,32 +3353,132 @@ impl FuncGen<'_, '_> {
     }
 
     /// `base.f`: a new reference to the field's value. A base that is a local, or a field of
-    /// one, is read in place; any other is evaluated and dropped after the read.
+    /// one, is read in place; any other is evaluated and dropped after the read. A field of an
+    /// unboxed struct local is its local (C8c2): a pointer field is moved out at the local's
+    /// last use and copied otherwise; a boxed enum or struct in it is unboxed with a reference.
     fn field(&mut self, base: &ir::Expr, f: u32, ty: &Ty) {
-        let b = if self.in_place(base) {
-            self.borrow(base);
-            None
-        } else {
-            self.expr(base);
-            if base.ty == Ty::Never {
-                return;
+        if let Some(l) = self.field_local(base, f) {
+            match self.sh.field_rep(ty) {
+                Rep::None => {}
+                _ if self.boxes(ty) => {
+                    self.sink().local_get(l);
+                    self.unbox_field(ty, true);
+                }
+                _ if slot_ptr(ty) && self.moves_out(base) => {
+                    self.sink().local_get(l).i32_const(0).local_set(l);
+                }
+                _ => {
+                    self.sink().local_get(l);
+                    if slot_ptr(ty) {
+                        self.inc(l);
+                    }
+                }
             }
-            let b = self.temp(ValType::I32);
-            self.sink().local_tee(b);
-            Some(b)
-        };
+            return;
+        }
+        if self.in_place(base) {
+            self.borrow_ptr(base);
+            self.sink().i64_load(slot_at(RECORD_SLOTS + 8 * u64::from(f)));
+            self.slot_out(ty, true);
+            return;
+        }
+        self.expr(base);
+        if base.ty == Ty::Never {
+            return;
+        }
+        if let Rep::Fields(id) = self.sh.rep(&base.ty) {
+            // A temporary: the field's value is taken from it (a pointer field's reference
+            // moves out; an object in it is unboxed and dropped), the other fields dropped.
+            let v = self.temp_val(&base.ty);
+            self.set_val(v);
+            let Val::Fields(_, fl) = v else {
+                unreachable!("an unboxed struct")
+            };
+            let l = fl[f as usize];
+            match self.sh.field_rep(ty) {
+                Rep::None => {}
+                _ if self.boxes(ty) => {
+                    self.sink().local_get(l);
+                    self.unbox_owned_top(ty);
+                }
+                _ => {
+                    self.sink().local_get(l);
+                }
+            }
+            for (k, t) in self.field_vals(id, fl) {
+                if k != l && slot_ptr(t) {
+                    self.dec(k);
+                }
+            }
+            return;
+        }
+        let b = self.temp(ValType::I32);
+        self.sink().local_tee(b);
         self.sink().i64_load(slot_at(RECORD_SLOTS + 8 * u64::from(f)));
         self.slot_out(ty, true);
-        if let Some(b) = b {
-            self.dec(b);
+        self.dec(b);
+    }
+
+    /// The local holding field `f` of `base`, when `base` is a read of an unboxed struct local.
+    fn field_local(&self, base: &ir::Expr, f: u32) -> Option<u32> {
+        match base.kind {
+            ExprKind::Local(id) => match self.local(id) {
+                Val::Fields(_, fl) => Some(fl[f as usize]),
+                _ => None,
+            },
+            _ => None,
         }
     }
 
-    /// The Wasm locals of `e` if it is a read of a pointer or unboxed-enum local, to borrow in
-    /// place.
+    /// Turns the object pointer a field local holds (a boxed enum or struct of type `t`) on the
+    /// stack into the value, with a reference when `own`.
+    fn unbox_field(&mut self, t: &Ty, own: bool) {
+        match self.sh.rep(t) {
+            Rep::Two => self.unbox_top(t, own),
+            Rep::Fields(_) => self.unbox_struct_top(t, own),
+            rep => unreachable!("{rep:?} is not boxed in a field local"),
+        }
+    }
+
+    /// Turns the value of type `t` on the stack into what a field local of that type holds: an
+    /// unboxed enum or struct boxed, anything else as is.
+    fn box_field(&mut self, t: &Ty) {
+        match self.sh.rep(t) {
+            Rep::Two => self.box_top(t),
+            Rep::Fields(_) => self.box_struct_top(t),
+            _ => {}
+        }
+    }
+
+    /// Pushes the pointer to the object that `e` (which `in_place` accepts, of a boxed type)
+    /// names, borrowed: a local's, or a field of one read in place.
+    fn borrow_ptr(&mut self, e: &ir::Expr) {
+        match &e.kind {
+            ExprKind::Local(id) => match self.local(*id) {
+                Val::One(l) => {
+                    self.sink().local_get(l);
+                }
+                v => unreachable!("{v:?} is not an object"),
+            },
+            ExprKind::Field(base, f) => {
+                if let Some(l) = self.field_local(base, *f) {
+                    self.sink().local_get(l);
+                } else {
+                    self.borrow_ptr(base);
+                    self.sink()
+                        .i64_load(slot_at(RECORD_SLOTS + 8 * u64::from(*f)))
+                        .i32_wrap_i64();
+                }
+            }
+            _ => unreachable!("in place"),
+        }
+    }
+
+    /// The Wasm locals of `e` if it is a read of a pointer, unboxed-enum or unboxed-struct local,
+    /// to borrow in place.
     fn borrowed_local(&self, e: &ir::Expr) -> Option<Val> {
         match e.kind {
-            ExprKind::Local(id) if self.sh.is_ptr(&e.ty) || self.sh.unboxed(&e.ty) => Some(self.local(id)),
+            ExprKind::Local(id) if self.sh.lendable(&e.ty) => Some(self.local(id)),
             _ => None,
         }
     }
@@ -3034,7 +3493,7 @@ impl FuncGen<'_, '_> {
     }
 
     /// Pushes the value `e`, which `in_place` accepts, holds, borrowed: no `rt_inc`; an unboxed
-    /// enum field as a view of its object's tag and payload.
+    /// enum or struct field as a view of its object's tag and payload or fields.
     fn borrow(&mut self, e: &ir::Expr) {
         match &e.kind {
             ExprKind::Local(id) => {
@@ -3042,9 +3501,18 @@ impl FuncGen<'_, '_> {
                 self.get_val(v);
             }
             ExprKind::Field(base, f) => {
-                self.borrow(base);
-                self.sink().i64_load(slot_at(RECORD_SLOTS + 8 * u64::from(*f)));
-                self.slot_out(&e.ty, false);
+                if let Some(l) = self.field_local(base, *f) {
+                    if self.sh.field_rep(&e.ty) != Rep::None {
+                        self.sink().local_get(l);
+                        if self.boxes(&e.ty) {
+                            self.unbox_field(&e.ty, false);
+                        }
+                    }
+                } else {
+                    self.borrow_ptr(base);
+                    self.sink().i64_load(slot_at(RECORD_SLOTS + 8 * u64::from(*f)));
+                    self.slot_out(&e.ty, false);
+                }
             }
             _ => unreachable!("in place"),
         }
@@ -3105,7 +3573,7 @@ impl FuncGen<'_, '_> {
                 self.sink().local_get(pay);
                 &path[1..]
             }
-            Val::None => unreachable!("`()` has no parts"),
+            Val::None | Val::Fields(..) => unreachable!("`()` and structs have no parts"),
         };
         for &i in rest {
             self.sink()
@@ -3159,7 +3627,7 @@ impl FuncGen<'_, '_> {
                     (Val::One(l), true) => {
                         self.sink().local_get(l).i32_load(VARIANT);
                     }
-                    (Val::None, true) => unreachable!("`()` has no variants"),
+                    (Val::None | Val::Fields(..), true) => unreachable!("`()` and structs have no variants"),
                     (s, false) => {
                         self.part_slot(s, path);
                         self.sink().i32_wrap_i64().i32_load(VARIANT);
@@ -3269,7 +3737,10 @@ impl FuncGen<'_, '_> {
         let Val::Two(tag, pay) = s else {
             unreachable!("an Option or Result")
         };
-        let temp = self.owned_of(s, &x.ty).filter(|_| borrowed.is_none());
+        let temp = match borrowed {
+            None => self.owned_of(s, &x.ty).pop(),
+            Some(_) => None,
+        };
         self.sink().local_get(tag).i32_const(success).i32_ne();
         self.open(Open::If, BlockType::Empty);
         match &x.ty {
@@ -3446,9 +3917,21 @@ impl FuncGen<'_, '_> {
 /// handle of grant `i` (`rt_grant(i, kind)`) as its parameter `i`, return its value as a slot;
 /// an unboxed enum (of descriptor `desc`) boxed, for the runtime to display.
 fn entry(rt: &Runtime, sh: &Shapes, table: u32, index: u32, main: &ir::Func, desc: u32) -> Function {
-    // A tag, an object and a payload, for the boxing.
+    // A tag, an object and a payload, for the boxing; then a local per field of an unboxed
+    // struct result.
     let (tag, o, pay) = (0, 1, 2);
-    let mut f = Function::new([(2, ValType::I32), (1, ValType::I64)]);
+    let mut locals = vec![(2, ValType::I32), (1, ValType::I64)];
+    let fl = match sh.rep(&main.ret) {
+        Rep::Fields(id) => {
+            let mut next = 3;
+            Some(field_locals(sh, id, |vt| {
+                locals.push((1, vt));
+                (next, next += 1).0
+            }))
+        }
+        _ => None,
+    };
+    let mut f = Function::new(locals);
     let mut s = f.instructions();
     s.i32_const(table as i32).call(rt.export("rt_init"));
     for (i, l) in main.locals[..main.params as usize].iter().enumerate() {
@@ -3492,6 +3975,21 @@ fn entry(rt: &Runtime, sh: &Shapes, table: u32, index: u32, main: &ir::Func, des
             }
             s.local_get(o).i64_extend_i32_u();
         }
+        Rep::Fields(id) => {
+            // `rt_alloc` zeroes the slots, so a `()` field's stays 0.
+            let fl = fl.expect("locals for the fields");
+            for (i, t) in sh.field_tys(id).enumerate().rev() {
+                if sh.field_rep(t) != Rep::None {
+                    s.local_set(fl[i]);
+                }
+            }
+            s.i32_const(desc as i32)
+                .i32_const(0)
+                .call(rt.export("rt_alloc"))
+                .local_set(o);
+            store_fields(&mut s, sh, id, &fl, o);
+            s.local_get(o).i64_extend_i32_u();
+        }
     }
     s.end();
     f
@@ -3529,6 +4027,10 @@ fn wrapper(rt: &Runtime, sh: &Shapes, f: ir::FuncId, captures: usize, lent: &[bo
             Rep::Two => {
                 s.local_get(0).i64_load(at).i32_wrap_i64().local_set(p);
                 unbox(&mut s, rt, sh.masks(&l.ty), p, !lent[i], [tag, pay, q, r]);
+            }
+            Rep::Fields(id) => {
+                s.local_get(0).i64_load(at).i32_wrap_i64().local_set(q);
+                unbox_struct(&mut s, rt, sh, id, q, !lent[i], [p, r]);
             }
             rep => {
                 if sh.is_ptr(&l.ty) && !lent[i] {
@@ -3571,6 +4073,17 @@ fn wrapper(rt: &Runtime, sh: &Shapes, f: ir::FuncId, captures: usize, lent: &[bo
                     dec(&mut s, rt, p, r);
                     if test.is_some() {
                         s.end();
+                    }
+                }
+            }
+            Rep::Fields(id) => {
+                for t in sh.field_tys(id) {
+                    if sh.field_rep(t) == Rep::None {
+                        continue;
+                    }
+                    w += 1;
+                    if lent && slot_ptr(t) {
+                        dec(&mut s, rt, w, r);
                     }
                 }
             }
