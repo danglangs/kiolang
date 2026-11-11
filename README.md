@@ -6,6 +6,48 @@ A language for code that AI agents write, with explicit authority, host-enforced
 
 The code names what it needs (`input: Dir`), the operator decides what that is (`--dir input=/data`), and nothing else is reachable.
 
+## In 60 seconds
+
+An agent writes a job: read today's orders, post them to the CRM ([examples/glance](examples/glance)).
+
+```rust
+fn main(orders: Dir, crm: Http) -> Result<Int, Str> {
+  let csv = orders.read("today.csv").map_err(|_| "no orders")?;
+  let r = crm.send("POST", "/v1/import", [], csv, 5000).map_err(|_| "crm down")?;
+  Ok(r.status)
+}
+```
+
+The operator grants exactly that: the orders read-only, one host, POST only, and a key the program never sees.
+
+```
+$ kio run sync.kio --dir orders=./orders:ro --http crm=api.crm.example \
+    --http-methods crm=POST --http-header crm=Authorization:env:CRM_KEY
+```
+
+Next week an instruction hidden in a ticket makes the agent "archive the file after import". The reviewer reads one line, not the code:
+
+```
+$ kio check archive.kio --base sync.kio
+~ orders: Dir (+remove)
+authority added (exit 3); --detail lists each function
+```
+
+Shipped anyway, it does not start:
+
+```
+kio: `orders` is granted `:ro` but the program can write it (`orders remove`)
+```
+
+| To get this | kio | Python |
+|---|---|---|
+| Only `./orders`, read-only | `--dir orders=./orders:ro` | a sandbox profile or container mounts |
+| Only `api.crm.example`, only POST | `--http`, `--http-methods` | an egress proxy with a method filter |
+| A key the code never holds | `--http-header crm=Authorization:env:CRM_KEY` | a proxy that injects it |
+| What a change adds | `kio check --base`, exact | read the diff; scanners guess |
+
+## A closer look
+
 A reviewer reads one report instead of every line. This is what an agent might write to convert invoices at the day's exchange rate:
 
 ```rust
