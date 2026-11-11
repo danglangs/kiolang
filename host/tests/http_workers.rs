@@ -84,7 +84,7 @@ fn the_ceiling_refuses_new_requests_not_dir_reads() {
         std::thread::spawn(move || {
             let origin = Origin::parse(&grant).unwrap();
             let mut kio = Kio::new(limits).unwrap();
-            // At the deadline the run stops, or its workers answer `timeout` first: either way.
+            // At the deadline the run stops as a timeout (H24).
             let _ = kio.run_with(&batch(16, "/hang"), vec![], vec![("h".into(), origin)]);
         })
     };
@@ -164,7 +164,7 @@ fn pools_balance_under_mixed_load() {
             });
         }
         for _ in 0..4 {
-            // Each stops at its deadline, or its requests answer `timeout` first: either way.
+            // Each stops as a timeout at its deadline (H24).
             for src in [batch(8, "/hang"), one("/trickle"), one("/hang")] {
                 let grant = up.grant.clone();
                 s.spawn(move || {

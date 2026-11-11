@@ -65,10 +65,11 @@ Compiled-only kio covers the whole language and every capability. What real apps
 | H22 | `Hmac` (`--hmac k=env:VAR\|file:PATH[:verify]`): `sign(msg) -> Result<Bytes, HmacErr>` and constant-time `verify(msg, mac) -> Bool`, HMAC-SHA256 in the host over lang's SHA-256 under a key read once at start with S1's rules; `:verify` makes `sign` `Denied`. caps.wit (owner-approved), both paths, report, audit (method, length, result; never a key or MAC), grant hint, `--listen`. RFC 4231 vectors; a Stripe-style webhook verified in kio. Security-reviewed, fixes in |
 | P3 (product) | `kio check NEW --base OLD` prints one line per changed grant first (`+ stripe: Hmac (verify)`, `~ db: Db (+query)`, `- x: Dir (read)`), the per-function lines under `--detail` or when no grant line shows the addition; payhook's step 2 diff is 2 lines, was 6. Exit codes unchanged (#180) |
 | D2 | docs from P2, each run first: an `Http` call in flight at a `--listen` run's `--timeout` (guide.md), `--base` module resolution, which SQLite errors are `DbErr::Constraint`, unary `-` on expressions (language.md) |
+| H24 | an `Http` call (`get`, `send`, `send_all`) in flight at the run's deadline always stops the run as a timeout, `--listen` (a 500) and plain `kio run`; a request's own shorter `timeout_ms` is still `Err(Timeout)`. 50 runs, one outcome (before: 3 of 3 test runs saw `Err(Timeout)` reach the program) |
 
 ## Next
 
-Direction A ([product-todo.md](product-todo.md)): P1, S1, E1, E2 and the pilot P2 (payhook) are done. Next: allocation speed, C8c2-C8c8 (compiler-todo.md; the plan is proposals/allocation-speed.md), then H24 (one outcome for an `Http` call at the deadline). Packages after. Tuples if the evals show models still reach for them.
+Direction A ([product-todo.md](product-todo.md)): P1, S1, E1, E2 and the pilot P2 (payhook) are done. Next: allocation speed, C8c2-C8c8 (compiler-todo.md; the plan is proposals/allocation-speed.md), Packages after. Tuples if the evals show models still reach for them.
 
 Also open: C8 (roadmap.md): tree's remaining freeing (free-list pushes, a `List`'s separate buffer); tree's 4-5% from the larger size classes (#117); borrowed match bindings of a borrowed scrutinee (tree). Pinned, not started: L18 `par_map` and L19 `scope`/`spawn` (concurrency stages 2 and 3, when a program needs them).
 

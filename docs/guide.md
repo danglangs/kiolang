@@ -157,7 +157,7 @@ The audit log has a line per call with the SQL (cut at 256 characters), the para
 
 A listening socket is a grant too. Each request runs in a fresh sandbox; `main` takes `req: Incoming, res: Outgoing` (any names) plus its other grants, `Http` included. `send` answers the client at once, and `main` may go on working under the request's limits (a webhook after the response, say).
 
-`--timeout` covers the whole run, the work after `send` included. An `Http` call still waiting at the deadline is cut off then: the run stops as a timeout (a client not yet answered gets a 500; after `send`, stderr says `request failed after its response was sent`), or the call returns `Err(Timeout)` with no time left to use it, whichever the host sees first. To act on a slow upstream, give the call less than the run has: `send_all`'s `timeout_ms` (payhook posts with 2 s under `--timeout 20`).
+`--timeout` covers the whole run, the work after `send` included. An `Http` call (`get`, `send`, `send_all`) still waiting at the deadline stops the run as a timeout; the program never sees its result (a client not yet answered gets a 500; after `send`, stderr says `request failed after its response was sent`). To act on a slow upstream, give the call less than the run has: `send_all`'s `timeout_ms` (payhook posts with 2 s under `--timeout 20`).
 
 ```
 $ kio run examples/serve/app.kio --dir public=examples/tour/in --listen 127.0.0.1:8080

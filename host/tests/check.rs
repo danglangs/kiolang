@@ -670,15 +670,78 @@ fn http_quotas_and_timeout() {
     let mut kio = Kio::new(limits).unwrap();
     let o = kio_host::Origin::parse(&g).unwrap();
     let start = std::time::Instant::now();
-    // The request timeout and the deadline coincide: either stops the run, or `timeout` reaches the program.
-    match kio.run_with(src, vec![], vec![("h".into(), o)]) {
-        Err(e) => assert_eq!(
-            kio.explain(&e).unwrap(),
-            "timed out after 1 s (raise it with --timeout)"
-        ),
-        Ok(out) => assert_eq!(out.unwrap().value, "0"),
-    }
+    // The deadline cuts the request off: the run stops; `timeout` never reaches the program (H24).
+    let e = kio.run_with(src, vec![], vec![("h".into(), o)]).unwrap_err();
+    assert_eq!(
+        kio.explain(&e).unwrap(),
+        "timed out after 1 s (raise it with --timeout)"
+    );
     assert!(start.elapsed() < std::time::Duration::from_secs(2));
+}
+
+/// H24: a `get`, `send` or `send_all` still in flight at the run's deadline always ends the run
+/// as a timeout, compiled or interpreted: 50 runs, one outcome.
+#[test]
+fn http_call_at_the_deadline_ends_the_run() {
+    let g = serve();
+    let one_sec = Limits {
+        timeout_secs: 1,
+        ..Limits::default()
+    };
+    let calls = [
+        r#"h.get("/hang").is_ok()"#,
+        r#"h.send("POST", "/hang", [], "x".to_bytes()).is_ok()"#,
+        r#"h.send_all([HttpRequest { method: "GET", path: "/ok", headers: [], body: "".to_bytes(), timeout_ms: 0 }, HttpRequest { method: "GET", path: "/hang", headers: [], body: "".to_bytes(), timeout_ms: 0 }]).len() == 2"#,
+    ];
+    // Ten at a time, so the load stays light for the tests beside it.
+    for wave in 0..5 {
+        std::thread::scope(|s| {
+            let runs: Vec<_> = (wave * 10..wave * 10 + 10)
+                .map(|i| {
+                    let (g, call) = (&g, calls[i % 3]);
+                    s.spawn(move || {
+                        let src = format!("fn main(h: Http) -> Bool {{ {call} }}");
+                        let grants = vec![("h".into(), granted(g, "POST"))];
+                        let out = if i % 5 == 4 {
+                            let mut interp = kio_host::Interp::new(one_sec).unwrap();
+                            let r = interp.run_with(&src, vec![], grants);
+                            r.map(|o| o.map(|o| o.value)).map_err(|e| interp.explain(&e))
+                        } else {
+                            let mut kio = Kio::new(one_sec).unwrap();
+                            let r = kio.run_with(&src, vec![], grants);
+                            r.map(|o| o.map(|o| o.value)).map_err(|e| kio.explain(&e))
+                        };
+                        format!("{out:?}")
+                    })
+                })
+                .collect();
+            for (i, r) in (wave * 10..).zip(runs) {
+                assert_eq!(
+                    r.join().unwrap(),
+                    r#"Err(Some("timed out after 1 s (raise it with --timeout)"))"#,
+                    "run {i}: {}",
+                    calls[i % 3]
+                );
+            }
+        });
+    }
+}
+
+/// H24: a request's own `timeout_ms`, shorter than what the run has left, is still `timeout` to
+/// the program, which goes on.
+#[test]
+fn a_short_request_timeout_reaches_the_program() {
+    let g = serve();
+    let src = r#"fn main(h: Http) -> List<Result<Int, HttpErr>> { h.send_all([HttpRequest { method: "GET", path: "/hang", headers: [], body: "".to_bytes(), timeout_ms: 200 }]).map(|r| r.map(|r| r.status)) }"#;
+    let one_sec = Limits {
+        timeout_secs: 1,
+        ..Limits::default()
+    };
+    for _ in 0..5 {
+        let mut kio = Kio::new(one_sec).unwrap();
+        let out = kio.run_with(src, vec![], vec![("h".into(), granted(&g, ""))]);
+        assert_eq!(out.unwrap().unwrap().value, "[Err(HttpErr::Timeout)]");
+    }
 }
 
 /// N1: a body over 10 MB is `too-large`, and what was read is charged.

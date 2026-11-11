@@ -593,6 +593,8 @@ struct Performed {
     ms: f64,
     /// Not sent: the process had `MAX_HTTP_WORKERS` HTTP workers alive.
     busy: bool,
+    /// Timed out at the run's deadline, not at the request's own timeout.
+    cut: bool,
     result: std::result::Result<Inbound, kio::caps::net::HttpErr>,
 }
 
@@ -660,6 +662,7 @@ fn perform(origin: &Origin, req: &Outbound, deadline: Instant, budget: &AtomicI6
         read: 0,
         ms: 0.0,
         busy: false,
+        cut: false,
         result: Err(HttpErr::Denied),
     };
     let mut url = req.url.clone();
@@ -732,6 +735,7 @@ fn perform(origin: &Origin, req: &Outbound, deadline: Instant, budget: &AtomicI6
         };
     };
     done.ms = start.elapsed().as_secs_f64() * 1000.0;
+    done.cut = until == deadline && matches!(result, Err(HttpErr::Timeout));
     done.result = result;
     done
 }
@@ -1458,6 +1462,7 @@ fn busy() -> Performed {
         read: 0,
         ms: 0.0,
         busy: true,
+        cut: false,
         result: Err(kio::caps::net::HttpErr::Timeout),
     }
 }
@@ -1513,8 +1518,19 @@ impl State {
         // A worker the deadline left behind stops reading at its next chunk.
         let mut done = (self.within_all(vec![work], slots)).inspect_err(|_| budget.store(0, Relaxed))?;
         let done = done.pop().expect("one worker, one result");
+        self.at_deadline(std::slice::from_ref(&done))?;
         self.settle(&done)?;
         Ok(done)
+    }
+
+    /// A request still in flight at the run's deadline stops the run as a timeout (H24): its
+    /// result, `timeout` or a late answer, is never the program's. A request's own shorter
+    /// timeout is still `timeout` to the program.
+    fn at_deadline(&mut self, done: &[Performed]) -> Result<()> {
+        if Instant::now() >= self.deadline || done.iter().any(|d| d.cut) {
+            return Err(self.stop_timed_out());
+        }
+        Ok(())
     }
 
     /// Bytes the run may still read or write before `--io` stops it: a response's `read_body`
@@ -1658,7 +1674,11 @@ impl State {
         let done = match HTTP_POOL.take(works.len()) {
             None => works.iter().map(|_| busy()).collect(),
             // Workers the deadline left behind stop reading at their next chunk.
-            Some(slots) => (self.within_all(works, slots)).inspect_err(|_| budget.store(0, Relaxed))?,
+            Some(slots) => {
+                let done = (self.within_all(works, slots)).inspect_err(|_| budget.store(0, Relaxed))?;
+                self.at_deadline(&done)?;
+                done
+            }
         };
         let mut done = done.into_iter();
         let mut results = Vec::with_capacity(n);

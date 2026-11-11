@@ -619,8 +619,26 @@ fn a_hanging_upstream_does_not_starve_other_requests() {
         assert!(took < std::time::Duration::from_secs(1), "{took:?}");
     }
     let (status, _, took) = hung.join().unwrap();
-    assert!(matches!(status, 500 | 502), "{status}");
+    assert_eq!(status, 500);
     assert!(took >= std::time::Duration::from_millis(1500), "{took:?}");
+}
+
+/// H24: a `send` still in flight at the request's deadline ends its run as a timeout (a 500),
+/// never as `Err(Timeout)` to the handler (its 502): 50 requests, one outcome.
+#[test]
+fn an_upstream_call_at_the_deadline_is_a_500() {
+    let up = upstream::start();
+    let (kio, _app) = http::start(&up, &["--timeout", "1"]);
+    let port = kio.port;
+    for _ in 0..5 {
+        let wave: Vec<_> = (0..10)
+            .map(|_| std::thread::spawn(move || http::timed(port, "/hang")))
+            .collect();
+        for w in wave {
+            let (status, body, _) = w.join().unwrap();
+            assert_eq!(status, 500, "{}", String::from_utf8_lossy(&body));
+        }
+    }
 }
 
 /// H12: `--audit` with `--listen` writes one log: the header once, then each request's calls and
