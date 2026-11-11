@@ -33,8 +33,9 @@ interface net {
   resource http {
     get: func(path: string) -> result<list<u8>, http-err>;              // a non-2xx status is status(n)
     // A non-2xx status is ok (the program reads `status`); a method not granted is denied; the
-    // body at most 8 MB (else too-large); the response as `get`'s limits.
-    send: func(method: string, path: string, headers: list<string>, body: list<u8>) -> result<http-response, http-err>;
+    // body at most 8 MB (else too-large); the response as `get`'s limits. `timeout-ms` as
+    // `http-request`'s; negative is invalid.
+    send: func(method: string, path: string, headers: list<string>, body: list<u8>, timeout-ms: s32) -> result<http-response, http-err>;
     // `reqs` issued at once, each checked, counted and audited as a `send`; results in list order
     // whatever finished first. At most 64 a batch, else every result is invalid and nothing is sent.
     send-all: func(reqs: list<http-request>) -> list<result<http-response, http-err>>;

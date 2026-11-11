@@ -31,7 +31,7 @@ Each example aggregates two upstreams. `api.send` is H16's.
 **(a) Structured concurrency.** Tasks spawned in a scope, joined at its end, capabilities only as arguments to a named function.
 
 ```rust
-fn fetch(api: Http, path: Str) -> Result<HttpResponse, HttpErr> { api.send("GET", path, [], []) }
+fn fetch(api: Http, path: Str) -> Result<HttpResponse, HttpErr> { api.send("GET", path, [], [], 0) }
 fn both(api: Http) -> List<Result<HttpResponse, HttpErr>> {
   scope {                                   // every spawn below is joined here
     spawn fetch(api, "/a");                 // a task is a call of a named fn
@@ -43,7 +43,7 @@ fn both(api: Http) -> List<Result<HttpResponse, HttpErr>> {
 **(b) Async/await.**
 
 ```rust
-async fn fetch(api: Http, path: Str) -> Result<HttpResponse, HttpErr> { api.send("GET", path, [], []).await }
+async fn fetch(api: Http, path: Str) -> Result<HttpResponse, HttpErr> { api.send("GET", path, [], [], 0).await }
 async fn both(api: Http) -> .. { let a = fetch(api, "/a"); let b = fetch(api, "/b"); join(a, b).await }
 ```
 

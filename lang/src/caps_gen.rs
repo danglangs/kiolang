@@ -77,7 +77,7 @@ pub fn v0() -> CapTable {
                     ),
                     method(
                         "send",
-                        vec![Ty::Str, Ty::Str, Ty::List(Box::new(Ty::Str)), Ty::Bytes],
+                        vec![Ty::Str, Ty::Str, Ty::List(Box::new(Ty::Str)), Ty::Bytes, Ty::Int],
                         Ty::Result(
                             Box::new(Ty::Struct("HttpResponse".into(), vec![])),
                             Box::new(Ty::Enum("HttpErr".into(), vec![])),

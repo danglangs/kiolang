@@ -47,7 +47,7 @@ error: IoErr::InvalidPath
 `--http api=api.example` grants one host over HTTPS, GET only; `--http api=http://127.0.0.1:9000` allows plain HTTP for local testing. `--http-methods api=POST,PUT,PATCH,DELETE` adds methods (also `HEAD`, `OPTIONS`).
 
 - `get(path) -> Result<Bytes, HttpErr>`: a non-2xx status is `Err(Status(n))`.
-- `send(method, path, headers, body) -> Result<HttpResponse, HttpErr>`: headers are `"name: value"` strings; any status is `Ok`, read `r.status`, `r.headers`, `r.body`. Framing headers (`host`, `content-length`, `transfer-encoding`, `connection`, ..) and any CR or LF are `Invalid`; a method not granted is `Denied`; a body over 8 MB is `TooLarge`. Redirects are followed only for GET and HEAD.
+- `send(method, path, headers, body, timeout_ms) -> Result<HttpResponse, HttpErr>`: `timeout_ms` 0 is the 10 s limit, less cuts the request off as `Err(Timeout)`, negative is `Invalid`; headers are `"name: value"` strings; any status is `Ok`, read `r.status`, `r.headers`, `r.body`. Framing headers (`host`, `content-length`, `transfer-encoding`, `connection`, ..) and any CR or LF are `Invalid`; a method not granted is `Denied`; a body over 8 MB is `TooLarge`. Redirects are followed only for GET and HEAD.
 - `send_all([HttpRequest { method, path, headers, body, timeout_ms }, ..])`: up to 64 requests at once; results in list order; a request past its timeout is `Err(Timeout)` in its place.
 - The audit log records each request's method, path, status, byte counts and header names, never a header value.
 
@@ -158,7 +158,7 @@ The audit log has a line per call with the SQL (cut at 256 characters), the para
 
 A listening socket is a grant too. Each request runs in a fresh sandbox; `main` takes `req: Incoming, res: Outgoing` (any names) plus its other grants, `Http` included. `send` answers the client at once, and `main` may go on working under the request's limits (a webhook after the response, say).
 
-`--timeout` covers the whole run, the work after `send` included. An `Http` call (`get`, `send`, `send_all`) still waiting at the deadline stops the run as a timeout; the program never sees its result (a client not yet answered gets a 500; after `send`, stderr says `request failed after its response was sent`). To act on a slow upstream, give the call less than the run has: `send_all`'s `timeout_ms` (payhook posts with 2 s under `--timeout 20`).
+`--timeout` covers the whole run, the work after `send` included. An `Http` call (`get`, `send`, `send_all`) still waiting at the deadline stops the run as a timeout; the program never sees its result (a client not yet answered gets a 500; after `send`, stderr says `request failed after its response was sent`). To act on a slow upstream, give the call less than the run has: its `timeout_ms` (`send`, `send_all`) (payhook posts with 2 s under `--timeout 20`).
 
 ```
 $ kio run examples/serve/app.kio --dir public=examples/tour/in --listen 127.0.0.1:8080

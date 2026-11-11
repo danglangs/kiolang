@@ -228,7 +228,7 @@ fn diff_new_main_parameter() {
             "fn main(links: Kv, log: Log, hook: Http)",
         )
         .replace("create(links, log)?;", "create(links, log)?; notify(hook);")
-        + r#"fn notify(hook: Http) { let _r = hook.send("POST", "/", [], "{}".to_bytes()); }"#;
+        + r#"fn notify(hook: Http) { let _r = hook.send("POST", "/", [], "{}".to_bytes(), 0); }"#;
     assert_eq!(
         diff(&[("a.kio", &old())], &[("a.kio", &new)]),
         want(

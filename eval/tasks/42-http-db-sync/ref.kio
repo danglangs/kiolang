@@ -59,7 +59,7 @@ fn main(api: Http, db: Db) -> Result<Str, Failed> {
   let mut total = Counts { applied: 0, stale: 0, invalid: 0 };
   let mut stop = "";
   loop {
-    let r = api.send("GET", "/changes?cursor=" + cursor, [], "".to_bytes());
+    let r = api.send("GET", "/changes?cursor=" + cursor, [], "".to_bytes(), 0);
     let Ok(resp) = r else { stop = "no response"; break; };
     if resp.status != 200 {
       stop = "status " + resp.status.to_str();

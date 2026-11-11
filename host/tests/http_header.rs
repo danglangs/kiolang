@@ -27,10 +27,10 @@ fn main(up: Http, log: Log) -> Str {
     let mut out: List<Str> = [];
     out.push(match up.get("/get") { Ok(b) => b.to_str(), Err(_) => "error" });
     out.push(match up.get("/redirect") { Ok(b) => b.to_str(), Err(_) => "error" });
-    out.push(show(up.send("POST", "/post", ["x-trace: 1"], "hi".to_bytes())));
+    out.push(show(up.send("POST", "/post", ["x-trace: 1"], "hi".to_bytes(), 0)));
     for r in up.send_all([req("/all/0", []), req("/all/1", ["x-trace: 2"])]) { out.push(show(r)); }
-    out.push(show(up.send("GET", "/mine", ["Authorization: Bearer mine"], "".to_bytes())));
-    out.push(show(up.send("GET", "/mine", ["X-API-KEY: mine"], "".to_bytes())));
+    out.push(show(up.send("GET", "/mine", ["Authorization: Bearer mine"], "".to_bytes(), 0)));
+    out.push(show(up.send("GET", "/mine", ["X-API-KEY: mine"], "".to_bytes(), 0)));
     for r in up.send_all([req("/mine-all", ["authorization: mine"])]) { out.push(show(r)); }
     let text = out.join("\n");
     match log.write(text) { Ok(_) => text, Err(_) => "log full" }
@@ -335,8 +335,8 @@ fn a_grant_prints_no_value() {
 #[test]
 fn under_listen_every_run_gets_the_header() {
     const APP: &str = r#"fn main(req: Incoming, res: Outgoing, up: Http) -> Result<(), WebErr> {
-        let r = up.send("POST", req.target(), ["x-trace: 1"], req.body());
-        let mine = up.send("GET", "/mine", ["authorization: x"], "".to_bytes());
+        let r = up.send("POST", req.target(), ["x-trace: 1"], req.body(), 0);
+        let mine = up.send("GET", "/mine", ["authorization: x"], "".to_bytes(), 0);
         let out = match r { Ok(r) => r.status.to_str() + " " + r.headers.join("|") + " " + r.body.to_str(), Err(_) => "error" };
         let out = out + match mine { Ok(_) => " sent", Err(HttpErr::Invalid) => " invalid", Err(_) => " error" };
         res.send(200, [], [], out.to_bytes())

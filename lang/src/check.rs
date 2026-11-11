@@ -2987,7 +2987,15 @@ impl<'a> Checker<'a> {
         };
         if args.len() != params.len() {
             let msg = format!("`{name}` takes {} arguments, found {}", params.len(), args.len());
-            return Err(err(e.span, msg, Some(&declared(&recv_ty, name, &params, &ret))));
+            let hint = match (&recv_ty, name, args.len()) {
+                // `send` took 4 before H23.
+                (Ty::Cap(c), "send", 4) if c == "Http" => {
+                    "`Http.send` takes `timeout_ms: Int` last (0 is the 10 s limit): `send(method, path, headers, body, 0)`"
+                        .to_string()
+                }
+                _ => declared(&recv_ty, name, &params, &ret),
+            };
+            return Err(err(e.span, msg, Some(&hint)));
         }
         if let (Ty::List(t), "contains") = (&recv_ty, name) {
             if self.has_fn(t) {

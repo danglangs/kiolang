@@ -311,8 +311,10 @@ impl lang::Caps for Native<'_> {
                     .map(bytes)
                     .map_err(http_err),
             ),
-            ("Http", "send", [Value::Str(m), Value::Str(p), Value::List(hs), Value::Bytes(b)]) => {
-                let r = HostHttp::send(s, own(rep), m.to_string(), p.to_string(), texts(hs)?, b.to_vec());
+            ("Http", "send", [Value::Str(m), Value::Str(p), Value::List(hs), Value::Bytes(b), Value::Int(ms)]) => {
+                // Past `s32` either way is past the cap, or negative: the host's answer is the same.
+                let ms = (*ms).clamp(i32::MIN.into(), i32::MAX.into()) as i32;
+                let r = HostHttp::send(s, own(rep), m.to_string(), p.to_string(), texts(hs)?, b.to_vec(), ms);
                 result(r.map_err(stop)?.map(|r| self.response(r)).map_err(http_err))
             }
             ("Http", "send_all", [Value::List(reqs)]) => {

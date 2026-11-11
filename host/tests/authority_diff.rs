@@ -124,7 +124,7 @@ fn main(req: Incoming, res: Outgoing, links: Kv, log: Log) -> Result<(), WebErr>
 }
 "#;
 const HTTP: &str = r#"pub fn post(api: Http, path: Str, body: Str) -> Result<(), Str> {
-    match api.send("POST", path, ["content-type: application/json"], body.to_bytes()) { Ok(_r) => Ok(()), Err(_e) => Err("failed") }
+    match api.send("POST", path, ["content-type: application/json"], body.to_bytes(), 0) { Ok(_r) => Ok(()), Err(_e) => Err("failed") }
 }
 "#;
 

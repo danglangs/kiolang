@@ -186,11 +186,11 @@ fn http_send_matches_the_interpreter() {
     let src = r#"fn main(h: Http) -> List<Result<HttpResponse, HttpErr>> {
         let req = |m: Str, p: Str| HttpRequest { method: m, path: p, headers: ["a: b"], body: "x".to_bytes(), timeout_ms: 1 };
         let mut out = [
-            h.send("GET", "/x", [], "".to_bytes()),
-            h.send("POST", "/x", [], "".to_bytes()),
-            h.send("PUT", "/x", ["bad"], "".to_bytes()),
-            h.send("get", "/x", [], "".to_bytes()),
-            h.send("GET", "x", [], "".to_bytes()),
+            h.send("GET", "/x", [], "".to_bytes(), 0),
+            h.send("POST", "/x", [], "".to_bytes(), 0),
+            h.send("PUT", "/x", ["bad"], "".to_bytes(), 0),
+            h.send("get", "/x", [], "".to_bytes(), 0),
+            h.send("GET", "x", [], "".to_bytes(), 0),
         ];
         for r in h.send_all([req("GET", "/a"), req("DELETE", "/b"), req("PUT", "/c"), req("GET", "nope")]) { out.push(r); }
         let mut many: List<HttpRequest> = [];

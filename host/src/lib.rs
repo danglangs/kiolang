@@ -1424,13 +1424,14 @@ impl kio::caps::net::HostHttp for State {
         path: String,
         headers: Vec<String>,
         body: Vec<u8>,
+        timeout_ms: i32,
     ) -> Result<Result<HttpResponse, kio::caps::net::HttpErr>> {
         let arg = path.clone();
         self.call(
             h.rep(),
             "send",
             &arg,
-            |s| s.send_one(&h, &method, &path, &headers, body),
+            |s| s.send_one(&h, &method, &path, &headers, body, timeout_ms),
             outcome,
         )
     }
@@ -1616,12 +1617,17 @@ impl State {
         path: &str,
         headers: &[String],
         body: Vec<u8>,
+        timeout_ms: i32,
     ) -> Result<Result<HttpResponse, kio::caps::net::HttpErr>> {
         let Some(origin) = self.origin(h) else {
             return Ok(Err(kio::caps::net::HttpErr::Denied));
         };
-        let mut extra = String::new();
-        let r = match self.prepare(&origin, method, path, headers, body, HTTP_TIMEOUT, &mut extra)? {
+        let mut extra = format!(r#","timeout_ms":{timeout_ms}"#);
+        let Some(timeout) = request_timeout(timeout_ms.into()) else {
+            self.audit_extra = extra;
+            return Ok(Err(kio::caps::net::HttpErr::Invalid));
+        };
+        let r = match self.prepare(&origin, method, path, headers, body, timeout, &mut extra)? {
             Ok(req) => {
                 let done = self.finish(&origin, req)?;
                 extra += &received(&done);
@@ -1664,10 +1670,7 @@ impl State {
         let mut checked = Vec::with_capacity(n);
         for (i, r) in reqs.into_iter().enumerate() {
             let mut extra = format!(r#","batch":{batch},"index":{i}"#);
-            let timeout = match r.timeout_ms {
-                0 => HTTP_TIMEOUT,
-                ms => Duration::from_millis(ms.into()).min(HTTP_TIMEOUT),
-            };
+            let timeout = request_timeout(r.timeout_ms.into()).expect("a u32 is not negative");
             let sent = r.body.len() as u64;
             let refused = match self.prepare(&origin, &r.method, &r.path, &r.headers, r.body, timeout, &mut extra)? {
                 Err(e) => Some(e),
@@ -1708,6 +1711,16 @@ impl State {
             results.push(result);
         }
         Ok(results)
+    }
+}
+
+/// A request's `timeout_ms` as its limit: 0 is `HTTP_TIMEOUT`, a positive value is capped at it,
+/// a negative one is `None` (`invalid`).
+fn request_timeout(ms: i64) -> Option<Duration> {
+    match ms {
+        0 => Some(HTTP_TIMEOUT),
+        1.. => Some(Duration::from_millis(ms as u64).min(HTTP_TIMEOUT)),
+        _ => None,
     }
 }
 

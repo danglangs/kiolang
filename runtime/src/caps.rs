@@ -312,7 +312,17 @@ fn http_result(t: &Table, ret: u32, r: Result<HttpResponse, HttpErr>) -> u64 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn rt_cap_http_send(ret: u32, h: u32, method: u32, path: u32, headers: u32, body: u32) -> u32 {
+pub unsafe extern "C" fn rt_cap_http_send(
+    ret: u32,
+    h: u32,
+    method: u32,
+    path: u32,
+    headers: u32,
+    body: u32,
+    timeout_ms: i64,
+) -> u32 {
+    // Past `s32` either way is past the cap, or negative: the host's answer is the same.
+    let timeout_ms = timeout_ms.clamp(i32::MIN.into(), i32::MAX.into()) as i32;
     // SAFETY: the contract above.
     let (c, method, path, headers, body) = unsafe {
         (
@@ -323,7 +333,7 @@ pub unsafe extern "C" fn rt_cap_http_send(ret: u32, h: u32, method: u32, path: u
             bytes(body),
         )
     };
-    let r = in_place(|| c.send(method, path, &headers, body));
+    let r = in_place(|| c.send(method, path, &headers, body, timeout_ms));
     addr(obj::from_slot(http_result(table(), ret, r)))
 }
 

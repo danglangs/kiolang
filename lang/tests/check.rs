@@ -43,6 +43,20 @@ fn wrong_arity() {
     assert_eq!(at, "f(1, 2)");
 }
 
+/// H23: `Http.send` took 4 arguments before `timeout_ms`; the old call's hint names it.
+#[test]
+fn http_send_without_timeout_names_it() {
+    let src = r#"fn main(h: Http) { let _r = h.send("GET", "/", [], "".to_bytes()); }"#;
+    let d = &check(src, &caps()).expect_err("4 arguments")[0];
+    assert_eq!(d.msg, "`send` takes 5 arguments, found 4");
+    assert_eq!(
+        d.hint.as_deref(),
+        Some("`Http.send` takes `timeout_ms: Int` last (0 is the 10 s limit): `send(method, path, headers, body, 0)`")
+    );
+    let src = r#"fn main(h: Http) { let _r = h.send("GET", "/", [], "".to_bytes(), 0); }"#;
+    check(src, &caps()).unwrap_or_else(|d| panic!("{d:?}"));
+}
+
 #[test]
 fn type_mismatch() {
     let (msg, at) = reject("fn main() { let x: Int = \"a\"; }");

@@ -690,7 +690,7 @@ fn http_call_at_the_deadline_ends_the_run() {
     };
     let calls = [
         r#"h.get("/hang").is_ok()"#,
-        r#"h.send("POST", "/hang", [], "x".to_bytes()).is_ok()"#,
+        r#"h.send("POST", "/hang", [], "x".to_bytes(), 0).is_ok()"#,
         r#"h.send_all([HttpRequest { method: "GET", path: "/ok", headers: [], body: "".to_bytes(), timeout_ms: 0 }, HttpRequest { method: "GET", path: "/hang", headers: [], body: "".to_bytes(), timeout_ms: 0 }]).len() == 2"#,
     ];
     // Ten at a time, so the load stays light for the tests beside it.
@@ -741,6 +741,56 @@ fn a_short_request_timeout_reaches_the_program() {
         let mut kio = Kio::new(one_sec).unwrap();
         let out = kio.run_with(src, vec![], vec![("h".into(), granted(&g, ""))]);
         assert_eq!(out.unwrap().unwrap().value, "[Err(HttpErr::Timeout)]");
+    }
+}
+
+/// H23: `send`'s `timeout_ms` as an `HttpRequest`'s: a limit shorter than the run is
+/// `Err(Timeout)` to the program, 0 is the 10 s, negative is `Err(Invalid)` and audited as such;
+/// compiled and interpreted alike.
+#[test]
+fn send_takes_a_timeout() {
+    let g = serve();
+    let one_sec = Limits {
+        timeout_secs: 1,
+        ..Limits::default()
+    };
+    let cases = [
+        (
+            r#"h.send("GET", "/hang", [], "".to_bytes(), 200)"#,
+            "[Err(HttpErr::Timeout)]",
+        ),
+        (r#"h.send("GET", "/ok", [], "".to_bytes(), 0)"#, "[Ok(200)]"),
+        (r#"h.send("GET", "/ok", [], "".to_bytes(), 1099511627776)"#, "[Ok(200)]"),
+        (
+            r#"h.send("GET", "/ok", [], "".to_bytes(), -1)"#,
+            "[Err(HttpErr::Invalid)]",
+        ),
+        (
+            r#"h.send("GET", "/ok", [], "".to_bytes(), -1099511627776)"#,
+            "[Err(HttpErr::Invalid)]",
+        ),
+    ];
+    for (call, want) in cases {
+        let src = format!("fn main(h: Http) -> List<Result<Int, HttpErr>> {{ [{call}.map(|r| r.status)] }}");
+        for compiled in [true, false] {
+            let log = Log::default();
+            let grants = vec![("h".into(), granted(&g, ""))];
+            let out = if compiled {
+                let mut kio = Kio::new(one_sec).unwrap();
+                kio.audit(log.clone(), vec![]);
+                kio.run_with(&src, vec![], grants).unwrap().unwrap().value
+            } else {
+                let mut interp = kio_host::Interp::new(one_sec).unwrap();
+                interp.audit(log.clone(), vec![]);
+                interp.run_with(&src, vec![], grants).unwrap().unwrap().value
+            };
+            assert_eq!(out, want, "{call}, compiled: {compiled}");
+            let line = &log.lines()[1];
+            assert!(
+                line.contains(r#""method":"send""#) && line.contains(r#","timeout_ms":"#),
+                "{line}"
+            );
+        }
     }
 }
 
@@ -819,17 +869,20 @@ fn http_send_methods_and_statuses() {
     };
     for m in ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] {
         assert_eq!(
-            status(&format!(r#"h.send("{m}", "/ok", [], {empty})"#)),
+            status(&format!(r#"h.send("{m}", "/ok", [], {empty}, 0)"#)),
             "Ok(200)",
             "{m}"
         );
     }
     assert_eq!(
-        status(&format!(r#"h.send("POST", "/created", [], {empty})"#)),
+        status(&format!(r#"h.send("POST", "/created", [], {empty}, 0)"#)),
         "Ok(201)"
     );
-    assert_eq!(status(&format!(r#"h.send("GET", "/error", [], {empty})"#)), "Ok(500)");
-    assert_eq!(status(&format!(r#"h.send("GET", "/nope", [], {empty})"#)), "Ok(404)");
+    assert_eq!(
+        status(&format!(r#"h.send("GET", "/error", [], {empty}, 0)"#)),
+        "Ok(500)"
+    );
+    assert_eq!(status(&format!(r#"h.send("GET", "/nope", [], {empty}, 0)"#)), "Ok(404)");
     let text = |methods: &str, call: &str| {
         send(
             &g,
@@ -838,14 +891,20 @@ fn http_send_methods_and_statuses() {
             &format!("Ok({call}?.body.to_str())"),
         )
     };
-    assert_eq!(text("", r#"h.send("GET", "/ok", [], "".to_bytes())"#), "Ok(\"hello\")");
     assert_eq!(
-        text("", r#"h.send("GET", "/error", [], "".to_bytes())"#),
+        text("", r#"h.send("GET", "/ok", [], "".to_bytes(), 0)"#),
+        "Ok(\"hello\")"
+    );
+    assert_eq!(
+        text("", r#"h.send("GET", "/error", [], "".to_bytes(), 0)"#),
         "Ok(\"boom\")"
     );
-    assert_eq!(text("HEAD", r#"h.send("HEAD", "/ok", [], "".to_bytes())"#), "Ok(\"\")");
+    assert_eq!(
+        text("HEAD", r#"h.send("HEAD", "/ok", [], "".to_bytes(), 0)"#),
+        "Ok(\"\")"
+    );
     for m in ["POST", "PUT", "DELETE"] {
-        let call = format!(r#"h.send("{m}", "/ok", [], {empty})"#);
+        let call = format!(r#"h.send("{m}", "/ok", [], {empty}, 0)"#);
         assert_eq!(text("", &call), "HttpErr::Denied", "{m} without the grant");
         assert_eq!(
             text("POST,PUT", &call),
@@ -857,21 +916,21 @@ fn http_send_methods_and_statuses() {
         );
     }
     for m in ["get", "Post", "PROPFIND", "", "GET ", "GE\nT"] {
-        let call = format!(r#"h.send("{}", "/ok", [], {empty})"#, m.replace('\n', "\\n"));
+        let call = format!(r#"h.send("{}", "/ok", [], {empty}, 0)"#, m.replace('\n', "\\n"));
         assert_eq!(text("POST", &call), "HttpErr::Invalid", "{m:?}");
     }
     // A bad path is `denied` as for `get`; the body is sent and echoed.
     assert_eq!(
-        text("POST", r#"h.send("POST", "http://evil.com/", [], "".to_bytes())"#),
+        text("POST", r#"h.send("POST", "http://evil.com/", [], "".to_bytes(), 0)"#),
         "HttpErr::Denied"
     );
-    let echoed = text("POST", r#"h.send("POST", "/echo", [], "payload".to_bytes())"#);
+    let echoed = text("POST", r#"h.send("POST", "/echo", [], "payload".to_bytes(), 0)"#);
     assert!(
         echoed.starts_with("Ok(\"POST /echo\\n") && echoed.ends_with("\\n\\npayload\")"),
         "{echoed}"
     );
     // A POST without a body says so; nothing is chunked.
-    let echoed = text("POST", r#"h.send("POST", "/echo", [], "".to_bytes())"#);
+    let echoed = text("POST", r#"h.send("POST", "/echo", [], "".to_bytes(), 0)"#);
     assert!(
         echoed.contains("\\ncontent-length: 0\\n") && !echoed.contains("chunked"),
         "{echoed}"
@@ -887,7 +946,7 @@ fn http_send_headers() {
         &g,
         "POST",
         "Result<Str, HttpErr>",
-        r#"Ok(h.send("POST", "/echo", ["X-Token: abc", "content-type: text/plain", "accept:  a, b "], "hi".to_bytes())?.body.to_str())"#,
+        r#"Ok(h.send("POST", "/echo", ["X-Token: abc", "content-type: text/plain", "accept:  a, b "], "hi".to_bytes(), 0)?.body.to_str())"#,
     );
     for want in [
         "\\nx-token: abc\\n",
@@ -901,7 +960,7 @@ fn http_send_headers() {
         &g,
         "",
         "Result<List<Str>, HttpErr>",
-        r#"Ok(h.send("GET", "/echo", [], "".to_bytes())?.headers)"#,
+        r#"Ok(h.send("GET", "/echo", [], "".to_bytes(), 0)?.headers)"#,
     );
     assert!(
         headers.starts_with(r#"Ok(["x-echo: yes", "set-thing: a", "content-length: "#)
@@ -932,17 +991,17 @@ fn http_send_headers() {
             &g,
             "",
             RESPONSE,
-            &format!(r#"h.send("GET", "/ok", ["{h}"], "".to_bytes())"#),
+            &format!(r#"h.send("GET", "/ok", ["{h}"], "".to_bytes(), 0)"#),
         );
         assert_eq!(r, "HttpErr::Invalid", "{h}");
     }
-    let del = r#"let mut b = "X-A: a".to_bytes(); b.push(127); h.send("GET", "/ok", [b.to_str()], "".to_bytes())"#;
+    let del = r#"let mut b = "X-A: a".to_bytes(); b.push(127); h.send("GET", "/ok", [b.to_str()], "".to_bytes(), 0)"#;
     assert_eq!(send(&g, "", RESPONSE, del), "HttpErr::Invalid");
-    let many = r#"let mut hs: List<Str> = []; for i in 0..65 { hs.push("x-" + i.to_str() + ": a"); } h.send("GET", "/ok", hs, "".to_bytes())"#;
+    let many = r#"let mut hs: List<Str> = []; for i in 0..65 { hs.push("x-" + i.to_str() + ": a"); } h.send("GET", "/ok", hs, "".to_bytes(), 0)"#;
     assert_eq!(send(&g, "", RESPONSE, many), "HttpErr::Invalid");
-    let long = r#"let mut v = "a"; for i in 0..13 { v = v + v; } h.send("GET", "/ok", ["x: " + v], "".to_bytes())"#;
+    let long = r#"let mut v = "a"; for i in 0..13 { v = v + v; } h.send("GET", "/ok", ["x: " + v], "".to_bytes(), 0)"#;
     assert_eq!(send(&g, "", RESPONSE, long), "HttpErr::Invalid"); // 8,195 bytes
-    let fits = r#"let mut v = "a"; for i in 0..12 { v = v + v; } Ok(h.send("GET", "/ok", ["x: " + v], "".to_bytes())?.status)"#;
+    let fits = r#"let mut v = "a"; for i in 0..12 { v = v + v; } Ok(h.send("GET", "/ok", ["x: " + v], "".to_bytes(), 0)?.status)"#;
     assert_eq!(send(&g, "", "Result<Int, HttpErr>", fits), "Ok(200)");
 }
 
@@ -952,7 +1011,7 @@ fn http_send_body_limit() {
     let g = serve();
     let big = |extra: &str| {
         format!(
-            r#"let mut b = "x".to_bytes(); for i in 0..23 {{ b.extend(b); }} {extra} Ok(h.send("POST", "/created", [], b)?.status)"#
+            r#"let mut b = "x".to_bytes(); for i in 0..23 {{ b.extend(b); }} {extra} Ok(h.send("POST", "/created", [], b, 0)?.status)"#
         )
     };
     assert_eq!(send(&g, "POST", "Result<Int, HttpErr>", &big("")), "Ok(201)");
@@ -978,7 +1037,7 @@ fn http_send_redirects() {
             &g,
             methods,
             "Result<Int, HttpErr>",
-            &format!(r#"Ok(h.send("{m}", "{path}", [], "".to_bytes())?.status)"#),
+            &format!(r#"Ok(h.send("{m}", "{path}", [], "".to_bytes(), 0)?.status)"#),
         )
     };
     assert_eq!(status("", "GET", "/same"), "Ok(200)");
@@ -994,11 +1053,11 @@ fn http_send_redirects() {
         &g,
         "POST",
         "Result<List<Str>, HttpErr>",
-        r#"Ok(h.send("POST", "/same", [], "".to_bytes())?.headers)"#,
+        r#"Ok(h.send("POST", "/same", [], "".to_bytes(), 0)?.headers)"#,
     );
     assert!(location.starts_with(r#"Ok(["location: /ok""#), "{location}");
     let calls = |path: &str| {
-        let src = format!(r#"fn main(h: Http) -> Int {{ let r = h.send("GET", "{path}", [], "".to_bytes()); 0 }}"#);
+        let src = format!(r#"fn main(h: Http) -> Int {{ let r = h.send("GET", "{path}", [], "".to_bytes(), 0); 0 }}"#);
         let mut kio = Kio::new(Limits::default()).unwrap();
         kio.run_with(&src, vec![], vec![("h".into(), granted(&g, ""))])
             .unwrap()
@@ -1018,7 +1077,7 @@ fn http_audit_lines_stay_json() {
         r#"fn main(h: Http) -> Int {{
         let a = h.get("/x\"y\\z");
         let b = h.get("{long}");
-        let c = h.send("GE\"T", "/q", ["x-\"y: v"], "".to_bytes());
+        let c = h.send("GE\"T", "/q", ["x-\"y: v"], "".to_bytes(), 0);
         let one = HttpRequest {{ method: "GET", path: "/x\"y", headers: [], body: "".to_bytes(), timeout_ms: 0 }};
         let two = HttpRequest {{ method: "P\"OST", path: "/ok", headers: [], body: "".to_bytes(), timeout_ms: 0 }};
         let d = h.send_all([one, two]);
@@ -1078,7 +1137,7 @@ impl Log {
 fn http_send_is_audited_without_header_values() {
     let g = serve();
     let src = r#"fn main(h: Http) -> Result<Int, HttpErr> {
-        Ok(h.send("POST", "/echo", ["Authorization: Bearer secret-token-xyz", "content-type: text/plain"], "hi".to_bytes())?.status)
+        Ok(h.send("POST", "/echo", ["Authorization: Bearer secret-token-xyz", "content-type: text/plain"], "hi".to_bytes(), 0)?.status)
     }"#;
     let log = Log::default();
     let mut kio = Kio::new(Limits::default()).unwrap();
@@ -1098,13 +1157,13 @@ fn http_send_is_audited_without_header_values() {
     let call = &lines[1];
     for want in [
         r#""method":"send","arg":"/echo","bytes":"#,
-        r#""result":"ok","http":"POST","headers":["authorization","content-type"],"sent":2,"status":200,"received":"#,
+        r#""result":"ok","timeout_ms":0,"http":"POST","headers":["authorization","content-type"],"sent":2,"status":200,"received":"#,
     ] {
         assert!(call.contains(want), "{want} in {call}");
     }
     assert!(!lines.join("\n").contains("secret"), "{lines:?}");
     // A refused request is audited before the network: the method, and no header names.
-    let src = r#"fn main(h: Http) -> Result<Int, HttpErr> { Ok(h.send("DELETE", "/echo", ["Authorization: Bearer s3cret"], "".to_bytes())?.status) }"#;
+    let src = r#"fn main(h: Http) -> Result<Int, HttpErr> { Ok(h.send("DELETE", "/echo", ["Authorization: Bearer s3cret"], "".to_bytes(), 0)?.status) }"#;
     let log = Log::default();
     let mut kio = Kio::new(Limits::default()).unwrap();
     kio.audit(log.clone(), vec![]);
@@ -1112,7 +1171,10 @@ fn http_send_is_audited_without_header_values() {
         .unwrap()
         .unwrap();
     let call = &log.lines()[1];
-    assert!(call.contains(r#""result":"denied","http":"DELETE","ms":"#), "{call}");
+    assert!(
+        call.contains(r#""result":"denied","timeout_ms":0,"http":"DELETE","ms":"#),
+        "{call}"
+    );
     assert!(!call.contains("s3cret"), "{call}");
 }
 

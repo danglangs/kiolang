@@ -44,7 +44,7 @@ fn main(api: Http) -> Result<Str, Failed> {
   m.insert("paid_cents", Json::Obj(cents));
   m.insert("refunded", Json::Num(refunded));
   m.insert("largest", largest);
-  let r = api.send("POST", "/summaries", ["content-type: application/json"], Json::Obj(m).to_json().to_bytes())
+  let r = api.send("POST", "/summaries", ["content-type: application/json"], Json::Obj(m).to_json().to_bytes(), 0)
     .map_err(|e| Failed::Http(e))?;
   if r.status != 201 { return Err(Failed::Status(r.status)); }
   Ok(field_str(parse(r.body)?, "id"))

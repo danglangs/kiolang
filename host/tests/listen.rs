@@ -430,7 +430,7 @@ mod http {
             }
             return res.send(200, [], [], out.to_bytes());
         }
-        match up.send("POST", t, ["x-key: k"], req.body()) {
+        match up.send("POST", t, ["x-key: k"], req.body(), 0) {
             Ok(r) => res.send(r.status, [], [], r.body),
             Err(_) => res.send(502, [], [], "upstream failed".to_bytes()),
         }
