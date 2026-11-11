@@ -61,6 +61,7 @@ rustup target add wasm32-unknown-unknown
 cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 cargo clippy -p runtime --target wasm32-unknown-unknown --features test-heap -- -D warnings
 cargo build --release -p kio            # target/release/kio
+KIO_TEST_HEAP=1 cargo test ...          # compiled code on the test-heap runtime (poisoned frees)
 ```
 
 kio-web (github.com/danglangs/kio-web) has its own tests: `KIO=path/to/kio ./test.sh`.
