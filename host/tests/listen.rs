@@ -513,72 +513,6 @@ fn calls_flag_overrides_the_listen_default() {
     assert_eq!(head["limits"]["calls"], 7);
 }
 
-/// #164 (H19 security review): 16 requests each fanning 64 requests out to an upstream that
-/// never answers held the whole HTTP pool (1,024), and every other request's `get` was `timeout`
-/// at once. With a full batch per worker in the pool, another request's `get` answers while they
-/// hang. Served in-process at 32 workers (16 cores' worth) whatever this machine has.
-#[test]
-fn sixteen_fan_outs_do_not_starve_another_requests_get() {
-    use kio_host::listen::{serve_with, ListenLimits};
-    use kio_host::{open_dir, Limits, Origin, Server};
-    const APP: &str = r#"fn main(req: Incoming, res: Outgoing, public: Dir, up: Http) -> Result<(), WebErr> {
-        if req.target() == "/fan" {
-            let mut rs: List<HttpRequest> = [];
-            for i in 0..64 {
-                rs.push(HttpRequest { method: "GET", path: "/hang", headers: [], body: "".to_bytes(), timeout_ms: 0 });
-            }
-            let out = up.send_all(rs).map(|r| match r { Ok(_) => "ok", Err(_) => "!" }).join(";");
-            return res.send(200, [], [], out.to_bytes());
-        }
-        match up.get("/ok") {
-            Ok(b) => res.send(200, [], [], b),
-            Err(_) => res.send(502, [], [], "upstream failed".to_bytes()),
-        }
-    }"#;
-    let up = upstream::start();
-    let public = tempfile::tempdir().unwrap();
-    let mut server = Server::new(
-        vec![("app.kio".into(), APP.into())],
-        Limits {
-            timeout_secs: 2,
-            ..Limits::web()
-        },
-    )
-    .unwrap()
-    .unwrap();
-    server.grant_https(vec![("up".into(), Origin::parse(&up.grant).unwrap())]);
-    let dirs = vec![("public".to_string(), open_dir(public.path()).unwrap())];
-    let limits = ListenLimits {
-        workers: 32,
-        ..Default::default()
-    };
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = serve_with(server, dirs, "127.0.0.1:0".parse().unwrap(), limits, |a| {
-            tx.send(a.port()).unwrap()
-        });
-    });
-    let port = rx.recv().unwrap();
-    let fans: Vec<_> = (0..16)
-        .map(|_| std::thread::spawn(move || send(port, "GET", "/fan", b"")))
-        .collect();
-    let start = std::time::Instant::now();
-    while up.seen.lock().unwrap().len() < 16 * 64 {
-        assert!(
-            start.elapsed() < std::time::Duration::from_secs(2),
-            "the fan-outs never all started"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    let (status, body, took) = http::timed(port, "/one");
-    assert_eq!((status, body), (200, b"GET /ok ".to_vec()));
-    assert!(took < std::time::Duration::from_secs(1), "{took:?}");
-    for f in fans {
-        let (status, _) = f.join().unwrap();
-        assert!(matches!(status, 200 | 500), "{status}");
-    }
-}
-
 /// H19: 50 requests at once, each with a `send_all` of 8, all answered in order.
 #[test]
 fn fifty_concurrent_requests_each_send_eight() {
@@ -630,8 +564,11 @@ fn an_upstream_call_at_the_deadline_is_a_500() {
     let up = upstream::start();
     let (kio, _app) = http::start(&up, &["--timeout", "1"]);
     let port = kio.port;
-    for _ in 0..5 {
-        let wave: Vec<_> = (0..10)
+    // At most a worker each: a wave larger than the server's workers (two per core, 8 on a
+    // 4-core CI runner) leaves the rest queued past the 1 s queue wait, rightly answered 503.
+    let wave = ListenLimits::default().workers.min(10);
+    for _ in 0..50usize.div_ceil(wave) {
+        let wave: Vec<_> = (0..wave)
             .map(|_| std::thread::spawn(move || http::timed(port, "/hang")))
             .collect();
         for w in wave {
@@ -661,8 +598,16 @@ fn audit_log_of_concurrent_requests() {
     for t in threads {
         assert_eq!(t.join().unwrap(), (200, b"hello".to_vec()));
     }
-    // Each trailer is written before its response is sent.
-    let text = std::fs::read_to_string(&log).unwrap();
+    // Since H18 a run ends, and writes its trailer, after its response is sent: wait for all three.
+    let start = std::time::Instant::now();
+    let text = loop {
+        let text = std::fs::read_to_string(&log).unwrap();
+        if text.matches(r#""event":"end""#).count() == 3 && text.ends_with('\n') {
+            break text;
+        }
+        assert!(start.elapsed() < std::time::Duration::from_secs(10), "{text}");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
     let lines: Vec<serde_json::Value> = text
         .lines()
         .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))

@@ -400,17 +400,24 @@ fn busy_when_another_run_keeps_the_connection() {
             kio.explain(&e).unwrap()
         })
     };
-    std::thread::sleep(Duration::from_millis(1500));
     let mut kio = Kio::new(Limits {
         timeout_secs: 30,
         ..Limits::default()
     })
     .unwrap();
-    kio.grant_sources(sources());
-    let start = Instant::now();
     let main = r#"fn main(db: Db) -> Str { rows(db.query("SELECT 1", [])) }"#;
-    let out = kio.run(&format!("{SHOW}{main}"), vec![]).unwrap().unwrap().value;
-    let waited = start.elapsed();
+    // Until the slow run has compiled and started its statement the connection is free and this
+    // answers `1` (a fixed sleep lost that race on a loaded machine): ask again until it is held.
+    let (out, waited) = loop {
+        kio.grant_sources(sources());
+        let start = Instant::now();
+        let out = kio.run(&format!("{SHOW}{main}"), vec![]).unwrap().unwrap().value;
+        if out != "1" {
+            break (out, start.elapsed());
+        }
+        assert!(!slow.is_finished(), "the slow statement never held the connection");
+        std::thread::sleep(Duration::from_millis(50));
+    };
     assert_eq!(out, "busy");
     assert!(
         waited >= Duration::from_secs(2) && waited < Duration::from_secs(4),

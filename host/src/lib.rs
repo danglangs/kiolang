@@ -2838,6 +2838,13 @@ mod tests {
         assert_eq!(one(&mut s).unwrap(), [7]);
         assert!(start.elapsed() >= Duration::from_millis(150), "{:?}", start.elapsed());
         freed.join().unwrap();
+        // The worker that answered 7 gives its place back just after sending the answer: wait
+        // for it (the count falls back to `held`'s BATCH_MAX - 1), or it would free a place
+        // under the cap set below.
+        while *s.workers.live.lock().unwrap() >= BATCH_MAX {
+            assert!(start.elapsed() < Duration::from_secs(10), "the worker never ended");
+            std::thread::sleep(Duration::from_millis(1));
+        }
         *s.workers.live.lock().unwrap() = BATCH_MAX;
         assert!(one(&mut s).is_err());
         assert!(s.timed_out);

@@ -467,6 +467,7 @@ fn overlong_path_is_invalid() {
 /// else is 404. Returns the grant string.
 fn serve() -> String {
     use std::io::{BufRead, BufReader, Read, Write};
+    use std::sync::atomic::Ordering::SeqCst;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let grant = format!("http://{}", listener.local_addr().unwrap());
     let port = listener.local_addr().unwrap().port();
@@ -505,7 +506,10 @@ fn serve() -> String {
                     "/created" => ("201 Created".into(), b"made".to_vec()),
                     "/error" => ("500 Internal Server Error".into(), b"boom".to_vec()),
                     "/slow" => {
+                        let now = SLOW_LIVE.fetch_add(1, SeqCst) + 1;
+                        SLOW_MOST.fetch_max(now, SeqCst);
                         std::thread::sleep(std::time::Duration::from_secs(2));
+                        SLOW_LIVE.fetch_sub(1, SeqCst);
                         ("200 OK".into(), b"slow".to_vec())
                     }
                     "/big" => ("200 OK".into(), vec![b'x'; (10 << 20) + 1]),
@@ -554,6 +558,9 @@ fn get(grant: &str, body: &str, limits: Limits) -> String {
 }
 
 const HTTP_DENIED: &str = "HttpErr::Denied";
+/// `/slow` requests being answered now, and the most at once (only `http_send_all` asks for it).
+static SLOW_LIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static SLOW_MOST: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// N1: a granted GET returns the body, a 404 is `status(404)`.
 #[test]
@@ -677,7 +684,10 @@ fn http_quotas_and_timeout() {
         kio.explain(&e).unwrap(),
         "timed out after 1 s (raise it with --timeout)"
     );
-    assert!(start.elapsed() < std::time::Duration::from_secs(4));
+    // Well under the 10 s HTTP timeout the deadline must cut short; the rest is compiling,
+    // slow on a loaded machine.
+    let took = start.elapsed();
+    assert!(took < std::time::Duration::from_secs(7), "{took:?}");
 }
 
 /// H24: a `get`, `send` or `send_all` still in flight at the run's deadline always ends the run
@@ -1300,9 +1310,12 @@ fn http_send_all() {
         .unwrap()
         .unwrap();
     assert_eq!(out.value, want);
-    // Two 2 s requests in parallel, not 4 s in turn; the margin covers compiling under load.
+    // The two 2 s requests were at the server at once, not in turn. (A time bound could not tell
+    // them apart from a slow compile on a loaded machine.)
+    use std::sync::atomic::Ordering::SeqCst;
+    assert_eq!(SLOW_MOST.swap(0, SeqCst), 2);
     assert!(
-        start.elapsed() < std::time::Duration::from_millis(3500),
+        start.elapsed() < std::time::Duration::from_secs(10),
         "{:?}",
         start.elapsed()
     );
@@ -1313,6 +1326,7 @@ fn http_send_all() {
         .unwrap()
         .unwrap();
     assert_eq!(out.value, want);
+    assert_eq!(SLOW_MOST.load(SeqCst), 2);
     assert_eq!(interp.import_calls(), 6);
 }
 
@@ -1502,5 +1516,12 @@ fn fifo_read_is_denied_at_once() {
     let regular = regular.elapsed();
     let start = std::time::Instant::now();
     assert_eq!(on(d, "d.read(\"p\")"), DENIED);
-    assert!(start.elapsed() < regular + std::time::Duration::from_secs(1));
+    // A blocked read would end the run as a timeout at the 10 s deadline (and `on` would panic),
+    // so the outcome is the proof; the bound only checks it came well before then, with room
+    // for a second compile on a loaded machine.
+    let took = start.elapsed();
+    assert!(
+        took < regular + std::time::Duration::from_secs(5),
+        "{took:?} against {regular:?}"
+    );
 }
