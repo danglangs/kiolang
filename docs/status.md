@@ -71,13 +71,13 @@ Compiled-only kio covers the whole language and every capability. What real apps
 
 ## Next
 
-Direction A ([product-todo.md](product-todo.md)): P1, S1, E1, E2 and the pilot P2 (payhook) are done. Next: allocation speed, C8c3-C8c8 (compiler-todo.md; the plan is proposals/allocation-speed.md), Packages after. Tuples if the evals show models still reach for them.
+Direction A ([product-todo.md](product-todo.md)): P1, S1, E1, E2 and the pilot P2 (payhook) are done. In progress: C8c8 (borrowed loop variables), L26 (`Str.from_hex`), H23 (`Http.send` takes `timeout_ms`), P4 (`--grants` file). Then allocation speed in this order: C8c4, C8c3, C8c9 (per-loop fuel), C8c5, C8c6 (compiler-todo.md; the plan is proposals/allocation-speed.md). Packages after. Tuples if the evals show models still reach for them.
 
 Also open: C8 (roadmap.md): tree's remaining freeing (free-list pushes, a `List`'s separate buffer); tree's 4-5% from the larger size classes (#117); borrowed match bindings of a borrowed scrutinee (tree). Pinned, not started: L18 `par_map` and L19 `scope`/`spawn` (concurrency stages 2 and 3, when a program needs them).
 
 ## Waiting on the maintainer
 
-Nothing blocks work. Open, from the pilot (P2) and the evals: `Str.from_hex() -> Option<Bytes>` (L26: payhook wrote `unhex` by hand), a timeout argument on `Http.send` (H23, a caps.wit change; today `send_all([req])`), a grants file (design.md: a manifest once a run has more than a handful of grants), per-loop fuel (allocation-speed.md), and tuples (Opus; today a hint, L20). `Str.chars()` (L21) and `for` over `Bytes` (L22), and L24 and L25 (E2) were approved 2026-11-10.
+Nothing. Tuples stay deferred (today a hint, L20) unless an eval shows models still reach for them. Approved 2026-11-10: L21-L26, H22, H23 (a caps.wit change), P4 (the grants file) and C8c9 (per-loop fuel, after C8c4 and C8c3, with a security review).
 
 ## Speed (C8b5 with C8b6, C8b7, C8c1 and C8c2 marked, 2026-11-09, release, run time; all in [roadmap.md](roadmap.md))
 
