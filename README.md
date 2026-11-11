@@ -222,7 +222,7 @@ The cost is the ecosystem: few libraries, no package manager yet. Agents write m
 
 ## Roadmap
 
-- **Now:** allocation speed (unboxed enums, small structs and borrowed loop variables are in; fewer string copies, inlining and per-loop fuel next); E3: kio against Python in a hardened sandbox, attack by attack.
+- **Now:** allocation speed (unboxed enums, small structs and borrowed loop variables are in; fewer string copies, inlining and per-loop fuel next); E3b: adaptive injections against weaker models; a report that does not flag a method swap on a grant (P6).
 - **Next:** packages (a module from another directory); `par_map` and tasks (pinned).
 - **Later:** tuples, if the eval shows models still reach for them.
 
