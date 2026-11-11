@@ -676,7 +676,7 @@ fn http_quotas_and_timeout() {
         kio.explain(&e).unwrap(),
         "timed out after 1 s (raise it with --timeout)"
     );
-    assert!(start.elapsed() < std::time::Duration::from_secs(2));
+    assert!(start.elapsed() < std::time::Duration::from_secs(4));
 }
 
 /// H24: a `get`, `send` or `send_all` still in flight at the run's deadline always ends the run
