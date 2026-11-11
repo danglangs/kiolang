@@ -826,10 +826,16 @@ pub fn path_id(path: &Path) -> io::Result<FileId> {
 /// each ancestor of that name in its resolved directory, and of the file the chain ends at.
 /// Empty when nothing is at `path`.
 pub fn reached_through(path: &Path) -> Vec<FileId> {
+    chain(path).0
+}
+
+/// `reached_through(path)`, and the identity of the file its symlink chain ends at, if it ends.
+fn chain(path: &Path) -> (Vec<FileId>, Option<FileId>) {
     let Ok(mut name) = std::path::absolute(path) else {
-        return vec![];
+        return (vec![], None);
     };
     let mut places = vec![];
+    let mut end = None;
     // 40 links, as Linux follows: a longer chain does not resolve.
     for _ in 0..40 {
         if std::fs::symlink_metadata(&name).is_err() {
@@ -846,6 +852,7 @@ pub fn reached_through(path: &Path) -> Vec<FileId> {
         let named = dir.join(file);
         places.push(named.clone());
         let Ok(target) = std::fs::read_link(&named) else {
+            end = lstat_id(&named);
             break;
         };
         name = dir.join(target);
@@ -862,7 +869,26 @@ pub fn reached_through(path: &Path) -> Vec<FileId> {
             .unwrap_or(0);
         p.ancestors().skip(1).take_while(move |a| a.components().count() > up)
     });
-    ancestors.filter_map(|a| path_id(a).ok()).collect()
+    (ancestors.filter_map(|a| path_id(a).ok()).collect(), end)
+}
+
+/// The identity of `path` itself, a symlink not followed.
+fn lstat_id(path: &Path) -> Option<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::symlink_metadata(path).ok()?;
+    Some((m.dev(), m.ino()))
+}
+
+/// The contents of the program file at `path`, and the identity of the file read: opened once,
+/// so the identity is of the file the contents came from (`changed_refusal`).
+pub fn read_source(path: &Path) -> io::Result<(String, FileId)> {
+    use std::io::Read;
+    use std::os::unix::fs::MetadataExt;
+    let mut f = std::fs::File::open(path)?;
+    let mut src = String::new();
+    f.read_to_string(&mut src)?;
+    let m = f.metadata()?;
+    Ok((src, (m.dev(), m.ino())))
 }
 
 /// Whether `dir` is a directory `place` is reached through (`reached_through`).
@@ -870,22 +896,37 @@ pub fn within(place: &Path, dir: FileId) -> bool {
     reached_through(place).contains(&dir)
 }
 
+/// `source_places`: each directory with the file name it holds, and each file's name with its
+/// identity.
+pub type Places = (Vec<(FileId, String)>, Vec<(Option<FileId>, String)>);
+
 /// The directories each of a program's `files` (root first, then each module beside it, as
-/// `Kio::run_files` takes them) is reached through, with its name as given. A name with nothing
-/// on disk at it has none.
-pub fn source_places(files: &[(String, String)]) -> Vec<(FileId, String)> {
+/// `Kio::run_files` takes them) is reached through, with its name as given; and for each file in
+/// order, its name and the identity of the file its symlink chain ends at, from the same walk
+/// (`changed_refusal`). A name with nothing on disk at it has no places and no identity.
+pub fn source_places(files: &[(String, String)]) -> Places {
     let Some((root, _)) = files.first() else {
-        return vec![];
+        return (vec![], vec![]);
     };
     let dir = Path::new(root).parent().unwrap_or(".".as_ref());
     let paths = std::iter::once(Path::new(root).to_path_buf()).chain(files[1..].iter().map(|(n, _)| dir.join(n)));
-    paths
-        .flat_map(|p| {
-            reached_through(&p)
-                .into_iter()
-                .map(move |id| (id, p.display().to_string()))
-        })
-        .collect()
+    let (mut places, mut ends) = (vec![], vec![]);
+    for p in paths {
+        let name = p.display().to_string();
+        let (dirs, end) = chain(&p);
+        places.extend(dirs.into_iter().map(|id| (id, name.clone())));
+        ends.push((end, name));
+    }
+    (places, ends)
+}
+
+/// Why startup is refused, if it is: a program file checked (`ends`, from `source_places`) is not
+/// the file read (`read`, from `read_source`, in the same order), so the checks were made of
+/// another file than the one that runs.
+pub fn changed_refusal(ends: &[(Option<FileId>, String)], read: &[FileId]) -> Option<String> {
+    ends.iter().zip(read).find(|((end, _), id)| *end != Some(**id)).map(|((_, name), _)| {
+        format!("`{name}` changed while kio was starting: the file checked is not the file read\n  hint: run again once nothing is changing it")
+    })
 }
 
 /// Why a writable `Dir` grant is refused, if one is: it is a directory one of the program's

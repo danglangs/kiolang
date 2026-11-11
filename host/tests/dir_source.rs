@@ -2,7 +2,8 @@
 //! `kio run`, `--listen` and `kio check --grants`: the program could rewrite itself for the next
 //! run. A `:ro` dir cannot write and is granted. H29: a grant is compared by the identity of the
 //! directory opened for it, every name in a symlink chain to a program file counts, and the
-//! library (`Kio::run_files`, `Server`) refuses as `kio run` does.
+//! library (`Kio::run_files`, `Server`) refuses as `kio run` does. H29b: startup checks the
+//! identity of each source file it read.
 use std::path::Path;
 use std::process::Command;
 
@@ -183,7 +184,7 @@ fn the_opened_dir_decides_not_its_path() {
     let id = kio_host::dir_id(&opened).unwrap();
     assert_ne!(kio_host::path_id(&flip).unwrap(), id, "the path names another dir now");
     let prog = s(&app.join("app.kio"));
-    let places = kio_host::source_places(&[(prog.clone(), SELF_WRITER.into())]);
+    let (places, _) = kio_host::source_places(&[(prog.clone(), SELF_WRITER.into())]);
     let granted = [("d".to_string(), s(&flip), id)];
     let d = format!("d={}", s(&flip));
     assert_eq!(
@@ -280,4 +281,54 @@ fn the_library_refuses_too() {
         e.starts_with("`d` is granted `:ro` but the program can write it"),
         "{e}"
     );
+}
+
+/// The files checked are the files read: a program path whose symlink is flipped, or a module
+/// replaced, between the read and the check is refused; unchanged files pass.
+#[test]
+fn a_file_changed_between_read_and_check_is_refused() {
+    let t = tempfile::tempdir().unwrap();
+    let t = &t.path().canonicalize().unwrap();
+    let (app, other) = (t.join("app"), t.join("other"));
+    std::fs::create_dir(&app).unwrap();
+    std::fs::create_dir(&other).unwrap();
+    let root = "mod util;\nfn main() -> Int { util::one() }";
+    let util = "pub fn one() -> Int { 1 }";
+    for d in [&app, &other] {
+        std::fs::write(d.join("app.kio"), root).unwrap();
+        std::fs::write(d.join("util.kio"), util).unwrap();
+    }
+    let flip = t.join("flip");
+    std::os::unix::fs::symlink(&app, &flip).unwrap();
+    let (prog, module) = (flip.join("app.kio"), flip.join("util.kio"));
+    let files = vec![(s(&prog), root.to_string()), ("util.kio".to_string(), util.to_string())];
+    let (root_id, util_id) = (
+        kio_host::read_source(&prog).unwrap().1,
+        kio_host::read_source(&module).unwrap().1,
+    );
+    let ids = [root_id, util_id];
+    let check = || kio_host::changed_refusal(&kio_host::source_places(&files).1, &ids);
+    let changed = |p: &Path| {
+        Some(format!(
+            "`{}` changed while kio was starting: the file checked is not the file read\n  hint: run again once nothing is changing it",
+            s(p)
+        ))
+    };
+    assert_eq!(check(), None, "unchanged");
+
+    // Read through the link, then the link flipped to another dir.
+    std::fs::remove_file(&flip).unwrap();
+    std::os::unix::fs::symlink(&other, &flip).unwrap();
+    assert_eq!(check(), changed(&prog));
+
+    // Flipped back; the module replaced by another file.
+    std::fs::remove_file(&flip).unwrap();
+    std::os::unix::fs::symlink(&app, &flip).unwrap();
+    std::fs::write(app.join("new.kio"), util).unwrap();
+    std::fs::rename(app.join("new.kio"), app.join("util.kio")).unwrap();
+    assert_eq!(check(), changed(&module));
+
+    // Removed after the read.
+    std::fs::remove_file(app.join("app.kio")).unwrap();
+    assert_eq!(check(), changed(&prog));
 }

@@ -95,17 +95,26 @@ const HELP: &str = "kio check <prog.kio> [--base <old.kio> [--detail]]\n       k
 /// The root file, then `NAME.kio` beside it for each `mod NAME;` line. This is operator input,
 /// read by the host like the root; the program never sees the filesystem.
 fn read_files(path: &str) -> Result<Vec<(String, String)>, i32> {
-    let root = std::fs::read_to_string(path).map_err(|e| fail(format!("{path}: cannot read: {e}")))?;
+    read_program(path).map(|(files, _)| files)
+}
+
+/// A program's `(name, source)` files, root first, and the identity of each file read.
+type Program = (Vec<(String, String)>, Vec<kio_host::FileId>);
+
+/// `read_files`, and the identity of each file read, in the same order.
+fn read_program(path: &str) -> Result<Program, i32> {
+    let read = kio_host::read_source;
+    let (root, root_id) = read(path.as_ref()).map_err(|e| fail(format!("{path}: cannot read: {e}")))?;
     let dir = std::path::Path::new(path).parent().unwrap_or(".".as_ref());
-    let mut files = Vec::new();
+    let (mut files, mut ids) = (vec![(path.to_string(), String::new())], vec![root_id]);
     for name in root.lines().filter_map(mod_name) {
         let file = dir.join(format!("{name}.kio"));
-        let src = std::fs::read_to_string(&file)
-            .map_err(|e| fail(format!("mod {name}: cannot read {}: {e}", file.display())))?;
+        let (src, id) = read(&file).map_err(|e| fail(format!("mod {name}: cannot read {}: {e}", file.display())))?;
         files.push((format!("{name}.kio"), src));
+        ids.push(id);
     }
-    files.insert(0, (path.to_string(), root));
-    Ok(files)
+    files[0].1 = root;
+    Ok((files, ids))
 }
 
 /// `web` for a line that is `mod web;`.
@@ -496,7 +505,7 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
     if json_out() && flags.iter().step_by(2).any(|f| *f == "--listen") {
         return fail("`--json` reports one run; `--listen` serves many\n  hint: drop --json, or drop --listen".into());
     }
-    let files = match read_files(path) {
+    let (files, read_ids) = match read_program(path) {
         Ok(f) => f,
         Err(code) => return code,
     };
@@ -690,8 +699,11 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
             Err(_) => {}
         }
     }
-    let places = kio_host::source_places(&files);
-    if let Some(why) = kio_host::source_refusal(&places, &granted, &sources.read_only_dirs) {
+    // Checked against the files read: a path changed since names another file.
+    let (places, ends) = kio_host::source_places(&files);
+    if let Some(why) = kio_host::changed_refusal(&ends, &read_ids)
+        .or_else(|| kio_host::source_refusal(&places, &granted, &sources.read_only_dirs))
+    {
         return refuse(why);
     }
     for (i, (name, list)) in http_methods.iter().enumerate() {

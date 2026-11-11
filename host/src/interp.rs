@@ -93,6 +93,7 @@ impl Interp {
         self.run_files(&[single(source)], dirs, https)
     }
 
+    /// Like `Kio::run_files`, but makes none of its refusals: names are not looked at on disk.
     pub fn run_files(
         &mut self,
         files: &[(String, String)],

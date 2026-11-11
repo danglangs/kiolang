@@ -86,6 +86,7 @@ Compiled-only kio covers the whole language and every capability. Built and revi
 | P7 | The report names each `Http` call's method (`api send PUT`, `api send_all POST`, `*` when unseen); coverage is per method (`send PUT` is not covered by `send_all POST`); `kio run`, `--listen` and `check --grants` refuse a literal method `--http-methods` does not grant. E3 compromised references through the granted host: 0 to 3 of 4 visible; 35d stays covered (task 35 already PUTs). Reviewed; per-call `send_all` verbs after review (#219-#222) |
 | D2 (pilot) | `kio run`/`check --json`: one JSON line on stdout with `ok`, `value` (a `Result`'s `Ok` payload, a `Str` unquoted), `errors` (kind, message, hint, file, line, col), `report`, `diff`, `audit`, `used`; 13 kinds, exit codes unchanged. Fuel spent at instantiation now reports as out of fuel. 15 tests (#233-#236) |
 | H29 | a grant is compared by the identity of the directory opened for it, not its path: H28 and the grants-file, store, log and key-file checks; every link of a symlink chain to a program file, and a dir symlink it is reached through, count; the H27 and H28 refusals live in `kio_host`, so `Kio::run_files` and `Server` refuse too. A grant path flipped while `kio run` starts: 0 rewrites in 964 runs (149 in 996 before) |
+| H29b | startup checks the identity of each source file it read against the file its path resolves to when checked, and refuses a file changed in between (`grant`). A program path flipped while `kio run` starts: 0 rewrites in 13271 runs (215 in 5251 before) |
 
 ## Next
 

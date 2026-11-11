@@ -434,7 +434,9 @@ impl Kio {
     /// Like `run_with` for `(name, source)` files, root first, each name the path the file was
     /// read from (a module's beside the root's). Refused (`Refused`) as `kio run` refuses them:
     /// a writable dir any of the files is reached through (the program could rewrite itself for
-    /// the next run), and a `:ro` dir the program can write.
+    /// the next run), and a `:ro` dir the program can write. Each name is a path, looked at now:
+    /// to refuse files changed since they were read, read them with `read_source` and check
+    /// `changed_refusal` first, as `kio run` does.
     pub fn run_files(
         &mut self,
         files: &[(String, String)],
@@ -452,7 +454,7 @@ impl Kio {
         }
         let ro = &self.sources.read_only_dirs;
         let report = || crate::check_files(files).map_or(String::new(), |r| r.lines.join("\n"));
-        let why = source_refusal(&source_places(files), &granted, ro)
+        let why = source_refusal(&source_places(files).0, &granted, ro)
             .or_else(|| (!ro.is_empty()).then(|| read_only_refusal(&report(), ro)).flatten());
         if let Some(why) = why {
             return Err(wasmtime::Error::msg(Refused(why)));
@@ -695,7 +697,7 @@ impl Server {
             http,
             audit: None,
             requests: AtomicU64::new(0),
-            places: source_places(&files),
+            places: source_places(&files).0,
         }))
     }
 
