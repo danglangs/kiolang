@@ -7,6 +7,7 @@ kio check <prog.kio>             the authority report, or errors with hints
 kio check <new.kio> --base <old.kio> [--detail]   grants new adds or drops; exit 3 if any added
 kio check <prog.kio> --grants <file> [flags]   bind the file's grants to main without running
 kio run <prog.kio> [--grants file] [grants] [limits] [--audit log] [--listen addr]
+... --json                       one JSON object on stdout (JSON output, below)
 kio mcp                          the MCP server (README, "Use from an agent")
 ```
 
@@ -258,6 +259,31 @@ $ grep denied /tmp/leak.jsonl
 ```
 
 Each run writes a `start` line (program hash, grants, limits), its calls, and an `end` line (outcome, calls, I/O, peak memory, fuel used). Under `--listen` it is one log for the server: the header once, then each request's calls and trailer, every line starting with `"req":N` (and `"conn":N` for a WebSocket event); the trailer counts calls made after the response was sent (`"after_send":N`).
+
+## JSON output
+
+`--json` (anywhere after `run` or `check`) makes stdout one line, one JSON object, in every outcome; kio prints nothing else (stderr carries only `--log name=-` lines). Exit codes are unchanged. Not with `--listen` or `mcp`, and not in a grants file.
+
+| field | |
+|---|---|
+| `ok` | no errors |
+| `value` | `run`: `main`'s value as text; for a `Result`, the `Ok` payload alone, a `Str` unquoted (return `Ok(j.to_json())` to hand back JSON); `null` for `()` and failures |
+| `errors` | `[{"kind", "message", "hint", "file", "line", "col"}]`; `file`, `line`, `col` (1-based, in characters) are `null` without a place |
+| `report` | the authority report's lines |
+| `diff` | `check --base`: `{"grants", "funcs", "added"}` |
+| `audit` | the `--audit` path (appended across runs) |
+| `used` | `run`: `{"fuel", "calls", "io", "peak_memory", "ms"}` |
+
+Kinds: `check`, `grant` (a grant that does not bind, exit 1; one the host refuses at startup, exit 2), `usage` (exit 2), `err` (`main` returned `Err`), `runtime`, `fuel`, `memory`, `timeout`, `stack`, `calls`, `io` (a limit; the hint names its flag), `denied` (the host stopped a call), `internal`.
+
+```
+$ kio run job.kio --dir input=in:ro --json
+{"audit":null,"diff":null,"errors":[],"ok":true,"report":["main : input read"],"used":{"calls":1,"fuel":98619,"io":5,"ms":0.5,"peak_memory":1966080},"value":"{\"alice\": 1}"}
+$ kio run job.kio --json
+{"audit":null,"diff":null,"errors":[{"col":9,"file":"job.kio","hint":"grant it: `--dir input=path`","kind":"grant","line":1,"message":"no grant for `input: Dir`"}],"ok":false,"report":["main : input read"],"used":null,"value":null}
+$ kio run spin.kio --fuel 1000 --json
+{"audit":null,"diff":null,"errors":[{"col":null,"file":null,"hint":"raise it with --fuel","kind":"fuel","line":null,"message":"out of fuel (limit 1000)"}],"ok":false,"report":["main : none"],"used":{"calls":0,"fuel":1000,"io":0,"ms":0.2,"peak_memory":1179648},"value":null}
+```
 
 ## Reviewing authority in a pull request
 

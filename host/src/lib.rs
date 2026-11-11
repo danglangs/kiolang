@@ -91,6 +91,34 @@ impl std::fmt::Display for Stopped {
     }
 }
 
+/// What a run used: its fuel, capability calls, bytes of I/O and peak memory, as the audit log's
+/// `end` record counts them, and its wall time from binding its grants.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Used {
+    pub fuel: u64,
+    pub calls: u32,
+    pub io: u64,
+    pub peak_memory: usize,
+    pub ms: f64,
+}
+
+/// The kind `kio run --json` gives a `Stopped` message: the limit it names, or `denied` for a
+/// call the host stopped (`state_limit`'s read-only write or call not in the report).
+pub fn stop_kind(msg: &str) -> &'static str {
+    let limits = [
+        ("out of fuel", "fuel"),
+        ("out of memory", "memory"),
+        ("timed out", "timeout"),
+        ("stack overflow", "stack"),
+        ("too many host calls", "calls"),
+        ("too much I/O", "io"),
+    ];
+    limits
+        .iter()
+        .find(|(p, _)| msg.starts_with(p))
+        .map_or("denied", |(_, k)| k)
+}
+
 /// The message of a run stopped by a limit, or `None` for any other error.
 pub fn explain(e: &wasmtime::Error) -> Option<String> {
     e.downcast_ref::<Stopped>().map(|s| s.0.clone())

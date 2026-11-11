@@ -1,6 +1,10 @@
 mod mcp;
 
-use kio_host::{listen, open_dir, ClockSpec, Diag, HmacKey, Kio, Limits, LogSink, Origin, RngSpec, Server, Sources};
+use kio_host::{
+    listen, open_dir, ClockSpec, Diag, HmacKey, Kio, Limits, LogSink, Origin, RngSpec, Server, Sources, Used,
+};
+use serde_json::json;
+use std::cell::RefCell;
 
 /// `kio run`'s flags.
 const USAGE: &str = "[--grants file] [--dir name=path[:ro]]... [--http name=host]... [--http-methods name=POST,PUT,..]... [--http-header name=Header:env:VAR|file:path]... [--kv name=path[:ro]|:memory:]... [--kv-mb mb] [--db name=path[:ro]|:memory:]... [--db-mb mb] [--rng name[=seed:N]]... [--clock name[=fixed:T]]... [--log name=path|-]... [--hmac name=env:VAR|file:path[:verify]]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]...";
@@ -12,21 +16,81 @@ fn main() {
     std::process::exit(t.spawn(cli).unwrap().join().unwrap());
 }
 
-fn cli() -> i32 {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
-        ["check", path] => return check(path),
-        ["check", path, "--base", base] => return check_base(path, base, false),
-        ["check", path, "--base", base, "--detail"] => return check_base(path, base, true),
-        ["check", path, ref flags @ ..] if flags.contains(&"--grants") => return run(path, flags, true),
-        ["mcp"] => return mcp::serve(),
-        ["run", path, ref flags @ ..] => return run(path, flags, false),
-        _ => eprintln!(
-            "kio: a capability-typed language; code names what it needs, the operator grants what that is.\n\nusage: kio check <prog.kio> [--base <old.kio> [--detail]]\n       kio check <prog.kio> --grants <file> [flags]\n       kio mcp\n       kio run <prog.kio> {USAGE}"
-        ),
-    }
-    2
+thread_local! {
+    /// `--json`'s object while a command builds it; `None` for plain output.
+    static JSON: RefCell<Option<JsonOut>> = const { RefCell::new(None) };
 }
+
+/// The object `--json` prints, one line on stdout (product-todo D2).
+#[derive(Default)]
+struct JsonOut {
+    value: Option<String>,
+    errors: Vec<serde_json::Value>,
+    report: Vec<String>,
+    diff: Option<serde_json::Value>,
+    audit: Option<String>,
+    used: Option<Used>,
+}
+
+/// Whether output is `--json`'s object.
+fn json_out() -> bool {
+    JSON.with(|j| j.borrow().is_some())
+}
+
+/// Change `--json`'s object; nothing for plain output.
+fn set_json(f: impl FnOnce(&mut JsonOut)) {
+    JSON.with(|j| j.borrow_mut().as_mut().map(f));
+}
+
+/// With `--json` anywhere, the command's output is one JSON object on stdout and nothing else.
+fn cli() -> i32 {
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if !args.iter().any(|a| a == "--json") {
+        return command(&args);
+    }
+    args.retain(|a| a != "--json");
+    JSON.with(|j| *j.borrow_mut() = Some(JsonOut::default()));
+    let code = command(&args);
+    let o = JSON.with(|j| j.borrow_mut().take()).unwrap_or_default();
+    let used = o.used.map(|u| {
+        let ms = (u.ms * 10.0).round() / 10.0;
+        json!({"fuel": u.fuel, "calls": u.calls, "io": u.io, "peak_memory": u.peak_memory, "ms": ms})
+    });
+    let line = json!({
+        "ok": o.errors.is_empty(),
+        "value": o.value,
+        "errors": o.errors,
+        "report": o.report,
+        "diff": o.diff,
+        "audit": o.audit,
+        "used": used,
+    });
+    println!("{line}");
+    code
+}
+
+fn command(args: &[String]) -> i32 {
+    match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+        ["check", path] => check(path),
+        ["check", path, "--base", base] => check_base(path, base, false),
+        ["check", path, "--base", base, "--detail"] => check_base(path, base, true),
+        ["check", path, ref flags @ ..] if flags.contains(&"--grants") => run(path, flags, true),
+        ["mcp"] if json_out() => {
+            fail("`--json` reports one run or check; `kio mcp` serves many\n  hint: drop --json".into())
+        }
+        ["mcp"] => mcp::serve(),
+        ["run", path, ref flags @ ..] => run(path, flags, false),
+        _ if json_out() => fail(format!("usage: {}", HELP.replace("{USAGE}", USAGE))),
+        _ => {
+            let help = HELP.replace("{USAGE}", USAGE);
+            eprintln!("kio: a capability-typed language; code names what it needs, the operator grants what that is.\n\nusage: {help}");
+            2
+        }
+    }
+}
+
+/// The commands, `{USAGE}` standing for `kio run`'s flags.
+const HELP: &str = "kio check <prog.kio> [--base <old.kio> [--detail]]\n       kio check <prog.kio> --grants <file> [flags]\n       kio mcp\n       kio run <prog.kio> {USAGE}";
 
 /// The root file, then `NAME.kio` beside it for each `mod NAME;` line. This is operator input,
 /// read by the host like the root; the program never sees the filesystem.
@@ -59,11 +123,15 @@ fn check(path: &str) -> i32 {
         Err(code) => return code,
     };
     match kio_host::check_files(&files) {
+        Ok(report) if json_out() => {
+            set_json(|o| o.report = report.lines);
+            0
+        }
         Ok(report) => {
             println!("{}", report.lines.join("\n"));
             0
         }
-        Err(diags) => print_diags(&files, diags),
+        Err(diags) => print_diags(&files, diags, "check"),
     }
 }
 
@@ -79,10 +147,18 @@ fn check_base(path: &str, base: &str, detail: bool) -> i32 {
         Ok(diff) => diff,
         Err((is_base, diags)) => {
             let (side, files) = if is_base { ("base", &old) } else { ("new", &new) };
-            eprintln!("kio: the {side} program {} does not check", files[0].0);
-            return print_diags(files, diags);
+            if !json_out() {
+                eprintln!("kio: the {side} program {} does not check", files[0].0);
+            }
+            return print_diags(files, diags, "check");
         }
     };
+    if json_out() {
+        let report = kio_host::check_files(&new).map_or(vec![], |r| r.lines);
+        let d = json!({"grants": diff.grants, "funcs": diff.funcs, "added": diff.added});
+        set_json(|o| (o.report, o.diff) = (report, Some(d)));
+        return if diff.added { 3 } else { 0 };
+    }
     if diff.grants.is_empty() && diff.funcs.is_empty() {
         println!("no change in authority");
         return 0;
@@ -458,6 +534,9 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
         Err(code) => return code,
     };
     let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
+    if json_out() && flags.iter().step_by(2).any(|f| *f == "--listen") {
+        return fail("`--json` reports one run; `--listen` serves many\n  hint: drop --json, or drop --listen".into());
+    }
     let files = match read_files(path) {
         Ok(f) => f,
         Err(code) => return code,
@@ -635,11 +714,11 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
         }
         match open_dir(dir.as_ref()) {
             Ok(d) => dirs.push((name.to_string(), d)),
-            Err(e) => return fail(format!("--dir {name}={dir}: {e}")),
+            Err(e) => return refuse(format!("--dir {name}={dir}: {e}")),
         }
     }
     if let Some(why) = source_refusal(&files, &dir_paths, &sources.read_only_dirs) {
-        return fail(why);
+        return refuse(why);
     }
     for (i, (name, list)) in http_methods.iter().enumerate() {
         if http_methods[..i].iter().any(|(n, _)| n == name) {
@@ -665,12 +744,12 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
             .map(|(f, s)| (f, kio_host::kv::split_spec(s).0));
         let written: Vec<(String, &str)> = written.iter().cloned().chain(stores).collect();
         if let Some(why) = grants_refusal(g, &dir_paths, &written) {
-            return fail(why);
+            return refuse(why);
         }
     }
     for spec in http_headers {
         if let Err(e) = http_header(spec, &mut https, &dir_paths, &written, dry) {
-            return fail(flag_error("--http-header", header_label(spec), &e));
+            return refuse(flag_error("--http-header", header_label(spec), &e));
         }
     }
     // An error names the grant only: a key given inline by mistake would follow the `=`, or be
@@ -680,7 +759,7 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
             Ok(grant) => sources.hmacs.push(grant),
             Err(e) => {
                 let name = spec.split_once('=').map_or("", |(n, _)| n);
-                return fail(flag_error("--hmac", name, &e));
+                return refuse(flag_error("--hmac", name, &e));
             }
         }
     }
@@ -690,12 +769,13 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
         &lang::CapTable::v0(),
     ) {
         Ok(p) => p,
-        Err(diags) => return print_diags(&files, diags.into_iter().map(Diag::from).collect()),
+        Err(diags) => return print_diags(&files, diags.into_iter().map(Diag::from).collect(), "check"),
     };
     let params = checked.main_params();
     // A read-only store or database is refused to a program that can write it (H12, H17); the
     // host also stops any write that reaches it.
     let report = lang::report(&checked);
+    set_json(|o| o.report = report.lines().map(String::from).collect());
     type WriteIn = fn(&str, &str) -> Option<&'static str>;
     let readers = (kv_specs
         .iter()
@@ -710,7 +790,7 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
             continue;
         }
         if let Some(m) = write_in_report(&report, name) {
-            return fail(format!(
+            return refuse(format!(
                 "`{name}` is granted read-only but `main` can call `{name} {m}`\n  hint: drop `:ro` or remove the writes"
             ));
         }
@@ -719,7 +799,7 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
     // `sign` that reaches it.
     for (name, key) in &sources.hmacs {
         if key.verify_only() && kio_host::signs_in_report(&report, name) {
-            return fail(format!(
+            return refuse(format!(
                 "`{name}` is granted `:verify` but the program can sign with it\n  hint: drop `:verify`, or remove the `sign` call"
             ));
         }
@@ -728,7 +808,7 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
     // reaches it (H27).
     for name in &sources.read_only_dirs {
         if let Some(m) = kio_host::dir_write_in_report(&report, name) {
-            return fail(format!(
+            return refuse(format!(
                 "`{name}` is granted `:ro` but the program can write it (`{name} {m}`)\n  hint: drop `:ro`, or remove the write"
             ));
         }
@@ -737,7 +817,7 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
     // checked per request, as every request is.
     for (name, v) in lang::main_http_verbs(&lang::authority(&checked)) {
         if !lang::HTTP_METHODS.contains(&v.as_str()) {
-            return fail(format!(
+            return refuse(format!(
                 "`{name}` sends {v}, not an HTTP method\n  hint: a method is one of {}",
                 lang::HTTP_METHODS.join(", ")
             ));
@@ -748,7 +828,7 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
         if origin.allows(&v) {
             continue;
         }
-        return fail(match http_methods.iter().find(|(n, _)| *n == name) {
+        return refuse(match http_methods.iter().find(|(n, _)| *n == name) {
             Some((_, list)) => format!(
                 "`{name}` sends {v} but `--http-methods {name}={list}` grants only {}\n  hint: add {v} to --http-methods, or remove the call",
                 list.to_ascii_uppercase()
@@ -762,20 +842,20 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
     let http = takes("Incoming") + takes("Outgoing") > 0;
     let ws = takes("WsMessage") + takes("WsSend") > 0;
     if ws && http {
-        return fail("main takes both WebSocket and HTTP grants\n  hint: a WebSocket server answers through WsSend; drop the Incoming and Outgoing parameters".into());
+        return refuse("main takes both WebSocket and HTTP grants\n  hint: a WebSocket server answers through WsSend; drop the Incoming and Outgoing parameters".into());
     }
     if ws && (takes("WsMessage"), takes("WsSend")) != (1, 1) {
-        return fail("a WebSocket server's main takes one WsMessage and one WsSend\n  hint: write `fn main(msg: WsMessage, conn: WsSend, ..)`".into());
+        return refuse("a WebSocket server's main takes one WsMessage and one WsSend\n  hint: write `fn main(msg: WsMessage, conn: WsSend, ..)`".into());
     }
     if http && (takes("Incoming"), takes("Outgoing")) != (1, 1) {
-        return fail("an HTTP server's main takes one Incoming and one Outgoing\n  hint: write `fn main(request: Incoming, response: Outgoing, ..)`".into());
+        return refuse("an HTTP server's main takes one Incoming and one Outgoing\n  hint: write `fn main(request: Incoming, response: Outgoing, ..)`".into());
     }
     if listen.is_none() && !hosts.is_empty() {
         return fail("--host without --listen\n  hint: --host names a Host the server answers to; add `--listen 127.0.0.1:8080` or drop it".into());
     }
     match (listen, http, ws) {
-        (None, true, _) => return fail("main takes Incoming/Outgoing but there is no address\n  hint: add `--listen 127.0.0.1:8080`".into()),
-        (None, _, true) => return fail("main takes WsMessage/WsSend but there is no address\n  hint: add `--listen 127.0.0.1:8080`".into()),
+        (None, true, _) => return refuse("main takes Incoming/Outgoing but there is no address\n  hint: add `--listen 127.0.0.1:8080`".into()),
+        (None, _, true) => return refuse("main takes WsMessage/WsSend but there is no address\n  hint: add `--listen 127.0.0.1:8080`".into()),
         (Some(_), false, false) => return fail("--listen needs a `main` that takes Incoming and Outgoing, or WsMessage and WsSend\n  hint: add `req: Incoming, res: Outgoing` (HTTP) or `msg: WsMessage, conn: WsSend` (WebSocket) to main, or drop --listen".into()),
         _ => {}
     }
@@ -801,11 +881,12 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
             }
         }
         return match kio_host::bind_grants(&checked, &named) {
+            Ok(()) if json_out() => 0,
             Ok(()) => {
                 println!("{}", report.lines().collect::<Vec<_>>().join("\n"));
                 0
             }
-            Err(diags) => print_diags(&files, diags),
+            Err(diags) => print_diags(&files, diags, "grant"),
         };
     }
     // A program that can write a store's log or a database through a `Dir` could replace or
@@ -825,7 +906,7 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
         if let Ok(parent) = std::fs::canonicalize(parent) {
             for (d, dir) in &dir_paths {
                 if std::fs::canonicalize(dir).is_ok_and(|root| parent.starts_with(root)) {
-                    return fail(format!(
+                    return refuse(format!(
                         "`{flag}` is inside `--dir {d}`\n  hint: keep stores outside granted directories"
                     ));
                 }
@@ -836,7 +917,7 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
             .iter()
             .find(|(o, p)| !o.starts_with(&flag[..4]) && same_file(p, &path))
         {
-            return fail(format!(
+            return refuse(format!(
                 "`{flag}` is the same file as `{other}`\n  hint: give each its own file"
             ));
         }
@@ -854,7 +935,7 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
             }
             let pairs = own.iter().flat_map(|m| theirs.iter().map(move |t| (m, t)));
             if let Some((m, t)) = pairs.into_iter().find(|(m, t)| same_file(m, t)) {
-                return fail(format!(
+                return refuse(format!(
                     "`{flag}` and `{other}` share the file {}\n  hint: a database's `-wal`, `-shm` and `-journal` (a store's `.tmp`) are its own: give each grant its own file",
                     if *m == path { t } else { m }
                 ));
@@ -873,22 +954,22 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
     files_to_check.extend(log_paths.iter().map(|(n, p)| (format!("--log {n}"), p.as_str())));
     for (flag, path) in files_to_check {
         if let Some(why) = file_refusal(&flag, path, &stores, &dir_paths, &taken) {
-            return fail(why);
+            return refuse(why);
         }
         taken.push((flag, path));
     }
     let kvs = match kio_host::kv::open_all(&kv_specs, kv_mb) {
         Ok(kvs) => kvs,
-        Err(e) => return fail(e),
+        Err(e) => return refuse(e),
     };
     match kio_host::db::open_all(&db_specs, db_mb) {
         Ok(dbs) => sources.dbs = dbs,
-        Err(e) => return fail(e),
+        Err(e) => return refuse(e),
     }
     for (name, path) in &log_paths {
         match open_append(path) {
             Ok(f) => sources.logs.push((name.clone(), LogSink::file(f, path))),
-            Err(e) => return fail(format!("--log {name}={path}: {e}")),
+            Err(e) => return refuse(format!("--log {name}={path}: {e}")),
         }
     }
     if let Some(addr) = listen {
@@ -897,24 +978,37 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
     }
     let mut kio = match Kio::new(limits) {
         Ok(k) => k,
-        Err(e) => return fail(format!("{e:#}")),
+        Err(e) => return internal(format!("{e:#}")),
     };
     if let Some(path) = audit {
         match open_append(&path) {
-            Ok(f) => kio.audit(f, dir_paths),
-            Err(e) => return fail(format!("--audit {path}: {e}")),
+            Ok(f) => {
+                kio.audit(f, dir_paths);
+                set_json(|o| o.audit = Some(path.clone()));
+            }
+            Err(e) => return refuse(format!("--audit {path}: {e}")),
         }
     }
     kio.grant_kvs(kvs);
     kio.grant_sources(sources);
-    match kio.run_files(&files, dirs, https) {
+    let result = kio.run_files(&files, dirs, https);
+    set_json(|o| o.used = kio.used());
+    match result {
         Err(e) => {
             // A limit or trap is the program failing, not a usage error.
             match kio.explain(&e) {
-                Some(msg) => eprintln!("{msg}"),
+                Some(msg) => stopped(&msg),
+                None if json_out() => push_error("internal", &format!("{e:#}"), None, None),
                 None => eprintln!("kio: {e:#}"),
             }
             1
+        }
+        Ok(Ok(out)) if json_out() => {
+            match out.failed {
+                true => push_error("err", &out.value, None, None),
+                false => set_json(|o| o.value = json_value(&out.value, checked.main_ret())),
+            }
+            i32::from(out.failed)
         }
         Ok(Ok(out)) => {
             if !params.is_empty() {
@@ -928,7 +1022,12 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
             }
             i32::from(out.failed)
         }
-        Ok(Err(diags)) => print_diags(&files, diags),
+        // A grant that does not bind stops the run before `main` starts; any other is a
+        // run-time error.
+        Ok(Err(diags)) => {
+            let kind = if kio.used().is_some() { "runtime" } else { "grant" };
+            print_diags(&files, diags, kind)
+        }
     }
 }
 
@@ -948,8 +1047,8 @@ fn serve(
     audit: Option<(String, kio_host::DirPaths)>,
 ) -> i32 {
     let mut server = match Server::new(files.clone(), limits) {
-        Err(e) => return fail(format!("{e:#}")),
-        Ok(Err(diags)) => return print_diags(&files, diags),
+        Err(e) => return internal(format!("{e:#}")),
+        Ok(Err(diags)) => return print_diags(&files, diags, "check"),
         Ok(Ok(s)) => s,
     };
     server.grant_https(https);
@@ -958,12 +1057,12 @@ fn serve(
     // A grant `main` does not take is refused before binding, exit 1 as plain `kio run` (H21).
     let names: Vec<String> = dirs.iter().map(|(n, _)| n.clone()).collect();
     if let Err(diags) = server.check_grants(&names) {
-        return print_diags(&files, diags);
+        return print_diags(&files, diags, "grant");
     }
     if let Some((path, dir_paths)) = audit {
         let opened = open_append(&path).and_then(|f| server.audit(f, dir_paths));
         if let Err(e) = opened {
-            return fail(format!("--audit {path}: {e}"));
+            return refuse(format!("--audit {path}: {e}"));
         }
     }
     match listen::serve(server, dirs, addr, ws_origins, hosts) {
@@ -1055,8 +1154,14 @@ fn locate(files: &[(String, String)], diags: &[Diag]) -> Vec<(usize, usize)> {
         .collect()
 }
 
-fn print_diags(files: &[(String, String)], diags: Vec<Diag>) -> i32 {
+/// Each diag, of `kind` for `--json`; exit 1.
+fn print_diags(files: &[(String, String)], diags: Vec<Diag>, kind: &str) -> i32 {
     for (d, (file, line)) in diags.iter().zip(locate(files, &diags)) {
+        if json_out() {
+            let at = (json_path(files, file), line, column(&files[file].1, d.start as usize));
+            push_error(kind, &d.message, d.hint.as_deref(), Some(at));
+            continue;
+        }
         eprintln!("{}:{line}: error: {}", files[file].0, d.message);
         if let Some(h) = &d.hint {
             eprintln!("  hint: {h}");
@@ -1065,7 +1170,116 @@ fn print_diags(files: &[(String, String)], diags: Vec<Diag>) -> i32 {
     1
 }
 
+/// A malformed command line: exit 2.
 fn fail(msg: String) -> i32 {
-    eprintln!("kio: {msg}");
+    error("usage", &msg)
+}
+
+/// A grant the host refuses before running: exit 2.
+fn refuse(msg: String) -> i32 {
+    error("grant", &msg)
+}
+
+/// The engine or server cannot start: exit 2.
+fn internal(msg: String) -> i32 {
+    error("internal", &msg)
+}
+
+/// `msg` (its hint after `\n  hint: `) without a span, of `kind` for `--json`; exit 2.
+fn error(kind: &str, msg: &str) -> i32 {
+    if !json_out() {
+        eprintln!("kio: {msg}");
+        return 2;
+    }
+    let (message, hint) = match msg.split_once("\n  hint: ") {
+        Some((m, h)) => (m, Some(h)),
+        None => (msg, None),
+    };
+    push_error(kind, message, hint, None);
     2
+}
+
+/// Add an error to `--json`'s object; `at` is its file, line and column.
+fn push_error(kind: &str, message: &str, hint: Option<&str>, at: Option<(String, usize, usize)>) {
+    let (file, line, col) = at.map_or((None, None, None), |(f, l, c)| (Some(f), Some(l), Some(c)));
+    let e = json!({"kind": kind, "message": message, "hint": hint, "file": file, "line": line, "col": col});
+    set_json(|o| o.errors.push(e));
+}
+
+/// A run stopped by a limit or by the host (`Kio::explain`'s `msg`). For `--json` its kind is
+/// the limit, and "raise it with --x" is the hint.
+fn stopped(msg: &str) {
+    if !json_out() {
+        eprintln!("{msg}");
+        return;
+    }
+    let raise = |h: &str| format!("raise it with {}", h.trim_end_matches(')'));
+    let (message, hint) = match (msg.split_once(" (raise it with "), msg.split_once("; raise it with ")) {
+        (Some((m, h)), _) => (m.to_string(), Some(raise(h))),
+        (_, Some((m, h))) => (format!("{m})"), Some(raise(h))),
+        _ => (msg.to_string(), None),
+    };
+    push_error(kio_host::stop_kind(msg), &message, hint.as_deref(), None);
+}
+
+/// The path of source file `i` for `--json`: the root as given, a module beside it.
+fn json_path(files: &[(String, String)], i: usize) -> String {
+    if i == 0 {
+        return files[0].0.clone();
+    }
+    let dir = std::path::Path::new(&files[0].0).parent().unwrap_or(".".as_ref());
+    dir.join(&files[i].0).display().to_string()
+}
+
+/// The 1-based column of byte `at` in `src`, in characters from its line's start.
+fn column(src: &str, at: usize) -> usize {
+    let at = (0..=at.min(src.len()))
+        .rev()
+        .find(|&i| src.is_char_boundary(i))
+        .unwrap_or(0);
+    let start = src[..at].rfind('\n').map_or(0, |i| i + 1);
+    src[start..at].chars().count() + 1
+}
+
+/// `main`'s value as `--json` shows it (D2): `printed` as `kio run` prints it, but `null` for
+/// `()`, and for a `Result` its `Ok` payload alone, a `Str` payload unquoted.
+fn json_value(printed: &str, ret: Option<&lang::check::Ty>) -> Option<String> {
+    use lang::check::Ty;
+    let Some(Ty::Result(ok, _)) = ret else {
+        return (ret != Some(&Ty::Unit)).then(|| printed.to_string());
+    };
+    let inner = printed
+        .strip_prefix("Ok(")
+        .and_then(|s| s.strip_suffix(')'))
+        .unwrap_or(printed);
+    match **ok {
+        Ty::Unit => None,
+        Ty::Str => Some(unquote(inner).unwrap_or_else(|| inner.to_string())),
+        _ => Some(inner.to_string()),
+    }
+}
+
+/// `s`, a string as Rust's `{:?}` prints it (as the runtime prints a nested `Str`), unquoted;
+/// `None` if it is not one.
+fn unquote(s: &str) -> Option<String> {
+    let mut chars = s.strip_prefix('"')?.strip_suffix('"')?.chars();
+    let mut out = String::new();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        out.push(match chars.next()? {
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
+            '0' => '\0',
+            'u' => {
+                let hex: String = chars.by_ref().skip(1).take_while(|&c| c != '}').collect();
+                char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?
+            }
+            c => c,
+        });
+    }
+    Some(out)
 }

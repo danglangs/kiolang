@@ -12,7 +12,7 @@ use crate::{
     audit_header, config, end_audit, grants, limit_message, main_calls, named, new_store, on_run_stack, push_grants,
     set_stack, single, spawn_ticker, start_audit, web_grants, write_line, ws_grants, Audit, Bound, Diag, DirPaths,
     Handles, KvGrants, Limits, Origin, Outcome, Report, Request, Response, RunResult, SharedLog, Sources, State,
-    Stopped,
+    Stopped, Used,
 };
 use cap_std::fs::Dir as RealDir;
 use codegen::Site;
@@ -312,6 +312,8 @@ pub struct Kio {
     /// Capability imports and peak memory of the last run.
     calls: u32,
     peak_memory: usize,
+    /// What the last run used, once its grants were bound.
+    used: Option<Used>,
     /// Test only: a `(parameter, method)` pair to leave out of the authority report.
     #[cfg(feature = "test-hooks")]
     hidden: Option<(String, String)>,
@@ -336,6 +338,7 @@ impl Kio {
             sources: Sources::default(),
             calls: 0,
             peak_memory: 0,
+            used: None,
             #[cfg(feature = "test-hooks")]
             hidden: None,
             #[cfg(feature = "test-hooks")]
@@ -406,6 +409,11 @@ impl Kio {
     /// Capability imports the last run called.
     pub fn import_calls(&self) -> u32 {
         self.calls
+    }
+
+    /// What the last run used (`kio run --json`), or `None` if its grants did not bind.
+    pub fn used(&self) -> Option<Used> {
+        self.used
     }
 
     /// Check and compile `source`, then run `main` with `dirs` granted by name.
@@ -514,8 +522,11 @@ impl Kio {
         handles: impl FnOnce(&mut State) -> Result<Handles>,
         edit: impl FnOnce(&mut lang::ir::Module),
     ) -> Result<RunResult> {
+        self.used = None;
         // Compiled before the store exists, so compiling is not charged to the run.
         let checked = compile(&self.engine, files, &self.limits, edit)?;
+        let start = std::time::Instant::now();
+        let mut bound_ok = false;
         let mut store = new_store(&self.engine, &self.limits)?;
         #[cfg(feature = "test-hooks")]
         {
@@ -537,9 +548,20 @@ impl Kio {
                     allowed.remove(h);
                 }
                 store.data_mut().allowed = allowed;
-                match instantiate(&mut store, program, &bound)? {
-                    Err(diags) => Ok(Err(diags)),
-                    Ok((world, grants)) => call(&mut store, &world, &grants, program, &self.limits),
+                match instantiate(&mut store, program, &bound) {
+                    Ok(Err(diags)) => Ok(Err(diags)),
+                    Ok(Ok((world, grants))) => {
+                        bound_ok = true;
+                        call(&mut store, &world, &grants, program, &self.limits)
+                    }
+                    // Instantiation runs guest code too: fuel or memory can run out there.
+                    Err(e) => {
+                        bound_ok = true;
+                        match limit_message(store.data(), &self.limits, &e) {
+                            Some(msg) => Err(e.context(Stopped(msg))),
+                            None => Err(e),
+                        }
+                    }
                 }
             }
         };
@@ -551,6 +573,13 @@ impl Kio {
             _ => "error",
         };
         let fuel_used = self.limits.fuel.saturating_sub(store.get_fuel().unwrap_or(0));
+        self.used = bound_ok.then(|| Used {
+            fuel: fuel_used,
+            calls: self.calls,
+            io: store.data().io,
+            peak_memory: self.peak_memory,
+            ms: start.elapsed().as_secs_f64() * 1000.0,
+        });
         end_audit(store.data_mut(), fuel_used, outcome)?;
         result
     }

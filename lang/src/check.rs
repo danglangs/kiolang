@@ -82,6 +82,11 @@ impl Program {
             .collect()
     }
 
+    /// `main`'s return type, which `kio run --json` reads its value by.
+    pub fn main_ret(&self) -> Option<&Ty> {
+        self.sigs.get("main").map(|s| &s.ret)
+    }
+
     /// `v` as `kio run` prints it: a top-level `Str` bare, everything else like its source form
     /// (`["a", 1]`, `Point { x: 1 }`, `Shape::Circle(2)`, `Some(3)`), with declared field and variant names.
     pub fn display(&self, v: &Value) -> String {
