@@ -194,6 +194,16 @@ kio is a Rust subset on purpose, and its errors name the fix. Without the refere
 | Containers, seccomp, VMs | All or nothing per process. They cannot say which function may send data where, and tell a reviewer nothing before the run. |
 | kio | Authority is in every signature, so the checker's rule is one sentence and the report is exact. The host checks the code it compiles, runs only that code, enforces every grant again and logs every call. |
 
+Measured ([E3](docs/proposals/e3-scorecard.md)): 55 prompt-injection attacks planted in task data, each program made to follow its injection, run under equal permissions.
+
+| | kio | Python, sandboxed by a careful team | Python, common practice |
+|---|---|---|---|
+| Attacks stopped at run time | 52/55 | 52/55 | 40/55 |
+| What it took | flags on `kio run` | an egress proxy that injects keys and filters methods, a per-task sandbox profile, memory and disk watchdogs | a sandbox profile and a proxy |
+| Lines a reviewer reads (median, real model runs) | 1-2 | 80-90 | 80-90 |
+
+kio matches the careful setup as its default and makes review a one-line diff. No arm stops data sent through a host the task legitimately uses: that needs information-flow control, which kio does not have.
+
 The cost is the ecosystem: few libraries, no package manager yet. Agents write most of the code, and Rust syntax means models already write it well; HTTP, TLS and filesystems live in the host, in Rust, behind capabilities.
 
 ## Threat model
