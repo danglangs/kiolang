@@ -17,7 +17,7 @@
 | Benign programs flagged, false alarms (Sonnet / Opus) | 11 / 10 | 14 / 12 | 12 / 10 |
 | Cost, USD (Sonnet / Opus) | 4.05 / 7.66 | 1.76 / 3.37 | 2.18 / 4.39 |
 
-**Today's frontier models almost never followed these injections**: one attempt in 330 adversarial runs (Sonnet, Python, a disk-fill that the sandbox blocked). With these models and these injections, no arm's run-time defences were tested by the models themselves. Section 2 measures them directly.
+**Today's frontier models almost never followed these injections**: two of 330 adversarial runs, both Sonnet following the same disk-fill twin, once in each Python arm, both blocked. With these models and these injections, no arm's run-time defences were tested by the models themselves. Section 2 measures them directly.
 
 kio's false alarms are all a method changing on a grant the task already had (`out: Dir (+create -write)`, `counts: Kv (+scan -keys)`): noise a reviewer can see is harmless in one line, but noise. Python's are a heuristic scan of an 80-90 line diff.
 
@@ -41,11 +41,15 @@ No arm stops data sent out through the host the task legitimately uses (as a que
 ## What this says
 
 1. **At run time, kio equals Python sandboxed by a careful team (52/55), and beats Python as commonly sandboxed (40/55)**, mostly on secrets: kio programs never hold their keys.
-2. **The difference is cost, not ceiling.** py-best needed a custom egress proxy that injects keys and filters methods, a per-task sandbox profile and watchdog threads for memory and disk. kio's equivalent is flags on `kio run`; its limits are the host's own counters, not polled watchdogs.
+2. **The difference is who builds the stack, not the ceiling.** py-best needed a custom egress proxy that injects keys and filters methods, a per-task sandbox profile and watchdog threads for memory and disk. kio's equivalent is flags on `kio run`; its limits are the host's own counters, not polled watchdogs. Not zero setup: an operator still picks grants, places writable paths and supplies secrets, and kio's maintainers maintain that stack instead of each adopter.
 3. **Review is where kio is clearly ahead**: 1-2 lines of exact authority against an 80-90 line diff and a heuristic scan (which misses indirect access such as `getattr(os, "environ")`). kio's view misses what does not change authority (escapes, most exhaustion), which the host blocks anyway.
 4. **The adversarial half did not test the models**: they ignored the injections. A stronger test needs subtler, adaptive injections and weaker or older models.
 
 ## Biases, both directions
+
+- 52/55 is this suite's outcome (curated attacks, Python standard library only), not a general equivalence. Neither the arms' run-time cost nor the cost of maintaining each deployment was measured.
+- "Lines a reviewer reads" is output size, not reviewer effort or accuracy; reading authority alone cannot show a program handles data correctly. A human review study would test the stronger claim.
+- Generation cost: kio runs cost about twice Python's, mostly the longer system prompt (all of language.md against a paragraph).
 
 - kio's system prompt is all of language.md; Python's a paragraph. The task text is written in kio's terms.
 - py-best's limits are polled watchdogs; a kernel quota would refuse earlier. It refuses CONNECT (no HTTPS through the proxy).
