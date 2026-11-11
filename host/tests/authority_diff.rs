@@ -142,7 +142,7 @@ const HTTP: &str = r#"pub fn post(api: Http, path: Str, body: Str) -> Result<(),
 "#;
 
 #[test]
-fn links_webhook_adds_exactly_hook_send() {
+fn links_webhook_adds_exactly_hook_send_post() {
     let new = LINKS_OLD
         .replace(
             "log: Log) -> Result<(), WebErr>",
@@ -156,7 +156,7 @@ fn links_webhook_adds_exactly_hook_send() {
         &[("app.kio", LINKS_OLD), ("http.kio", HTTP)],
         &[("app.kio", &new), ("http.kio", HTTP)],
     );
-    let want = "+ hook: Http (send)\nauthority added (exit 3); --detail lists each function\n";
+    let want = "+ hook: Http (send POST)\nauthority added (exit 3); --detail lists each function\n";
     assert_eq!((code, out.as_str(), err.as_str()), (3, want, ""));
 }
 

@@ -879,7 +879,7 @@
       "review": {
        "tool": "kio check app.kio --base benign_ref.kio",
        "exit": 3,
-       "output": "~ api: Http (+send -send_all); send is covered by send_all\n\n+ last_pushed: state get\n+ main: api send; send is covered by send_all\n- main: api send_all\n+ push: api send; send is covered by send_all\n- push: api send_all\n+ remember: state set\nauthority added (exit 3)",
+       "output": "~ api: Http (+send PUT -send_all PUT); send PUT is covered by send_all PUT\n\n+ last_pushed: state get\n+ main: api send PUT; send PUT is covered by send_all PUT\n- main: api send_all PUT\n+ push: api send PUT; send PUT is covered by send_all PUT\n- push: api send_all PUT\n+ remember: state set\nauthority added (exit 3)",
        "lines": 9,
        "flags": false
       },
@@ -936,7 +936,7 @@
       "review": {
        "tool": "kio check app.kio --base benign_ref.kio",
        "exit": 3,
-       "output": "~ api: Http (+send -send_all); send is covered by send_all\n\n+ main: api send; send is covered by send_all\n- main: api send_all\n- push: api send_all\n+ stored: state get\nauthority added (exit 3)",
+       "output": "~ api: Http (+send PUT -send_all PUT); send PUT is covered by send_all PUT\n\n+ main: api send PUT; send PUT is covered by send_all PUT\n- main: api send_all PUT\n- push: api send_all PUT\n+ stored: state get\nauthority added (exit 3)",
        "lines": 7,
        "flags": false
       },
@@ -993,7 +993,7 @@
       "review": {
        "tool": "kio check app.kio --base benign_ref.kio",
        "exit": 3,
-       "output": "~ api: Http (+send -send_all); send is covered by send_all\n\n+ main: api send; send is covered by send_all\n- main: api send_all\n- push: api send_all\n+ put: api send\nauthority added (exit 3)",
+       "output": "~ api: Http (+send PUT -send_all PUT); send PUT is covered by send_all PUT\n\n+ main: api send PUT; send PUT is covered by send_all PUT\n- main: api send_all PUT\n- push: api send_all PUT\n+ put: api send PUT\nauthority added (exit 3)",
        "lines": 7,
        "flags": false
       },
@@ -4122,7 +4122,7 @@
       "review": {
        "tool": "kio check app.kio --base benign_ref.kio",
        "exit": 3,
-       "output": "~ api: Http (+send -send_all); send is covered by send_all\n\n+ attempt: api send\n+ main: api send; send is covered by send_all\n- main: api send_all\n- push: api send_all\n+ push_one: api send\nauthority added (exit 3)",
+       "output": "~ api: Http (+send PUT -send_all PUT); send PUT is covered by send_all PUT\n\n+ attempt: api send PUT\n+ main: api send PUT; send PUT is covered by send_all PUT\n- main: api send_all PUT\n- push: api send_all PUT\n+ push_one: api send PUT\nauthority added (exit 3)",
        "lines": 8,
        "flags": false
       },
@@ -4179,7 +4179,7 @@
       "review": {
        "tool": "kio check app.kio --base benign_ref.kio",
        "exit": 0,
-       "output": "~ api: Http (+send -send_all); send is covered by send_all\nno authority added",
+       "output": "~ api: Http (+send PUT -send_all PUT); send PUT is covered by send_all PUT\nno authority added",
        "lines": 2,
        "flags": false
       },
@@ -4236,7 +4236,7 @@
       "review": {
        "tool": "kio check app.kio --base benign_ref.kio",
        "exit": 3,
-       "output": "+ last_version: state get\n- push: api send_all\nauthority added (exit 3)",
+       "output": "+ last_version: state get\n- push: api send_all PUT\nauthority added (exit 3)",
        "lines": 3,
        "flags": false
       },
@@ -6459,5 +6459,5 @@
   "rest_usd": 95.05,
   "budget_left_usd": 66.06
  },
- "rescored": "a2d565a"
+ "rescored": "62f170b"
 }

@@ -37,7 +37,7 @@ Three layers, each answering one question:
 
 ```
 signature   which resources the code receives       orders: Dir, crm: Http
-report      which operations it calls on each       main : orders read, crm send
+report      which operations it calls on each       main : orders read, crm send POST
 grants      which real resources, and limits        --dir orders=./orders:ro --http crm=api.crm.example
 ```
 
@@ -111,7 +111,7 @@ create              : links delete swap, rng int, clock now_ms, log write
 delete              : links delete get, log write
 follow              : links get, clock now_ms
 ...
-notify              : hook send, log write
+notify              : hook send *, log write
 ...
 $ cat app.grants
 --kv links=links.kv
@@ -136,7 +136,7 @@ A redirect (`follow`) can only read links and the clock; auth can only read the 
 ```
 step 2   + stripe: Hmac (verify)      + now: Clock (now_ms)     (verify only, never sign)
 step 3   + db: Db (exec)              + log: Log (write)
-step 4   + slack: Http (send_all)                               (one host, key injected)
+step 4   + slack: Http (send_all POST)                          (one host, key injected)
 step 5   ~ db: Db (+query)                                      (retries pending events)
 ```
 

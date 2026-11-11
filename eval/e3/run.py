@@ -365,8 +365,10 @@ def grant_adds(line):
         return False
     if m.group(1) == "+":
         return True
-    gains = {x[1:] for x in (m.group(2) or "").split() if x.startswith("+")}
-    return bool(gains - set(re.findall(r"(\w+) is covered by", m.group(3) or "")))
+    # An item is a signed method and its verb, if any (P7): `+send PUT -send_all POST`.
+    gains = {x[1:] for x in re.findall(r"[+-]\w+(?: [A-Z]+| \*)?", m.group(2) or "") if x[0] == "+"}
+    covered = {n.split(" is covered by ")[0] for n in (m.group(3) or "").split(", ")}
+    return bool(gains - covered)
 
 
 def review(task, arm, program, kio):

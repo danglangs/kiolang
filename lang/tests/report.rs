@@ -295,8 +295,8 @@ fn diff_new_main_parameter() {
     assert_eq!(
         diff(&[("a.kio", &old())], &[("a.kio", &new)]),
         want(
-            &["+ hook: Http (send)"],
-            &["+ main: hook send", "+ notify: hook send"],
+            &["+ hook: Http (send POST)"],
+            &["+ main: hook send POST", "+ notify: hook send POST"],
             true
         )
     );
@@ -439,7 +439,8 @@ fn covers(ty: &str, by: &str, m: &str) -> bool {
 
 #[test]
 fn diff_covered_gain_adds_nothing_and_covering_gain_does() {
-    for (ty, m, by) in lang::COVERS {
+    // `Http`'s rows hold per verb: `diff_http_verb_coverage`.
+    for (ty, m, by) in lang::COVERS.iter().filter(|(t, _, _)| *t != "Http") {
         for c in *by {
             // Swapping `c` for `m`, which `c` covers: shown, not added.
             let got = diff(&[("a.kio", &main_calling(ty, c))], &[("a.kio", &main_calling(ty, m))]);
@@ -583,4 +584,164 @@ fn covers_lists_every_caps_method() {
             );
         }
     }
+}
+
+// P7: an `Http` call's method in the report.
+
+/// The report of `main(api: Http)` doing `body`.
+fn http(body: &str) -> String {
+    rep(&format!("fn main(api: Http) {{ {body} }}"))
+}
+
+fn send(verb: &str) -> String {
+    format!(r#"let _s = api.send({verb}, "/", [], "x".to_bytes(), 0);"#)
+}
+
+fn req(verb: &str) -> String {
+    format!(r#"HttpRequest {{ method: {verb}, path: "/", headers: [], body: "x".to_bytes(), timeout_ms: 0 }}"#)
+}
+
+fn send_all(verbs: &[&str]) -> String {
+    let reqs: Vec<String> = verbs.iter().map(|v| req(v)).collect();
+    format!("let _a = api.send_all([{}]);", reqs.join(", "))
+}
+
+#[test]
+fn http_literal_verb() {
+    assert_eq!(http(&send(r#""PUT""#)), "main : api send PUT");
+    assert_eq!(http(r#"let _g = api.get("/");"#), "main : api get");
+}
+
+#[test]
+fn http_const_verb() {
+    let src = format!(r#"const PUT: Str = "PUT"; fn main(api: Http) {{ {} }}"#, send("PUT"));
+    assert_eq!(rep(&src), "main : api send PUT");
+    // A local shadowing the constant is not the constant.
+    let src = format!(
+        r#"const M: Str = "PUT"; fn main(api: Http, d: Dir) {{ let M = d.read("m").unwrap_or("".to_bytes()).to_str(); {} }}"#,
+        send("M")
+    );
+    assert_eq!(rep(&src), "main : api send *, d read");
+    // A module's constant.
+    let root = format!("mod web;\nfn main(api: Http) {{ {} }}", send("web::DEL"));
+    let web = r#"pub const DEL: Str = "DELETE";"#;
+    let p = lang::check_files(&[("a.kio", &root), ("web.kio", web)], &common::caps()).unwrap();
+    assert_eq!(report(&p), "main : api send DELETE");
+}
+
+#[test]
+fn http_unseen_verb_is_star() {
+    // A variable, a parameter, a computed string, and a literal the host refuses.
+    let var = format!(r#"let m = "PU" + "T"; {}"#, send("m"));
+    assert_eq!(http(&var), "main : api send *");
+    let param = format!(
+        "fn go(api: Http, m: Str) {{ {} }} fn main(api: Http) {{ go(api, \"PUT\"); }}",
+        send("m")
+    );
+    assert_eq!(rep(&param), "go   : api send *\nmain : api send *");
+    assert_eq!(http(&send(r#""put""#)), "main : api send *");
+}
+
+#[test]
+fn http_send_all_struct_literals() {
+    assert_eq!(http(&send_all(&[r#""POST""#])), "main : api send_all POST");
+    assert_eq!(
+        http(&send_all(&[r#""POST""#, r#""PUT""#])),
+        "main : api send_all POST PUT"
+    );
+    // Built in a helper and mapped, as E3's task 35 does: still every literal the program has.
+    let mapped = format!(
+        "fn put(p: Str) -> HttpRequest {{ {} }} fn main(api: Http) {{ let _a = api.send_all([\"/a\"].map(put)); }}",
+        req(r#""PUT""#).replace(r#"path: "/""#, "path: p")
+    );
+    assert_eq!(rep(&mapped), "main : api send_all PUT\nput  : none");
+    // One unseen method, or none at all, is `*`.
+    let unseen = format!(r#"let m = "PO" + "ST"; {}"#, send_all(&[r#""PUT""#, "m"]));
+    assert_eq!(http(&unseen), "main : api send_all *");
+    assert_eq!(http("let _a = api.send_all([]);"), "main : api send_all *");
+    // An assignment to a request's `method` counts as a literal does.
+    let set = |v: &str| {
+        format!(
+            "let mut r = {}; r.method = {v}; let _a = api.send_all([r]);",
+            req(r#""POST""#)
+        )
+    };
+    assert_eq!(http(&set(r#""PATCH""#)), "main : api send_all PATCH POST");
+    assert_eq!(http(&set(r#""PA" + "TCH""#)), "main : api send_all *");
+}
+
+#[test]
+fn http_mixed_verbs() {
+    let body = format!(
+        r#"let _g = api.get("/"); {} {} {}"#,
+        send(r#""PUT""#),
+        send(r#""POST""#),
+        send_all(&[r#""DELETE""#])
+    );
+    assert_eq!(http(&body), "main : api get send POST PUT send_all DELETE");
+}
+
+/// The `kio check --base` grant line for `api` when `go(api, s)` goes from `old` to `new`,
+/// and whether it adds authority.
+fn http_diff(old: &str, new: &str) -> (String, bool) {
+    let p = |b: &str| format!(r#"fn go(api: Http, s: Str) {{ {b} }} fn main(api: Http) {{ go(api, "x"); }}"#);
+    let got = diff(&[("a.kio", &p(old))], &[("a.kio", &p(new))]);
+    assert_eq!(got.added, got.grant_added, "{got:?}");
+    (got.grants.join("\n"), got.added)
+}
+
+#[test]
+fn diff_http_verb_coverage() {
+    let get = r#"let _g = api.get("/");"#.to_string();
+    let (put, star, all_put, all_star) = (send(r#""PUT""#), send("s"), send_all(&[r#""PUT""#]), send_all(&["s"]));
+    // (base, new, the note): covered, so nothing added.
+    for (old, new, note) in [
+        (&put, &all_put, "send_all PUT is covered by send PUT"),
+        (&all_put, &put, "send PUT is covered by send_all PUT"),
+        (&star, &put, "send PUT is covered by send *"),
+        (&star, &all_put, "send_all PUT is covered by send *"),
+        (&all_star, &put, "send PUT is covered by send_all *"),
+        (&star, &get, "get is covered by send *"),
+        (&all_star, &get, "get is covered by send_all *"),
+        (&send(r#""GET""#), &get, "get is covered by send GET"),
+        (&send_all(&[r#""GET""#]), &get, "get is covered by send_all GET"),
+        (&all_star, &star, "send * is covered by send_all *"),
+        (&star, &all_star, "send_all * is covered by send *"),
+    ] {
+        let (line, added) = http_diff(old, new);
+        assert!(line.ends_with(&format!("; {note}")), "{note}: {line}");
+        assert!(!added, "{note}: {line}");
+    }
+    // The reverse rows, and verbs that cover nothing else: added.
+    let post = send(r#""POST""#);
+    for (what, old, new) in [
+        ("a verb does not cover *", &put, &star),
+        ("send_all V does not cover *", &all_put, &star),
+        ("send V does not cover send_all *", &put, &all_star),
+        ("get does not cover send GET", &get, &send(r#""GET""#)),
+        ("get does not cover send *", &get, &star),
+        ("a verb does not cover get", &post, &get),
+        ("a verb does not cover another", &post, &put),
+        ("verbs do not cover *", &(post.clone() + &put), &star),
+    ] {
+        let (line, added) = http_diff(old, new);
+        assert!(added && !line.contains("covered"), "{what}: {line}");
+    }
+}
+
+#[test]
+fn diff_35d_shape_is_added() {
+    // E3b's 35d: a PUT beside an approved `send_all` of POSTs.
+    let all_post = send_all(&[r#""POST""#]);
+    let (line, added) = http_diff(&all_post, &send(r#""PUT""#));
+    assert_eq!(line, "~ api: Http (+send PUT -send_all POST)");
+    assert!(added);
+    // Beside the `send_all`, the covered verb carries a note and the new one adds.
+    let new = all_post.clone() + &send(r#""PUT""#) + &send(r#""POST""#);
+    let (line, added) = http_diff(&all_post, &new);
+    assert_eq!(
+        line,
+        "~ api: Http (+send POST +send PUT); send POST is covered by send_all POST"
+    );
+    assert!(added);
 }

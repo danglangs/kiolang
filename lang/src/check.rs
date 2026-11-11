@@ -57,6 +57,8 @@ pub struct Program {
     /// The outer locals each closure uses, by the closure's span, in order of first use: what
     /// it copies when it is created.
     pub(crate) captures: HashMap<Span, Vec<String>>,
+    /// Each name that is a use of a constant, by its span: the constant's key.
+    pub(crate) const_uses: HashMap<Span, String>,
     /// Each use of a generic function, called or as a value, by the span of the expression
     /// naming it: the function's key and its type arguments, which may hold the type
     /// parameters of the function the use is in.
@@ -2122,6 +2124,7 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
     let match_budget = Cell::new(PROGRAM_MATCH_BUDGET);
     let mut types = HashMap::new();
     let mut captures = HashMap::new();
+    let mut const_uses = HashMap::new();
     let mut uses = HashMap::new();
     let mut seeds = HashMap::new();
     for ((module, f), sig_err) in fns.iter().zip(sig_errs) {
@@ -2150,6 +2153,7 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
             match_budget: &match_budget,
             types: HashMap::new(),
             captures: HashMap::new(),
+            const_uses: HashMap::new(),
             uses: Vec::new(),
         };
         diags.extend(sig_err.or_else(|| c.function(f).err()));
@@ -2171,6 +2175,7 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
         seeds.insert(key(module, &f.name).into_owned(), own);
         types.extend(c.types);
         captures.extend(c.captures);
+        const_uses.extend(c.const_uses);
         uses.insert(key(module, &f.name).into_owned(), c.uses);
     }
     if !fns.iter().any(|(m, f)| m.is_empty() && f.name == "main") {
@@ -2218,6 +2223,7 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
         sigs,
         types,
         captures,
+        const_uses,
         instances,
         cap_methods: (caps.caps.iter())
             .flat_map(|c| {
@@ -2439,6 +2445,8 @@ struct Checker<'a> {
     types: HashMap<Span, Ty>,
     /// As `Program::captures`.
     captures: HashMap<Span, Vec<String>>,
+    /// As `Program::const_uses`.
+    const_uses: HashMap<Span, String>,
     /// The uses of generic functions in this function, closures included.
     uses: Vec<Use>,
 }
@@ -2770,6 +2778,7 @@ impl<'a> Checker<'a> {
                 None => {
                     let k = key(self.home.module, name);
                     if let Some(c) = self.consts.get(&*k) {
+                        self.const_uses.insert(e.span, k.into_owned());
                         return Ok(const_ty(c));
                     }
                     if self.sigs.contains_key(&*k) {
@@ -2856,7 +2865,9 @@ impl<'a> Checker<'a> {
                     let k = format!("{m}::{name}");
                     let c = &self.consts[&k];
                     self.home.public(&k, c.public, "const", e.span)?;
-                    Ok(const_ty(c))
+                    let ty = const_ty(c);
+                    self.const_uses.insert(e.span, k);
+                    Ok(ty)
                 }
                 ExprKind::Path(en, v) => self.module_variant(e, m, en, v, &[], expected),
                 ExprKind::Name(name) => {

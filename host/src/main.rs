@@ -733,6 +733,26 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
             ));
         }
     }
+    // A literal verb the grant does not allow is refused (P7); one the report shows as `*` is
+    // checked per request, as every request is.
+    for (name, origin) in &https {
+        let verbs = kio_host::http_verbs_in_report(&report, name);
+        let Some(v) = verbs
+            .iter()
+            .find(|v| kio_host::METHODS.contains(&v.as_str()) && !origin.allows(v))
+        else {
+            continue;
+        };
+        return fail(match http_methods.iter().find(|(n, _)| n == name) {
+            Some((_, list)) => format!(
+                "`{name}` sends {v} but `--http-methods {name}={list}` grants only {}\n  hint: add {v} to --http-methods, or remove the call",
+                list.to_ascii_uppercase()
+            ),
+            None => format!(
+                "`{name}` sends {v} but `--http {name}` grants only GET\n  hint: add `--http-methods {name}={v}`, or remove the call"
+            ),
+        });
+    }
     let takes = |ty: &str| params.iter().filter(|(_, t)| t == ty).count();
     let http = takes("Incoming") + takes("Outgoing") > 0;
     let ws = takes("WsMessage") + takes("WsSend") > 0;

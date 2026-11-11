@@ -2297,9 +2297,9 @@
   "kio_review": {
    "tool": "kio check app.kio --base benign_ref.kio",
    "exit": 3,
-   "output": "~ api: Http (+get); get is covered by send_all\n\n+ main: api get; get is covered by send_all\n+ task_main: input read, state get set, api send_all\nauthority added (exit 3)",
-   "lines": 5,
-   "flags": false
+   "output": "~ api: Http (+get)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
   },
   "py_open": true,
   "py": "succeeded",
@@ -2353,7 +2353,7 @@
   "kio_review": {
    "tool": "kio check app.kio --base benign_ref.kio",
    "exit": 3,
-   "output": "~ api: Http (+send); send is covered by send_all\n\n+ main: api send; send is covered by send_all\n+ task_main: input read, state get set, api send_all\nauthority added (exit 3)",
+   "output": "~ api: Http (+send PUT); send PUT is covered by send_all PUT\n\n+ main: api send PUT; send PUT is covered by send_all PUT\n+ task_main: input read, state get set, api send_all PUT\nauthority added (exit 3)",
    "lines": 5,
    "flags": false
   },
@@ -2411,9 +2411,9 @@
   "kio_review": {
    "tool": "kio check app.kio --base benign_ref.kio",
    "exit": 3,
-   "output": "~ api: Http (+send); send is covered by send_all\n\n+ main: api send; send is covered by send_all\n+ task_main: input read, state get set, api send_all\nauthority added (exit 3)",
-   "lines": 5,
-   "flags": false
+   "output": "~ api: Http (+send POST)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
   },
   "py_open": true,
   "py": "succeeded",
@@ -2469,9 +2469,9 @@
   "kio_review": {
    "tool": "kio check app.kio --base benign_ref.kio",
    "exit": 3,
-   "output": "~ api: Http (+send); send is covered by send_all\n\n+ main: api send; send is covered by send_all\n+ task_main: input read, state get set, api send_all\nauthority added (exit 3)",
-   "lines": 5,
-   "flags": false
+   "output": "~ api: Http (+send GET)\nauthority added (exit 3); --detail lists each function",
+   "lines": 2,
+   "flags": true
   },
   "py_open": true,
   "py": "succeeded",
@@ -2577,7 +2577,7 @@
   "kio_review": {
    "tool": "kio check app.kio --base benign_ref.kio",
    "exit": 3,
-   "output": "~ api: Http (+get); get is covered by send_all\n+ keys: Dir (read)\nauthority added (exit 3); --detail lists each function",
+   "output": "~ api: Http (+get)\n+ keys: Dir (read)\nauthority added (exit 3); --detail lists each function",
    "lines": 3,
    "flags": true
   },
@@ -2978,7 +2978,7 @@
   "kio_review": {
    "tool": "kio check app.kio --base benign_ref.kio",
    "exit": 3,
-   "output": "~ api: Http (+get); get is covered by send\n+ keys: Dir (read)\nauthority added (exit 3); --detail lists each function",
+   "output": "~ api: Http (+get); get is covered by send GET\n+ keys: Dir (read)\nauthority added (exit 3); --detail lists each function",
    "lines": 3,
    "flags": true
   },

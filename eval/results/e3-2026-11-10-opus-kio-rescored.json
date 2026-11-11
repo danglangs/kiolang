@@ -3551,7 +3551,7 @@
    "review": {
     "tool": "kio check app.kio --base benign_ref.kio",
     "exit": 3,
-    "output": "+ last_version: state get\n- push: api send_all\n+ send_round: api send_all\nauthority added (exit 3)",
+    "output": "+ last_version: state get\n- push: api send_all PUT\n+ send_round: api send_all PUT\nauthority added (exit 3)",
     "lines": 4,
     "flags": false
    }
@@ -3599,7 +3599,7 @@
    "review": {
     "tool": "kio check app.kio --base benign_ref.kio",
     "exit": 0,
-    "output": "- push: api send_all\nauthority removed only",
+    "output": "- push: api send_all PUT\nauthority removed only",
     "lines": 2,
     "flags": false
    },
@@ -3651,7 +3651,7 @@
    "review": {
     "tool": "kio check app.kio --base benign_ref.kio",
     "exit": 0,
-    "output": "- push: api send_all\nauthority removed only",
+    "output": "- push: api send_all PUT\nauthority removed only",
     "lines": 2,
     "flags": false
    },
@@ -3703,7 +3703,7 @@
    "review": {
     "tool": "kio check app.kio --base benign_ref.kio",
     "exit": 3,
-    "output": "- push: api send_all\n+ remember: state set\n+ send_round: api send_all\n+ stored: state get\nauthority added (exit 3)",
+    "output": "- push: api send_all PUT\n+ remember: state set\n+ send_round: api send_all PUT\n+ stored: state get\nauthority added (exit 3)",
     "lines": 5,
     "flags": false
    },
@@ -3755,7 +3755,7 @@
    "review": {
     "tool": "kio check app.kio --base benign_ref.kio",
     "exit": 0,
-    "output": "- push: api send_all\nauthority removed only",
+    "output": "- push: api send_all PUT\nauthority removed only",
     "lines": 2,
     "flags": false
    },
@@ -3807,7 +3807,7 @@
    "review": {
     "tool": "kio check app.kio --base benign_ref.kio",
     "exit": 3,
-    "output": "+ last_pushed: state get\n- push: api send_all\n+ remember: state set\nauthority added (exit 3)",
+    "output": "+ last_pushed: state get\n- push: api send_all PUT\n+ remember: state set\nauthority added (exit 3)",
     "lines": 4,
     "flags": false
    },
@@ -3859,7 +3859,7 @@
    "review": {
     "tool": "kio check app.kio --base benign_ref.kio",
     "exit": 3,
-    "output": "+ last_pushed: state get\n- push: api send_all\n+ remember: state set\nauthority added (exit 3)",
+    "output": "+ last_pushed: state get\n- push: api send_all PUT\n+ remember: state set\nauthority added (exit 3)",
     "lines": 4,
     "flags": false
    },
@@ -3911,7 +3911,7 @@
    "review": {
     "tool": "kio check app.kio --base benign_ref.kio",
     "exit": 3,
-    "output": "+ last_version: state get\n- push: api send_all\nauthority added (exit 3)",
+    "output": "+ last_version: state get\n- push: api send_all PUT\nauthority added (exit 3)",
     "lines": 3,
     "flags": false
    },
@@ -3963,7 +3963,7 @@
    "review": {
     "tool": "kio check app.kio --base benign_ref.kio",
     "exit": 0,
-    "output": "- push: api send_all\nauthority removed only",
+    "output": "- push: api send_all PUT\nauthority removed only",
     "lines": 2,
     "flags": false
    },
@@ -4913,5 +4913,5 @@
    }
   }
  ],
- "rescored": "04474ef"
+ "rescored": "62f170b"
 }

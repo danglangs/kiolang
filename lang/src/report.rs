@@ -30,13 +30,30 @@ pub fn report(p: &Program) -> String {
     lines.join("\n")
 }
 
-/// `hook send, log write`.
+/// `hook send POST PUT, log write`: an `Http` method's verbs follow it once.
 fn uses_str(params: &[(String, BTreeSet<String>)]) -> String {
     let parts: Vec<String> = params
         .iter()
-        .map(|(d, ms)| format!("{d} {}", ms.iter().map(String::as_str).collect::<Vec<_>>().join(" ")))
+        .map(|(d, ms)| {
+            let mut words = vec![d.as_str()];
+            let mut last = "";
+            for m in ms {
+                let (name, verb) = split_verb(m);
+                if name != last {
+                    words.push(name);
+                    last = name;
+                }
+                words.extend(verb);
+            }
+            words.join(" ")
+        })
         .collect();
     parts.join(", ")
+}
+
+/// `send PUT` is (`send`, `PUT`); a method without a verb is itself.
+fn split_verb(m: &str) -> (&str, Option<&str>) {
+    m.split_once(' ').map_or((m, None), |(n, v)| (n, Some(v)))
 }
 
 /// What `new` changes in `old`'s authority; every list is empty when nothing changed.
@@ -60,6 +77,8 @@ pub struct AuthorityDiff {
 /// Every capability method with the methods that cover it: a gained method that a covering
 /// one already reached on the same grant (or function parameter) in the base is not new
 /// authority (P6, open_questions #208). Every caps.wit method is listed; `[]` is standalone.
+/// An `Http` method carries its verb (P7, #219): a verb is covered by the same verb or `*` on
+/// a covering method, and by `*` on its own; `*` only by `*`. `get` is `GET`.
 pub const COVERS: &[(&str, &str, &[&str])] = &[
     ("Dir", "read", &[]),
     ("Dir", "create", &["write"]),
@@ -108,11 +127,21 @@ fn split_gains(ty: Option<&str>, gains: &BTreeSet<String>, base: &BTreeSet<Strin
     let mut uncovered = false;
     let mut notes = Vec::new();
     for m in gains {
-        let by = COVERS
-            .iter()
-            .find(|(t, n, _)| Some(*t) == ty && n == m)
-            .and_then(|(_, _, by)| by.iter().find(|c| base.contains(**c)));
-        match by {
+        let (name, verb) = split_verb(m);
+        let verb = verb.or((ty == Some("Http") && name == "get").then_some("GET"));
+        let mut by: Vec<String> = Vec::new();
+        if verb.is_some_and(|v| v != "*") && name != "get" {
+            by.push(format!("{name} *"));
+        }
+        let row = COVERS.iter().find(|(t, n, _)| Some(*t) == ty && *n == name);
+        for c in row.map_or(&[][..], |(_, _, by)| by) {
+            match verb {
+                Some(v) => by.extend([format!("{c} {v}"), format!("{c} *")]),
+                None => by.push(c.to_string()),
+            }
+        }
+        by.dedup();
+        match by.iter().find(|c| base.contains(*c)) {
             Some(c) => notes.push(format!("{m} is covered by {c}")),
             None => uncovered = true,
         }
@@ -228,6 +257,7 @@ pub fn authority(p: &Program) -> Authority {
             uses.insert((name.clone(), d.name.clone()), BTreeSet::new());
         }
     }
+    let requests = request_verbs(p);
     // Sets only grow and are bounded by the method names, so this stops.
     let mut grown = true;
     while grown {
@@ -235,32 +265,43 @@ pub fn authority(p: &Program) -> Authority {
         for (name, f) in &p.funcs {
             let mut found = Vec::new();
             // Rule 1: a capability is only a parameter name, as a receiver or a whole argument.
-            walk_block(&f.body, &mut |e| match &e.kind {
-                ExprKind::Method(recv, m, _) => {
-                    if let Some(d) = cap_param(p, recv) {
-                        found.push((d.to_string(), m.clone()));
-                    }
-                }
-                ExprKind::Call(callee, args) => {
-                    // `Some(x)` and the like are calls on names that are not functions. A
-                    // generic function's capability parameters are concrete, so every instance
-                    // is charged the same.
-                    let g = match &callee.kind {
-                        ExprKind::Name(g) | ExprKind::Turbofish(g, _) => key(module_of(name), g).into_owned(),
-                        ExprKind::Module(m, inner) => match &inner.kind {
-                            ExprKind::Name(g) | ExprKind::Turbofish(g, _) => format!("{m}::{g}"),
-                            _ => return,
-                        },
-                        _ => return,
-                    };
-                    let Some(g_fn) = p.funcs.get(&g) else { return };
-                    for (arg, param) in args.iter().zip(&g_fn.params) {
-                        if let (Some(d), Some(ms)) = (cap_param(p, arg), uses.get(&(g.clone(), param.name.clone()))) {
-                            found.extend(ms.iter().map(|m| (d.to_string(), m.clone())));
+            walk_block(&f.body, &mut |n| {
+                let Node::Expr(e) = n else { return };
+                match &e.kind {
+                    ExprKind::Method(recv, m, args) => {
+                        if let Some(d) = cap_param(p, recv) {
+                            let http = matches!(p.types.get(&recv.span), Some(Ty::Cap(t)) if t == "Http");
+                            match (http, m.as_str(), args.first()) {
+                                (true, "send", Some(v)) => found.push((d.to_string(), format!("send {}", verb(p, v)))),
+                                (true, "send_all", _) => {
+                                    found.extend(requests.iter().map(|v| (d.to_string(), format!("send_all {v}"))))
+                                }
+                                _ => found.push((d.to_string(), m.clone())),
+                            }
                         }
                     }
+                    ExprKind::Call(callee, args) => {
+                        // `Some(x)` and the like are calls on names that are not functions. A
+                        // generic function's capability parameters are concrete, so every instance
+                        // is charged the same.
+                        let g = match &callee.kind {
+                            ExprKind::Name(g) | ExprKind::Turbofish(g, _) => key(module_of(name), g).into_owned(),
+                            ExprKind::Module(m, inner) => match &inner.kind {
+                                ExprKind::Name(g) | ExprKind::Turbofish(g, _) => format!("{m}::{g}"),
+                                _ => return,
+                            },
+                            _ => return,
+                        };
+                        let Some(g_fn) = p.funcs.get(&g) else { return };
+                        for (arg, param) in args.iter().zip(&g_fn.params) {
+                            if let (Some(d), Some(ms)) = (cap_param(p, arg), uses.get(&(g.clone(), param.name.clone())))
+                            {
+                                found.extend(ms.iter().map(|m| (d.to_string(), m.clone())));
+                            }
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
             });
             for (d, m) in found {
                 if let Some(set) = uses.get_mut(&(name.clone(), d)) {
@@ -298,12 +339,62 @@ fn type_str(t: &Type) -> String {
     }
 }
 
+/// The verb `e` names when the checker can see it, a string literal or a constant, else `*`.
+/// A verb is capital letters (the host refuses any other as `Invalid`), so another literal is
+/// `*` too and a report's words stay unambiguous.
+fn verb(p: &Program, e: &Expr) -> String {
+    let lit = match &e.kind {
+        ExprKind::Name(_) | ExprKind::Module(..) => p.const_uses.get(&e.span).map(|k| &p.consts[k].value.kind),
+        k => Some(k),
+    };
+    match lit {
+        Some(ExprKind::Str(s)) if !s.is_empty() && s.bytes().all(|b| b.is_ascii_uppercase()) => s.clone(),
+        _ => "*".into(),
+    }
+}
+
+/// Every verb an `HttpRequest` of the program may carry: the `method` of each `HttpRequest`
+/// literal and each assignment to one's `method`, the only ways to make or change one. Any
+/// `send_all` sends only these (#220); `*` when one is not visible, or there are none.
+fn request_verbs(p: &Program) -> BTreeSet<String> {
+    let is_request = |e: &Expr| matches!(p.types.get(&e.span), Some(Ty::Struct(n, _)) if n == "HttpRequest");
+    let mut verbs = BTreeSet::new();
+    for f in p.funcs.values() {
+        walk_block(&f.body, &mut |n| match n {
+            Node::Expr(e) => {
+                if let (ExprKind::StructLit(_, fields, _), true) = (&e.kind, is_request(e)) {
+                    verbs.extend(fields.iter().filter(|(f, _)| f == "method").map(|(_, v)| verb(p, v)));
+                }
+            }
+            Node::Assign(target, op, value) => {
+                if let ExprKind::Field(base, f) = &target.kind {
+                    if f == "method" && is_request(base) {
+                        verbs.insert(if op == "=" { verb(p, value) } else { "*".into() });
+                    }
+                }
+            }
+        });
+    }
+    if verbs.is_empty() || verbs.contains("*") {
+        return BTreeSet::from(["*".to_string()]);
+    }
+    verbs
+}
+
+/// What `walk_block` visits: each expression, and each assignment `target op value` before the
+/// expressions in it.
+enum Node<'a> {
+    Expr(&'a Expr),
+    Assign(&'a Expr, &'a str, &'a Expr),
+}
+
 /// Calls `visit` on every expression in the block, outer before inner.
-fn walk_block(b: &Block, visit: &mut dyn FnMut(&Expr)) {
+fn walk_block(b: &Block, visit: &mut dyn FnMut(Node)) {
     for s in &b.stmts {
         match &s.kind {
             StmtKind::Let { init: e, .. } | StmtKind::Return(Some(e)) | StmtKind::Expr(e) => walk(e, visit),
-            StmtKind::Assign { target, value, .. } => {
+            StmtKind::Assign { target, op, value } => {
+                visit(Node::Assign(target, op, value));
                 walk(target, visit);
                 walk(value, visit);
             }
@@ -334,8 +425,8 @@ fn walk_block(b: &Block, visit: &mut dyn FnMut(&Expr)) {
     }
 }
 
-fn walk(e: &Expr, visit: &mut dyn FnMut(&Expr)) {
-    visit(e);
+fn walk(e: &Expr, visit: &mut dyn FnMut(Node)) {
+    visit(Node::Expr(e));
     match &e.kind {
         // A closure's body is charged to the function it is written in. It can reach no
         // capability (the checker refuses a capture of one), so this only keeps the report an

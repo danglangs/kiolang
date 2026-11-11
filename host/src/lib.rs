@@ -173,7 +173,7 @@ impl std::fmt::Debug for Secret {
 }
 
 /// The request methods a program may name; any other is `invalid`.
-const METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
+pub const METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
 
 impl Origin {
     /// Parse `host[:port]` (HTTPS), `http://host[:port]` or `https://host[:port]`; nothing else.
@@ -306,7 +306,7 @@ impl Origin {
     }
 
     /// Whether the grant allows `method`, one of `METHODS`.
-    fn allows(&self, method: &str) -> bool {
+    pub fn allows(&self, method: &str) -> bool {
         method == "GET" || self.methods.contains(&method)
     }
 
@@ -2179,6 +2179,17 @@ pub fn dir_write_in_report(report: &str, name: &str) -> Option<&'static str> {
 /// Whether `main`'s report line has `name sign`: a `:verify` grant of `name` is then refused.
 pub fn signs_in_report(report: &str, name: &str) -> bool {
     main_calls(report).contains(&(name.to_string(), "sign".to_string()))
+}
+
+/// The literal verbs `main`'s report line shows on the `Http` `name` (`api send POST PUT`),
+/// sorted: the capital words, as lang's report writes no other word in capitals (P7).
+pub fn http_verbs_in_report(report: &str, name: &str) -> Vec<String> {
+    let mut verbs: Vec<String> = (main_calls(report).into_iter())
+        .filter(|(cap, m)| cap == name && m.bytes().all(|b| b.is_ascii_uppercase()))
+        .map(|(_, m)| m)
+        .collect();
+    verbs.sort();
+    verbs
 }
 
 /// HMAC-SHA256 (RFC 2104) of `msg` under `key`, over lang's SHA-256.
