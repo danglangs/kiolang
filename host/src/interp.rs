@@ -1,8 +1,9 @@
-//! Test only: the interpreter, run natively as the reference compiled code is tested against
-//! (docs/compiler-todo.md). `Interp` has `Kio`'s API. Its capability calls go through the same
-//! host functions as compiled code (`State`'s caps.wit traits, called directly instead of
-//! through Wasm), so grants, quotas, the report check and the audit log are the same; only the
-//! fuel, memory and stack limits do not apply.
+//! The interpreter, run natively as the reference compiled code is checked against: by tests
+//! (`Interp`, test only, with `Kio`'s API; docs/compiler-todo.md) and by `kio test`, which runs
+//! each property case both ways (`interpret`). Its capability calls go through the same host
+//! functions as compiled code (`State`'s caps.wit traits, called directly instead of through
+//! Wasm), so grants, quotas, the report check, the deadline and the audit log are the same; only
+//! the fuel, memory and stack limits do not apply.
 
 use crate::kio::caps::clock::HostClock;
 use crate::kio::caps::db::{DbErr, HostDb, SqlValue};
@@ -14,22 +15,51 @@ use crate::kio::caps::net::{HostHttp, HttpErr, HttpRequest, HttpResponse};
 use crate::kio::caps::rng::HostRng;
 use crate::kio::caps::web::{HostIncoming, HostOutgoing, WebErr};
 use crate::kio::caps::ws::{HostWsMessage, HostWsSend, WsErr};
+#[cfg(feature = "test-hooks")]
 use crate::ws::{WsEvent, WsFrame};
+#[cfg(feature = "test-hooks")]
 use crate::{
     end_audit, grants, main_calls, named, on_run_stack, push_grants, single, start_audit, state_limit, web_grants,
     ws_grants, Diag, DirPaths, Handles, KvGrants, Limits, Origin, Outcome, Report, Request, Response, RunResult,
-    Sources, State, Stopped,
+    Sources, Stopped,
 };
+use crate::{Bound, State};
+#[cfg(feature = "test-hooks")]
 use cap_std::fs::Dir as RealDir;
 use lang::ir::{EnumId, EnumRef, StructId};
-use lang::{CapTable, Value};
+use lang::CapTable;
+use lang::{RunErr, Value};
 use std::collections::BTreeMap;
+#[cfg(feature = "test-hooks")]
 use std::io::Write;
+#[cfg(feature = "test-hooks")]
 use std::sync::PoisonError;
+use std::time::Instant;
 use wasmtime::component::Resource;
 use wasmtime::Result;
 
+/// Runs `run` (`lang::run`, or `run_module` on a test's entry) in the interpreter with `bound`,
+/// the grants in `s`'s table. `s`'s deadline is checked on every call and loop pass too, so a
+/// case that loops stops as a timeout.
+pub(crate) fn interpret(
+    s: &mut State,
+    bound: &[Bound],
+    run: impl FnOnce(&mut dyn lang::Caps) -> std::result::Result<Value, RunErr>,
+) -> std::result::Result<Value, RunErr> {
+    let grants = bound.iter().map(|b| (b.name.clone(), (b.kind, b.rep))).collect();
+    let mut native = Native {
+        s,
+        grants,
+        entry: struct_id("KvEntry"),
+        response: struct_id("HttpResponse"),
+        sql_value: enum_id("SqlValue"),
+        ticks: 0,
+    };
+    run(&mut native)
+}
+
 /// Runs programs in the native interpreter, with grants and an audit log as `Kio` takes them.
+#[cfg(feature = "test-hooks")]
 pub struct Interp {
     limits: Limits,
     audit: Option<(Box<dyn Write + Send>, DirPaths)>,
@@ -39,6 +69,7 @@ pub struct Interp {
     calls: u32,
 }
 
+#[cfg(feature = "test-hooks")]
 impl Interp {
     pub fn new(limits: Limits) -> Result<Self> {
         Ok(Interp {
@@ -176,15 +207,7 @@ impl Interp {
                 match grants::bind(&params, &named(&bound)) {
                     Err(diags) => Ok(Err(diags.into_iter().map(Diag::from).collect())),
                     Ok(_) => {
-                        let grants = bound.iter().map(|b| (b.name.clone(), (b.kind, b.rep))).collect();
-                        let mut native = Native {
-                            s: &mut s,
-                            grants,
-                            entry: struct_id("KvEntry"),
-                            response: struct_id("HttpResponse"),
-                            sql_value: enum_id("SqlValue"),
-                        };
-                        let r = lang::run(&program, &mut native);
+                        let r = interpret(&mut s, &bound, |c| lang::run(&program, c));
                         match (r, state_limit(&s, &self.limits)) {
                             // A host call refused by a quota, the report check or the deadline
                             // stops the run, as a trap does in compiled code.
@@ -235,6 +258,8 @@ struct Native<'a> {
     response: StructId,
     /// The program's id for the built-in `SqlValue`, which `Db` takes and returns.
     sql_value: EnumId,
+    /// Calls and loop passes so far; the deadline is read every 1,024.
+    ticks: u32,
 }
 
 impl Native<'_> {
@@ -266,6 +291,15 @@ fn request(v: &Value) -> Result<HttpRequest, String> {
 }
 
 impl lang::Caps for Native<'_> {
+    fn tick(&mut self) -> std::result::Result<(), String> {
+        self.ticks = self.ticks.wrapping_add(1);
+        if self.ticks.is_multiple_of(1024) && Instant::now() >= self.s.deadline {
+            self.s.timed_out = true;
+            return Err("timed out".into());
+        }
+        Ok(())
+    }
+
     fn has(&self, name: &str, ty: &str) -> bool {
         self.grants.get(name).is_some_and(|(kind, _)| *kind == ty)
     }

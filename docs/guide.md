@@ -8,7 +8,7 @@ kio check <new.kio> --base <old.kio> [--detail]   grants new adds or drops; exit
 kio check <prog.kio> --grants <file> [flags]   bind the file's grants to main without running
 kio run <prog.kio> [--grants file] [grants] [limits] [--audit log] [--listen addr]
 ... --json                       one JSON object on stdout (JSON output, below)
-kio test <prog.kio> [--grants file] [--filter substr] [limits]   run the #[test] functions (Tests, below)
+kio test <prog.kio> [--grants file] [--filter substr] [--cases n] [--seed s] [limits]   run the #[test] functions (Tests, below)
 kio mcp                          the MCP server (README, "Use from an agent")
 ```
 
@@ -288,7 +288,7 @@ $ kio run spin.kio --fuel 1000 --json
 
 ## Tests
 
-`kio test prog.kio [--grants file] [--filter substr] [--json] [limits]` runs every `#[test]` function ([language.md](language.md#tests)) whose name contains `--filter`, sorted by name (`util::t` for one in `util.kio`). The program needs no `main`. Each test is compiled as the entry and runs in a fresh instance with the default limits (or the limit flags given). Each parameter gets the grants file's grant of its name and type (`--kv k=..` is for `k: Kv`, `--hmac k=..` for `k: Hmac`); the file's other grants are ignored for that test, and a test is held to its own authority as `kio run` holds `main` (`:ro`, `:verify`, the source and grants-file checks). A parameter the file does not name gets, by type:
+`kio test prog.kio [--grants file] [--filter substr] [--cases n] [--seed s] [--json] [limits]` runs every `#[test]` function ([language.md](language.md#tests)) whose name contains `--filter`, sorted by name (`util::t` for one in `util.kio`). The program needs no `main`. Each test is compiled as the entry and runs in a fresh instance with the default limits (or the limit flags given). Each parameter gets the grants file's grant of its name and type (`--kv k=..` is for `k: Kv`, `--hmac k=..` for `k: Hmac`); the file's other grants are ignored for that test, and a test is held to its own authority as `kio run` holds `main` (`:ro`, `:verify`, the source and grants-file checks). A parameter the file does not name gets, by type:
 
 | Type | Default |
 |---|---|
@@ -314,6 +314,25 @@ $ kio test app.kio --filter parses --json
 ```
 
 `--json`'s `error` is an `errors` entry of [JSON output](#json-output) (an assertion is `runtime`, an `Err` return `err`). A check or usage error prints `{"ok": false, "passed": 0, "failed": 0, "tests": [], "errors": [..]}`.
+
+### Properties
+
+A test with data parameters is a property ([language.md](language.md#properties)). It runs on `--cases` generated inputs (default 100, at most 100,000) from `--seed` (default 1); case `i` depends only on the seed and `i`, so a run repeats exactly. Each case runs compiled, through an entry that calls the test with the case's values built in IR (never printed and reparsed), and again in the interpreter, each in a fresh instance with fresh grants (a new temporary `Dir` per case). A case where the two differ fails the test (kind `internal`) and names the input; a case compiled code stops at a limit is not run in the interpreter, which has no fuel, memory or stack limit, only the timeout. A failing case is shrunk in the interpreter (at most 1,000 runs, keeping the failure's kind); the smallest then runs both ways again.
+
+A property may not take `Http` ("a property runs many times; `api: Http` would repeat real requests", hint "test the call in an example test, or pass the data as a parameter"), nor a `Dir`, `Kv` or `Db` the grants file names unless it is `:ro` (or `:memory:`). More than 90% of cases discarded by `assume` fails it ("`t` discarded 95 of 100 inputs").
+
+```
+$ kio test app.kio
+ok   reverse_twice  (100 cases: 100 interpreted, 100 compiled; seed 1)
+FAIL small  (4 cases: 4 interpreted, 4 compiled; seed 1)
+  minimal input: n = 6, o = Order { id: "", total: 0 }
+  shrunk in 44 interpreted runs; the minimal input ran compiled and interpreted
+  app.kio:13:5: assertion failed: too big
+  rerun: kio test app.kio --filter small --seed 1
+1 passed, 1 failed
+```
+
+`--json` adds to a property's entry `cases`, `interpreted`, `compiled`, `seed`, `discarded`, `shrinks` and `input` (each parameter's literal, or `null` when it passed). Compiling a case costs about 30 ms in a release build, so 100 cases take about 3 s.
 
 ## Reviewing authority in a pull request
 

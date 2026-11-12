@@ -11,8 +11,9 @@ use crate::ws::{WsEvent, WsFrame};
 use crate::{
     audit_header, config, dir_id, end_audit, entry_report, grants, limit_message, main_calls, named, new_store,
     on_run_stack, push_grants, read_only_refusal, set_stack, single, source_places, source_refusal, spawn_ticker,
-    start_audit, web_grants, write_line, ws_grants, Audit, Bound, Diag, DirPaths, FileId, Handles, KvGrants, Limits,
-    Origin, Outcome, Refused, Report, Request, Response, RunResult, SharedLog, Sources, State, Stopped, Used,
+    start_audit, state_limit, web_grants, write_line, ws_grants, Audit, Bound, Diag, DirPaths, FileId, Handles,
+    KvGrants, Limits, Origin, Outcome, Refused, Report, Request, Response, RunResult, SharedLog, Sources, State,
+    Stopped, Used,
 };
 use cap_std::fs::Dir as RealDir;
 use codegen::Site;
@@ -352,6 +353,9 @@ pub struct Kio {
     used: Option<Used>,
     /// The function the next run compiles as `main`: `main`, or a test's key (`run_test`).
     entry: String,
+    /// The property case the next run calls the test with (`run_case`), and whether it is
+    /// interpreted rather than compiled.
+    case: Option<(lang::prop::Case, bool)>,
     /// Test only: a `(parameter, method)` pair to leave out of the authority report.
     #[cfg(feature = "test-hooks")]
     hidden: Option<(String, String)>,
@@ -378,6 +382,7 @@ impl Kio {
             peak_memory: 0,
             used: None,
             entry: "main".into(),
+            case: None,
             #[cfg(feature = "test-hooks")]
             hidden: None,
             #[cfg(feature = "test-hooks")]
@@ -498,6 +503,26 @@ impl Kio {
         self.run_entry(files, test, dirs, https)
     }
 
+    /// Like `run_test` for a property `test` on one case: the test is called with `case`'s values
+    /// by an entry built in IR (`lang::prop::case_entry`), which takes the test's capabilities
+    /// as `main` does. `interpret` runs it in the interpreter instead of compiled, with the same
+    /// grants, refusals, report check, quotas and deadline; fuel, memory and stack apply only to
+    /// compiled code.
+    pub fn run_case(
+        &mut self,
+        files: &[(String, String)],
+        test: &str,
+        case: &lang::prop::Case,
+        interpret: bool,
+        dirs: Vec<(String, RealDir)>,
+        https: Vec<(String, Origin)>,
+    ) -> Result<RunResult> {
+        self.case = Some((case.clone(), interpret));
+        let r = self.run_entry(files, test, dirs, https);
+        self.case = None;
+        r
+    }
+
     fn run_entry(
         &mut self,
         files: &[(String, String)],
@@ -609,6 +634,19 @@ impl Kio {
         edit: impl FnOnce(&mut lang::ir::Module),
     ) -> Result<RunResult> {
         self.used = None;
+        let case = match self.case.clone() {
+            Some((case, true)) => return self.interpret_case(files, dirs, https, &case),
+            Some((case, false)) => Some(case),
+            None => None,
+        };
+        let edit = |m: &mut lang::ir::Module| {
+            if let Some(case) = case {
+                lang::prop::case_entry(m, &case.values());
+                #[cfg(feature = "test-hooks")]
+                skew_case(m);
+            }
+            edit(m)
+        };
         // Compiled before the store exists, so compiling is not charged to the run.
         let checked = compile(&self.engine, files, &self.entry, &self.limits, edit)?;
         let start = std::time::Instant::now();
@@ -668,6 +706,102 @@ impl Kio {
         });
         end_audit(store.data_mut(), fuel_used, outcome)?;
         result
+    }
+}
+
+impl Kio {
+    /// `run_here` for a property case in the interpreter (`run_case`).
+    fn interpret_case(
+        &mut self,
+        files: &[(String, String)],
+        dirs: Vec<(String, RealDir)>,
+        https: Vec<(String, Origin)>,
+        case: &lang::prop::Case,
+    ) -> Result<RunResult> {
+        let pairs: Vec<(&str, &str)> = files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
+        let caps = lang::CapTable::v0();
+        let program = match lang::check_files_for_tests(&pairs, &caps) {
+            Ok(p) => p,
+            Err(diags) => return Ok(Err(diags.into_iter().map(Diag::from).collect())),
+        };
+        if !program.tests().iter().any(|t| t.name == self.entry) {
+            wasmtime::bail!("no test `{}`", self.entry);
+        }
+        let report = lang::entry_report(&program, &self.entry);
+        let mut module = lang::lower::lower_entry(&program, &caps, &self.entry);
+        lang::prop::case_entry(&mut module, &case.values());
+        let start = std::time::Instant::now();
+        let mut s = State::limited(&self.limits);
+        let (kvs, sources) = (std::mem::take(&mut self.kvs), std::mem::take(&mut self.sources));
+        let bound = push_grants(&mut s, dirs, https, Handles::default(), kvs, sources, None)?;
+        if let Some((out, paths)) = self.audit.take() {
+            start_audit(&mut s, out, &paths, &self.limits, files, &bound)?;
+        }
+        s.allowed = main_calls(&report);
+        let mut bound_ok = false;
+        let result = match grants::bind(&grants::main_params(&module), &named(&bound)) {
+            Err(diags) => Ok(Err(diags.into_iter().map(Diag::from).collect())),
+            Ok(_) => {
+                bound_ok = true;
+                let r = crate::interp::interpret(&mut s, &bound, |c| lang::eval::run_module(&module, c));
+                match (r, state_limit(&s, &self.limits)) {
+                    (Err(_), Some(msg)) => Err(wasmtime::Error::msg(Stopped(msg))),
+                    (Err(e), None) => Ok(Err(vec![Diag::from(lang::Diag {
+                        span: e.span,
+                        msg: e.msg,
+                        hint: None,
+                    })])),
+                    (Ok(v), _) => {
+                        // Shown as compiled code shows it: a failed test's error alone.
+                        let failed = matches!(&v, lang::Value::Enum(lang::ir::EnumRef::Result, 1, _));
+                        let shown = match &v {
+                            lang::Value::Enum(lang::ir::EnumRef::Result, 1, payload) => &payload[0],
+                            v => v,
+                        };
+                        let value = match shown {
+                            lang::Value::Str(s) => s.to_string(),
+                            v => lang::eval::debug(&module, v),
+                        };
+                        Ok(Ok(Outcome {
+                            report: Report {
+                                lines: report.lines().map(String::from).collect(),
+                            },
+                            value,
+                            failed,
+                        }))
+                    }
+                }
+            }
+        };
+        self.calls = s.calls;
+        self.peak_memory = 0;
+        self.used = bound_ok.then(|| Used {
+            fuel: 0,
+            calls: s.calls,
+            io: s.io,
+            peak_memory: 0,
+            ms: start.elapsed().as_secs_f64() * 1000.0,
+        });
+        let outcome = match &result {
+            Ok(Ok(o)) if !o.failed => "ok",
+            Ok(Ok(_)) => "failed",
+            _ => "error",
+        };
+        end_audit(&mut s, 0, outcome)?;
+        result
+    }
+}
+
+/// Test only: with `KIO_TEST_SKEW_CASE` set, a compiled property case's entry no longer calls
+/// the test, so it passes whatever the interpreter finds: a disagreement `kio test` must catch.
+#[cfg(feature = "test-hooks")]
+fn skew_case(m: &mut lang::ir::Module) {
+    if std::env::var_os("KIO_TEST_SKEW_CASE").is_some() {
+        let main = m.main.0 as usize;
+        m.funcs[main].body = lang::ir::Block {
+            stmts: vec![],
+            tail: None,
+        };
     }
 }
 

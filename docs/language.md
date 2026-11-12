@@ -149,7 +149,7 @@ let out = Json::Arr([Json::Num(1), Json::Float(2.5), Json::Null]).to_json();   /
 
 ## Tests
 
-`#[test]` before a top-level `fn`, in the root or a module file, marks a test; it is kio's only attribute. A test takes no type parameters, returns `()` or `Result<(), E>` (an `Err` fails it), and its parameters are capabilities, which the runner grants. No code calls a test or names it as a value. `kio test` runs them, compiled, each with its own grants ([guide.md](guide.md#tests)); it needs no `main`, `kio run` and `kio check` still do.
+`#[test]` before a top-level `fn`, in the root or a module file, marks a test; it is kio's only attribute. A test takes no type parameters, returns `()` or `Result<(), E>` (an `Err` fails it), and its parameters are capabilities, which the runner grants, or data, which it generates (a property, below). No code calls a test or names it as a value. `kio test` runs them, compiled, each with its own grants ([guide.md](guide.md#tests)); it needs no `main`, `kio run` and `kio check` still do.
 
 `assert(cond: Bool, msg: Str)` and `assert_eq(a, b)` (two values of one type that `==` accepts) are built-in functions, usable anywhere; no function may take their names. Both arguments are evaluated, as in any call; then a false `cond` stops the run with `assertion failed: <msg>`, and unequal values with ``assert_eq failed: left `<a>`, right `<b>` `` (each as `kio run` prints a nested value: `"a"`, `[1, 2]`, `P { x: 1 }`; a message or value past 4,096 bytes is cut there and ends `...`), at the call. A local named `assert` hides the built-in, as it hides a function.
 
@@ -160,6 +160,21 @@ fn total(xs: List<Int>) -> Int { let mut t = 0; for x in xs { t += x; } t }
 fn total_adds() {
     assert_eq(total([1, 2, 3]), 6);
     assert(total([]) == 0, "empty list");
+}
+```
+
+### Properties
+
+A test whose parameters include data is a property: `kio test` generates them ([guide.md](guide.md#properties)). A parameter is a capability or any type without a function in it: `Int`, `Float`, `Bool`, `Str`, `Bytes`, `List`, `Map`, `HashMap`, `Option`, `Result`, structs and enums (`f: fn(Int) -> Int`: "a test cannot take `fn(Int) -> Int`", hint "build it inside the test"). Generated `Int`s include 0, ±1, `i64::MIN` and `i64::MAX`; `Float`s 0.0, -0.0, NaN and ±inf; `Str`s multi-byte characters; lengths grow with the case up to 32. `assume(cond: Bool)`, only in a test's own body ("`assume` is only for tests"), discards the case when `cond` is false. A failing case is shrunk (`Int` toward 0, lists by dropping elements, enums toward the first variant) and shown as literals.
+
+```
+#[test]
+fn sort_keeps_length(xs: List<Int>, n: Int) {
+    assume(n >= 0);
+    let mut ys = xs;
+    ys.push(n);
+    ys.sort();
+    assert_eq(ys.len(), xs.len() + 1);
 }
 ```
 

@@ -234,7 +234,7 @@ fn main(req: Incoming, res: Outgoing, store: Kv) -> Result<(), WebErr> {
 
 ## Tests: `#[test]`, `assert`, `assert_eq`
 
-A test is a top-level function marked `#[test]`; `kio test` runs each one. `assert` takes a message; `assert_eq` prints both values when they differ. A test's parameters are capabilities only, and it returns `()` or `Result<(), E>`.
+A test is a top-level function marked `#[test]`; `kio test` runs each one. `assert` takes a message; `assert_eq` prints both values when they differ. A test returns `()` or `Result<(), E>`. Its capability parameters are granted fresh; data parameters make it a property, run on 100 generated inputs (`assume(cond)` skips one), and a failure is shrunk to a minimal input.
 
 ```
 struct Row { name: Str, qty: Int }
@@ -249,6 +249,12 @@ fn parse(line: Str) -> Option<Row> {
 fn parses_a_row() {
   assert_eq(parse("apple, 3"), Some(Row { name: "apple", qty: 3 }));
   assert(parse("apple").is_none(), "one field is not a row");
+}
+
+#[test]
+fn parses_any_row(name: Str, qty: Int) {
+  assume(!name.contains(","));
+  assert_eq(parse(name + "," + qty.to_str()), Some(Row { name: name.trim(), qty: qty }));
 }
 
 #[test]

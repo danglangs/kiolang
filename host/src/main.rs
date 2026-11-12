@@ -533,6 +533,8 @@ struct TestRun<'a> {
     program: &'a lang::Program,
     test: &'a lang::TestFn,
     logs: Vec<(String, LogSink)>,
+    /// A property's case: its values, and whether it runs in the interpreter.
+    case: Option<(lang::prop::Case, bool)>,
 }
 
 /// `run`'s work once the flags (`grants_file`'s first) and the program's `files`, with the
@@ -1034,6 +1036,9 @@ fn run_program(
     }
     kio.grant_sources(sources);
     let result = match &test {
+        Some(TestRun {
+            test, case: Some(c), ..
+        }) => kio.run_case(files, &test.name, &c.0, c.1, dirs, https),
         Some(t) => kio.run_test(files, &t.test.name, dirs, https),
         None => kio.run_files(files, dirs, https),
     };
@@ -1089,7 +1094,7 @@ fn run_program(
 
 /// `kio test`'s flags.
 const TEST_USAGE: &str =
-    "[--grants file] [--filter substr] [--json] [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb]";
+    "[--grants file] [--filter substr] [--cases n] [--seed s] [--json] [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb]";
 
 /// The limit flags `kio test` takes on its command line; grants come from `--grants`.
 const LIMIT_FLAGS: [&str; 6] = ["--fuel", "--timeout", "--memory", "--stack", "--calls", "--io"];
@@ -1121,14 +1126,47 @@ struct Tests {
     grants_file: Option<String>,
     program: lang::Program,
     filter: String,
+    /// The program's path as given, for a property's rerun line.
+    path: String,
+    /// Cases per property (`--cases`) and the seed they are generated from (`--seed`).
+    cases: usize,
+    seed: u64,
 }
 
-/// One test's result: its error as `--json` shows one, the time it took and its `Log` lines.
+/// One test's result: its error as `--json` shows one, the time it took and its `Log` lines;
+/// for a property, how its cases ran.
 struct TestResult {
     name: String,
     error: Option<serde_json::Value>,
     ms: f64,
     log: String,
+    prop: Option<PropInfo>,
+}
+
+/// How a property's cases ran: generated cases, how many ran in each engine, discards, and the
+/// input shown with a failure (`(name, literal)`, shrunk or not).
+#[derive(Default)]
+struct PropInfo {
+    cases: usize,
+    interpreted: usize,
+    compiled: usize,
+    seed: u64,
+    discarded: usize,
+    input: Option<(Vec<(String, String)>, bool)>,
+    /// Interpreted runs shrinking took; the minimal input then ran both ways.
+    shrinks: usize,
+}
+
+impl PropInfo {
+    /// `100 cases: 100 interpreted, 100 compiled; seed 1`, and the discards if any.
+    fn summary(&self) -> String {
+        let (n, i, c, s) = (self.cases, self.interpreted, self.compiled, self.seed);
+        let mut line = format!("{n} cases: {i} interpreted, {c} compiled; seed {s}");
+        if self.discarded > 0 {
+            line += &format!("; {} discarded", self.discarded);
+        }
+        line
+    }
 }
 
 /// Runs `f` with `--json`'s object capturing what it reports when `capture`, and that object.
@@ -1167,7 +1205,23 @@ fn test(path: &str, flags: &[&str], json: bool) -> i32 {
         let rows: Vec<_> = (results.iter())
             .map(|r| {
                 let ms = (r.ms * 10.0).round() / 10.0;
-                json!({"name": r.name, "ok": r.error.is_none(), "ms": ms, "error": r.error, "log": r.log})
+                let mut row =
+                    json!({"name": r.name, "ok": r.error.is_none(), "ms": ms, "error": r.error, "log": r.log});
+                if let Some(p) = &r.prop {
+                    let input = (p.input.as_ref()).map(|(vs, _)| {
+                        vs.iter()
+                            .map(|(k, v)| (k.clone(), json!(v)))
+                            .collect::<serde_json::Map<_, _>>()
+                    });
+                    row["cases"] = json!(p.cases);
+                    row["interpreted"] = json!(p.interpreted);
+                    row["compiled"] = json!(p.compiled);
+                    row["seed"] = json!(p.seed);
+                    row["discarded"] = json!(p.discarded);
+                    row["shrinks"] = json!(p.shrinks);
+                    row["input"] = json!(input);
+                }
+                row
             })
             .collect();
         println!(
@@ -1176,11 +1230,24 @@ fn test(path: &str, flags: &[&str], json: bool) -> i32 {
         );
     } else {
         for r in &results {
+            let summary = r
+                .prop
+                .as_ref()
+                .map_or(String::new(), |p| format!("  ({})", p.summary()));
             let Some(e) = &r.error else {
-                println!("ok   {}", r.name);
+                println!("ok   {}{summary}", r.name);
                 continue;
             };
-            println!("FAIL {}", r.name);
+            println!("FAIL {}{summary}", r.name);
+            if let Some((input, shrunk)) = r.prop.as_ref().and_then(|p| p.input.as_ref()) {
+                let shown: Vec<String> = input.iter().map(|(n, v)| format!("{n} = {v}")).collect();
+                let label = if *shrunk { "minimal input" } else { "input" };
+                println!("  {label}: {}", kio_host::escape_line(&shown.join(", ")));
+                if *shrunk {
+                    let n = r.prop.as_ref().map_or(0, |p| p.shrinks);
+                    println!("  shrunk in {n} interpreted runs; the minimal input ran compiled and interpreted");
+                }
+            }
             // The program writes the message: escaped as a log line is, it is one line and no
             // terminal escape, so it cannot print a forged `ok` or count.
             let message = kio_host::escape_line(e["message"].as_str().unwrap_or_default());
@@ -1194,6 +1261,15 @@ fn test(path: &str, flags: &[&str], json: bool) -> i32 {
             if !r.log.is_empty() {
                 println!("  log:");
                 r.log.lines().for_each(|l| println!("    {l}"));
+            }
+            if let Some(p) = &r.prop {
+                let cases = if tests.cases == DEFAULT_CASES {
+                    String::new()
+                } else {
+                    format!(" --cases {}", tests.cases)
+                };
+                let (file, name) = (shell_word(&tests.path), shell_word(&r.name));
+                println!("  rerun: kio test {file} --filter {name} --seed {}{cases}", p.seed);
             }
         }
         println!("{passed} passed, {failed} failed");
@@ -1209,10 +1285,19 @@ fn test_setup(path: &str, flags: &[&str]) -> Result<Tests, i32> {
         return Err(usage());
     }
     let mut filter = String::new();
+    let (mut cases, mut seed) = (DEFAULT_CASES, 1);
     let mut rest = Vec::new();
     for pair in flags.chunks(2) {
         match pair {
             ["--filter", f] => filter = f.to_string(),
+            ["--cases", n] => match n.parse::<usize>() {
+                Ok(n) if (1..=MAX_CASES).contains(&n) => cases = n,
+                _ => return Err(fail(format!("--cases {n}: expected 1 to {MAX_CASES}"))),
+            },
+            ["--seed", s] => match s.parse::<u64>() {
+                Ok(s) => seed = s,
+                Err(_) => return Err(fail(format!("--seed {s}: expected a non-negative integer"))),
+            },
             [flag, _] if *flag == "--grants" || LIMIT_FLAGS.contains(flag) => rest.extend(pair),
             [flag, _] if RUN_FLAGS.contains(flag) => {
                 return Err(fail(format!(
@@ -1265,15 +1350,46 @@ fn test_setup(path: &str, flags: &[&str]) -> Result<Tests, i32> {
         grants_file,
         program,
         filter,
+        path: path.to_string(),
+        cases,
+        seed,
     })
 }
 
-/// Runs test `t` of `tests`: the grants file's grant for each parameter it names, else one by
-/// type (a fresh empty temporary `Dir`, `:memory:` `Kv` and `Db`, `Clock` at `TEST_CLOCK`, `Rng`
-/// seed 1, a `Log` into a buffer), all bound and checked by `run_program` as `kio run` binds and
-/// checks `main`'s.
+/// Runs test `t` of `tests`: an example test once, a property on its cases (`run_property`).
 fn run_test(tests: &Tests, t: &lang::TestFn) -> TestResult {
     let start = std::time::Instant::now();
+    let (error, log, prop) = match t.inputs.is_empty() {
+        true => {
+            let r = run_once(tests, t, None);
+            (r.error, r.log, None)
+        }
+        false => {
+            let (error, log, info) = run_property(tests, t);
+            (error, log, Some(info))
+        }
+    };
+    TestResult {
+        name: t.name.clone(),
+        error,
+        ms: start.elapsed().as_secs_f64() * 1000.0,
+        log,
+        prop,
+    }
+}
+
+/// One run of a test: its exit code, its error as `--json` shows one, and its `Log` lines.
+struct Once {
+    code: i32,
+    error: Option<serde_json::Value>,
+    log: String,
+}
+
+/// Runs test `t` of `tests` once, on `case` for a property: the grants file's grant for each
+/// parameter it names, else a fresh one by type (a new empty temporary `Dir`, `:memory:` `Kv`
+/// and `Db`, `Clock` at `TEST_CLOCK`, `Rng` seed 1, a `Log` into a buffer), all bound and checked
+/// by `run_program` as `kio run` binds and checks `main`'s.
+fn run_once(tests: &Tests, t: &lang::TestFn, case: Option<(lang::prop::Case, bool)>) -> Once {
     // A grant to a parameter of another test, or of another type, is not this test's: one file
     // can grant `k: Kv` to one test and `k: Hmac` to another.
     let mut flags: Vec<String> = Vec::new();
@@ -1341,6 +1457,7 @@ fn run_test(tests: &Tests, t: &lang::TestFn) -> TestResult {
                 program: &tests.program,
                 test: t,
                 logs,
+                case,
             };
             let grants = tests.grants_file.as_deref();
             run_program(&tests.files, &tests.read_ids, &flags, grants, false, Some(run))
@@ -1355,11 +1472,191 @@ fn run_test(tests: &Tests, t: &lang::TestFn) -> TestResult {
             "file": null, "line": null, "col": null}),
         );
     }
-    TestResult {
-        name: t.name.clone(),
-        error,
-        ms: start.elapsed().as_secs_f64() * 1000.0,
-        log: text,
+    Once { code, error, log: text }
+}
+
+/// `--cases` unless given, and its most.
+const DEFAULT_CASES: usize = 100;
+const MAX_CASES: usize = 100_000;
+
+/// The most runs shrinking a failing case may take.
+const MAX_SHRINK_RUNS: usize = 1_000;
+
+/// What one case did: passed, was discarded by `assume`, or failed with an error as `--json`
+/// shows one.
+#[derive(Debug, PartialEq)]
+enum Verdict {
+    Pass,
+    Discard,
+    Fail(serde_json::Value),
+}
+
+impl Verdict {
+    fn of(r: &Once) -> Verdict {
+        match &r.error {
+            _ if r.code == 0 => Verdict::Pass,
+            Some(e) if e["kind"] == "runtime" && e["message"] == lang::eval::DISCARDED => Verdict::Discard,
+            Some(e) => Verdict::Fail(e.clone()),
+            None => Verdict::Fail(test_error("internal", "the test failed without an error", None)),
+        }
+    }
+
+    /// A failure the two engines need not agree on: a limit (compiled code has fuel, memory and
+    /// stack limits the interpreter lacks), the interpreter's call depth, or a host error.
+    fn unchecked(&self) -> bool {
+        let Verdict::Fail(e) = self else { return false };
+        let kinds = ["fuel", "memory", "timeout", "stack", "calls", "io", "internal", "grant"];
+        kinds.iter().any(|k| e["kind"] == *k) || e["message"] == "evaluation is too deep"
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            Verdict::Pass => "passed".to_string(),
+            Verdict::Discard => "discarded".to_string(),
+            Verdict::Fail(e) => {
+                let at = match (e["line"].as_u64(), e["col"].as_u64()) {
+                    (Some(l), Some(c)) => format!(" at {l}:{c}"),
+                    _ => String::new(),
+                };
+                format!("{}{at}", e["message"].as_str().unwrap_or_default())
+            }
+        }
+    }
+}
+
+fn test_error(kind: &str, message: &str, hint: Option<&str>) -> serde_json::Value {
+    json!({"kind": kind, "message": message, "hint": hint, "file": null, "line": null, "col": null})
+}
+
+/// Why property `t` may not take the grant the grants file gives one of its parameters: an
+/// `Http` (every case would send real requests), or a writable `Dir`, `Kv` or `Db` (cases would
+/// share its state). A parameter the file leaves out gets a fresh grant per case.
+fn property_effect(tests: &Tests, t: &lang::TestFn) -> Option<(String, &'static str)> {
+    for (name, ty) in &t.params {
+        if ty == "Http" {
+            let msg = format!("a property runs many times; `{name}: Http` would repeat real requests");
+            return Some((msg, "test the call in an example test, or pass the data as a parameter"));
+        }
+        let flag = match ty.as_str() {
+            "Dir" => "--dir",
+            "Kv" => "--kv",
+            "Db" => "--db",
+            _ => continue,
+        };
+        for pair in tests.flags.chunks(2) {
+            let Some((n, target)) = pair[1].split_once('=') else {
+                continue;
+            };
+            if pair[0] == flag && n == name && !target.ends_with(":ro") && target != ":memory:" {
+                let msg = format!("a property runs many times; `{name}: {ty}` from the grants file would share its writes across cases");
+                let hint = "grant it `:ro`, or leave it out of the grants file for a fresh one per case";
+                return Some((msg, hint));
+            }
+        }
+    }
+    None
+}
+
+/// Runs property `t` on `tests.cases` generated cases, each compiled and interpreted in fresh
+/// instances with fresh grants; a disagreement fails it. A failing case is shrunk in the
+/// interpreter, and the smallest is run both ways again. Its error, the failing run's log, and
+/// how the cases ran.
+fn run_property(tests: &Tests, t: &lang::TestFn) -> (Option<serde_json::Value>, String, PropInfo) {
+    let mut info = PropInfo {
+        seed: tests.seed,
+        ..PropInfo::default()
+    };
+    if let Some((msg, hint)) = property_effect(tests, t) {
+        return (Some(test_error("grant", &msg, Some(hint))), String::new(), info);
+    }
+    let m = lang::lower::lower_entry(&tests.program, &lang::CapTable::v0(), &t.name);
+    let (names, tys): (Vec<String>, Vec<lang::ir::Ty>) = lang::prop::inputs(&m).into_iter().unzip();
+    let shown = |vs: &[lang::Value]| -> Vec<(String, String)> {
+        let literals = vs.iter().map(|v| lang::prop::debug_literal(&m, v));
+        names.iter().cloned().zip(literals).collect()
+    };
+    for i in 0..tests.cases {
+        let mut rng = lang::prop::Rng::for_case(tests.seed, i as u64);
+        let size = lang::prop::size_of_case(i);
+        let values: Vec<lang::Value> = tys
+            .iter()
+            .map(|ty| lang::prop::generate(&m, ty, &mut rng, size))
+            .collect();
+        info.cases += 1;
+        let (verdict, log) = run_both(tests, t, &values, &mut info);
+        let error = match verdict {
+            Verdict::Pass => continue,
+            Verdict::Discard => {
+                info.discarded += 1;
+                continue;
+            }
+            Verdict::Fail(e) => e,
+        };
+        if Verdict::Fail(error.clone()).unchecked() || error["kind"] == "internal" {
+            info.input = Some((shown(&values), false));
+            return (Some(error), log, info);
+        }
+        // Shrink in the interpreter to a smaller case failing the same way, then run that both ways.
+        let kind = error["kind"].clone();
+        let fails = |vs: &[lang::Value]| {
+            let r = run_once(tests, t, Some((lang::prop::Case::new(vs), true)));
+            matches!(Verdict::of(&r), Verdict::Fail(e) if e["kind"] == kind)
+        };
+        let (minimal, runs) = lang::prop::minimize(&m, &tys, values, MAX_SHRINK_RUNS, fails);
+        info.shrinks = runs;
+        let (verdict, log) = run_both(tests, t, &minimal, &mut PropInfo::default());
+        info.input = Some((shown(&minimal), true));
+        let error = match verdict {
+            Verdict::Fail(e) => e,
+            // The smallest case passed when run again: the property is not deterministic.
+            other => test_error(
+                "internal",
+                &format!("the shrunk input {} when run again", other.describe()),
+                Some("make the test depend only on its inputs and grants"),
+            ),
+        };
+        return (Some(error), log, info);
+    }
+    if info.discarded * 10 > info.cases * 9 {
+        let msg = format!("`{}` discarded {} of {} inputs", t.name, info.discarded, info.cases);
+        let hint = "loosen `assume`, or build the inputs inside the test";
+        return (Some(test_error("discard", &msg, Some(hint))), String::new(), info);
+    }
+    (None, String::new(), info)
+}
+
+/// Runs one case compiled, then (unless compiled code stopped at a limit) interpreted, each in a
+/// fresh instance with fresh grants: the verdict both give, or a failure naming both when they
+/// differ. The log of the compiled run.
+fn run_both(tests: &Tests, t: &lang::TestFn, values: &[lang::Value], info: &mut PropInfo) -> (Verdict, String) {
+    let case = lang::prop::Case::new(values);
+    let compiled = run_once(tests, t, Some((case.clone(), false)));
+    info.compiled += 1;
+    let verdict = Verdict::of(&compiled);
+    if verdict.unchecked() {
+        return (verdict, compiled.log);
+    }
+    let interpreted = Verdict::of(&run_once(tests, t, Some((case, true))));
+    info.interpreted += 1;
+    if interpreted.unchecked() || interpreted == verdict {
+        let v = if interpreted.unchecked() { interpreted } else { verdict };
+        return (v, compiled.log);
+    }
+    let msg = format!(
+        "compiled and interpreted runs disagree: compiled {}, interpreted {}",
+        verdict.describe(),
+        interpreted.describe()
+    );
+    let hint = "a kio bug: please report it with the input and the rerun line";
+    (Verdict::Fail(test_error("internal", &msg, Some(hint))), compiled.log)
+}
+
+/// `s` as one shell word: as is if it is plain, else single-quoted.
+fn shell_word(s: &str) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "-_./:".contains(c);
+    match !s.is_empty() && s.chars().all(plain) {
+        true => s.to_string(),
+        false => format!("'{}'", s.replace('\'', "'\\''")),
     }
 }
 
