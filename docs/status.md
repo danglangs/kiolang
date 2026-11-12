@@ -90,7 +90,7 @@ Compiled-only kio covers the whole language and every capability. Built and revi
 
 ## Next
 
-Pilot phase ([product-todo.md](product-todo.md)): D1 done (`v0.1.0` published 2026-11-12: macOS arm64 and Linux archives, docs/first-job.md); D1b (`kio --version`) for v0.1.1; D2 and D3 done; D5 done: the agent demo (tools/agent-demo/) passes 11/11 jobs on claude-sonnet-5-5 for $0.33; W1, E3c next. Direction A is done through P7 and E4. Open: P7b (fewer `send_all *`, pinned) and C8c2b (C8c2 review follow-ups, pinned).
+Direction B (adopted 2026-11-12, [product-todo.md](product-todo.md)): a general-purpose language for generated software; next T1 (`kio test`, syntax awaiting approval), then F1 (a durable workflow service) with T2 (property tests), PG1 (benchmark gates) alongside. Pilot phase: D1 done (`v0.1.0` published 2026-11-12: macOS arm64 and Linux archives, docs/first-job.md); D1b (`kio --version`) for v0.1.1; D2 and D3 done; D5 done: the agent demo (tools/agent-demo/) passes 11/11 jobs on claude-sonnet-5-5 for $0.33; W1, E3c next. Direction A is done through P7 and E4. Open: P7b (fewer `send_all *`, pinned) and C8c2b (C8c2 review follow-ups, pinned).
 
 Allocation speed is paused after C8c3 (inlining, done) for the pilot phase; next when a pilot needs it: C8c9 (per-loop fuel, approved), C8c5 (inline list buffers), C8c6 (branchless counts). Packages after. Tuples if the evals show models still reach for them. Pinned, not started: L18 `par_map` and L19 `scope`/`spawn` (concurrency stages 2 and 3, when a program needs them).
 
