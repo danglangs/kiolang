@@ -90,13 +90,13 @@ Compiled-only kio covers the whole language and every capability. Built and revi
 
 ## Next
 
-Pilot phase ([product-todo.md](product-todo.md)): D1 built (docs/first-job.md, release archives, CI job `first-job`); D2 and D3 done; D5 done: the agent demo (tools/agent-demo/) passes 11/11 jobs on claude-sonnet-5-5 for $0.33; W1, E3c next. Direction A is done through P7 and E4. Open: P7b (fewer `send_all *`, pinned) and C8c2b (C8c2 review follow-ups, pinned).
+Pilot phase ([product-todo.md](product-todo.md)): D1 done (`v0.1.0` published 2026-11-12: macOS arm64 and Linux archives, docs/first-job.md); D1b (`kio --version`) for v0.1.1; D2 and D3 done; D5 done: the agent demo (tools/agent-demo/) passes 11/11 jobs on claude-sonnet-5-5 for $0.33; W1, E3c next. Direction A is done through P7 and E4. Open: P7b (fewer `send_all *`, pinned) and C8c2b (C8c2 review follow-ups, pinned).
 
 Allocation speed is paused after C8c3 (inlining, done) for the pilot phase; next when a pilot needs it: C8c9 (per-loop fuel, approved), C8c5 (inline list buffers), C8c6 (branchless counts). Packages after. Tuples if the evals show models still reach for them. Pinned, not started: L18 `par_map` and L19 `scope`/`spawn` (concurrency stages 2 and 3, when a program needs them).
 
 ## Waiting on the maintainer
 
-D1: draft release `v0.1.0` (macOS arm64 and Linux archives, built and tested by the release workflow) waits on approval to publish; docs/first-job.md links `releases/latest`, and the README links first-job.md once published. Signing the macOS binary needs an Apple account (#232). Tuples stay deferred (today a hint, L20) unless an eval shows models still reach for them. Approved: L21-L26, H22, H23 (a caps.wit change), P4 (the grants file), E3, E3b (2026-11-11) and C8c9 (per-loop fuel, after C8c4 and C8c3, with a security review); C8c9 stays waiting on its turn in the queue.
+Signing the macOS binary needs an Apple account (#232). Tuples stay deferred (today a hint, L20) unless an eval shows models still reach for them. Approved: L21-L26, H22, H23 (a caps.wit change), P4 (the grants file), E3, E3b (2026-11-11) and C8c9 (per-loop fuel, after C8c4 and C8c3, with a security review); C8c9 stays waiting on its turn in the queue.
 
 ## Speed (C8b5 with C8b6, C8b7, C8c1, C8c2, C8c8, C8c4 and C8c3 marked, 2026-11-09, release, run time; all in [roadmap.md](roadmap.md))
 
