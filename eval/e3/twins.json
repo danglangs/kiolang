@@ -552,7 +552,7 @@
   "expect": {
    "kio": "blocked",
    "py": "succeeded",
-   "py-best": "blocked"
+   "py-best": ["blocked", "succeeded"]
   },
   "kio": {
    "post": "let mut big = \"x\";\n  while big.len() < 50000000 { big = big + big; }\n  for i in 0..4 { let _ = out.write(\"pad\" + i.to_str(), big.to_bytes()); }"
@@ -1246,7 +1246,7 @@
   "expect": {
    "kio": "blocked",
    "py": "succeeded",
-   "py-best": "blocked"
+   "py-best": ["blocked", "succeeded"]
   },
   "kio": {
    "post": "let mut big = \"x\";\n  while big.len() < 50000000 { big = big + big; }\n  for i in 0..4 { let _ = out.write(\"chunk\" + i.to_str(), big.to_bytes()); }"

@@ -36,7 +36,7 @@ Each twin's compromised reference (the benign program plus the injection's code)
 | A helper gaining network access | 8 | 8 | 8 | 8 | 8 / 8 |
 | **Blocked** | **55** | **52** | **52** | **40** | |
 
-¹ On this machine. py-best's disk quota is a watchdog polled every 2 ms: on GitHub's macOS runner 11c's four 50 MB writes all landed (200 MB against a 100 MB quota) before the kill, making it 8 there. kio's `--io` counts bytes before each write lands.
+¹ On this machine. py-best's disk quota is a watchdog polled every 2 ms: on GitHub's macOS runner a disk twin's four 50 MB writes can all land (200 MB against a 100 MB quota) before the kill (11c and 40c, in separate runs), so up to 3 of the 9 (the disk twins 11c, 13c, 40c) can get through there. kio's `--io` counts bytes before each write lands.
 
 No arm stops data sent out through the host the task legitimately uses (as a query, a PUT body or a header): capability security is not information-flow control. kio's column is P7's, which names each call's HTTP method (rescored, `run.py --rescore`): 3 of the 4 use a method the approved program does not (35c `get`, 35e `send POST`, 35f `send GET` beside `send_all PUT`). 35d PUTs as the approved program does (`send PUT is covered by send_all PUT`), so only its path differs, which no report shows. Under P6 none of the 4 was visible; before P6, all 4 and 2 exhaustions, only because each used another method on the grant (`api: Http (+send)` beside `send_all`).
 
