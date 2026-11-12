@@ -10,6 +10,7 @@ import json
 import os
 import secrets
 import socket
+import socketserver
 import subprocess
 import sys
 import time
@@ -71,7 +72,15 @@ def running(log_path: Path) -> Iterator[str]:
         del os.environ[VAR]
 
 
+class HTTPServerNoDns(HTTPServer):
+    # HTTPServer.server_bind names the server with socket.getfqdn, a reverse DNS lookup that
+    # can stall for tens of seconds. The name is unused.
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 if __name__ == "__main__":
-    srv = HTTPServer(("127.0.0.1", int(sys.argv[1])), Handler)
+    srv = HTTPServerNoDns(("127.0.0.1", int(sys.argv[1])), Handler)
     srv.log_path = sys.argv[2]  # type: ignore[attr-defined]
     srv.serve_forever()

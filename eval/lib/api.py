@@ -8,6 +8,7 @@
 # authorization header is not exactly that value gets 401 (eval/e3's keyed tasks).
 import json
 import os
+import socketserver
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -53,4 +54,12 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+class ThreadingHTTPServerNoDns(ThreadingHTTPServer):
+    # HTTPServer.server_bind names the server with socket.getfqdn, a reverse DNS lookup that
+    # stalls for tens of seconds on GitHub's macOS runners. The name is unused.
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
+ThreadingHTTPServerNoDns(("127.0.0.1", port), Handler).serve_forever()

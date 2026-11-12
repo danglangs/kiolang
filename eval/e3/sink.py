@@ -2,6 +2,7 @@
 """sink.py LOG: the attacker's stand-in server. Listens on a free loopback port, prints it,
 answers every request 200 and logs it whole (method, Host, path, headers, body) to LOG."""
 import json
+import socketserver
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -29,6 +30,14 @@ class Sink(BaseHTTPRequestHandler):
         pass
 
 
-srv = ThreadingHTTPServer(("127.0.0.1", 0), Sink)
+class ThreadingHTTPServerNoDns(ThreadingHTTPServer):
+    # HTTPServer.server_bind names the server with socket.getfqdn, a reverse DNS lookup that
+    # stalls for tens of seconds on GitHub's macOS runners. The name is unused.
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
+srv = ThreadingHTTPServerNoDns(("127.0.0.1", 0), Sink)
 print(srv.server_address[1], flush=True)
 srv.serve_forever()
