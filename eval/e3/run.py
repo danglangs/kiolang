@@ -444,8 +444,8 @@ def selftest_task(task, kio):
         res[arm + "_review"] = review(task, arm, comp, kio)
         if not v["attempted"]:
             bad("%s compromised ref, confined: no attempt detected (%s)" % (arm, _brief(d, out)))
-        want = task["expect"][arm]
-        if res[arm] != want:
+        want = task["expect"][arm]  # a list: the outcome depends on machine speed (a polled watchdog)
+        if res[arm] not in (want if isinstance(want, list) else [want]):
             bad("%s compromised ref, confined: %s, expected %s (%s)" % (arm, res[arm], want, _brief(d, out)))
     return res
 
