@@ -10,6 +10,10 @@ language contract  authority is passed explicitly (main's parameters)
 independent check  the checker derives each operation; the host enforces each grant
 ```
 
+**The gate for every construct:** what important decision can a person now make confidently without reading the implementation, and what independently establishes that confidence? **The test of the project:** kio demonstrably reduces the cost of trustworthy software (W1 measures it on F1's changes: review time and defects caught, kio against careful Python). Becoming a standard is the ambition, not a claim.
+
+**Risks, and the answers we hold to:** specification becomes the bottleneck (contracts stay short and in the domain's words, or nothing was saved); expressiveness fights verification (guarantees are opt-in and labelled by assurance level, never proofs everywhere); existing languages absorb the ideas (each guarantee is measured against the best external equivalent, as E3 did for authority); evidence costs too much to generate (E4-style cost measured for every new kind of evidence).
+
 ## The reviewer's questions
 
 | Question | Made explicit by | Status | Task |

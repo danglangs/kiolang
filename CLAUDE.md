@@ -26,6 +26,7 @@ tools/capgen  generates lang/src/caps_gen.rs from caps.wit
 
 ## Principles
 
+- **Every construct earns trust.** Ask of each new feature: what important decision can a person now make confidently without reading the implementation, and what independently establishes that confidence (the checker, the host, a reproducible run; not another agent)? A feature that cannot answer waits ([trust.md](docs/proposals/trust.md)).
 - **Every resource is a grant.** A directory, host, socket or store is a capability: a `main` parameter, granted on the command line, enforced and logged by the host. For a new feature, first ask "is this a grant?"; prefer a capability and a `kio run` flag over a new command, mode or construct.
 - **The host is the security boundary.** It enforces every rule itself and never trusts compiled code or the checker.
 - **Errors teach.** Every diagnostic says what is wrong, at the exact span, with a hint naming the fix, as rustc does. Tests assert hints.
