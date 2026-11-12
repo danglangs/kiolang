@@ -1518,12 +1518,12 @@ pub(crate) fn shape(variants: &Variants, tparams: &TypeParams, ty: &Ty) -> Shape
     }
 }
 
-/// `None`, `Some`, `Ok` and `Err` always mean the constructors, so no binding may take those names.
 fn test_called(span: Span, k: &str) -> Diag {
     let hint = "move the code both need into a function without `#[test]`";
     err(span, format!("`{k}` is a test; only `kio test` runs it"), Some(hint))
 }
 
+/// `None`, `Some`, `Ok` and `Err` always mean the constructors, so no binding may take those names.
 fn not_builtin(name: &str, span: Span) -> Result<(), Diag> {
     match builtin(name) {
         Some(_) => Err(err(

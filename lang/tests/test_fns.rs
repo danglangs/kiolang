@@ -99,13 +99,13 @@ fn unknown_attribute() {
     let hint = "kio has one attribute, `#[test]`";
     rejects(
         "#[derive(Debug)]\nstruct P { a: Int }\nfn main() {}",
-        "unknown attribute `#[derive]`",
+        "unknown attribute `#[derive(..)]`",
         hint,
         "#[derive(Debug)]",
     );
     rejects(
         "#![allow(x)]\nfn main() {}",
-        "unknown attribute `#![allow]`",
+        "unknown attribute `#![allow(..)]`",
         hint,
         "#![allow(x)]",
     );
@@ -116,8 +116,14 @@ fn unknown_attribute() {
         "#[ignore]",
     );
     rejects(
+        "#[test(x)]\nfn t() {}\nfn main() {}",
+        "unknown attribute `#[test(..)]`",
+        hint,
+        "#[test(x)]",
+    );
+    rejects(
         "fn main() { #[allow(x)] let a = 1; }",
-        "unknown attribute `#[allow]`",
+        "unknown attribute `#[allow(..)]`",
         hint,
         "#[allow(x)]",
     );

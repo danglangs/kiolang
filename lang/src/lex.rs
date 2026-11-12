@@ -11,8 +11,8 @@ pub enum Kind {
     Float(u64),
     Str(String),
     Sym(&'static str),
-    /// An attribute, as `#[name]` or `#![name]` without its arguments: `#[derive(Debug)]` is
-    /// `#[derive]`. The parser accepts `#[test]` only.
+    /// An attribute, as `#[name]` or `#![name]`, any arguments shown as `(..)`: `#[derive(Debug)]`
+    /// is `#[derive(..)]`. The parser accepts `#[test]` only.
     Attr(String),
 }
 
@@ -287,6 +287,9 @@ pub fn lex_all(src: &str, errs: &mut Vec<Diag>) -> Result<Vec<Token>, Diag> {
                         .chars()
                         .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
                         .collect();
+                    // Arguments are kept as `(..)`, so `#[test(x)]` is not `#[test]`.
+                    let rest = src[open + 1..].trim_start()[name.len()..].trim_start();
+                    let args = if rest.starts_with(']') { "" } else { "(..)" };
                     let mut depth = 0;
                     i = open;
                     while i < bytes.len() {
@@ -296,7 +299,7 @@ pub fn lex_all(src: &str, errs: &mut Vec<Diag>) -> Result<Vec<Token>, Diag> {
                             break;
                         }
                     }
-                    Kind::Attr(format!("#{}[{name}]", if inner { "!" } else { "" }))
+                    Kind::Attr(format!("#{}[{name}{args}]", if inner { "!" } else { "" }))
                 }
             },
         };
