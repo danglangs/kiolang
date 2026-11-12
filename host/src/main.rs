@@ -1094,18 +1094,19 @@ const TEST_USAGE: &str =
 /// The limit flags `kio test` takes on its command line; grants come from `--grants`.
 const LIMIT_FLAGS: [&str; 6] = ["--fuel", "--timeout", "--memory", "--stack", "--calls", "--io"];
 
-/// The flags of a grant to one parameter, `--flag name=..` (`--rng name` and `--clock name` too).
-const NAMED: [&str; 10] = [
-    "--dir",
-    "--http",
-    "--http-methods",
-    "--http-header",
-    "--kv",
-    "--db",
-    "--rng",
-    "--clock",
-    "--log",
-    "--hmac",
+/// The flags of a grant to one parameter, `--flag name=..` (`--rng name` and `--clock name`
+/// too), and the parameter's capability type.
+const NAMED: [(&str, &str); 10] = [
+    ("--dir", "Dir"),
+    ("--http", "Http"),
+    ("--http-methods", "Http"),
+    ("--http-header", "Http"),
+    ("--kv", "Kv"),
+    ("--db", "Db"),
+    ("--rng", "Rng"),
+    ("--clock", "Clock"),
+    ("--log", "Log"),
+    ("--hmac", "Hmac"),
 ];
 
 /// The time a test's `Clock` reads unless the grants file names it.
@@ -1180,13 +1181,15 @@ fn test(path: &str, flags: &[&str], json: bool) -> i32 {
                 continue;
             };
             println!("FAIL {}", r.name);
-            let message = e["message"].as_str().unwrap_or_default();
+            // The program writes the message: escaped as a log line is, it is one line and no
+            // terminal escape, so it cannot print a forged `ok` or count.
+            let message = kio_host::escape_line(e["message"].as_str().unwrap_or_default());
             match (e["file"].as_str(), e["line"].as_u64(), e["col"].as_u64()) {
                 (Some(f), Some(l), Some(c)) => println!("  {f}:{l}:{c}: {message}"),
                 _ => println!("  {message}"),
             }
             if let Some(h) = e["hint"].as_str() {
-                println!("  hint: {h}");
+                println!("  hint: {}", kio_host::escape_line(h));
             }
             if !r.log.is_empty() {
                 println!("  log:");
@@ -1226,6 +1229,20 @@ fn test_setup(path: &str, flags: &[&str]) -> Result<Tests, i32> {
             "`{flag}` is not for kio test\n  hint: remove it from the grants file; a test runs once, without a server or an audit log"
         )));
     }
+    // Checked once here, as `run_program` checks them, so a bad value is a usage error, not a
+    // failure of every test.
+    for pair in flags.chunks(2) {
+        let [flag, n] = pair else { continue };
+        if !LIMIT_FLAGS.contains(&flag.as_str()) && flag != "--kv-mb" && flag != "--db-mb" {
+            continue;
+        }
+        let Some(v) = n.parse::<u64>().ok().filter(|&v| v > 0) else {
+            return Err(fail(format!("{flag} {n}: expected a positive integer")));
+        };
+        if flag == "--stack" && v > (kio_host::MAX_STACK >> 10) as u64 {
+            return Err(fail(format!("--stack {n}: at most {} KB", kio_host::MAX_STACK >> 10)));
+        }
+    }
     let (files, read_ids) = read_program(path)?;
     let pairs: Vec<(&str, &str)> = files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
     let program = match lang::check_files_for_tests(&pairs, &lang::CapTable::v0()) {
@@ -1235,6 +1252,12 @@ fn test_setup(path: &str, flags: &[&str]) -> Result<Tests, i32> {
             return Err(2);
         }
     };
+    // A filter that matches nothing is a typo, not a pass.
+    if !filter.is_empty() && !program.tests().iter().any(|t| t.name.contains(&filter)) {
+        return Err(fail(format!(
+            "no test matches `{filter}`\n  hint: a test runs when its name (`util::t` in a module) contains the filter"
+        )));
+    }
     Ok(Tests {
         files,
         read_ids,
@@ -1251,14 +1274,14 @@ fn test_setup(path: &str, flags: &[&str]) -> Result<Tests, i32> {
 /// checks `main`'s.
 fn run_test(tests: &Tests, t: &lang::TestFn) -> TestResult {
     let start = std::time::Instant::now();
-    let names: Vec<&str> = t.params.iter().map(|(n, _)| n.as_str()).collect();
-    // A grant to a parameter of another test is not this test's.
+    // A grant to a parameter of another test, or of another type, is not this test's: one file
+    // can grant `k: Kv` to one test and `k: Hmac` to another.
     let mut flags: Vec<String> = Vec::new();
     let mut named = Vec::new();
     for pair in tests.flags.chunks(2) {
-        if NAMED.contains(&pair[0].as_str()) {
+        if let Some((_, ty)) = NAMED.iter().find(|(f, _)| *f == pair[0]) {
             let name = pair[1].split('=').next().unwrap_or_default();
-            if !names.contains(&name) {
+            if !t.params.iter().any(|(n, t)| n == name && t == ty) {
                 continue;
             }
             named.push(name.to_string());

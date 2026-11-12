@@ -2615,7 +2615,7 @@ const LOG_RUN_MAX: u64 = 1 << 20;
 /// bidirectional controls (U+202A-E, U+2066-9) as `\u{XX}`. So a line is one line, holds no
 /// terminal escape, and reads in the order it was written (no Trojan-source reordering can hide
 /// its prefix). Never shorter than `s`.
-fn escape_line(s: &str) -> String {
+pub fn escape_line(s: &str) -> String {
     let mut o = String::with_capacity(s.len());
     for c in s.chars() {
         match c {

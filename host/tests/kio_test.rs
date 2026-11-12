@@ -155,8 +155,24 @@ fn filter_and_exit_codes() {
         (0, "ok   a\nok   b\n2 passed, 0 failed\n"),
         "{err}"
     );
-    let (code, out, _) = pass.kio(&["--filter", "zzz"]);
+    // A filter that matches nothing is a usage error; a file with no tests passes.
+    let (code, out, err) = pass.kio(&["--filter", "zzz"]);
+    assert_eq!((code, out.as_str()), (2, ""));
+    assert!(err.contains("no test matches `zzz`"), "{err}");
+    let (code, j) = pass.json(&["--filter", "zzz"]);
+    assert_eq!((code, j["errors"][0]["kind"].as_str()), (2, Some("usage")));
+    let none = Case::new("fn main() {}\n");
+    let (code, out, _) = none.kio(&[]);
     assert_eq!((code, out.as_str()), (0, "0 passed, 0 failed\n"));
+    // A bad limit is a usage error before any test runs.
+    for bad in [["--fuel", "abc"], ["--memory", "0"], ["--stack", "99999999"]] {
+        let (code, out, err) = pass.kio(&bad);
+        assert_eq!((code, out.as_str()), (2, ""), "{bad:?}");
+        assert!(err.contains(bad[0]), "{err}");
+    }
+    let g = pass.file("bad.grants", "--timeout x\n");
+    let (code, _, err) = pass.kio(&["--grants", &g]);
+    assert_eq!(code, 2, "{err}");
     // A check error, a usage error and a grant flag on the command line: exit 2.
     let bad = Case::new("#[test]\nfn a() { assert(1, \"m\"); }\n");
     let (code, out, err) = bad.kio(&[]);
@@ -331,4 +347,41 @@ fn a_test_in_a_module() {
         util.display()
     );
     assert_eq!(out, want);
+}
+
+#[test]
+fn messages_are_escaped_in_text() {
+    // A message that tries to print a forged result line and clear the screen.
+    let src = "#[test]\nfn forges() { let mut b = \"\".to_bytes(); b.push(27);\n  assert(false, \"x\\nok   other\\n9 passed, 0 failed\\r\" + b.to_str() + \"[2J\"); }\n";
+    let c = Case::new(src);
+    let (code, out, _) = c.kio(&[]);
+    assert_eq!(code, 1);
+    let want = format!(
+        "FAIL forges\n  {}:3:3: assertion failed: x\\nok   other\\n9 passed, 0 failed\\r\\u{{1b}}[2J\n0 passed, 1 failed\n",
+        c.app
+    );
+    assert_eq!(out, want);
+    // `--json` carries the message as it is.
+    let (_, j) = c.json(&[]);
+    assert_eq!(
+        j["tests"][0]["error"]["message"],
+        "assertion failed: x\nok   other\n9 passed, 0 failed\r\u{1b}[2J"
+    );
+}
+
+#[test]
+fn grants_match_by_name_and_type() {
+    let c = Case::new(
+        r#"#[test]
+fn signs(k: Hmac) { assert(k.sign("m".to_bytes()).is_ok(), "signs"); }
+
+#[test]
+fn sets(k: Kv) -> Result<(), KvErr> { k.set("a", "1".to_bytes()) }
+"#,
+    );
+    let key = c.file("key", "secret");
+    let g = c.file("t.grants", &format!("--hmac k=file:{key}\n"));
+    let (code, j) = c.json(&["--grants", &g]);
+    assert_eq!(code, 0, "{j}");
+    assert_eq!(j["passed"], 2);
 }
