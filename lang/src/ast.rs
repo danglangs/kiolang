@@ -24,6 +24,8 @@ pub struct Const {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fn {
     pub public: bool,
+    /// Marked `#[test]`: run by `kio test`, never called by code.
+    pub test: bool,
     pub name: String,
     /// Type parameters `<T, U: Ord>`; empty for a function that is not generic.
     pub tparams: Vec<TParam>,

@@ -147,6 +147,22 @@ let tags = doc.get("tags").and_then(|j| j.as_list()).unwrap_or([]);
 let out = Json::Arr([Json::Num(1), Json::Float(2.5), Json::Null]).to_json();   // [1,2.5,null]
 ```
 
+## Tests
+
+`#[test]` before a top-level `fn`, in the root or a module file, marks a test; it is kio's only attribute. A test takes no type parameters, returns `()` or `Result<(), E>` (an `Err` fails it), and its parameters are capabilities, which the runner grants. No code calls a test or names it as a value; the program still needs `main`.
+
+`assert(cond: Bool, msg: Str)` and `assert_eq(a, b)` (two values of one type that `==` accepts) are built-in functions, usable anywhere; no function may take their names. Both arguments are evaluated, as in any call; then a false `cond` stops the run with `assertion failed: <msg>`, and unequal values with ``assert_eq failed: left `<a>`, right `<b>` `` (each as `kio run` prints a nested value: `"a"`, `[1, 2]`, `P { x: 1 }`), at the call. A local named `assert` hides the built-in, as it hides a function.
+
+```
+fn total(xs: List<Int>) -> Int { let mut t = 0; for x in xs { t += x; } t }
+
+#[test]
+fn total_adds() {
+    assert_eq(total([1, 2, 3]), 6);
+    assert(total([]) == 0, "empty list");
+}
+```
+
 ## Capabilities
 
 The checker's capability table is generated from [caps.wit](../caps.wit). Today:
@@ -205,13 +221,13 @@ A WebSocket server is `fn main(msg: WsMessage, conn: WsSend, ..)` under `--liste
 
 2. **Capabilities cannot be constructed.** There is no literal, constructor or cast that produces a `Dir`. Only the host provides them, as arguments to `main`.
 
-3. **`main` is the only entry point.** Its parameters are all capabilities and are the program's whole authority. Their names are what the operator binds with `--dir name=path`, `--http`, `--kv`, `--db`, `--rng`, `--clock`, `--log`; under `--listen`, `Incoming`, `Outgoing`, `WsMessage` and `WsSend` are bound by type, whatever the names. It may return any type: `kio run` prints it, and an `Err` exits 1.
+3. **`main` is the only entry point.** Its parameters are all capabilities and are the program's whole authority. Their names are what the operator binds with `--dir name=path`, `--http`, `--kv`, `--db`, `--rng`, `--clock`, `--log`; under `--listen`, `Incoming`, `Outgoing`, `WsMessage` and `WsSend` are bound by type, whatever the names. It may return any type: `kio run` prints it, and an `Err` exits 1. A test (`#[test]`) is not an entry point of the program; `kio test` runs it.
 
 4. **`?` needs matching error types.** `d.read(x)?` inside a function returning `Result<_, IoErr>` is fine. Inside one returning `Option` or a different error type it is rejected. No implicit conversion.
 
 ## Authority report
 
-One line per function: each capability parameter with the methods it may call, including through helpers and recursion. A capability passed to a helper is charged with the helper's calls. The report describes possible authority, not an execution trace. An `Http` call names its method when it is a literal or a constant (`api send PUT`, `api send_all POST`) and `*` when the checker cannot see it (`api send *`); [guide.md](guide.md#http) has the rules.
+One line per function: each capability parameter with the methods it may call, including through helpers and recursion. A capability passed to a helper is charged with the helper's calls. The report describes possible authority, not an execution trace. Tests are left out: they are not `main`'s authority. An `Http` call names its method when it is a literal or a constant (`api send PUT`, `api send_all POST`) and `*` when the checker cannot see it (`api send *`); [guide.md](guide.md#http) has the rules.
 
 ```
 load      : d read

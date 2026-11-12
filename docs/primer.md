@@ -232,6 +232,38 @@ fn main(req: Incoming, res: Outgoing, store: Kv) -> Result<(), WebErr> {
 }
 ```
 
+## Tests: `#[test]`, `assert`, `assert_eq`
+
+A test is a top-level function marked `#[test]`; `kio test` runs each one. `assert` takes a message; `assert_eq` prints both values when they differ. A test's parameters are capabilities only, and it returns `()` or `Result<(), E>`.
+
+```
+struct Row { name: Str, qty: Int }
+
+fn parse(line: Str) -> Option<Row> {
+  let f = line.split(",");
+  if f.len() != 2 { return None; }
+  Some(Row { name: f[0].trim(), qty: f[1].trim().parse_int()? })
+}
+
+#[test]
+fn parses_a_row() {
+  assert_eq(parse("apple, 3"), Some(Row { name: "apple", qty: 3 }));
+  assert(parse("apple").is_none(), "one field is not a row");
+}
+
+#[test]
+fn reads_the_file(input: Dir) -> Result<(), IoErr> {
+  input.write("rows.csv", "a,1".to_bytes())?;
+  assert_eq(input.read("rows.csv")?.to_str(), "a,1");
+  Ok(())
+}
+
+fn main(input: Dir) -> Result<Int, IoErr> {
+  let rows = input.read("rows.csv")?.to_str().lines().filter(|l| parse(l).is_some());
+  Ok(rows.len())
+}
+```
+
 ## Characters and bytes
 
 ```

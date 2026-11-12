@@ -1,6 +1,6 @@
 use crate::ast::*;
-use crate::eval::{Key, Value};
-use crate::ir::{self, EnumRef};
+use crate::eval::Value;
+use crate::ir;
 use crate::parse::{parse_all, rust_type_hint};
 use crate::{Diag, Span};
 use std::borrow::Cow;
@@ -68,18 +68,48 @@ pub struct Program {
     pub(crate) ir: ir::Module,
 }
 
+/// A `#[test]` function of a checked program.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestFn {
+    /// Its key, `t` or `web::t`: the entry `lower::lower_entry` and `eval::run_entry` take.
+    pub name: String,
+    /// The module it is in; empty for the root file.
+    pub module: String,
+    pub span: Span,
+    /// Name and capability type of each parameter, in order, as `main_params` gives them.
+    pub params: Vec<(String, String)>,
+}
+
+/// Name and type name of each parameter of `f`, whose parameters are all capabilities.
+fn cap_params(f: &Fn) -> Vec<(String, String)> {
+    (f.params.iter())
+        .filter_map(|p| match &p.ty.kind {
+            TypeKind::Named(ty, _) => Some((p.name.clone(), ty.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
 impl Program {
     /// Name and capability type of each `main` parameter, in order. The host uses it to
     /// validate grants before running.
     pub fn main_params(&self) -> Vec<(String, String)> {
-        let params = &self.funcs["main"].params;
-        params
-            .iter()
-            .filter_map(|p| match &p.ty.kind {
-                TypeKind::Named(ty, _) => Some((p.name.clone(), ty.clone())),
-                _ => None,
+        cap_params(&self.funcs["main"])
+    }
+
+    /// The test functions, sorted by key.
+    pub fn tests(&self) -> Vec<TestFn> {
+        let mut tests: Vec<TestFn> = (self.funcs.iter())
+            .filter(|(_, f)| f.test)
+            .map(|(k, f)| TestFn {
+                name: k.clone(),
+                module: module_of(k).to_string(),
+                span: f.span,
+                params: cap_params(f),
             })
-            .collect()
+            .collect();
+        tests.sort_by(|a, b| a.name.cmp(&b.name));
+        tests
     }
 
     /// `main`'s return type, which `kio run --json` reads its value by.
@@ -92,60 +122,8 @@ impl Program {
     pub fn display(&self, v: &Value) -> String {
         match v {
             Value::Str(s) => s.to_string(),
-            _ => self.nested(v),
+            _ => crate::eval::debug(&self.ir, v),
         }
-    }
-
-    fn nested(&self, v: &Value) -> String {
-        let list = |vs: &[Value]| vs.iter().map(|v| self.nested(v)).collect::<Vec<_>>().join(", ");
-        match v {
-            Value::Int(n) => n.to_string(),
-            Value::Float(x) => x.to_string(),
-            Value::Bool(b) => b.to_string(),
-            Value::Str(s) => format!("{s:?}"),
-            Value::Bytes(b) => format!("<{} bytes>", b.len()),
-            Value::Unit => "()".to_string(),
-            Value::List(vs) => format!("[{}]", list(vs)),
-            Value::Map(m) => self.entries(m.iter()),
-            Value::HashMap(m) => self.entries(m.iter()),
-            Value::Struct(s, vs) => {
-                let s = &self.ir.structs[s.0 as usize];
-                let fields: Vec<_> = (s.fields.iter().zip(vs))
-                    .map(|((f, _), v)| format!("{f}: {}", self.nested(v)))
-                    .collect();
-                if fields.is_empty() {
-                    s.name.clone()
-                } else {
-                    format!("{} {{ {} }}", s.name, fields.join(", "))
-                }
-            }
-            Value::Enum(en, i, vs) => {
-                let variant = match en {
-                    EnumRef::User(e) => {
-                        let e = &self.ir.enums[e.0 as usize];
-                        format!("{}::{}", e.name, e.variants[*i].0)
-                    }
-                    EnumRef::Option => ["None", "Some"][*i].to_string(),
-                    EnumRef::Result => ["Ok", "Err"][*i].to_string(),
-                };
-                if vs.is_empty() {
-                    variant
-                } else {
-                    format!("{variant}({})", list(vs))
-                }
-            }
-            Value::Cap(name) => name.clone(),
-            Value::Fn(f) => format!("<fn {}>", self.ir.funcs[f.0 as usize].name),
-            Value::Closure(..) => "<closure>".to_string(),
-        }
-    }
-
-    /// A map's entries as `{k: v, ..}`, in the order given.
-    fn entries<'v>(&self, entries: impl Iterator<Item = (&'v Key, &'v Value)>) -> String {
-        let entries: Vec<_> = entries
-            .map(|(k, v)| format!("{}: {}", self.nested(&k.to_value()), self.nested(v)))
-            .collect();
-        format!("{{{}}}", entries.join(", "))
     }
 
     pub(crate) fn is_cap(&self, ty: &str) -> bool {
@@ -685,6 +663,8 @@ impl Usefulness<'_> {
 #[derive(Debug)]
 pub(crate) struct Sig {
     public: bool,
+    /// Marked `#[test]`: no code may call it or name it.
+    test: bool,
     /// The declaration as written, like `fn f(a: Int, b: Str)`, for hints.
     decl: String,
     /// Type parameters, which `params` and `ret` name as `Ty::Param`; empty if not generic.
@@ -1337,9 +1317,27 @@ fn signature(
     enums: &HashMap<String, Enum>,
     scope: Scope,
 ) -> Result<Sig, Diag> {
+    if BUILTIN_FNS.contains(&f.name.as_str()) {
+        return Err(err(
+            f.span,
+            format!("`{}` is built in", f.name),
+            Some("choose another name"),
+        ));
+    }
     if sigs.contains_key(&*key(scope.module, &f.name)) {
         let msg = format!("duplicate function `{}`", f.name);
         return Err(err(f.span, msg, Some("rename one of them")));
+    }
+    if f.test && scope.module.is_empty() && f.name == "main" {
+        return Err(err(
+            f.span,
+            "`main` cannot be a test".to_string(),
+            Some("rename the test"),
+        ));
+    }
+    if let (true, Some(t)) = (f.test, f.tparams.first()) {
+        let hint = "remove `<..>`: `kio test` calls a test with no type arguments";
+        return Err(err(t.span, "a test cannot be generic".to_string(), Some(hint)));
     }
     if let Some(p) = f.params.get(MAX_PARAMS) {
         let what = format!("`{}` takes {} parameters", f.name, f.params.len());
@@ -1364,6 +1362,10 @@ fn signature(
             let hint = "`main` parameters must be capabilities, like `input: Dir`";
             return Err(err(p.span, msg, Some(hint)));
         }
+        if f.test && !matches!(ty, Ty::Cap(_)) {
+            let msg = "a test's parameters are capabilities the runner grants".to_string();
+            return Err(err(p.span, msg, Some("build the value inside the test")));
+        }
         params.push(ty);
     }
     let typed: Vec<_> = f
@@ -1374,12 +1376,26 @@ fn signature(
         .collect();
     let ret = resolve(&f.ret, caps, structs, enums, scope)?;
     cap_type_ok(&ret, f.ret.span, Place::Return(&f.name))?;
+    let unit_or_result = match &ret {
+        Ty::Unit => true,
+        Ty::Result(t, _) => **t == Ty::Unit,
+        _ => false,
+    };
+    if f.test && !unit_or_result {
+        let hint = "return `()` and fail with `assert`, or return `Result<(), E>` and fail with `Err`";
+        return Err(err(
+            f.ret.span,
+            "a test returns `()` or `Result<(), E>`".to_string(),
+            Some(hint),
+        ));
+    }
     let generic = match f.tparams.is_empty() {
         true => String::new(),
         false => format!("<{}>", tparams_text(&f.tparams)),
     };
     Ok(Sig {
         public: f.public,
+        test: f.test,
         decl: format!("fn {}{generic}({})", f.name, typed.join(", ")),
         tparams: f.tparams.iter().map(|t| t.name.clone()).collect(),
         bounds: f.tparams.iter().map(|t| t.bound).collect(),
@@ -1503,6 +1519,11 @@ pub(crate) fn shape(variants: &Variants, tparams: &TypeParams, ty: &Ty) -> Shape
 }
 
 /// `None`, `Some`, `Ok` and `Err` always mean the constructors, so no binding may take those names.
+fn test_called(span: Span, k: &str) -> Diag {
+    let hint = "move the code both need into a function without `#[test]`";
+    err(span, format!("`{k}` is a test; only `kio test` runs it"), Some(hint))
+}
+
 fn not_builtin(name: &str, span: Span) -> Result<(), Diag> {
     match builtin(name) {
         Some(_) => Err(err(
@@ -1513,6 +1534,9 @@ fn not_builtin(name: &str, span: Span) -> Result<(), Diag> {
         None => Ok(()),
     }
 }
+
+/// The built-in functions, which no function may be named.
+const BUILTIN_FNS: [&str; 2] = ["assert", "assert_eq"];
 
 /// The enum and variant index of the built-in constructors `None`, `Some`, `Ok` and `Err`.
 pub(crate) fn builtin(name: &str) -> Option<(&'static str, usize)> {
@@ -2790,6 +2814,10 @@ impl<'a> Checker<'a> {
                     if self.sigs.contains_key(&*k) {
                         return self.fn_value(e.span, &k, None, expected);
                     }
+                    if BUILTIN_FNS.contains(&name.as_str()) {
+                        let msg = format!("`{name}` is built in and can only be called");
+                        return Err(err(e.span, msg, Some(&format!("write `{name}(..)`"))));
+                    }
                     let mut d = self.unknown_name(e.span, name);
                     let in_root = self.sigs.contains_key(name.as_str()) || self.consts.contains_key(name.as_str());
                     if !self.home.module.is_empty() && in_root {
@@ -3353,6 +3381,7 @@ impl<'a> Checker<'a> {
             .map_or_else(|| &self.enums[k].tparams, |s| &s.tparams);
         Sig {
             public: true,
+            test: false,
             decl: format!("{kw} {name}<{}>", tparams_text(declared)),
             bounds: declared.iter().map(|t| t.bound).collect(),
             ret: match kw {
@@ -3792,6 +3821,7 @@ impl<'a> Checker<'a> {
         }
         let (name, module, explicit) = match &callee.kind {
             ExprKind::Name(name) if builtin(name).is_some() => return self.constructor(e, name, args, expected),
+            ExprKind::Name(name) if BUILTIN_FNS.contains(&name.as_str()) => return self.assert_call(e, name, args),
             ExprKind::Name(name) => (name, None, None),
             ExprKind::Turbofish(name, tys) => (name, None, Some(tys.as_slice())),
             ExprKind::Path(en, v) if (en == "Map" || en == "HashMap") && v == "new" => {
@@ -3825,6 +3855,38 @@ impl<'a> Checker<'a> {
             want_expr(a, &self.operand(a, Some(param))?, param)?;
         }
         Ok(sig.ret.clone())
+    }
+
+    /// `assert(cond, msg)`, or `assert_eq(a, b)` on two values `==` accepts.
+    fn assert_call(&mut self, e: &Expr, name: &str, args: &[Expr]) -> Result<Ty, Diag> {
+        let [a, b] = args else {
+            let decl = match name {
+                "assert" => "fn assert(cond: Bool, msg: Str)",
+                _ => "fn assert_eq<T: Eq>(a: T, b: T)",
+            };
+            let msg = format!("`{name}` takes 2 arguments, found {}", args.len());
+            return Err(err(e.span, msg, Some(&format!("`{name}` is declared as `{decl}`"))));
+        };
+        if name == "assert" {
+            want_expr(a, &self.expr(a, Some(&Ty::Bool))?, &Ty::Bool)?;
+            want_expr(b, &self.expr(b, Some(&Ty::Str))?, &Ty::Str)?;
+            return Ok(Ty::Unit);
+        }
+        // The side that needs no expected type gives one to the other: `assert_eq(xs, [])`.
+        let (x, y) = match self.needs_expected(a) && !self.needs_expected(b) {
+            true => (b, a),
+            false => (a, b),
+        };
+        let tx = self.expr(x, None)?;
+        let ty = self.expr(y, Some(&tx))?;
+        if tx == ty && self.has_fn(&tx) {
+            return Err(no_fn_equality(e.span, &tx));
+        }
+        let own = self.home.tparams;
+        match binary_ty("==", &tx, &ty, own) {
+            Some(_) => Ok(Ty::Unit),
+            None => Err(binary_err("==", "assert_eq", (&tx, &ty), own, e.span, (x, y))),
+        }
     }
 
     /// A call of a generic function, named at `at` and given as (key, name as written,
@@ -4117,6 +4179,9 @@ impl<'a> Checker<'a> {
         if module.is_some() {
             self.home.public(&k, sig.public, "fn", span)?;
         }
+        if sig.test {
+            return Err(test_called(span, &k));
+        }
         Ok((k, sig))
     }
 
@@ -4130,6 +4195,9 @@ impl<'a> Checker<'a> {
         }
         let sigs = self.sigs;
         let sig = &sigs[k];
+        if sig.test {
+            return Err(test_called(span, k));
+        }
         if sig.params.iter().any(|p| cap_in(p).is_some()) {
             return Err(fn_cap_err(span));
         }

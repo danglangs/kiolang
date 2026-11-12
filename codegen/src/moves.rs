@@ -212,7 +212,7 @@ impl Analysis<'_> {
                 live.union(&r);
                 self.expr(a, live);
             }
-            ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) => {
+            ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Assert(a, b) | ExprKind::AssertEq(a, b) => {
                 self.expr(b, live);
                 self.expr(a, live);
             }
@@ -297,7 +297,7 @@ fn each_local(e: &Expr, f: &mut impl FnMut(LocalId, bool)) {
         | ExprKind::FnRef(_)
         | ExprKind::MapNew => {}
         ExprKind::Unary(_, x) | ExprKind::Field(x, _) | ExprKind::Try(x) => each_local(x, f),
-        ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) => {
+        ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Assert(a, b) | ExprKind::AssertEq(a, b) => {
             each_local(a, f);
             each_local(b, f);
         }
@@ -495,7 +495,7 @@ impl Uses<'_> {
             ExprKind::Unary(_, x) => self.owned(x),
             ExprKind::Field(x, _) | ExprKind::Try(x) => self.borrowed(x),
             // On pointers only `==`, `!=` and `+`, which borrow; the rest are on scalars.
-            ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) => {
+            ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Assert(a, b) | ExprKind::AssertEq(a, b) => {
                 self.borrowed(a);
                 self.borrowed(b);
             }

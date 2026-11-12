@@ -11,6 +11,9 @@ pub enum Kind {
     Float(u64),
     Str(String),
     Sym(&'static str),
+    /// An attribute, as `#[name]` or `#![name]` without its arguments: `#[derive(Debug)]` is
+    /// `#[derive]`. The parser accepts `#[test]` only.
+    Attr(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,7 +75,7 @@ fn ends_operand(t: &Token) -> bool {
         Kind::Ident(_) | Kind::Int(_) | Kind::Float(_) | Kind::Str(_) => true,
         Kind::Keyword(k) => k == "true" || k == "false",
         Kind::Sym(s) => matches!(*s, ")" | "]" | "}" | "?"),
-        Kind::Reserved(_) => false,
+        Kind::Reserved(_) | Kind::Attr(_) => false,
     }
 }
 
@@ -86,8 +89,8 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diag> {
 }
 
 /// Like `lex`, stepping over the errors it can: `&` and `&mut` (dropped), a char literal (read
-/// as a `Str`), a lifetime (dropped), a block comment and an attribute `#[..]` (skipped). Those
-/// are pushed to `errs`; any other error ends lexing as `Err`.
+/// as a `Str`), a lifetime (dropped) and a block comment (skipped). Those are pushed to `errs`;
+/// any other error ends lexing as `Err`.
 pub fn lex_all(src: &str, errs: &mut Vec<Diag>) -> Result<Vec<Token>, Diag> {
     let bytes = src.as_bytes();
     let mut tokens = Vec::new();
@@ -267,15 +270,23 @@ pub fn lex_all(src: &str, errs: &mut Vec<Diag>) -> Result<Vec<Token>, Diag> {
                 }
                 None => {
                     let ch = src[i..].chars().next().unwrap_or(' ');
-                    let msg = format!("unexpected character `{ch}`");
-                    let hint = "remove it, or put it inside a string";
-                    let d = err(i, i + ch.len_utf8(), &msg, Some(hint));
-                    // An attribute `#[..]` or `#![..]` is skipped to its `]`.
-                    let open = i + 1 + usize::from(bytes.get(i + 1) == Some(&b'!'));
+                    // An attribute `#[..]` or `#![..]` is one token, to its matching `]`.
+                    let inner = bytes.get(i + 1) == Some(&b'!');
+                    let open = i + 1 + usize::from(inner);
                     if ch != '#' || bytes.get(open) != Some(&b'[') {
-                        return Err(d);
+                        let msg = format!("unexpected character `{ch}`");
+                        return Err(err(
+                            i,
+                            i + ch.len_utf8(),
+                            &msg,
+                            Some("remove it, or put it inside a string"),
+                        ));
                     }
-                    step_over(errs, d)?;
+                    let name: String = src[open + 1..]
+                        .trim_start()
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                        .collect();
                     let mut depth = 0;
                     i = open;
                     while i < bytes.len() {
@@ -285,7 +296,7 @@ pub fn lex_all(src: &str, errs: &mut Vec<Diag>) -> Result<Vec<Token>, Diag> {
                             break;
                         }
                     }
-                    continue;
+                    Kind::Attr(format!("#{}[{name}]", if inner { "!" } else { "" }))
                 }
             },
         };

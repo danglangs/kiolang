@@ -2791,6 +2791,7 @@ impl<'m> FuncGen<'_, 'm> {
             ExprKind::CapCall(cap, method, args) => self.cap_call(*cap, *method, args, &e.ty, e.span),
             ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms, &e.ty),
             ExprKind::Try(x) => self.try_expr(x),
+            ExprKind::Assert(..) | ExprKind::AssertEq(..) => unimplemented!("codegen: assert and assert_eq (T1b)"),
         }
         if e.ty == Ty::Never {
             self.sink().unreachable();

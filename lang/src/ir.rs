@@ -211,6 +211,12 @@ pub enum ExprKind {
     Match(Box<Expr>, Vec<Arm>),
     /// `e?` on an `Option` or `Result`.
     Try(Box<Expr>),
+    /// `assert(cond, msg)`: both evaluated, then the run stops with "assertion failed: <msg>"
+    /// if `cond` is false.
+    Assert(Box<Expr>, Box<Expr>),
+    /// `assert_eq(a, b)`: both evaluated, then the run stops with "assert_eq failed: left
+    /// `<a>`, right `<b>`" (as `eval::debug` shows them) unless `a == b`, as `BinOp::Eq`.
+    AssertEq(Box<Expr>, Box<Expr>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

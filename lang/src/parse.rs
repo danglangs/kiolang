@@ -63,6 +63,11 @@ fn reserved_hint(word: &str) -> &'static str {
     }
 }
 
+fn test_misplaced(span: Span) -> Diag {
+    let hint = "put it on the line before a function at the top level of a file";
+    err(span, "`#[test]` marks a top-level function", Some(hint))
+}
+
 /// A hint for the expected tokens whose fix is clear.
 fn expected_hint(expected: &str) -> Option<&'static str> {
     match expected {
@@ -288,8 +293,9 @@ impl Parser {
     }
 
     /// After an error in the item starting at token `from`: moves to the next `fn`, `struct`,
-    /// `enum`, `const`, `mod`, `use` or `pub` that starts a line or follows a `}`, outside the
-    /// item's braces; or, braces unbalanced, one in column 0. The end of the file otherwise.
+    /// `enum`, `const`, `mod`, `use`, `pub` or attribute that starts a line or follows a `}`,
+    /// outside the item's braces; or, braces unbalanced, one in column 0. The end of the file
+    /// otherwise.
     fn skip_item(&mut self, from: usize) {
         let resume = self.pos.min(self.toks.len()).max(from + 1);
         let mut depth = 0usize;
@@ -298,6 +304,7 @@ impl Parser {
             let item = match &self.toks[i].kind {
                 Kind::Keyword(k) => matches!(k.as_str(), "fn" | "struct" | "enum" | "const" | "mod" | "pub"),
                 Kind::Reserved(w) => w == "use",
+                Kind::Attr(_) => true,
                 _ => false,
             };
             let (line, col0) = self.line_start[i];
@@ -461,6 +468,12 @@ impl Parser {
         match self.peek() {
             Some(Kind::Reserved(w)) => err(span, &format!("`{w}` is not supported in kio"), Some(reserved_hint(w))),
             Some(Kind::Sym("..")) => err(span, "unexpected `..`", Some("ranges are only for `for` loops")),
+            Some(Kind::Attr(a)) if a == "#[test]" => test_misplaced(span),
+            Some(Kind::Attr(a)) => err(
+                span,
+                &format!("unknown attribute `{a}`"),
+                Some("kio has one attribute, `#[test]`"),
+            ),
             Some(Kind::Keyword(k)) if k == "const" => err(
                 span,
                 "a constant is declared at the top level of a file",
@@ -487,6 +500,23 @@ impl Parser {
 
     fn item(&mut self) -> Result<Item, Diag> {
         let start = self.span().start;
+        let test = matches!(self.peek(), Some(Kind::Attr(a)) if a == "#[test]");
+        if test {
+            let attr = self.span();
+            self.pos += 1;
+            let at = self.pos + usize::from(self.at_kw("pub"));
+            match self.toks.get(at).map(|t| &t.kind) {
+                Some(Kind::Keyword(k)) if k == "fn" => {}
+                Some(Kind::Attr(_)) => {
+                    // Past it, so that recovery does not report it again as an item.
+                    self.pos = at;
+                    let d = self.unexpected("`fn`");
+                    self.pos += 1;
+                    return Err(d);
+                }
+                _ => return Err(test_misplaced(attr)),
+            }
+        }
         if self.eat_kw("mod") {
             let name = self.ident()?;
             self.expect(";")?;
@@ -548,6 +578,7 @@ impl Parser {
         let body = self.block()?;
         Ok(Item::Fn(Fn {
             public,
+            test,
             name,
             tparams,
             params,
@@ -1015,6 +1046,7 @@ impl Parser {
                     "matches" => "use `match` or `if let`",
                     "vec" => "write a list literal: `[..]`",
                     "println" | "print" | "eprintln" | "dbg" => "return the value from `main`",
+                    "assert" | "assert_eq" => "they are functions in kio: `assert(cond, \"why\")`, `assert_eq(a, b)`",
                     _ => "kio has no macros; write a function call",
                 };
                 self.pos += 2;

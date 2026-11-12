@@ -12,15 +12,22 @@ use crate::Span;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
-/// Lowers `p`, which `check` built with `caps`.
+/// Lowers `p`, which `check` built with `caps`, with `main` as the entry.
 pub fn lower(p: &Program, caps: &CapTable) -> Module {
+    lower_entry(p, caps, "main")
+}
+
+/// Like `lower`, with function `entry` (`main` or a test's key) as `Module::main`. Of the test
+/// functions, only `entry` is lowered: no function calls a test.
+pub fn lower_entry(p: &Program, caps: &CapTable, entry: &str) -> Module {
     let sorted = |keys: Vec<&String>| {
         let mut keys: Vec<String> = keys.into_iter().cloned().collect();
         keys.sort();
         keys
     };
     // A generic function becomes one function per instance, made when a use is lowered.
-    let funcs = sorted(p.funcs.keys().filter(|k| p.sigs[*k].tparams.is_empty()).collect());
+    let lowered = |k: &&String| p.sigs[*k].tparams.is_empty() && (!p.funcs[*k].test || *k == entry);
+    let funcs = sorted(p.funcs.keys().filter(lowered).collect());
     // So is a generic type: one struct or enum per instance, made when its type is lowered.
     let plain = |k: &&String| p.tparams[*k].is_empty();
     // The capability structs (`KvEntry`) at fixed ids, in table order; then the program's.
@@ -96,7 +103,7 @@ pub fn lower(p: &Program, caps: &CapTable) -> Module {
                     .collect(),
             })
             .collect(),
-        main: FuncId(ids.funcs["main"]),
+        main: FuncId(ids.funcs[entry]),
     }
 }
 
@@ -655,6 +662,14 @@ impl<'a> Lowerer<'a> {
     fn call(&mut self, ty: &check::Ty, callee: &'a ast::Expr, args: &'a [ast::Expr]) -> ir::ExprKind {
         let k = match &callee.kind {
             ExprKind::Name(name) if builtin(name).is_some() => return self.variant_value(ty, name, args),
+            ExprKind::Name(name) if self.local(name).is_none() && (name == "assert" || name == "assert_eq") => {
+                let [a, b] = args else { unreachable!("checked assert") };
+                let (a, b) = (Box::new(self.expr(a)), Box::new(self.expr(b)));
+                return match name.as_str() {
+                    "assert" => ir::ExprKind::Assert(a, b),
+                    _ => ir::ExprKind::AssertEq(a, b),
+                };
+            }
             ExprKind::Name(name) if self.local(name).is_none() => key(self.module, name).into_owned(),
             ExprKind::Turbofish(name, _) => key(self.module, name).into_owned(),
             ExprKind::Path(en, _) if en == "Map" || en == "HashMap" => return ir::ExprKind::MapNew,

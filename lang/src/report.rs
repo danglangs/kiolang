@@ -312,7 +312,8 @@ pub fn authority(p: &Program) -> Authority {
     }
 
     let mut a = Authority::default();
-    for (name, f) in &p.funcs {
+    // A test is not `main`'s authority: no function calls one.
+    for (name, f) in p.funcs.iter().filter(|(_, f)| !f.test) {
         let mut params = Vec::new();
         for d in &f.params {
             if let Some(ms) = uses.remove(&(name.clone(), d.name.clone())).filter(|ms| !ms.is_empty()) {

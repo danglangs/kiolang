@@ -1,4 +1,4 @@
-use crate::check::Program;
+use crate::check::{CapTable, Program};
 use crate::hmap::{self, HashKey, HashMap};
 use crate::ir::*;
 use crate::Span;
@@ -134,7 +134,21 @@ pub fn cap_arg_error(cap: &str, method: &str, args: &[Value]) -> Option<String> 
 /// of stack in release builds and 9 MB in debug ones, more with deep nesting in each call.
 /// Callers provide that stack.
 pub fn run(p: &Program, caps: &mut dyn Caps) -> Result<Value, RunErr> {
-    let m = &p.ir;
+    run_module(&p.ir, caps)
+}
+
+/// Evaluates function `entry` of `p`, as `run` evaluates `main`: `main` or a test's key from
+/// `Program::tests`. `table` is the one `p` was checked with. A test's value, such as its
+/// `Err`, is shown by `debug` with the module `lower_entry` gives for it.
+pub fn run_entry(p: &Program, table: &CapTable, entry: &str, caps: &mut dyn Caps) -> Result<Value, RunErr> {
+    match entry {
+        "main" => run(p, caps),
+        _ => run_module(&crate::lower::lower_entry(p, table, entry), caps),
+    }
+}
+
+/// Evaluates `m`'s entry function (`Module::main`), whose parameters are capabilities.
+pub fn run_module(m: &Module, caps: &mut dyn Caps) -> Result<Value, RunErr> {
     let main = &m.funcs[m.main.0 as usize];
     let mut stack = Vec::new();
     for param in &main.locals[..main.params as usize] {
@@ -166,6 +180,60 @@ pub fn run(p: &Program, caps: &mut dyn Caps) -> Result<Value, RunErr> {
             Stop::Return(_) | Stop::Break | Stop::Continue => unreachable!(),
         },
     }
+}
+
+/// `v` as Rust's derived `Debug` shows it, with the names declared in `m`: a `Str` quoted,
+/// `Point { x: 1 }`, `Shape::Circle(2)`, `Some(3)`.
+pub fn debug(m: &Module, v: &Value) -> String {
+    let list = |vs: &[Value]| vs.iter().map(|v| debug(m, v)).collect::<Vec<_>>().join(", ");
+    match v {
+        Value::Int(n) => n.to_string(),
+        Value::Float(x) => x.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Str(s) => format!("{s:?}"),
+        Value::Bytes(b) => format!("<{} bytes>", b.len()),
+        Value::Unit => "()".to_string(),
+        Value::List(vs) => format!("[{}]", list(vs)),
+        Value::Map(map) => entries(m, map.iter()),
+        Value::HashMap(map) => entries(m, map.iter()),
+        Value::Struct(s, vs) => {
+            let s = &m.structs[s.0 as usize];
+            let fields: Vec<_> = (s.fields.iter().zip(vs))
+                .map(|((f, _), v)| format!("{f}: {}", debug(m, v)))
+                .collect();
+            if fields.is_empty() {
+                s.name.clone()
+            } else {
+                format!("{} {{ {} }}", s.name, fields.join(", "))
+            }
+        }
+        Value::Enum(en, i, vs) => {
+            let variant = match en {
+                EnumRef::User(e) => {
+                    let e = &m.enums[e.0 as usize];
+                    format!("{}::{}", e.name, e.variants[*i].0)
+                }
+                EnumRef::Option => ["None", "Some"][*i].to_string(),
+                EnumRef::Result => ["Ok", "Err"][*i].to_string(),
+            };
+            if vs.is_empty() {
+                variant
+            } else {
+                format!("{variant}({})", list(vs))
+            }
+        }
+        Value::Cap(name) => name.clone(),
+        Value::Fn(f) => format!("<fn {}>", m.funcs[f.0 as usize].name),
+        Value::Closure(..) => "<closure>".to_string(),
+    }
+}
+
+/// A map's entries as `{k: v, ..}`, in the order given.
+fn entries<'v>(m: &Module, entries: impl Iterator<Item = (&'v Key, &'v Value)>) -> String {
+    let entries: Vec<_> = entries
+        .map(|(k, v)| format!("{}: {}", debug(m, &k.to_value()), debug(m, v)))
+        .collect();
+    format!("{{{}}}", entries.join(", "))
 }
 
 struct Interp<'a> {
@@ -497,6 +565,23 @@ impl<'a> Interp<'a> {
             ExprKind::Variant(en, i, args) => self.variant(*en, *i, args),
             ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms),
             ExprKind::Try(x) => self.try_expr(x),
+            ExprKind::Assert(cond, msg) => match (self.cond(cond)?, self.expr(msg)?) {
+                (true, _) => Ok(Value::Unit),
+                (false, Value::Str(msg)) => Err(fail(e.span, &format!("assertion failed: {msg}"))),
+                _ => unreachable!("checked assert"),
+            },
+            ExprKind::AssertEq(a, b) => {
+                let (l, r) = (self.expr(a)?, self.expr(b)?);
+                if l == r {
+                    return Ok(Value::Unit);
+                }
+                let msg = format!(
+                    "assert_eq failed: left `{}`, right `{}`",
+                    debug(self.m, &l),
+                    debug(self.m, &r)
+                );
+                Err(fail(e.span, &msg))
+            }
         }
     }
 
@@ -947,7 +1032,9 @@ fn pure(e: &Expr) -> bool {
         ExprKind::CallValue(f, xs) => pure(f) && xs.iter().all(pure),
         ExprKind::Block(_) | ExprKind::If(..) | ExprKind::Match(..) | ExprKind::Mutate(..) => false,
         ExprKind::Unary(_, x) | ExprKind::Field(x, _) | ExprKind::Try(x) => pure(x),
-        ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) => pure(a) && pure(b),
+        ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Assert(a, b) | ExprKind::AssertEq(a, b) => {
+            pure(a) && pure(b)
+        }
         ExprKind::Builtin(_, x, xs) => pure(x) && xs.iter().all(pure),
         ExprKind::Call(_, xs) | ExprKind::CapCall(_, _, xs) | ExprKind::List(xs) | ExprKind::Variant(_, _, xs) => {
             xs.iter().all(pure)

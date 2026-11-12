@@ -306,6 +306,17 @@ impl Printer<'_> {
                 self.expr(out, x, depth);
                 *out += "?";
             }
+            ExprKind::Assert(a, b) | ExprKind::AssertEq(a, b) => {
+                *out += if matches!(e.kind, ExprKind::Assert(..)) {
+                    "assert("
+                } else {
+                    "assert_eq("
+                };
+                self.expr(out, a, depth);
+                *out += ", ";
+                self.expr(out, b, depth);
+                *out += ")";
+            }
             ExprKind::Closure(f, captured) => {
                 let captured: Vec<_> = captured.iter().map(|x| self.local(*x)).collect();
                 *out += &format!("closure {}[{}]", self.m.funcs[f.0 as usize].name, captured.join(", "));
@@ -872,6 +883,11 @@ impl Types<'_> {
                     BinOp::FAdd | BinOp::FSub | BinOp::FMul | BinOp::FDiv | BinOp::FRem => Some(Ty::Float),
                     _ => Some(Ty::Bool),
                 }
+            }
+            ExprKind::Assert(a, b) | ExprKind::AssertEq(a, b) => {
+                self.expr(a);
+                self.expr(b);
+                Some(Ty::Unit)
             }
             ExprKind::If(c, then, els) => {
                 self.expr(c);
