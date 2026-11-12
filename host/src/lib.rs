@@ -145,6 +145,21 @@ pub fn check_files(files: &[(String, String)]) -> std::result::Result<Report, Ve
     }
 }
 
+/// The authority report a run of `entry` (`main`, or a test's key) is held to: `main`'s report,
+/// or the test's line alone (`lang::entry_report`). `None` if `files` do not check or there is
+/// no such test.
+fn entry_report(files: &[(String, String)], entry: &str) -> Option<String> {
+    if entry == "main" {
+        return check_files(files).ok().map(|r| r.lines.join("\n"));
+    }
+    let pairs: Vec<(&str, &str)> = files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
+    let p = lang::check_files_for_tests(&pairs, &lang::CapTable::v0()).ok()?;
+    p.tests()
+        .iter()
+        .any(|t| t.name == entry)
+        .then(|| lang::entry_report(&p, entry))
+}
+
 /// The authority `new` has over `old` and the reverse (see `lang::report_diff`), or the
 /// diagnostics of the first side that fails to check: `Err((true, ..))` for `old`.
 pub fn diff_files(
@@ -1013,6 +1028,8 @@ pub struct State {
     workers: Arc<RunWorkers>,
     /// Compiled code: the third value of the next runtime error's message (compiled.rs).
     trap_c: i64,
+    /// Compiled code: the texts of the next runtime error's message (compiled.rs), each capped.
+    trap_texts: [Vec<u8>; 2],
     /// `calls` when `Outgoing.send` handed over the response; the trailer counts the calls after.
     sent_at: Option<u32>,
     table: ResourceTable,
@@ -1051,6 +1068,7 @@ impl State {
             batches: 0,
             workers: Arc::default(),
             trap_c: 0,
+            trap_texts: Default::default(),
             sent_at: None,
             table: ResourceTable::new(),
         }

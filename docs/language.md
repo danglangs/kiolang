@@ -149,9 +149,9 @@ let out = Json::Arr([Json::Num(1), Json::Float(2.5), Json::Null]).to_json();   /
 
 ## Tests
 
-`#[test]` before a top-level `fn`, in the root or a module file, marks a test; it is kio's only attribute. A test takes no type parameters, returns `()` or `Result<(), E>` (an `Err` fails it), and its parameters are capabilities, which the runner grants. No code calls a test or names it as a value; the program still needs `main`.
+`#[test]` before a top-level `fn`, in the root or a module file, marks a test; it is kio's only attribute. A test takes no type parameters, returns `()` or `Result<(), E>` (an `Err` fails it), and its parameters are capabilities, which the runner grants. No code calls a test or names it as a value. `kio test` runs them, compiled, each with its own grants ([guide.md](guide.md#tests)); it needs no `main`, `kio run` and `kio check` still do.
 
-`assert(cond: Bool, msg: Str)` and `assert_eq(a, b)` (two values of one type that `==` accepts) are built-in functions, usable anywhere; no function may take their names. Both arguments are evaluated, as in any call; then a false `cond` stops the run with `assertion failed: <msg>`, and unequal values with ``assert_eq failed: left `<a>`, right `<b>` `` (each as `kio run` prints a nested value: `"a"`, `[1, 2]`, `P { x: 1 }`), at the call. A local named `assert` hides the built-in, as it hides a function.
+`assert(cond: Bool, msg: Str)` and `assert_eq(a, b)` (two values of one type that `==` accepts) are built-in functions, usable anywhere; no function may take their names. Both arguments are evaluated, as in any call; then a false `cond` stops the run with `assertion failed: <msg>`, and unequal values with ``assert_eq failed: left `<a>`, right `<b>` `` (each as `kio run` prints a nested value: `"a"`, `[1, 2]`, `P { x: 1 }`; a message or value past 4,096 bytes is cut there and ends `...`), at the call. A local named `assert` hides the built-in, as it hides a function.
 
 ```
 fn total(xs: List<Int>) -> Int { let mut t = 0; for x in xs { t += x; } t }

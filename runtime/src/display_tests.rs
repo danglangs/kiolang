@@ -423,3 +423,18 @@ fn deep_values_do_not_overflow_the_stack() {
     }
     assert_eq!(obj::live(), before);
 }
+
+/// `clip` cuts as lang's `eval::clip` does, at and around the limit and inside a character.
+#[test]
+fn clip_matches_lang() {
+    use crate::display::{clip, ASSERT_TEXT_MAX};
+    assert_eq!(ASSERT_TEXT_MAX, lang::eval::ASSERT_TEXT_MAX);
+    for unit in ["a", "é", "ab€", "😀"] {
+        for n in [0, 1, 1023, 1024, 1025, 2048, 4096, 5000] {
+            let s: String = core::iter::repeat_n(unit, n).collect();
+            let mut b = s.as_bytes().to_vec();
+            clip(&mut b);
+            assert_eq!(b, lang::eval::clip(&s).as_bytes(), "{unit} x {n}");
+        }
+    }
+}

@@ -10,9 +10,9 @@
 //! error and codegen emits no check. Each such function has one kind of error.
 
 use crate::desc::{RawTable, Table};
-use crate::entry::{rt_trap, trap3};
+use crate::entry::{rt_trap, trap3, trap_texts};
 use crate::obj::{self, Header};
-use crate::{coll, desc, float, json, text};
+use crate::{coll, desc, display, float, json, text};
 use alloc::boxed::Box;
 use core::cell::UnsafeCell;
 
@@ -170,6 +170,30 @@ pub extern "C" fn rt_map_new(desc: u32) -> u32 {
 pub unsafe extern "C" fn rt_eq(desc: u32, a: i64, b: i64) -> bool {
     // SAFETY: the group's contract.
     unsafe { coll::eq(table(), desc, a as u64, b as u64) }
+}
+
+/// `assert(cond, msg)` whose `cond` was false: the run stops at `site`, showing `msg` clipped.
+#[no_mangle]
+pub unsafe extern "C" fn rt_assert_fail(msg: u32, site: u32) {
+    // SAFETY: the group's contract.
+    let mut m = unsafe { obj::bytes(ptr(msg)) }.to_vec();
+    display::clip(&mut m);
+    trap_texts(site, &[&m])
+}
+
+/// `assert_eq(a, b)` on values of descriptor `desc`: nothing if they are equal (as `rt_eq`),
+/// else the run stops at `site`, showing both.
+#[no_mangle]
+pub unsafe extern "C" fn rt_assert_eq(desc: u32, a: i64, b: i64, site: u32) {
+    let t = table();
+    // SAFETY: the group's contract.
+    unsafe {
+        if coll::eq(t, desc, a as u64, b as u64) {
+            return;
+        }
+        let (l, r) = (display::debug(t, desc, a as u64), display::debug(t, desc, b as u64));
+        trap_texts(site, &[&l, &r])
+    }
 }
 
 /// `a.cmp(b)` on two `Str`s by bytes, as Rust's `str`: -1, 0 or 1.

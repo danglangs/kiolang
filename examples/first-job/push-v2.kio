@@ -33,3 +33,10 @@ fn main(orders: Dir, api: Http, out: Dir) -> Result<Str, Failed> {
   orders.remove("orders.csv").map_err(|e| Failed::Io(e))?; // an agent's edit: don't send them twice
   Ok(summary)
 }
+
+// `kio test push-v2.kio` runs this; `kio run` and the authority report leave it out.
+#[test]
+fn parses_rows() {
+  assert_eq(parse("1001, acme, 12000"), Some(Order { id: "1001", customer: "acme", cents: 12000 }));
+  assert(parse("1003,initech,oops").is_none(), "cents must be a number");
+}

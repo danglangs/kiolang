@@ -8,6 +8,7 @@ kio check <new.kio> --base <old.kio> [--detail]   grants new adds or drops; exit
 kio check <prog.kio> --grants <file> [flags]   bind the file's grants to main without running
 kio run <prog.kio> [--grants file] [grants] [limits] [--audit log] [--listen addr]
 ... --json                       one JSON object on stdout (JSON output, below)
+kio test <prog.kio> [--grants file] [--filter substr] [limits]   run the #[test] functions (Tests, below)
 kio mcp                          the MCP server (README, "Use from an agent")
 ```
 
@@ -284,6 +285,35 @@ $ kio run job.kio --json
 $ kio run spin.kio --fuel 1000 --json
 {"audit":null,"diff":null,"errors":[{"col":null,"file":null,"hint":"raise it with --fuel","kind":"fuel","line":null,"message":"out of fuel (limit 1000)"}],"ok":false,"report":["main : none"],"used":{"calls":0,"fuel":1000,"io":0,"ms":0.2,"peak_memory":1179648},"value":null}
 ```
+
+## Tests
+
+`kio test prog.kio [--grants file] [--filter substr] [--json] [limits]` runs every `#[test]` function ([language.md](language.md#tests)) whose name contains `--filter`, sorted by name (`util::t` for one in `util.kio`). The program needs no `main`. Each test is compiled as the entry and runs in a fresh instance with the default limits (or the limit flags given). Its parameters get the grants file's grant of that name; the file's grants to names no test parameter has are ignored, and a test is held to its own authority as `kio run` holds `main` (`:ro`, `:verify`, the source and grants-file checks). A parameter the file does not name gets, by type:
+
+| Type | Default |
+|---|---|
+| `Dir` | a new empty directory under the system's temporary directory (`$TMPDIR`), mode 0700, removed afterwards |
+| `Kv`, `Db` | `:memory:` |
+| `Clock` | fixed at 2026-01-01T00:00:00Z |
+| `Rng` | `seed:1` |
+| `Log` | a buffer, printed when the test fails |
+| `Http`, `Hmac` | none: the test fails with "test `t` needs `api: Http`", hint "name it in a --grants file" |
+
+A test fails on a failed `assert` or `assert_eq`, an `Err` return (shown as `Err("..")`), a runtime error, a limit or a refused grant. Exit 0 when every test passes, 1 when any fails, 2 for a check error or a usage error. `--audit`, `--listen`, `--ws-origin` and `--host` are refused, and grants go in the file, not on the command line.
+
+```
+$ kio test app.kio
+ok   parses
+FAIL totals
+  app.kio:12:3: assert_eq failed: left `3`, right `4`
+  log:
+    read 2 rows
+1 passed, 1 failed
+$ kio test app.kio --filter parses --json
+{"failed":0,"ok":true,"passed":1,"tests":[{"error":null,"log":"","ms":41.2,"name":"parses","ok":true}]}
+```
+
+`--json`'s `error` is an `errors` entry of [JSON output](#json-output) (an assertion is `runtime`, an `Err` return `err`). A check or usage error prints `{"ok": false, "passed": 0, "failed": 0, "tests": [], "errors": [..]}`.
 
 ## Reviewing authority in a pull request
 

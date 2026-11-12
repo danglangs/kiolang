@@ -9,10 +9,10 @@
 use crate::bindings::{Compiled as World, CompiledImports, Grant};
 use crate::ws::{WsEvent, WsFrame};
 use crate::{
-    audit_header, config, dir_id, end_audit, grants, limit_message, main_calls, named, new_store, on_run_stack,
-    push_grants, read_only_refusal, set_stack, single, source_places, source_refusal, spawn_ticker, start_audit,
-    web_grants, write_line, ws_grants, Audit, Bound, Diag, DirPaths, FileId, Handles, KvGrants, Limits, Origin,
-    Outcome, Refused, Report, Request, Response, RunResult, SharedLog, Sources, State, Stopped, Used,
+    audit_header, config, dir_id, end_audit, entry_report, grants, limit_message, main_calls, named, new_store,
+    on_run_stack, push_grants, read_only_refusal, set_stack, single, source_places, source_refusal, spawn_ticker,
+    start_audit, web_grants, write_line, ws_grants, Audit, Bound, Diag, DirPaths, FileId, Handles, KvGrants, Limits,
+    Origin, Outcome, Refused, Report, Request, Response, RunResult, SharedLog, Sources, State, Stopped, Used,
 };
 use cap_std::fs::Dir as RealDir;
 use codegen::Site;
@@ -32,6 +32,14 @@ const LEAKED: u32 = u32::MAX - 1;
 /// `a` (runtime/src/entry.rs `EXTRA`): `trap` has room for two.
 const EXTRA: u32 = u32::MAX - 2;
 
+/// The runtime's site whose `trap` returns, passing up to 8 bytes of a text of the next error
+/// message (runtime/src/entry.rs `TEXT`).
+const TEXT: u32 = u32::MAX - 3;
+
+/// The most bytes the host keeps of each text: the runtime clips a text to
+/// `ASSERT_TEXT_MAX` bytes and `...` (lang `eval::clip`); a guest sending more is cut off.
+const TEXT_MAX: usize = lang::eval::ASSERT_TEXT_MAX + 3;
+
 /// A `trap` call: the run stops with the error at `site`.
 #[derive(Debug)]
 struct Trapped {
@@ -39,6 +47,8 @@ struct Trapped {
     a: i64,
     b: i64,
     c: i64,
+    /// The texts sent before it, as UTF-8 (lossily: the guest is not trusted).
+    texts: [String; 2],
 }
 
 impl std::fmt::Display for Trapped {
@@ -55,8 +65,19 @@ impl CompiledImports for State {
             self.trap_c = a;
             return Ok(());
         }
+        if site == TEXT {
+            let text = &mut self.trap_texts[usize::from(b >> 8 & 1 == 1)];
+            let n = (b & 0xff).min(8) as usize;
+            let room = TEXT_MAX.saturating_sub(text.len());
+            text.extend_from_slice(&a.to_le_bytes()[..n.min(room)]);
+            return Ok(());
+        }
         let c = self.trap_c;
-        Err(wasmtime::Error::new(Trapped { site, a, b, c }))
+        let texts = self
+            .trap_texts
+            .each_ref()
+            .map(|t| String::from_utf8_lossy(t).into_owned());
+        Err(wasmtime::Error::new(Trapped { site, a, b, c, texts }))
     }
 }
 
@@ -78,34 +99,49 @@ struct Lowered {
     wasm: codegen::Wasm,
 }
 
-/// Check, lower and compile `files` (root first) for `engine`: the program, or the checker's
-/// diagnostics. `edit` changes the lowered program before codegen (tests only).
+/// Check, lower and compile `files` (root first) for `engine`, with function `entry` (`main`,
+/// or a test's key) as the program's `main`: the program, or the checker's diagnostics. `edit`
+/// changes the lowered program before codegen (tests only).
 fn compile(
     engine: &Engine,
     files: &[(String, String)],
+    entry: &str,
     limits: &Limits,
     edit: impl FnOnce(&mut lang::ir::Module),
 ) -> Result<std::result::Result<Program, Vec<Diag>>> {
-    match lower(files, limits, edit)? {
+    match lower(files, entry, limits, edit)? {
         Ok(lowered) => Ok(Ok(link(engine, files, lowered)?)),
         Err(diags) => Ok(Err(diags)),
     }
 }
 
-/// Check and lower `files` to a component, or the checker's diagnostics.
+/// Check and lower `files` to a component with `entry` as its `main`, or the checker's
+/// diagnostics. A test entry's authority report is its line alone, as `main`'s
+/// (`lang::entry_report`), so the report check holds it to its own calls.
 fn lower(
     files: &[(String, String)],
+    entry: &str,
     limits: &Limits,
     edit: impl FnOnce(&mut lang::ir::Module),
 ) -> Result<std::result::Result<Lowered, Vec<Diag>>> {
     let pairs: Vec<(&str, &str)> = files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
     let caps = lang::CapTable::v0();
-    let program = match lang::check_files(&pairs, &caps) {
+    let checked = match entry {
+        "main" => lang::check_files(&pairs, &caps),
+        _ => lang::check_files_for_tests(&pairs, &caps),
+    };
+    let program = match checked {
         Ok(p) => p,
         Err(diags) => return Ok(Err(diags.into_iter().map(Diag::from).collect())),
     };
-    let report = lang::report(&program);
-    let mut module = lang::lower::lower(&program, &caps);
+    let (report, mut module) = match entry {
+        "main" => (lang::report(&program), lang::lower::lower(&program, &caps)),
+        _ if !program.tests().iter().any(|t| t.name == entry) => wasmtime::bail!("no test `{entry}`"),
+        _ => (
+            lang::entry_report(&program, entry),
+            lang::lower::lower_entry(&program, &caps, entry),
+        ),
+    };
     edit(&mut module);
     let wasm = generate(&module)?;
     // Wasmtime's own refusal names pages ("memory minimum size of 18 pages exceeds memory
@@ -271,7 +307,7 @@ fn call(
                 Some(site) => Ok(Err(vec![Diag {
                     start: site.span.start as u32,
                     end: site.span.end as u32,
-                    message: site.message(t.a, t.b, t.c),
+                    message: site.message(t.a, t.b, t.c, &t.texts),
                     hint: None,
                     file: site.span.file,
                 }])),
@@ -314,6 +350,8 @@ pub struct Kio {
     peak_memory: usize,
     /// What the last run used, once its grants were bound.
     used: Option<Used>,
+    /// The function the next run compiles as `main`: `main`, or a test's key (`run_test`).
+    entry: String,
     /// Test only: a `(parameter, method)` pair to leave out of the authority report.
     #[cfg(feature = "test-hooks")]
     hidden: Option<(String, String)>,
@@ -339,6 +377,7 @@ impl Kio {
             calls: 0,
             peak_memory: 0,
             used: None,
+            entry: "main".into(),
             #[cfg(feature = "test-hooks")]
             hidden: None,
             #[cfg(feature = "test-hooks")]
@@ -379,7 +418,7 @@ impl Kio {
     /// with symbols) as this runner compiles it. Never loaded back.
     #[cfg(feature = "test-hooks")]
     pub fn wasm_and_native(&self, files: &[(String, String)]) -> Result<(Vec<u8>, Vec<u8>)> {
-        let Ok(lowered) = lower(files, &self.limits, |_| {})? else {
+        let Ok(lowered) = lower(files, "main", &self.limits, |_| {})? else {
             wasmtime::bail!("the program does not check");
         };
         let native = self.engine.precompile_component(&lowered.wasm.component)?;
@@ -443,6 +482,29 @@ impl Kio {
         dirs: Vec<(String, RealDir)>,
         https: Vec<(String, Origin)>,
     ) -> Result<RunResult> {
+        self.run_entry(files, "main", dirs, https)
+    }
+
+    /// Like `run_files` for the test function `test` (its key, `t` or `web::t`), compiled as the
+    /// program's `main`: its parameters are bound as `main`'s, and its own authority report line
+    /// is what the report check and the `:ro` refusal read. `files` need no `main`.
+    pub fn run_test(
+        &mut self,
+        files: &[(String, String)],
+        test: &str,
+        dirs: Vec<(String, RealDir)>,
+        https: Vec<(String, Origin)>,
+    ) -> Result<RunResult> {
+        self.run_entry(files, test, dirs, https)
+    }
+
+    fn run_entry(
+        &mut self,
+        files: &[(String, String)],
+        entry: &str,
+        dirs: Vec<(String, RealDir)>,
+        https: Vec<(String, Origin)>,
+    ) -> Result<RunResult> {
         let paths = self.audit.as_ref().map_or(&[][..], |(_, p)| p.as_slice());
         let mut granted = Vec::new();
         for (name, dir) in &dirs {
@@ -453,13 +515,16 @@ impl Kio {
             granted.push((name.clone(), path, dir_id(dir)?));
         }
         let ro = &self.sources.read_only_dirs;
-        let report = || crate::check_files(files).map_or(String::new(), |r| r.lines.join("\n"));
+        let report = || entry_report(files, entry).unwrap_or_default();
         let why = source_refusal(&source_places(files).0, &granted, ro)
             .or_else(|| (!ro.is_empty()).then(|| read_only_refusal(&report(), ro)).flatten());
         if let Some(why) = why {
             return Err(wasmtime::Error::msg(Refused(why)));
         }
-        self.run_inner(files, dirs, https, |_| Ok(Handles::default()), |_| {})
+        self.entry = entry.into();
+        let r = self.run_inner(files, dirs, https, |_| Ok(Handles::default()), |_| {});
+        self.entry = "main".into();
+        r
     }
 
     /// Run `main(req: Incoming, res: Outgoing, ..)` for one request, with `dirs` granted by name.
@@ -545,7 +610,7 @@ impl Kio {
     ) -> Result<RunResult> {
         self.used = None;
         // Compiled before the store exists, so compiling is not charged to the run.
-        let checked = compile(&self.engine, files, &self.limits, edit)?;
+        let checked = compile(&self.engine, files, &self.entry, &self.limits, edit)?;
         let start = std::time::Instant::now();
         let mut bound_ok = false;
         let mut store = new_store(&self.engine, &self.limits)?;
@@ -650,7 +715,7 @@ impl Server {
     /// runs under `limits`; the pool reserves address space for `limits.memory` per memory,
     /// but touches only what the program uses.
     pub fn new(files: Vec<(String, String)>, limits: Limits) -> Result<std::result::Result<Self, Vec<Diag>>> {
-        let lowered = match lower(&files, &limits, |_| {})? {
+        let lowered = match lower(&files, "main", &limits, |_| {})? {
             Ok(l) => l,
             Err(diags) => return Ok(Err(diags)),
         };

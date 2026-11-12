@@ -16,7 +16,15 @@ pub struct Authority {
 /// One line per function: its capability parameters and the methods they may call, including
 /// through helpers. Reads the checked AST only.
 pub fn report(p: &Program) -> String {
-    let a = authority(p);
+    print(&authority(p))
+}
+
+/// `entry_authority` printed as `report` prints: one line, `main : ..`.
+pub fn entry_report(p: &Program, entry: &str) -> String {
+    print(&entry_authority(p, entry))
+}
+
+fn print(a: &Authority) -> String {
     let width = a.funcs.keys().map(|n| n.len()).max().unwrap_or(0) + 1;
     let mut lines = Vec::new();
     for (name, params) in &a.funcs {
@@ -250,6 +258,45 @@ fn in_parens(items: impl IntoIterator<Item = String>) -> String {
 
 /// The structure `report` prints.
 pub fn authority(p: &Program) -> Authority {
+    let mut uses = uses(p);
+    let mut a = Authority::default();
+    // A test is not `main`'s authority: no function calls one.
+    for (name, f) in p.funcs.iter().filter(|(_, f)| !f.test) {
+        a.funcs.insert(name.clone(), own_uses(&mut uses, name, f));
+    }
+    if let Some(f) = p.funcs.get("main") {
+        a.main = f.params.iter().map(|d| (d.name.clone(), type_str(&d.ty))).collect();
+    }
+    a
+}
+
+/// The authority of function `entry` (a test's key, or `main`) as `authority` gives `main`'s:
+/// its line alone, named `main`, and its parameters as `main`'s. The host checks a test's
+/// grants and calls against it as it checks `main`'s.
+pub fn entry_authority(p: &Program, entry: &str) -> Authority {
+    let f = &p.funcs[entry];
+    let mut a = Authority::default();
+    a.funcs.insert("main".into(), own_uses(&mut uses(p), entry, f));
+    a.main = f.params.iter().map(|d| (d.name.clone(), type_str(&d.ty))).collect();
+    a
+}
+
+/// The capability parameters of function `name` (`f`) that call something, with the methods.
+fn own_uses(uses: &mut Uses, name: &str, f: &Fn) -> Vec<(String, BTreeSet<String>)> {
+    let mut params = Vec::new();
+    for d in &f.params {
+        if let Some(ms) = uses
+            .remove(&(name.to_string(), d.name.clone()))
+            .filter(|ms| !ms.is_empty())
+        {
+            params.push((d.name.clone(), ms));
+        }
+    }
+    params
+}
+
+/// The methods each capability parameter of each function may call, through helpers too.
+fn uses(p: &Program) -> Uses {
     let is_cap = |d: &Param| matches!(&d.ty.kind, TypeKind::Named(n, a) if a.is_empty() && p.is_cap(n));
     let mut uses = Uses::new();
     for (name, f) in &p.funcs {
@@ -310,22 +357,7 @@ pub fn authority(p: &Program) -> Authority {
             }
         }
     }
-
-    let mut a = Authority::default();
-    // A test is not `main`'s authority: no function calls one.
-    for (name, f) in p.funcs.iter().filter(|(_, f)| !f.test) {
-        let mut params = Vec::new();
-        for d in &f.params {
-            if let Some(ms) = uses.remove(&(name.clone(), d.name.clone())).filter(|ms| !ms.is_empty()) {
-                params.push((d.name.clone(), ms));
-            }
-        }
-        a.funcs.insert(name.clone(), params);
-    }
-    if let Some(f) = p.funcs.get("main") {
-        a.main = f.params.iter().map(|d| (d.name.clone(), type_str(&d.ty))).collect();
-    }
-    a
+    uses
 }
 
 /// `Http`, `List<Int>`, `web::Point`, as the source writes it.

@@ -87,6 +87,24 @@ pub const LEAKED: u32 = u32::MAX - 1;
 /// message of the `trap` that follows (host/src/compiled.rs).
 pub const EXTRA: u32 = u32::MAX - 2;
 
+/// The error site whose `trap` returns: the host appends `b & 0xff` (at most 8) bytes of `a`,
+/// little-endian, to text `b >> 8` (0 or 1) of the next error message, its `{s0}` or `{s1}`
+/// (host/src/compiled.rs).
+pub const TEXT: u32 = u32::MAX - 3;
+
+/// A runtime error at `site` whose message shows `texts` (`{s0}`, `{s1}`): each goes first, 8
+/// bytes per `trap` at `TEXT`, which returns.
+pub fn trap_texts(site: u32, texts: &[&[u8]]) -> ! {
+    for (i, text) in texts.iter().enumerate() {
+        for chunk in text.chunks(8) {
+            let mut b = [0u8; 8];
+            b[..chunk.len()].copy_from_slice(chunk);
+            trap(TEXT, i64::from_le_bytes(b), ((i as i64) << 8) | chunk.len() as i64);
+        }
+    }
+    rt_trap(site, 0, 0)
+}
+
 /// A runtime error at `site` whose message needs a third value `c`: `trap` has two, so `c`
 /// goes first through a `trap` at `EXTRA`, which returns.
 pub fn trap3(site: u32, a: i64, b: i64, c: i64) -> ! {

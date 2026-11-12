@@ -182,6 +182,22 @@ pub fn run_module(m: &Module, caps: &mut dyn Caps) -> Result<Value, RunErr> {
     }
 }
 
+/// The most bytes of an `assert` message, or of each value an `assert_eq` shows, that a failure
+/// prints; compiled code clips the same way (runtime/src/entry.rs `clip`).
+pub const ASSERT_TEXT_MAX: usize = 4096;
+
+/// `s`, or its first `ASSERT_TEXT_MAX` bytes cut back to a character boundary and `...` added.
+pub fn clip(s: &str) -> Cow<'_, str> {
+    if s.len() <= ASSERT_TEXT_MAX {
+        return Cow::Borrowed(s);
+    }
+    let end = (0..=ASSERT_TEXT_MAX)
+        .rev()
+        .find(|&i| s.is_char_boundary(i))
+        .unwrap_or(0);
+    Cow::Owned(format!("{}...", &s[..end]))
+}
+
 /// `v` as Rust's derived `Debug` shows it, with the names declared in `m`: a `Str` quoted,
 /// `Point { x: 1 }`, `Shape::Circle(2)`, `Some(3)`.
 pub fn debug(m: &Module, v: &Value) -> String {
@@ -565,24 +581,27 @@ impl<'a> Interp<'a> {
             ExprKind::Variant(en, i, args) => self.variant(*en, *i, args),
             ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms),
             ExprKind::Try(x) => self.try_expr(x),
-            ExprKind::Assert(cond, msg) => match (self.cond(cond)?, self.expr(msg)?) {
-                (true, _) => Ok(Value::Unit),
-                (false, Value::Str(msg)) => Err(fail(e.span, &format!("assertion failed: {msg}"))),
-                _ => unreachable!("checked assert"),
-            },
-            ExprKind::AssertEq(a, b) => {
-                let (l, r) = (self.expr(a)?, self.expr(b)?);
-                if l == r {
-                    return Ok(Value::Unit);
-                }
-                let msg = format!(
-                    "assert_eq failed: left `{}`, right `{}`",
-                    debug(self.m, &l),
-                    debug(self.m, &r)
-                );
-                Err(fail(e.span, &msg))
-            }
+            ExprKind::Assert(a, b) => self.assert(a, b, false, e.span),
+            ExprKind::AssertEq(a, b) => self.assert(a, b, true, e.span),
         }
+    }
+
+    /// `assert(a, b)`, or `assert_eq(a, b)` when `eq`. Not inlined, so that `expr`'s frame,
+    /// which every nested call stacks, stays small.
+    #[inline(never)]
+    fn assert(&mut self, a: &'a Expr, b: &'a Expr, eq: bool, span: Span) -> Res {
+        let (l, r) = (self.expr(a)?, self.expr(b)?);
+        let msg = match (eq, l, r) {
+            (false, Value::Bool(true), _) => return Ok(Value::Unit),
+            (false, _, Value::Str(msg)) => format!("assertion failed: {}", clip(&msg)),
+            (false, ..) => unreachable!("checked assert"),
+            (true, l, r) if l == r => return Ok(Value::Unit),
+            (true, l, r) => {
+                let (l, r) = (debug(self.m, &l), debug(self.m, &r));
+                format!("assert_eq failed: left `{}`, right `{}`", clip(&l), clip(&r))
+            }
+        };
+        Err(fail(span, &msg))
     }
 
     fn unary(&mut self, op: UnOp, x: &'a Expr, span: Span) -> Res {

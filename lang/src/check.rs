@@ -78,6 +78,8 @@ pub struct TestFn {
     pub span: Span,
     /// Name and capability type of each parameter, in order, as `main_params` gives them.
     pub params: Vec<(String, String)>,
+    /// `()` or `Result<(), E>`.
+    pub ret: Ty,
 }
 
 /// Name and type name of each parameter of `f`, whose parameters are all capabilities.
@@ -106,6 +108,7 @@ impl Program {
                 module: module_of(k).to_string(),
                 span: f.span,
                 params: cap_params(f),
+                ret: self.sigs[k].ret.clone(),
             })
             .collect();
         tests.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1877,7 +1880,13 @@ pub fn check(src: &str, caps: &CapTable) -> Result<Program, Vec<Diag>> {
 /// module named by its name without `.kio`, which the root must declare once with `mod name;`.
 /// Reports at most one `Diag` per function, in source order.
 pub fn check_files(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Diag>> {
-    check_all(files, caps).map_err(|diags| cap_diags(diags, MAX_DIAGS))
+    check_all(files, caps, true).map_err(|diags| cap_diags(diags, MAX_DIAGS))
+}
+
+/// Like `check_files` for `kio test`: `main` may be missing. Without one, the program is only
+/// for `lower::lower_entry` and `eval::run_entry` with a test as the entry.
+pub fn check_files_for_tests(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Diag>> {
+    check_all(files, caps, false).map_err(|diags| cap_diags(diags, MAX_DIAGS))
 }
 
 /// Checks that `mod` appears only in the root and that modules and files match one to one.
@@ -1981,7 +1990,7 @@ fn check_consts(
     out
 }
 
-fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Diag>> {
+fn check_all(files: &[(&str, &str)], caps: &CapTable, need_main: bool) -> Result<Program, Vec<Diag>> {
     let names: Vec<&str> = files.iter().map(|(n, _)| n.strip_suffix(".kio").unwrap_or(n)).collect();
     let mut parsed = Vec::new();
     let mut diags = Vec::new();
@@ -2208,7 +2217,8 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
         item_uses.extend(c.item_uses);
         uses.insert(key(module, &f.name).into_owned(), c.uses);
     }
-    if !fns.iter().any(|(m, f)| m.is_empty() && f.name == "main") {
+    let has_main = fns.iter().any(|(m, f)| m.is_empty() && f.name == "main");
+    if need_main && !has_main {
         let hint = "add `fn main() { .. }`";
         diags.push(err(Span::default(), "no `main` function".to_string(), Some(hint)));
     }
@@ -2271,7 +2281,9 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable) -> Result<Program, Vec<Dia
             main: ir::FuncId(0),
         },
     };
-    p.ir = crate::lower::lower(&p, caps);
+    if has_main {
+        p.ir = crate::lower::lower(&p, caps);
+    }
     Ok(p)
 }
 

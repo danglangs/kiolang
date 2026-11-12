@@ -61,7 +61,7 @@ world compiled {
 ```
 
 - The host checks grants (missing, duplicate, unknown) before running, from `main`'s parameters. The report is host-side.
-- `trap` is a new import: one more host function on the sandbox wall, so it gets a security review (C7). It records `(site, a, b)` and traps; the host formats the message. A call at the runtime's `EXTRA` site returns instead, keeping `a` for the next message ("How it is built" 12).
+- `trap` is a new import: one more host function on the sandbox wall, so it gets a security review (C7). It records `(site, a, b)` and traps; the host formats the message. A call at the runtime's `EXTRA` site returns instead, keeping `a` for the next message's `{c}` ("How it is built" 12); one at `TEXT` (`u32::MAX - 3`) returns too, appending `b & 0xff` (at most 8) bytes of `a` to text `b >> 8` of the next message (`{s0}`, `{s1}`: an `assert` message, the two `assert_eq` values), the host keeping at most 4,099 bytes of each (T1b).
 - `outcome` is the display string and a failed flag, formatted in the runtime from the descriptor table, matching `Program::display` exactly.
 - The glue that was in guest/src/lib.rs (removed in C5) moves into the runtime: error enums by `CapTable` order, `send` with a status that is not a u16 is `Err(WebErr::Invalid)`.
 

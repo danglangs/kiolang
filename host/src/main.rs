@@ -45,6 +45,14 @@ fn set_json(f: impl FnOnce(&mut JsonOut)) {
 /// With `--json` anywhere, the command's output is one JSON object on stdout and nothing else.
 fn cli() -> i32 {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // `kio test --json` prints its own object (T1b).
+    if let [cmd, path, flags @ ..] = &args[..] {
+        if cmd == "test" {
+            let json = flags.iter().any(|a| a == "--json");
+            let flags: Vec<&str> = flags.iter().map(String::as_str).filter(|a| *a != "--json").collect();
+            return test(path, &flags, json);
+        }
+    }
     if !args.iter().any(|a| a == "--json") {
         return command(&args);
     }
@@ -84,9 +92,12 @@ fn command(args: &[String]) -> i32 {
             0
         }
         ["run", path, ref flags @ ..] => run(path, flags, false),
-        _ if json_out() => fail(format!("usage: {}", HELP.replace("{USAGE}", USAGE))),
+        _ if json_out() => fail(format!(
+            "usage: {}",
+            HELP.replace("{USAGE}", USAGE).replace("{TEST_USAGE}", TEST_USAGE)
+        )),
         _ => {
-            let help = HELP.replace("{USAGE}", USAGE);
+            let help = HELP.replace("{USAGE}", USAGE).replace("{TEST_USAGE}", TEST_USAGE);
             eprintln!("kio: a capability-typed language; code names what it needs, the operator grants what that is.\n\nusage: {help}");
             2
         }
@@ -94,7 +105,7 @@ fn command(args: &[String]) -> i32 {
 }
 
 /// The commands, `{USAGE}` standing for `kio run`'s flags.
-const HELP: &str = "kio --version\n       kio check <prog.kio> [--base <old.kio> [--detail]]\n       kio check <prog.kio> --grants <file> [flags]\n       kio mcp\n       kio run <prog.kio> {USAGE}";
+const HELP: &str = "kio --version\n       kio check <prog.kio> [--base <old.kio> [--detail]]\n       kio check <prog.kio> --grants <file> [flags]\n       kio mcp\n       kio run <prog.kio> {USAGE}\n       kio test <prog.kio> {TEST_USAGE}";
 
 /// The root file, then `NAME.kio` beside it for each `mod NAME;` line. This is operator input,
 /// read by the host like the root; the program never sees the filesystem.
@@ -513,6 +524,29 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
         Ok(f) => f,
         Err(code) => return code,
     };
+    run_program(&files, &read_ids, &flags, grants_file.as_deref(), dry, None)
+}
+
+/// One test `kio test` runs through `run_program`: the checked program, the test, and the
+/// `Log` grants the flags cannot give (a buffer each).
+struct TestRun<'a> {
+    program: &'a lang::Program,
+    test: &'a lang::TestFn,
+    logs: Vec<(String, LogSink)>,
+}
+
+/// `run`'s work once the flags (`grants_file`'s first) and the program's `files`, with the
+/// identity of each file read, are known. With `test`, the test is the program's `main`: its
+/// parameters are bound, and its report line checked, as `main`'s are; nothing is printed but
+/// through `--json`'s object, which the caller captures.
+fn run_program(
+    files: &[(String, String)],
+    read_ids: &[FileId],
+    flags: &[&str],
+    grants_file: Option<&str>,
+    dry: bool,
+    mut test: Option<TestRun>,
+) -> i32 {
     let mut dirs = Vec::new();
     let mut https: Vec<(String, Origin)> = Vec::new();
     // `(name, methods)` of each `--http-methods`, applied once every `--http` is known.
@@ -704,8 +738,8 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
         }
     }
     // Checked against the files read: a path changed since names another file.
-    let (places, ends) = kio_host::source_places(&files);
-    if let Some(why) = kio_host::changed_refusal(&ends, &read_ids)
+    let (places, ends) = kio_host::source_places(files);
+    if let Some(why) = kio_host::changed_refusal(&ends, read_ids)
         .or_else(|| kio_host::source_refusal(&places, &granted, &sources.read_only_dirs))
     {
         return refuse(why);
@@ -754,17 +788,31 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
         }
     }
     // A program that fails to check says so before any check of `main`'s shape (H20).
-    let checked = match lang::check_files(
-        &files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect::<Vec<_>>(),
-        &lang::CapTable::v0(),
-    ) {
-        Ok(p) => p,
-        Err(diags) => return print_diags(&files, diags.into_iter().map(Diag::from).collect(), "check"),
+    let owned;
+    let checked = match &test {
+        Some(t) => t.program,
+        None => {
+            owned = match lang::check_files(
+                &files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect::<Vec<_>>(),
+                &lang::CapTable::v0(),
+            ) {
+                Ok(p) => p,
+                Err(diags) => return print_diags(files, diags.into_iter().map(Diag::from).collect(), "check"),
+            };
+            &owned
+        }
     };
-    let params = checked.main_params();
+    // A test is held to its own authority, as `main` is to its (`lang::entry_authority`).
+    let (params, report, authority) = match &test {
+        Some(t) => (
+            t.test.params.clone(),
+            lang::entry_report(checked, &t.test.name),
+            lang::entry_authority(checked, &t.test.name),
+        ),
+        None => (checked.main_params(), lang::report(checked), lang::authority(checked)),
+    };
     // A read-only store or database is refused to a program that can write it (H12, H17); the
     // host also stops any write that reaches it.
-    let report = lang::report(&checked);
     set_json(|o| o.report = report.lines().map(String::from).collect());
     type WriteIn = fn(&str, &str) -> Option<&'static str>;
     let readers = (kv_specs
@@ -801,7 +849,7 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
     }
     // A literal verb the grant does not allow is refused (P7); one the report shows as `*` is
     // checked per request, as every request is.
-    for (name, v) in lang::main_http_verbs(&lang::authority(&checked)) {
+    for (name, v) in lang::main_http_verbs(&authority) {
         if !lang::HTTP_METHODS.contains(&v.as_str()) {
             return refuse(format!(
                 "`{name}` sends {v}, not an HTTP method\n  hint: a method is one of {}",
@@ -866,13 +914,13 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
                 named.push((n.clone(), kind));
             }
         }
-        return match kio_host::bind_grants(&checked, &named) {
+        return match kio_host::bind_grants(checked, &named) {
             Ok(()) if json_out() => 0,
             Ok(()) => {
                 println!("{}", report.lines().collect::<Vec<_>>().join("\n"));
                 0
             }
-            Err(diags) => print_diags(&files, diags, "grant"),
+            Err(diags) => print_diags(files, diags, "grant"),
         };
     }
     // A program that can write a store's log or a database through a `Dir` could replace or
@@ -954,7 +1002,18 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
     }
     if let Some(addr) = listen {
         let audit = audit.map(|path| (path, dir_paths));
-        return serve(files, dirs, https, kvs, sources, addr, limits, ws_origins, hosts, audit);
+        return serve(
+            files.to_vec(),
+            dirs,
+            https,
+            kvs,
+            sources,
+            addr,
+            limits,
+            ws_origins,
+            hosts,
+            audit,
+        );
     }
     let mut kio = match Kio::new(limits) {
         Ok(k) => k,
@@ -970,8 +1029,14 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
         }
     }
     kio.grant_kvs(kvs);
+    if let Some(t) = &mut test {
+        sources.logs.append(&mut t.logs);
+    }
     kio.grant_sources(sources);
-    let result = kio.run_files(&files, dirs, https);
+    let result = match &test {
+        Some(t) => kio.run_test(files, &t.test.name, dirs, https),
+        None => kio.run_files(files, dirs, https),
+    };
     set_json(|o| o.used = kio.used());
     match result {
         Err(e) if e.downcast_ref::<kio_host::Refused>().is_some() => refuse(format!("{e}")),
@@ -983,6 +1048,16 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
                 None => eprintln!("kio: {e:#}"),
             }
             1
+        }
+        // A test's `Err(e)` fails it, shown as `{:?}` shows it, as lang's `eval::debug` does.
+        Ok(Ok(out)) if test.is_some() => {
+            if out.failed {
+                use lang::check::Ty;
+                let str_err = matches!(test.as_ref().map(|t| &t.test.ret), Some(Ty::Result(_, e)) if **e == Ty::Str);
+                let shown = if str_err { format!("{:?}", out.value) } else { out.value };
+                push_error("err", &format!("Err({shown})"), None, None);
+            }
+            i32::from(out.failed)
         }
         Ok(Ok(out)) if json_out() => {
             match out.failed {
@@ -1007,8 +1082,306 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
         // run-time error.
         Ok(Err(diags)) => {
             let kind = if kio.used().is_some() { "runtime" } else { "grant" };
-            print_diags(&files, diags, kind)
+            print_diags(files, diags, kind)
         }
+    }
+}
+
+/// `kio test`'s flags.
+const TEST_USAGE: &str =
+    "[--grants file] [--filter substr] [--json] [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb]";
+
+/// The limit flags `kio test` takes on its command line; grants come from `--grants`.
+const LIMIT_FLAGS: [&str; 6] = ["--fuel", "--timeout", "--memory", "--stack", "--calls", "--io"];
+
+/// The flags of a grant to one parameter, `--flag name=..` (`--rng name` and `--clock name` too).
+const NAMED: [&str; 10] = [
+    "--dir",
+    "--http",
+    "--http-methods",
+    "--http-header",
+    "--kv",
+    "--db",
+    "--rng",
+    "--clock",
+    "--log",
+    "--hmac",
+];
+
+/// The time a test's `Clock` reads unless the grants file names it.
+const TEST_CLOCK: &str = "fixed:2026-01-01T00:00:00Z";
+
+/// A checked program and the flags each of its tests is run with.
+struct Tests {
+    files: Vec<(String, String)>,
+    read_ids: Vec<FileId>,
+    /// The grants file's flags, then the command line's limits.
+    flags: Vec<String>,
+    grants_file: Option<String>,
+    program: lang::Program,
+    filter: String,
+}
+
+/// One test's result: its error as `--json` shows one, the time it took and its `Log` lines.
+struct TestResult {
+    name: String,
+    error: Option<serde_json::Value>,
+    ms: f64,
+    log: String,
+}
+
+/// Runs `f` with `--json`'s object capturing what it reports when `capture`, and that object.
+fn captured<T>(capture: bool, f: impl FnOnce() -> T) -> (T, JsonOut) {
+    if !capture {
+        return (f(), JsonOut::default());
+    }
+    let before = JSON.with(|j| j.borrow_mut().replace(JsonOut::default()));
+    let r = f();
+    let out = JSON.with(|j| std::mem::replace(&mut *j.borrow_mut(), before));
+    (r, out.unwrap_or_default())
+}
+
+/// `kio test`: every test function (sorted by key, those containing `--filter`), each compiled
+/// as the entry and run in a fresh instance with default limits. Exit 0 when all pass, 1 when
+/// any fails, 2 for a check error or usage.
+fn test(path: &str, flags: &[&str], json: bool) -> i32 {
+    let (tests, out) = captured(json, || test_setup(path, flags));
+    let tests = match tests {
+        Ok(t) => t,
+        Err(_) => {
+            if json {
+                let line = json!({"ok": false, "passed": 0, "failed": 0, "tests": [], "errors": out.errors});
+                println!("{line}");
+            }
+            return 2;
+        }
+    };
+    let mut results = Vec::new();
+    for t in tests.program.tests().iter().filter(|t| t.name.contains(&tests.filter)) {
+        results.push(run_test(&tests, t));
+    }
+    let failed = results.iter().filter(|r| r.error.is_some()).count();
+    let passed = results.len() - failed;
+    if json {
+        let rows: Vec<_> = (results.iter())
+            .map(|r| {
+                let ms = (r.ms * 10.0).round() / 10.0;
+                json!({"name": r.name, "ok": r.error.is_none(), "ms": ms, "error": r.error, "log": r.log})
+            })
+            .collect();
+        println!(
+            "{}",
+            json!({"ok": failed == 0, "passed": passed, "failed": failed, "tests": rows})
+        );
+    } else {
+        for r in &results {
+            let Some(e) = &r.error else {
+                println!("ok   {}", r.name);
+                continue;
+            };
+            println!("FAIL {}", r.name);
+            let message = e["message"].as_str().unwrap_or_default();
+            match (e["file"].as_str(), e["line"].as_u64(), e["col"].as_u64()) {
+                (Some(f), Some(l), Some(c)) => println!("  {f}:{l}:{c}: {message}"),
+                _ => println!("  {message}"),
+            }
+            if let Some(h) = e["hint"].as_str() {
+                println!("  hint: {h}");
+            }
+            if !r.log.is_empty() {
+                println!("  log:");
+                r.log.lines().for_each(|l| println!("    {l}"));
+            }
+        }
+        println!("{passed} passed, {failed} failed");
+    }
+    i32::from(failed > 0)
+}
+
+/// The flags, program and filter of `kio test path flags`, or the exit code once the error is
+/// reported.
+fn test_setup(path: &str, flags: &[&str]) -> Result<Tests, i32> {
+    let usage = || fail(format!("usage: kio test <prog.kio> {TEST_USAGE}"));
+    if !flags.len().is_multiple_of(2) {
+        return Err(usage());
+    }
+    let mut filter = String::new();
+    let mut rest = Vec::new();
+    for pair in flags.chunks(2) {
+        match pair {
+            ["--filter", f] => filter = f.to_string(),
+            [flag, _] if *flag == "--grants" || LIMIT_FLAGS.contains(flag) => rest.extend(pair),
+            [flag, _] if RUN_FLAGS.contains(flag) => {
+                return Err(fail(format!(
+                    "`{flag}` is not a flag of kio test\n  hint: name grants in a --grants file, one flag per line"
+                )))
+            }
+            _ => return Err(usage()),
+        }
+    }
+    let (flags, grants_file) = with_grants(&rest)?;
+    let server = ["--audit", "--listen", "--ws-origin", "--host"];
+    if let Some(flag) = flags.iter().step_by(2).find(|f| server.contains(&f.as_str())) {
+        return Err(fail(format!(
+            "`{flag}` is not for kio test\n  hint: remove it from the grants file; a test runs once, without a server or an audit log"
+        )));
+    }
+    let (files, read_ids) = read_program(path)?;
+    let pairs: Vec<(&str, &str)> = files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
+    let program = match lang::check_files_for_tests(&pairs, &lang::CapTable::v0()) {
+        Ok(p) => p,
+        Err(diags) => {
+            print_diags(&files, diags.into_iter().map(Diag::from).collect(), "check");
+            return Err(2);
+        }
+    };
+    Ok(Tests {
+        files,
+        read_ids,
+        flags,
+        grants_file,
+        program,
+        filter,
+    })
+}
+
+/// Runs test `t` of `tests`: the grants file's grant for each parameter it names, else one by
+/// type (a fresh empty temporary `Dir`, `:memory:` `Kv` and `Db`, `Clock` at `TEST_CLOCK`, `Rng`
+/// seed 1, a `Log` into a buffer), all bound and checked by `run_program` as `kio run` binds and
+/// checks `main`'s.
+fn run_test(tests: &Tests, t: &lang::TestFn) -> TestResult {
+    let start = std::time::Instant::now();
+    let names: Vec<&str> = t.params.iter().map(|(n, _)| n.as_str()).collect();
+    // A grant to a parameter of another test is not this test's.
+    let mut flags: Vec<String> = Vec::new();
+    let mut named = Vec::new();
+    for pair in tests.flags.chunks(2) {
+        if NAMED.contains(&pair[0].as_str()) {
+            let name = pair[1].split('=').next().unwrap_or_default();
+            if !names.contains(&name) {
+                continue;
+            }
+            named.push(name.to_string());
+        }
+        flags.extend(pair.iter().cloned());
+    }
+    let mut temps = Vec::new();
+    let mut logs = Vec::new();
+    let log = SharedBuf::default();
+    let mut missing = None;
+    for (name, ty) in t.params.iter().filter(|(n, _)| !named.contains(n)) {
+        let default = match ty.as_str() {
+            "Dir" => match TempDir::new() {
+                Ok(d) => {
+                    let spec = format!("{name}={}", d.0.display());
+                    temps.push(d);
+                    Some(("--dir", spec))
+                }
+                Err(e) => {
+                    missing = Some(("internal", format!("cannot make a temporary directory: {e}"), None));
+                    break;
+                }
+            },
+            "Kv" => Some(("--kv", format!("{name}=:memory:"))),
+            "Db" => Some(("--db", format!("{name}=:memory:"))),
+            "Clock" => Some(("--clock", format!("{name}={TEST_CLOCK}"))),
+            "Rng" => Some(("--rng", format!("{name}=seed:1"))),
+            "Log" => {
+                logs.push((name.clone(), LogSink::new(Box::new(log.clone()), "test")));
+                None
+            }
+            "Http" | "Hmac" => {
+                let msg = format!("test `{}` needs `{name}: {ty}`", t.name);
+                missing = Some(("grant", msg, Some("name it in a --grants file")));
+                break;
+            }
+            _ => {
+                let msg = format!("test `{}` needs `{name}: {ty}`", t.name);
+                let hint =
+                    "only `kio run --listen` grants a server's capabilities; test the handler's logic in a function";
+                missing = Some(("grant", msg, Some(hint)));
+                break;
+            }
+        };
+        if let Some((flag, spec)) = default {
+            flags.extend([flag.to_string(), spec]);
+        }
+    }
+    let (code, out) = captured(true, || match missing {
+        Some((kind, msg, hint)) => {
+            push_error(kind, &msg, hint, None);
+            1
+        }
+        None => {
+            let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
+            let run = TestRun {
+                program: &tests.program,
+                test: t,
+                logs,
+            };
+            let grants = tests.grants_file.as_deref();
+            run_program(&tests.files, &tests.read_ids, &flags, grants, false, Some(run))
+        }
+    });
+    drop(temps);
+    let text = String::from_utf8_lossy(&log.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)).into_owned();
+    let mut error = out.errors.into_iter().next();
+    if code != 0 && error.is_none() {
+        error = Some(
+            json!({"kind": "internal", "message": "the test failed without an error", "hint": null,
+            "file": null, "line": null, "col": null}),
+        );
+    }
+    TestResult {
+        name: t.name.clone(),
+        error,
+        ms: start.elapsed().as_secs_f64() * 1000.0,
+        log: text,
+    }
+}
+
+/// A buffer a test's `Log` writes to, shown if the test fails.
+#[derive(Clone, Default)]
+struct SharedBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for SharedBuf {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        let mut v = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        v.extend_from_slice(b);
+        Ok(b.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A test's own directory: new, empty and private (mode 0700), under the system's temporary
+/// directory with a name no other process chose (`mkdir` fails on any existing name, a symlink
+/// included). Removed when dropped; `remove_dir_all` never follows a symlink inside it.
+struct TempDir(std::path::PathBuf);
+
+impl TempDir {
+    fn new() -> std::io::Result<TempDir> {
+        use std::hash::BuildHasher;
+        use std::os::unix::fs::DirBuilderExt;
+        static MADE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        loop {
+            let n = MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let salt = std::collections::hash_map::RandomState::new().hash_one(n);
+            let path = std::env::temp_dir().join(format!("kio-test-{}-{n}-{salt:016x}", std::process::id()));
+            match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+                Ok(()) => return Ok(TempDir(path)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 

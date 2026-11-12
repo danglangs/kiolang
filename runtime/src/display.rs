@@ -59,6 +59,37 @@ pub unsafe fn outcome(t: &Table, desc: u32, slot: u64) -> (*mut Header, bool) {
     (unsafe { display(t, desc, slot) }, false)
 }
 
+/// The most bytes of an `assert` message, or of each value an `assert_eq` shows, that a failure
+/// prints (lang's `eval::ASSERT_TEXT_MAX`).
+pub const ASSERT_TEXT_MAX: usize = 4096;
+
+/// Clips the UTF-8 text `s` as lang's `eval::clip` does: past `ASSERT_TEXT_MAX` bytes, cut back
+/// to a character boundary and `...` added.
+pub fn clip(s: &mut Vec<u8>) {
+    if s.len() <= ASSERT_TEXT_MAX {
+        return;
+    }
+    let mut end = ASSERT_TEXT_MAX;
+    while end > 0 && s[end] & 0xC0 == 0x80 {
+        end -= 1;
+    }
+    s.truncate(end);
+    s.extend_from_slice(b"...");
+}
+
+/// The value `slot` of descriptor `desc` as an `assert_eq` failure shows it: nested (a `Str`
+/// quoted), clipped.
+///
+/// # Safety
+/// As `display`.
+pub unsafe fn debug(t: &Table, desc: u32, slot: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    // SAFETY: the caller's guarantee.
+    unsafe { write_value(t, desc, slot, &mut out) };
+    clip(&mut out);
+    out
+}
+
 /// # Safety
 /// As `display`.
 unsafe fn write_value(t: &Table, desc: u32, slot: u64, out: &mut Vec<u8>) {

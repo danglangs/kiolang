@@ -335,3 +335,51 @@ fn compiled_agrees_with_the_interpreter() {
         std::panic::resume_unwind(e);
     }
 }
+
+/// T1b: `assert` and `assert_eq` give the interpreter's messages and spans compiled, passing or
+/// failing, on every kind of value; a long value is clipped the same way on both.
+#[test]
+fn asserts_agree() {
+    let programs = [
+        r#"fn main() -> Int { assert(1 < 2, "fine"); assert_eq(1, 1); 7 }"#,
+        r#"fn main() { let n = 3; assert(n == 2, "n is " + n.to_str()); }"#,
+        r#"fn main() { assert(false, ""); }"#,
+        r#"fn main() { assert(false, "{a} {s1} \"q\" é"); }"#,
+        r#"fn main() { assert_eq(2, 3); }"#,
+        r#"fn main() { assert_eq(-1.5, 2.0); }"#,
+        r#"fn main() { let x = 0.0 / 0.0; assert_eq(x, x); }"#,
+        r#"fn main() { assert_eq(0.0, -0.0); assert_eq(true, false); }"#,
+        r#"fn main() { assert_eq((), ()); assert_eq("a\n", "b\t\"c\""); }"#,
+        r#"fn main() { assert_eq([1, 2], [1, 2]); assert_eq([[1], []], [[1], [2]]); }"#,
+        r#"struct P { x: Int, s: Str }
+           fn main() { assert_eq(P { x: 1, s: "a" }, P { x: 1, s: "a" }); assert_eq(P { x: 1, s: "a" }, P { x: 2, s: "a" }); }"#,
+        r#"struct E {}
+           fn main() { assert_eq(E {}, E {}); }"#,
+        r#"enum Shape { Dot, Circle(Int), Box(Int, Str) }
+           fn main() { assert_eq(Shape::Circle(1), Shape::Circle(1)); assert_eq(Shape::Box(1, "a"), Shape::Dot); }"#,
+        r#"fn main() { let a: Option<Int> = None; assert_eq(a, None); assert_eq(Some(1), a); }"#,
+        r#"fn main() { let a: Result<Int, Str> = Err("e"); assert_eq(a, Ok(1)); }"#,
+        r#"fn main() { let mut m: Map<Str, Int> = Map::new(); m.insert("b", 2); m.insert("a", 1);
+                      let mut n = m; assert_eq(m, n); n.insert("c", 3); assert_eq(m, n); }"#,
+        r#"fn main() { let mut m: HashMap<Int, List<Str>> = HashMap::new(); m.insert(2, ["x"]); m.insert(1, []);
+                      let mut n: HashMap<Int, List<Str>> = HashMap::new(); n.insert(1, []); n.insert(2, ["x"]);
+                      assert_eq(m, n); n.insert(3, []); assert_eq(m, n); }"#,
+        r#"fn main() { assert_eq("x".to_bytes(), "y".to_bytes()); }"#,
+        r#"fn same<T: Eq>(a: T, b: T) { assert_eq(a, b); }
+           fn main() { same([Some("a")], [Some("a")]); same(1, 2); }"#,
+        r#"fn main() { let mut s = ""; for i in 0..1500 { s = s + "abé"; } assert_eq(s, "x"); }"#,
+        r#"fn main() { let mut s = ""; for i in 0..5000 { s = s + "é"; } assert(false, s); }"#,
+        r#"fn main() { let mut xs: List<Int> = []; for i in 0..3000 { xs.push(i); } let ys = xs; xs.push(1); assert_eq(xs, ys); }"#,
+        r#"fn main() { let xs = [1]; assert(true, xs[2].to_str()); }"#,
+        r#"fn main() -> Int { let assert = |n: Int| n + 1; assert(1) }"#,
+    ];
+    let caps = CapTable::v0();
+    for src in programs {
+        let params = lang::check(src, &caps)
+            .unwrap_or_else(|d| panic!("{src}\n{d:?}"))
+            .main_params();
+        let (c, i) = (compiled(src, &params), interpreted(src, &params));
+        assert_eq!(c, i, "{src}");
+        assert!(matches!(c.0, End::Done(_)), "{src}");
+    }
+}

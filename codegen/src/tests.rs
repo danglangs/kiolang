@@ -184,7 +184,15 @@ fn a_site_formats_its_template() {
         span,
         template: "index {a} out of bounds for length {b}",
     };
-    assert_eq!(s.message(-1, 3, 0), "index -1 out of bounds for length 3");
+    let none = [String::new(), String::new()];
+    assert_eq!(s.message(-1, 3, 0, &none), "index -1 out of bounds for length 3");
+    // One pass: a text's own `{a}` or `{s1}` is not filled in.
+    let s = Site {
+        span,
+        template: "left `{s0}`, right `{s1}` {c} {x}",
+    };
+    let texts = ["{s1}".to_string(), "{a}".to_string()];
+    assert_eq!(s.message(1, 2, 3, &texts), "left `{s1}`, right `{a}` 3 {x}");
 }
 
 #[test]

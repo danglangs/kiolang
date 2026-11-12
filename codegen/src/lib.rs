@@ -37,18 +37,36 @@ pub struct Wasm {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Site {
     pub span: Span,
-    /// The message; the host replaces `{a}` and `{b}` with `trap`'s arguments, and `{c}` with
-    /// the value a `trap` at the runtime's `EXTRA` site passed before it.
+    /// The message; the host replaces `{a}` and `{b}` with `trap`'s arguments, `{c}` with the
+    /// value a `trap` at the runtime's `EXTRA` site passed before it, and `{s0}` and `{s1}` with
+    /// the texts `trap`s at its `TEXT` site sent.
     pub template: &'static str,
 }
 
 impl Site {
-    /// The message for a `trap(site, a, b)` here, after `trap(EXTRA, c, _)`.
-    pub fn message(&self, a: i64, b: i64, c: i64) -> String {
-        self.template
-            .replace("{a}", &a.to_string())
-            .replace("{b}", &b.to_string())
-            .replace("{c}", &c.to_string())
+    /// The message for a `trap(site, a, b)` here, after `trap(EXTRA, c, _)` and the texts `s`.
+    /// One pass over the template: a text's own `{a}` stays as it is.
+    pub fn message(&self, a: i64, b: i64, c: i64, s: &[String; 2]) -> String {
+        let mut out = String::new();
+        let mut rest = self.template;
+        while let Some(i) = rest.find('{') {
+            out.push_str(&rest[..i]);
+            rest = &rest[i..];
+            let holes: [(&str, &dyn std::fmt::Display); 5] =
+                [("{a}", &a), ("{b}", &b), ("{c}", &c), ("{s0}", &s[0]), ("{s1}", &s[1])];
+            match holes.iter().find(|(h, _)| rest.starts_with(h)) {
+                Some((h, v)) => {
+                    out.push_str(&v.to_string());
+                    rest = &rest[h.len()..];
+                }
+                None => {
+                    out.push('{');
+                    rest = &rest[1..];
+                }
+            }
+        }
+        out.push_str(rest);
+        out
     }
 }
 
@@ -2791,7 +2809,41 @@ impl<'m> FuncGen<'_, 'm> {
             ExprKind::CapCall(cap, method, args) => self.cap_call(*cap, *method, args, &e.ty, e.span),
             ExprKind::Match(scrut, arms) => self.match_expr(scrut, arms, &e.ty),
             ExprKind::Try(x) => self.try_expr(x),
-            ExprKind::Assert(..) | ExprKind::AssertEq(..) => unimplemented!("codegen: assert and assert_eq (T1b)"),
+            // Both operands run first, as in a call; the runtime shows the texts (T1b).
+            ExprKind::Assert(cond, msg) => {
+                let site = self.site(e.span, "assertion failed: {s0}");
+                self.borrowing(&[&**cond, &**msg], |g, temps, _| {
+                    g.get(cond, temps[0]);
+                    g.sink().i32_eqz().if_(BlockType::Empty);
+                    g.get(msg, temps[1]);
+                    g.sink().i32_const(site as i32);
+                    g.call_rt("rt_assert_fail");
+                    g.sink().unreachable().end();
+                });
+            }
+            // Every type as a slot, an unboxed enum or struct boxed, as `==` passes objects.
+            ExprKind::AssertEq(a, b) => {
+                let desc = self.statics.desc(&a.ty);
+                let site = self.site(e.span, "assert_eq failed: left `{s0}`, right `{s1}`");
+                self.borrowing(&[&**a, &**b], |g, temps, borrowed| {
+                    g.sink().i32_const(desc as i32);
+                    let mut boxes = Vec::new();
+                    for (i, (x, t)) in [a, b].into_iter().zip(temps).enumerate() {
+                        if g.boxes(&x.ty) {
+                            boxes.push(g.box_operand(x, *t, borrowed[i]));
+                            g.sink().i64_extend_i32_u();
+                        } else {
+                            g.get(x, *t);
+                            g.slot_in(&x.ty);
+                        }
+                    }
+                    g.sink().i32_const(site as i32);
+                    g.call_rt("rt_assert_eq");
+                    for bx in boxes {
+                        g.dec(bx);
+                    }
+                });
+            }
         }
         if e.ty == Ty::Never {
             self.sink().unreachable();
