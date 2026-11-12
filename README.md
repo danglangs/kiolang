@@ -160,6 +160,7 @@ v0, working end to end.
 | Language | structs, enums, generics, closures, `match` with nested and `\|` patterns, `let`-else, constants, `Float`, `HashMap`, built-in JSON, SHA-256 |
 | Resources, each a grant | files (`Dir`), a key-value store (`Kv`), SQLite (`Db`), an HTTP client (`Http`: any granted method, headers, parallel `send_all`), `Rng`, `Clock`, `Log`, `Hmac` (sign and verify under a key the program never holds); serving HTTP and WebSockets |
 | Safety | the authority report before a run; a Wasm sandbox with fuel, memory, time, call and I/O limits; an audit log |
+| Tests | `#[test]` functions with `assert`/`assert_eq`; `kio test` runs each compiled, with throwaway grants (a temp dir, in-memory stores, a fixed clock, a seeded random source) |
 | Speed | compiled to native code through Wasm: 1.1-2.3x Rust on compute, 2.1-7.3x where it allocates; faster than Python on most benchmarks ([table](docs/roadmap.md#speed-today)) |
 
 ## Choosing kio today
@@ -201,7 +202,7 @@ kio is a Rust subset on purpose, and its errors name the fix. Without the refere
 
 ## Roadmap
 
-- **Now:** a flagship application, a durable workflow service (webhook ingestion, a job queue, retries, idempotency, an API and a CLI), to prove kio at a larger scale; `kio test` with property-based tests, so a change ships with correctness evidence beside its authority diff.
+- **Now:** a flagship application, a durable workflow service (webhook ingestion, a job queue, retries, idempotency, an API and a CLI), to prove kio at a larger scale; property-based tests on top of `kio test`, so a change ships with correctness evidence beside its authority diff.
 - **Next:** packages, and narrowing a capability for a helper (a subdirectory, read-only, one host), as the application needs them; benchmark gates in CI so speed never regresses silently.
 - **Later:** contracts the application shows it needs; `par_map` and tasks (pinned).
 
