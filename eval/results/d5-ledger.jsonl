@@ -1,0 +1,12 @@
+{"job": "01-totals", "cost_usd": 0.07906, "input_tokens": 43997, "output_tokens": 1752, "time": 1794444430}
+{"job": "01-totals", "cost_usd": 0.03306, "input_tokens": 44025, "output_tokens": 1838, "time": 1794444462}
+{"job": "02-duplicates", "cost_usd": 0.01483, "input_tokens": 42243, "output_tokens": 426, "time": 1794444467}
+{"job": "03-join-country", "cost_usd": 0.04271, "input_tokens": 68784, "output_tokens": 1904, "time": 1794444479}
+{"job": "04-top3", "cost_usd": 0.0389, "input_tokens": 66206, "output_tokens": 1883, "time": 1794444492}
+{"job": "05-rejects", "cost_usd": 0.02715, "input_tokens": 43530, "output_tokens": 1373, "time": 1794444501}
+{"job": "06-date-range", "cost_usd": 0.02297, "input_tokens": 43371, "output_tokens": 995, "time": 1794444507}
+{"job": "07-errors-per-day", "cost_usd": 0.02485, "input_tokens": 43180, "output_tokens": 1216, "time": 1794444516}
+{"job": "08-clean-csv", "cost_usd": 0.03491, "input_tokens": 44939, "output_tokens": 1799, "time": 1794444528}
+{"job": "09-summary-json", "cost_usd": 0.03446, "input_tokens": 44187, "output_tokens": 1949, "time": 1794444541}
+{"job": "10-over-threshold", "cost_usd": 0.02607, "input_tokens": 43345, "output_tokens": 1308, "time": 1794444549}
+{"job": "11-http-eur", "cost_usd": 0.03487, "input_tokens": 44462, "output_tokens": 1940, "time": 1794444561}
