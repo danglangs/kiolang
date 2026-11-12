@@ -217,6 +217,9 @@ pub enum ExprKind {
     /// `assert_eq(a, b)`: both evaluated, then the run stops with "assert_eq failed: left
     /// `<a>`, right `<b>`" (as `eval::debug` shows them) unless `a == b`, as `BinOp::Eq`.
     AssertEq(Box<Expr>, Box<Expr>),
+    /// `assume(cond)`, only in a test: the run stops with `eval::DISCARDED` if `cond` is false,
+    /// and `kio test` discards the case.
+    Assume(Box<Expr>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

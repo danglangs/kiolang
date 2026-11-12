@@ -19,7 +19,16 @@ pub trait Caps {
     /// Runs `method` on the capability granted as `cap`. `Ok` must have the method's declared
     /// type; `Err` is a host failure that stops the run.
     fn call(&mut self, cap: &str, method: &str, args: Vec<Value>) -> Result<Value, String>;
+    /// Called on every function call and loop pass; `Err` stops the run, as a host failure in
+    /// `call` does. The host bounds an interpreted run's time with it (`kio test`'s cases).
+    fn tick(&mut self) -> Result<(), String> {
+        Ok(())
+    }
 }
+
+/// The error `assume(false)` stops a run with; `kio test` discards that case. Compiled code
+/// stops with the same message.
+pub const DISCARDED: &str = "discarded by assume";
 
 /// `==` is structural, and IEEE on floats (`NaN != NaN`), as Rust's derived `PartialEq`.
 #[derive(Debug, Clone, PartialEq)]
@@ -267,6 +276,10 @@ struct Interp<'a> {
 }
 
 impl<'a> Interp<'a> {
+    fn tick(&mut self, span: Span) -> Result<(), Box<Stop>> {
+        self.caps.tick().map_err(|msg| fail(span, &msg))
+    }
+
     fn local(&mut self, id: LocalId) -> &mut Value {
         &mut self.stack[self.base + id.0 as usize]
     }
@@ -372,6 +385,7 @@ impl<'a> Interp<'a> {
 
     /// Runs one pass of a loop body. False when it ends the loop with `break`.
     fn iteration(&mut self, body: &'a Block) -> Result<bool, Box<Stop>> {
+        self.tick(Span::default())?;
         match self.block(body) {
             Ok(_) => Ok(true),
             Err(s) => match *s {
@@ -583,6 +597,10 @@ impl<'a> Interp<'a> {
             ExprKind::Try(x) => self.try_expr(x),
             ExprKind::Assert(a, b) => self.assert(a, b, false, e.span),
             ExprKind::AssertEq(a, b) => self.assert(a, b, true, e.span),
+            ExprKind::Assume(c) => match self.cond(c)? {
+                true => Ok(Value::Unit),
+                false => Err(fail(e.span, DISCARDED)),
+            },
         }
     }
 
@@ -691,6 +709,10 @@ impl<'a> Interp<'a> {
     /// Runs `f`, whose arguments are on the stack from `base`.
     fn enter(&mut self, f: FuncId, base: usize) -> Res {
         let func = &self.m.funcs[f.0 as usize];
+        if let Err(s) = self.tick(func.span) {
+            self.stack.truncate(base);
+            return Err(s);
+        }
         self.stack.resize(base + func.locals.len(), Value::Unit);
         let caller = std::mem::replace(&mut self.base, base);
         self.calls += 1;
@@ -1050,7 +1072,7 @@ fn pure(e: &Expr) -> bool {
         ExprKind::Local(_) | ExprKind::MapNew | ExprKind::FnRef(_) | ExprKind::Closure(..) => true,
         ExprKind::CallValue(f, xs) => pure(f) && xs.iter().all(pure),
         ExprKind::Block(_) | ExprKind::If(..) | ExprKind::Match(..) | ExprKind::Mutate(..) => false,
-        ExprKind::Unary(_, x) | ExprKind::Field(x, _) | ExprKind::Try(x) => pure(x),
+        ExprKind::Unary(_, x) | ExprKind::Field(x, _) | ExprKind::Try(x) | ExprKind::Assume(x) => pure(x),
         ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Assert(a, b) | ExprKind::AssertEq(a, b) => {
             pure(a) && pure(b)
         }

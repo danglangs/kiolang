@@ -204,7 +204,9 @@ impl Analysis<'_> {
             | ExprKind::Unit
             | ExprKind::FnRef(_)
             | ExprKind::MapNew => {}
-            ExprKind::Unary(_, x) | ExprKind::Field(x, _) | ExprKind::Try(x) => self.expr(x, live),
+            ExprKind::Unary(_, x) | ExprKind::Field(x, _) | ExprKind::Try(x) | ExprKind::Assume(x) => {
+                self.expr(x, live)
+            }
             // The right side runs only on some paths.
             ExprKind::Binary(ir::BinOp::And | ir::BinOp::Or, a, b) => {
                 let mut r = live.clone();
@@ -296,7 +298,7 @@ fn each_local(e: &Expr, f: &mut impl FnMut(LocalId, bool)) {
         | ExprKind::Unit
         | ExprKind::FnRef(_)
         | ExprKind::MapNew => {}
-        ExprKind::Unary(_, x) | ExprKind::Field(x, _) | ExprKind::Try(x) => each_local(x, f),
+        ExprKind::Unary(_, x) | ExprKind::Field(x, _) | ExprKind::Try(x) | ExprKind::Assume(x) => each_local(x, f),
         ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Assert(a, b) | ExprKind::AssertEq(a, b) => {
             each_local(a, f);
             each_local(b, f);
@@ -492,7 +494,7 @@ impl Uses<'_> {
             | ExprKind::Unit
             | ExprKind::FnRef(_)
             | ExprKind::MapNew => {}
-            ExprKind::Unary(_, x) => self.owned(x),
+            ExprKind::Unary(_, x) | ExprKind::Assume(x) => self.owned(x),
             ExprKind::Field(x, _) | ExprKind::Try(x) => self.borrowed(x),
             // On pointers only `==`, `!=` and `+`, which borrow; the rest are on scalars.
             ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Assert(a, b) | ExprKind::AssertEq(a, b) => {

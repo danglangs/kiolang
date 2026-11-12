@@ -11,6 +11,7 @@ pub mod json;
 pub mod lex;
 pub mod lower;
 pub mod parse;
+pub mod prop;
 pub mod report;
 pub mod sort;
 

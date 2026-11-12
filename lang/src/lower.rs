@@ -662,6 +662,10 @@ impl<'a> Lowerer<'a> {
     fn call(&mut self, ty: &check::Ty, callee: &'a ast::Expr, args: &'a [ast::Expr]) -> ir::ExprKind {
         let k = match &callee.kind {
             ExprKind::Name(name) if builtin(name).is_some() => return self.variant_value(ty, name, args),
+            ExprKind::Name(name) if self.local(name).is_none() && name == "assume" => {
+                let [a] = args else { unreachable!("checked assume") };
+                return ir::ExprKind::Assume(Box::new(self.expr(a)));
+            }
             ExprKind::Name(name) if self.local(name).is_none() && (name == "assert" || name == "assert_eq") => {
                 let [a, b] = args else { unreachable!("checked assert") };
                 let (a, b) = (Box::new(self.expr(a)), Box::new(self.expr(b)));

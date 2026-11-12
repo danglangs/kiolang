@@ -2821,6 +2821,12 @@ impl<'m> FuncGen<'_, 'm> {
                     g.sink().unreachable().end();
                 });
             }
+            ExprKind::Assume(cond) => {
+                let [a, ..] = self.scratch();
+                self.expr(cond);
+                self.sink().i32_eqz();
+                self.trap_if(e.span, lang::eval::DISCARDED, a, a);
+            }
             // Every type as a slot, an unboxed enum or struct boxed, as `==` passes objects.
             ExprKind::AssertEq(a, b) => {
                 let desc = self.statics.desc(&a.ty);

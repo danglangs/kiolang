@@ -277,7 +277,12 @@ pub fn entry_authority(p: &Program, entry: &str) -> Authority {
     let f = &p.funcs[entry];
     let mut a = Authority::default();
     a.funcs.insert("main".into(), own_uses(&mut uses(p), entry, f));
-    a.main = f.params.iter().map(|d| (d.name.clone(), type_str(&d.ty))).collect();
+    // A property's data parameters are generated inputs, not grants.
+    let caps = f
+        .params
+        .iter()
+        .filter(|d| matches!(&d.ty.kind, TypeKind::Named(n, a) if a.is_empty() && p.is_cap(n)));
+    a.main = caps.map(|d| (d.name.clone(), type_str(&d.ty))).collect();
     a
 }
 

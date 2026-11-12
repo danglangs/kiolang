@@ -306,6 +306,11 @@ impl Printer<'_> {
                 self.expr(out, x, depth);
                 *out += "?";
             }
+            ExprKind::Assume(x) => {
+                *out += "assume(";
+                self.expr(out, x, depth);
+                *out += ")";
+            }
             ExprKind::Assert(a, b) | ExprKind::AssertEq(a, b) => {
                 *out += if matches!(e.kind, ExprKind::Assert(..)) {
                     "assert("
@@ -873,6 +878,10 @@ impl Types<'_> {
             ExprKind::Unary(_, x) | ExprKind::Try(x) => {
                 self.expr(x);
                 None
+            }
+            ExprKind::Assume(x) => {
+                self.expr(x);
+                Some(Ty::Unit)
             }
             ExprKind::Binary(op, a, b) => {
                 self.expr(a);

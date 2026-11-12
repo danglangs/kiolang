@@ -76,13 +76,15 @@ pub struct TestFn {
     /// The module it is in; empty for the root file.
     pub module: String,
     pub span: Span,
-    /// Name and capability type of each parameter, in order, as `main_params` gives them.
+    /// Name and capability type of each capability parameter, in order, as `main_params` gives them.
     pub params: Vec<(String, String)>,
+    /// Name and type of each data parameter, in order: a property's generated inputs (T2).
+    pub inputs: Vec<(String, String)>,
     /// `()` or `Result<(), E>`.
     pub ret: Ty,
 }
 
-/// Name and type name of each parameter of `f`, whose parameters are all capabilities.
+/// Name and type name of each parameter of `main`, whose parameters are all capabilities.
 fn cap_params(f: &Fn) -> Vec<(String, String)> {
     (f.params.iter())
         .filter_map(|p| match &p.ty.kind {
@@ -103,12 +105,19 @@ impl Program {
     pub fn tests(&self) -> Vec<TestFn> {
         let mut tests: Vec<TestFn> = (self.funcs.iter())
             .filter(|(_, f)| f.test)
-            .map(|(k, f)| TestFn {
-                name: k.clone(),
-                module: module_of(k).to_string(),
-                span: f.span,
-                params: cap_params(f),
-                ret: self.sigs[k].ret.clone(),
+            .map(|(k, f)| {
+                let sig = &self.sigs[k];
+                let (caps, data): (Vec<_>, Vec<_>) = (f.params.iter().zip(&sig.params))
+                    .map(|(p, ty)| (p.name.clone(), ty))
+                    .partition(|(_, ty)| matches!(ty, Ty::Cap(_)));
+                TestFn {
+                    name: k.clone(),
+                    module: module_of(k).to_string(),
+                    span: f.span,
+                    params: caps.into_iter().map(|(n, ty)| (n, ty.to_string())).collect(),
+                    inputs: data.into_iter().map(|(n, ty)| (n, ty.to_string())).collect(),
+                    ret: sig.ret.clone(),
+                }
             })
             .collect();
         tests.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1365,10 +1374,6 @@ fn signature(
             let hint = "`main` parameters must be capabilities, like `input: Dir`";
             return Err(err(p.span, msg, Some(hint)));
         }
-        if f.test && !matches!(ty, Ty::Cap(_)) {
-            let msg = "a test's parameters are capabilities the runner grants".to_string();
-            return Err(err(p.span, msg, Some("build the value inside the test")));
-        }
         params.push(ty);
     }
     let typed: Vec<_> = f
@@ -1539,7 +1544,7 @@ fn not_builtin(name: &str, span: Span) -> Result<(), Diag> {
 }
 
 /// The built-in functions, which no function may be named.
-const BUILTIN_FNS: [&str; 2] = ["assert", "assert_eq"];
+const BUILTIN_FNS: [&str; 3] = ["assert", "assert_eq", "assume"];
 
 /// The enum and variant index of the built-in constructors `None`, `Some`, `Ok` and `Err`.
 pub(crate) fn builtin(name: &str) -> Option<(&'static str, usize)> {
@@ -2194,6 +2199,7 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable, need_main: bool) -> Result
             captures: HashMap::new(),
             item_uses: HashMap::new(),
             uses: Vec::new(),
+            in_test: false,
         };
         diags.extend(sig_err.or_else(|| c.function(f).err()));
         // The types this function's lowering names that are or may become (by substituting
@@ -2491,6 +2497,8 @@ struct Checker<'a> {
     item_uses: HashMap<Span, String>,
     /// The uses of generic functions in this function, closures included.
     uses: Vec<Use>,
+    /// Whether the function being checked is a `#[test]`, where `assume` may be called.
+    in_test: bool,
 }
 
 impl<'a> Checker<'a> {
@@ -2508,6 +2516,14 @@ impl<'a> Checker<'a> {
         });
         self.scopes = vec![params.collect()];
         self.ret = sig.ret.clone();
+        self.in_test = sig.test;
+        // A property's data parameters are generated (`prop::generate`): no function inside.
+        for (p, ty) in f.params.iter().zip(&sig.params) {
+            if sig.test && !matches!(ty, Ty::Cap(_)) && self.has_fn(ty) {
+                let msg = format!("a test cannot take `{ty}`");
+                return Err(err(p.span, msg, Some("build it inside the test")));
+            }
+        }
         let found = self.block(&f.body, Some(&sig.ret))?;
         if f.body.tail.is_none() && found == Ty::Unit && sig.ret != Ty::Unit {
             let msg = format!("missing return: `{}` must return {}", f.name, sig.ret);
@@ -3869,8 +3885,24 @@ impl<'a> Checker<'a> {
         Ok(sig.ret.clone())
     }
 
-    /// `assert(cond, msg)`, or `assert_eq(a, b)` on two values `==` accepts.
+    /// `assert(cond, msg)`, `assert_eq(a, b)` on two values `==` accepts, or `assume(cond)` in a test.
     fn assert_call(&mut self, e: &Expr, name: &str, args: &[Expr]) -> Result<Ty, Diag> {
+        if name == "assume" {
+            if !self.in_test {
+                let hint = "skip the work with `if`, or move the check into a `#[test]` function";
+                return Err(err(e.span, "`assume` is only for tests".to_string(), Some(hint)));
+            }
+            let [a] = args else {
+                let msg = format!("`assume` takes 1 argument, found {}", args.len());
+                return Err(err(
+                    e.span,
+                    msg,
+                    Some("`assume` is declared as `fn assume(cond: Bool)`"),
+                ));
+            };
+            want_expr(a, &self.expr(a, Some(&Ty::Bool))?, &Ty::Bool)?;
+            return Ok(Ty::Unit);
+        }
         let [a, b] = args else {
             let decl = match name {
                 "assert" => "fn assert(cond: Bool, msg: Str)",

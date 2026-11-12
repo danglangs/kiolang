@@ -156,10 +156,10 @@ fn test_signature_rules() {
         "Result<Int, Str>",
     );
     rejects(
-        "#[test]\nfn t(d: Dir, n: Int) {}\nfn main() {}",
-        "a test's parameters are capabilities the runner grants",
-        "build the value inside the test",
-        "n: Int",
+        "#[test]\nfn t(d: Dir, f: fn(Int) -> Int) {}\nfn main() {}",
+        "a test cannot take `fn(Int) -> Int`",
+        "build it inside the test",
+        "f: fn(Int) -> Int",
     );
     rejects(
         "#[test]\nfn main() {}",

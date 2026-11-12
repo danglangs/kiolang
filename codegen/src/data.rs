@@ -384,7 +384,7 @@ impl<'m> Statics<'m> {
             | ExprKind::MapNew
             | ExprKind::FnRef(_)
             | ExprKind::Closure(..) => {}
-            ExprKind::Unary(_, x) | ExprKind::Field(x, _) | ExprKind::Try(x) => self.expr(x),
+            ExprKind::Unary(_, x) | ExprKind::Field(x, _) | ExprKind::Try(x) | ExprKind::Assume(x) => self.expr(x),
             ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Assert(a, b) | ExprKind::AssertEq(a, b) => {
                 self.expr(a);
                 self.expr(b);
