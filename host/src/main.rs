@@ -79,6 +79,10 @@ fn command(args: &[String]) -> i32 {
             fail("`--json` reports one run or check; `kio mcp` serves many\n  hint: drop --json".into())
         }
         ["mcp"] => mcp::serve(),
+        ["--version"] => {
+            println!("kio {} ({})", env!("CARGO_PKG_VERSION"), env!("KIO_COMMIT"));
+            0
+        }
         ["run", path, ref flags @ ..] => run(path, flags, false),
         _ if json_out() => fail(format!("usage: {}", HELP.replace("{USAGE}", USAGE))),
         _ => {
@@ -90,7 +94,7 @@ fn command(args: &[String]) -> i32 {
 }
 
 /// The commands, `{USAGE}` standing for `kio run`'s flags.
-const HELP: &str = "kio check <prog.kio> [--base <old.kio> [--detail]]\n       kio check <prog.kio> --grants <file> [flags]\n       kio mcp\n       kio run <prog.kio> {USAGE}";
+const HELP: &str = "kio --version\n       kio check <prog.kio> [--base <old.kio> [--detail]]\n       kio check <prog.kio> --grants <file> [flags]\n       kio mcp\n       kio run <prog.kio> {USAGE}";
 
 /// The root file, then `NAME.kio` beside it for each `mod NAME;` line. This is operator input,
 /// read by the host like the root; the program never sees the filesystem.
