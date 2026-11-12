@@ -96,7 +96,7 @@ Allocation speed is paused after C8c3 (inlining, done) for the pilot phase; next
 
 ## Waiting on the maintainer
 
-D1 (first job, release archives) is built; publishing needs approval: push a `v*` tag, which uploads macOS and Linux archives to a draft release, then publish the draft (docs/first-job.md links `releases/latest`). Signing the macOS binary needs an Apple account (#232). Tuples stay deferred (today a hint, L20) unless an eval shows models still reach for them. Approved: L21-L26, H22, H23 (a caps.wit change), P4 (the grants file), E3, E3b (2026-11-11) and C8c9 (per-loop fuel, after C8c4 and C8c3, with a security review); C8c9 stays waiting on its turn in the queue.
+D1: draft release `v0.1.0` (macOS arm64 and Linux archives, built and tested by the release workflow) waits on approval to publish; docs/first-job.md links `releases/latest`, and the README links first-job.md once published. Signing the macOS binary needs an Apple account (#232). Tuples stay deferred (today a hint, L20) unless an eval shows models still reach for them. Approved: L21-L26, H22, H23 (a caps.wit change), P4 (the grants file), E3, E3b (2026-11-11) and C8c9 (per-loop fuel, after C8c4 and C8c3, with a security review); C8c9 stays waiting on its turn in the queue.
 
 ## Speed (C8b5 with C8b6, C8b7, C8c1, C8c2, C8c8, C8c4 and C8c3 marked, 2026-11-09, release, run time; all in [roadmap.md](roadmap.md))
 
