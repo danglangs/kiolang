@@ -74,6 +74,10 @@ Review permission changes through the authority diff; use code review and tests 
 
 ## Quickstart
 
+No Rust needed: [your first job in 10 minutes](docs/first-job.md) downloads a [release](https://github.com/danglangs/kiolang/releases/latest) (macOS Apple silicon, Linux x86_64) and runs a program that POSTs to an API with a key it never sees.
+
+From source:
+
 ```
 rustup target add wasm32-unknown-unknown
 cargo install --git https://github.com/danglangs/kiolang kio
@@ -203,6 +207,7 @@ source ─► check + report ─► lower ─► IR ─┬─► codegen ─► 
 
 ## Docs
 
+- [docs/first-job.md](docs/first-job.md): download a release and run a first job, no Rust.
 - [docs/guide.md](docs/guide.md): every grant, flag, limit and the audit log.
 - [docs/tour.md](docs/tour.md): walkthroughs: a helper that gains the network (report, `--base`, the audit log), replaying a run.
 - [docs/language.md](docs/language.md): the language and the rules the checker enforces.
