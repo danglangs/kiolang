@@ -2,16 +2,20 @@
 
 # kio-lang
 
-**Run AI-written code with exactly the authority you grant, and see every permission a change adds in one line.**
+**A general-purpose language for code AI agents write: review the contracts and the evidence, not every line.**
 
-kio is an experimental language and runtime (v0) for agent-written file jobs, API integrations and small backend services. What a program can touch is checked from its code, the host enforces it, and `kio check --base` prints what a change adds: the safety you would otherwise assemble around Python or any general-purpose language (a sandbox, an egress proxy, a secret store, an authority report), built in. It fits where explicit authority matters more than a library ecosystem; if your task leans on Python packages, or already runs in a maintained hardened sandbox, Python may be the better fit.
+kio is an experimental (v0) language and runtime for generated software. It combines explicit authority, enforced isolation, value semantics and a compiler built for predictable performance. Its goal is software that is easy to approve, operate and change because its contracts are checked and its runs leave evidence.
 
-## Why kio, not a general-purpose language?
+The first contract is authority, and it works today: what a program can touch is checked from its code, the host enforces it, and `kio check --base` prints what a change adds in one line. The safety you would otherwise assemble around Python (a sandbox, an egress proxy, a secret store, an authority report) is built in. Correctness and performance evidence (tests, properties, resource budgets) come next ([roadmap](#roadmap)).
+
+kio runs file jobs, API integrations and stateful web services today; its libraries and tooling are young ([choosing kio today](#choosing-kio-today)).
+
+## Why a new language for generated software?
 
 - **"Can't I just sandbox Python?"** Yes, with work. On 55 prompt-injection attacks ([E3](docs/proposals/e3-scorecard.md)), Python sandboxed by a careful team stopped 52, the same as kio; it took an egress proxy that injects keys and filters methods, a sandbox profile per task and watchdogs. In kio that is flags on `kio run`.
 - **"How do I review a change?"** Permissions through the authority diff: 1-2 exact lines in E3, against an 80-90 line source diff where scanners guess. What the program does with those permissions (an SQL statement, a payload, a deletion path) still takes code review and tests.
 - **"Can agents write it?"** It is a Rust subset on purpose. Given the language reference (`kio mcp`), Haiku, Sonnet and Opus pass 42-43 of 45 backend tasks first try (Python: 39-45) and all 45 by try 5.
-- **"What does it not do?"** Stop misuse of what you granted: a program that may read `customers/` and call `partner.example` can send one to the other. Few libraries yet, and agents spend about 2x the tokens writing it today.
+- **"What does it not check yet?"** Whether the code is right inside its grants: a program can stay within every permission and still compute the wrong invoice, or send `customers/` to a granted partner. Today that takes tests and code review; checked correctness evidence is the next stage.
 
 | | kio | Python, careful sandbox | Python, common practice |
 |---|---|---|---|
@@ -158,6 +162,11 @@ v0, working end to end.
 | Safety | the authority report before a run; a Wasm sandbox with fuel, memory, time, call and I/O limits; an audit log |
 | Speed | compiled to native code through Wasm: 1.1-2.3x Rust on compute, 2.1-7.3x where it allocates; faster than Python on most benchmarks ([table](docs/roadmap.md#speed-today)) |
 
+## Choosing kio today
+
+- **A good fit:** agent-written jobs and services where you want authority you can review and enforce: file processing, API integrations, webhooks, web services with state.
+- **Not yet:** work that leans on a library ecosystem (no packages yet, and no FFI by design), or that already runs in a maintained hardened sandbox. Agents spend about 2x the tokens writing kio as Python today.
+
 ## Use from an agent
 
 `kio mcp` is an MCP server on stdio with two tools: `kio_primer` (idioms, then the language reference) and `kio_check` (errors come back as `{file, line, message, hint}`). There is no run tool: grants are the operator's decision.
@@ -192,9 +201,9 @@ kio is a Rust subset on purpose, and its errors name the fix. Without the refere
 
 ## Roadmap
 
-- **Now:** allocation speed (unboxed enums and small structs, borrowed loop variables and reused conversions are in; inlining in progress; per-loop fuel, inline list buffers and cheaper reference counts next).
-- **Next:** packages (a module from another directory); `par_map` and tasks (pinned).
-- **Later:** tuples, if the eval shows models still reach for them.
+- **Now:** a flagship application, a durable workflow service (webhook ingestion, a job queue, retries, idempotency, an API and a CLI), to prove kio at a larger scale; `kio test` with property-based tests, so a change ships with correctness evidence beside its authority diff.
+- **Next:** packages, and narrowing a capability for a helper (a subdirectory, read-only, one host), as the application needs them; benchmark gates in CI so speed never regresses silently.
+- **Later:** contracts the application shows it needs; `par_map` and tasks (pinned).
 
 Where work stands: [docs/status.md](docs/status.md); concurrency: [docs/proposals/concurrency.md](docs/proposals/concurrency.md).
 
