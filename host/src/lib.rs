@@ -137,21 +137,15 @@ pub fn bind_grants(program: &lang::Program, grants: &[(String, &str)]) -> std::r
 /// Check `files` (root first) in the host: the report `kio check` prints (`lang::shown_report`),
 /// or the diagnostics.
 pub fn check_files(files: &[(String, String)]) -> std::result::Result<Report, Vec<Diag>> {
-    check_report(files, false)
+    check_program(files).map(|p| Report {
+        lines: lang::shown_report(&p).lines().map(String::from).collect(),
+    })
 }
 
-/// `check_files`, with every function's line when `all` (`lang::report`, `kio check --all`).
-pub fn check_report(files: &[(String, String)], all: bool) -> std::result::Result<Report, Vec<Diag>> {
+/// Check `files` (root first) in the host: the checked program, or the diagnostics.
+pub fn check_program(files: &[(String, String)]) -> std::result::Result<lang::Program, Vec<Diag>> {
     let pairs: Vec<(&str, &str)> = files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
-    match lang::check_files(&pairs, &lang::CapTable::v0()) {
-        Ok(p) => {
-            let report = if all { lang::report(&p) } else { lang::shown_report(&p) };
-            Ok(Report {
-                lines: report.lines().map(String::from).collect(),
-            })
-        }
-        Err(diags) => Err(diags.into_iter().map(Diag::from).collect()),
-    }
+    lang::check_files(&pairs, &lang::CapTable::v0()).map_err(|diags| diags.into_iter().map(Diag::from).collect())
 }
 
 /// The authority report a run of `entry` (`main`, or a test's key) is held to: `main`'s report,

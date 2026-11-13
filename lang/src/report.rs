@@ -1,6 +1,6 @@
 use crate::ast::*;
 use crate::check::{key, module_of, Program, Ty};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 /// Methods reachable on each capability parameter, keyed by (function, parameter).
 type Uses = BTreeMap<(String, String), BTreeSet<String>>;
@@ -45,53 +45,91 @@ fn lines<'a>(funcs: impl Iterator<Item = Line<'a>>, width: usize) -> Vec<String>
     lines
 }
 
-/// The report `kio check` prints (P8): `main`, and each function it reaches that uses a
-/// capability; then, after a heading, each that only a test reaches and uses one; then a count of
-/// the rest. `report` prints every function and is what the host checks a run against; this
-/// view is never checked.
+/// The report `kio check` prints (P8), as parts. `report` prints every function and is what the
+/// host checks a run against; this view is never checked.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Shown {
+    /// `main`'s line, then each function `main` reaches that uses a capability.
+    pub main: Vec<String>,
+    /// Each function only a test reaches that uses a capability (test functions are left out).
+    pub tests: Vec<String>,
+    /// Functions reached, from `main` or a test, that use no capability.
+    pub no_capability: usize,
+    /// Functions nothing reaches, and how many of them use a capability.
+    pub unreached: usize,
+    pub unreached_with_capability: usize,
+}
+
+impl Shown {
+    /// The lines; then, after a blank line, `reached only from tests:` and its lines; then, after
+    /// a blank line, a count of the rest.
+    pub fn text(&self) -> String {
+        let mut out = self.main.clone();
+        if !self.tests.is_empty() {
+            out.extend(["".into(), "reached only from tests:".into()]);
+            out.extend(self.tests.iter().cloned());
+        }
+        let mut rest = Vec::new();
+        let (quiet, unreached, caps) = (self.no_capability, self.unreached, self.unreached_with_capability);
+        if quiet > 0 {
+            rest.push(format!(
+                "{quiet} more use{} no capability",
+                if quiet == 1 { "s" } else { "" }
+            ));
+        }
+        if unreached > 0 {
+            let with = match caps {
+                0 => String::new(),
+                n => format!(" ({n} use{} a capability)", if n == 1 { "s" } else { "" }),
+            };
+            rest.push(format!(
+                "{unreached} {} unreached{with}",
+                if unreached == 1 { "is" } else { "are" }
+            ));
+        }
+        if !rest.is_empty() {
+            out.extend(["".into(), format!("{}; --all lists every function", rest.join(", "))]);
+        }
+        out.join("\n")
+    }
+}
+
+/// `shown(p).text()`: what `kio check` prints.
 pub fn shown_report(p: &Program) -> String {
+    shown(p).text()
+}
+
+/// `main`, each function it reaches that uses a capability, each only a test reaches that uses
+/// one, and counts of the rest.
+pub fn shown(p: &Program) -> Shown {
     let a = authority(p);
     let from_main = reachable(p, ["main"]);
     let from_tests = reachable(p, p.funcs.iter().filter(|(_, f)| f.test).map(|(k, _)| k.as_str()));
-    let (mut main, mut tests, mut quiet, mut unreached) = (Vec::new(), Vec::new(), 0, 0);
+    let (mut main, mut tests, mut s) = (Vec::new(), Vec::new(), Shown::default());
     for line @ (k, params) in &a.funcs {
         match (from_main.contains(k), from_tests.contains(k)) {
             _ if k == "main" => main.insert(0, line),
-            (false, false) => unreached += 1,
-            _ if params.is_empty() => quiet += 1,
+            (false, false) => {
+                s.unreached += 1;
+                s.unreached_with_capability += usize::from(!params.is_empty());
+            }
+            _ if params.is_empty() => s.no_capability += 1,
             (true, _) => main.push(line),
             (false, true) => tests.push(line),
         }
     }
     let width = main.iter().chain(&tests).map(|(n, _)| n.len()).max().unwrap_or(0) + 1;
-    let mut out = lines(main.into_iter(), width);
-    if !tests.is_empty() {
-        out.extend(["".into(), "reached only from tests:".into()]);
-        out.extend(lines(tests.into_iter(), width));
-    }
-    let mut rest = Vec::new();
-    if quiet > 0 {
-        rest.push(format!(
-            "{quiet} more use{} no capability",
-            if quiet == 1 { "s" } else { "" }
-        ));
-    }
-    if unreached > 0 {
-        rest.push(format!(
-            "{unreached} {} unreached",
-            if unreached == 1 { "is" } else { "are" }
-        ));
-    }
-    if !rest.is_empty() {
-        out.extend(["".into(), format!("{}; --all lists every function", rest.join(", "))]);
-    }
-    out.join("\n")
+    s.main = lines(main.into_iter(), width);
+    s.tests = lines(tests.into_iter(), width);
+    s
 }
 
 /// Every function a call of `roots` may run, `roots` included. A function counts once a reached
 /// body names it, called or not: as a value passed, returned or stored in a struct, list or map,
-/// in a closure (called or not) or in dead code, under any type arguments. A name counts as the
-/// checker resolved it and also by its spelling, so a gap in either over-reports.
+/// in a closure (called or not) or in dead code, under any type arguments. A name is taken as the
+/// checker resolved it; one it did not record (a local holding a function value, say) is taken as
+/// the function of that spelling in the body's own module, as the checker would resolve it. A
+/// module path `web::f` names only `web::f`, never the caller's own `f`.
 pub fn reachable<'a>(p: &Program, roots: impl IntoIterator<Item = &'a str>) -> BTreeSet<String> {
     let mut seen = BTreeSet::new();
     let mut todo: Vec<String> = roots.into_iter().map(String::from).collect();
@@ -101,14 +139,20 @@ pub fn reachable<'a>(p: &Program, roots: impl IntoIterator<Item = &'a str>) -> B
             continue;
         }
         let module = module_of(&k);
+        // The inner name of each `web::f` seen: resolved by its `Module` expression, not here.
+        let mut pathed = HashSet::new();
         walk_block(&f.body, &mut |n| {
             let Node::Expr(e) = n else { return };
-            todo.extend(p.item_uses.get(&e.span).cloned());
             todo.extend(p.instances.get(&e.span).map(|(g, _)| g.clone()));
+            let resolved = p.item_uses.get(&e.span);
+            todo.extend(resolved.cloned());
             match &e.kind {
-                ExprKind::Name(g) | ExprKind::Turbofish(g, _) => todo.extend([key(module, g).into_owned(), g.clone()]),
+                ExprKind::Name(g) | ExprKind::Turbofish(g, _) if resolved.is_none() && !pathed.contains(&e.span) => {
+                    todo.push(key(module, g).into_owned())
+                }
                 ExprKind::Module(m, inner) => {
                     if let ExprKind::Name(g) | ExprKind::Turbofish(g, _) = &inner.kind {
+                        pathed.insert(inner.span);
                         todo.push(format!("{m}::{g}"));
                     }
                 }

@@ -122,7 +122,7 @@ create             : links delete swap, rng int, clock now_ms, log write
 notify             : hook send *, log write
 ...
 
-46 more use no capability, 12 are unreached; --all lists every function
+46 more use no capability, 12 are unreached (2 use a capability); --all lists every function
 $ cat app.grants
 --kv links=links.kv
 --kv auth=auth.kv

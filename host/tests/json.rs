@@ -16,7 +16,20 @@ fn kio(cwd: &Path, args: &[&str]) -> (i32, Value, String) {
     assert!(stdout.ends_with('\n') && stdout.lines().count() == 1, "{stdout:?}");
     let v: Value = serde_json::from_str(&stdout).unwrap();
     let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
-    assert_eq!(keys, ["audit", "diff", "errors", "ok", "report", "used", "value"]);
+    assert_eq!(
+        keys,
+        [
+            "audit",
+            "diff",
+            "errors",
+            "hidden",
+            "ok",
+            "report",
+            "report_tests",
+            "used",
+            "value"
+        ]
+    );
     assert_eq!(v["ok"], json!(v["errors"].as_array().unwrap().is_empty()));
     let stderr = String::from_utf8(out.stderr).unwrap();
     (out.status.code().unwrap(), v, stderr)
@@ -175,6 +188,24 @@ fn a_clean_check_has_the_report() {
         (&v["report"], &v["value"], &v["used"]),
         (&json!(["main : d read"]), &Value::Null, &Value::Null)
     );
+}
+
+#[test]
+fn a_check_reports_test_lines_and_hidden_counts_apart() {
+    // P8: `report` is `main`'s section only; no blank line, heading or footer in it.
+    let app = "mod tests;\nfn pure(n: Int) -> Int { n }\nfn wipe(d: Dir) { let _r = d.remove(\"a\"); }\nfn main(d: Dir) -> Int { let _r = d.read(\"x\"); pure(1) }\n";
+    let tests = "fn peek(d: Dir) { let _r = d.list(\"\"); }\n#[test]\nfn t(d: Dir) { peek(d); }\n";
+    let t = dir(&[("p.kio", app), ("tests.kio", tests)]);
+    let (code, v, err) = kio(t.path(), &["check", "p.kio", "--json"]);
+    assert_eq!((code, err.as_str()), (0, ""));
+    assert_eq!(v["report"], json!(["main        : d read"]));
+    assert_eq!(v["report_tests"], json!(["tests::peek : d list"]));
+    let hidden = json!({"no_capability": 1, "unreached": 1, "unreached_with_capability": 1});
+    assert_eq!(v["hidden"], hidden);
+    // `--all`: every function in `report`, nothing hidden.
+    let (_, v, _) = kio(t.path(), &["check", "p.kio", "--all", "--json"]);
+    assert_eq!(v["report"].as_array().map(Vec::len), Some(4));
+    assert_eq!((&v["report_tests"], &v["hidden"]), (&json!([]), &Value::Null));
 }
 
 #[test]

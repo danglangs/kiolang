@@ -98,7 +98,7 @@ fn tools() -> Value {
         },
         {
             "name": "kio_check",
-            "description": "Check kio source in a sandbox. Returns the authority report, or errors as a JSON array of {file, line, message, hint}.",
+            "description": "Check kio source in a sandbox. Returns the authority report as text: `main`'s line and one `name : param methods` line per function main reaches that uses a capability; then, if any, a blank line, `reached only from tests:` and those lines; then, if any, a blank line and a count of the functions not listed (`N more use no capability, M are unreached (K use a capability); --all lists every function`). On failure, errors as a JSON array of {file, line, message, hint}.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "files": {

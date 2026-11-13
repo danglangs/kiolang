@@ -94,7 +94,7 @@ fn check_shows_what_main_reaches() {
     std::fs::write(d.path().join("tests.kio"), P8_TESTS).unwrap();
     let app = d.path().join("app.kio");
     let app = app.to_str().unwrap();
-    let want = "main          : key verify\ncheck         : key verify\n\nreached only from tests:\ntests::sig_of : key sign\n\n1 is unreached; --all lists every function\n";
+    let want = "main          : key verify\ncheck         : key verify\n\nreached only from tests:\ntests::sig_of : key sign\n\n1 is unreached (1 uses a capability); --all lists every function\n";
     assert_eq!(kio(&["check", app]), (0, want.into(), "".into()));
     let all =
         "check         : key verify\nmain          : key verify\nmint          : key sign\ntests::sig_of : key sign\n";

@@ -917,7 +917,7 @@ fn minter(key: Hmac) -> Int {{ let _s = key.sign("m".to_bytes()); 0 }}
 fn pure(n: Int) -> Int {{ n }}
 fn main(key: Hmac) -> Int {{ check(key) + pure(1) }}"#
     );
-    let want = "main  : key verify\ncheck : key verify\n\n1 more uses no capability, 1 is unreached; --all lists every function";
+    let want = "main  : key verify\ncheck : key verify\n\n1 more uses no capability, 1 is unreached (1 uses a capability); --all lists every function";
     assert_eq!(shown(&[("a.kio", &src)]), want);
     // `--all` is `report`: every function.
     assert_eq!(
@@ -965,9 +965,83 @@ fn signs(key: Hmac) { assert_eq(sig_of(key), 0); }
 #[test]
 fn test_only_helpers_are_shown_apart() {
     let files = [("a.kio", TESTED), ("tests.kio", TESTS)];
-    let text = "main          : key verify\n\nreached only from tests:\ntests::sig_of : key sign\n\n1 is unreached; --all lists every function";
+    let text = "main          : key verify\n\nreached only from tests:\ntests::sig_of : key sign\n\n1 is unreached (1 uses a capability); --all lists every function";
     assert_eq!(shown(&files), text);
     // Not `main`'s authority: the diff from the program without tests is empty.
     let bare = TESTED.replace("mod tests;\n", "");
     assert_eq!(diff(&[("a.kio", &bare)], &files), want(&[], &[], false));
+}
+
+// P8 review: a module function and a root function of the same name are different functions;
+// naming one never reaches the other.
+const SAME_WEB: &str = r#"pub fn f(d: Dir) -> Int { let _r = d.read("a.txt"); 0 }
+fn g(d: Dir) -> Int { f(d) }"#;
+
+#[test]
+fn a_module_path_reaches_only_the_module_function() {
+    // a4: `web::f` in `main` does not reach root `f`; `web::g` calls its own module's `f`.
+    let root = r#"mod web;
+fn f(d: Dir) -> Int { let _r = d.remove("a.txt"); 0 }
+fn main(d: Dir) -> Int { web::f(d) }"#;
+    let files = [("a.kio", root), ("web.kio", SAME_WEB)];
+    let p = lang::check_files(&files, &common::caps()).unwrap();
+    let got: Vec<String> = lang::reachable(&p, ["main"]).into_iter().collect();
+    assert_eq!(got, ["main", "web::f"]);
+    assert_eq!(
+        shown(&files),
+        "main   : d read\nweb::f : d read\n\n2 are unreached (2 use a capability); --all lists every function"
+    );
+}
+
+#[test]
+fn a_bare_name_in_a_module_reaches_only_that_module() {
+    // d4m: `web::check` calls `sign_all`, which is `web::sign_all`, never the root's.
+    let root = r#"mod web;
+fn sign_all(key: Hmac) -> Int { let _s = key.sign("m".to_bytes()); 0 }
+fn main(key: Hmac) -> Bool { web::check(key) }"#;
+    let web = r#"pub fn check(key: Hmac) -> Bool { sign_all(key) == 0 }
+fn sign_all(key: Hmac) -> Int { let _v = key.verify("m".to_bytes(), "x".to_bytes()); 0 }"#;
+    let want = "main          : key verify\nweb::check    : key verify\nweb::sign_all : key verify\n\n1 is unreached (1 uses a capability); --all lists every function";
+    assert_eq!(shown(&[("a.kio", root), ("web.kio", web)]), want);
+}
+
+#[test]
+fn diff_root_function_newly_called_beside_its_module_namesake() {
+    // d2: `main` already called `web::f`; now it calls root `f` too, which counts in full.
+    let old = r#"mod web;
+fn save(d: Dir) -> Int { let _w = d.write("a.txt", "x".to_bytes()); 0 }
+fn f(d: Dir) -> Int { let _c = d.create("new.txt", "x".to_bytes()); 0 }
+fn main(d: Dir) -> Int { save(d) + web::f(d) }"#;
+    let new = old.replace("+ web::f(d) }", "+ web::f(d) + f(d) }");
+    assert_eq!(
+        diff(
+            &[("a.kio", old), ("web.kio", SAME_WEB)],
+            &[("a.kio", &new), ("web.kio", SAME_WEB)]
+        ),
+        // The grant line's gain is covered; `f`'s line is what adds (exit 3).
+        lang::AuthorityDiff {
+            grant_added: false,
+            ..want(
+                &["~ d: Dir (+create); create is covered by write"],
+                &["+ f: d create", "+ main: d create; create is covered by write"],
+                true
+            )
+        }
+    );
+}
+
+#[test]
+fn diff_module_function_newly_called_is_not_its_root_namesake() {
+    // d3: `main` starts calling `web::f`; root `f` stays unreached, so only `web::f` is new.
+    let old = r#"mod web;
+fn f(d: Dir) -> Int { let _c = d.create("new.txt", "x".to_bytes()); 0 }
+fn main(d: Dir) -> Int { let _r = d.read("a.txt"); 0 }"#;
+    let new = old.replace(r#"d.read("a.txt"); 0 }"#, r#"d.read("a.txt"); web::f(d) }"#);
+    assert_eq!(
+        diff(
+            &[("a.kio", old), ("web.kio", SAME_WEB)],
+            &[("a.kio", &new), ("web.kio", SAME_WEB)]
+        ),
+        want(&[], &["+ web::f: d read"], true)
+    );
 }

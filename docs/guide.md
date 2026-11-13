@@ -271,7 +271,9 @@ Each run writes a `start` line (program hash, grants, limits), its calls, and an
 | `ok` | no errors |
 | `value` | `run`: `main`'s value as text; for a `Result`, the `Ok` payload alone, a `Str` unquoted (return `Ok(j.to_json())` to hand back JSON); `null` for `()` and failures |
 | `errors` | `[{"kind", "message", "hint", "file", "line", "col"}]`; `file`, `line`, `col` (1-based, in characters) are `null` without a place |
-| `report` | the authority report's lines |
+| `report` | the authority report's lines: `main`'s, then each function it reaches that uses a capability (`check --all`: every function) |
+| `report_tests` | the lines of functions only a test reaches |
+| `hidden` | the functions counted without a line: `{"no_capability", "unreached", "unreached_with_capability"}`; `null` when no report was made |
 | `diff` | `check --base`: `{"grants", "funcs", "added"}` |
 | `audit` | the `--audit` path (appended across runs) |
 | `used` | `run`: `{"fuel", "calls", "io", "peak_memory", "ms"}` |
@@ -280,11 +282,11 @@ Kinds: `check`, `grant` (a grant that does not bind, exit 1; one the host refuse
 
 ```
 $ kio run job.kio --dir input=in:ro --json
-{"audit":null,"diff":null,"errors":[],"ok":true,"report":["main : input read"],"used":{"calls":1,"fuel":98619,"io":5,"ms":0.5,"peak_memory":1966080},"value":"{\"alice\": 1}"}
+{"audit":null,"diff":null,"errors":[],"hidden":{"no_capability":0,"unreached":0,"unreached_with_capability":0},"ok":true,"report":["main : input read"],"report_tests":[],"used":{"calls":1,"fuel":98619,"io":5,"ms":0.5,"peak_memory":1966080},"value":"{\"alice\": 1}"}
 $ kio run job.kio --json
-{"audit":null,"diff":null,"errors":[{"col":9,"file":"job.kio","hint":"grant it: `--dir input=path`","kind":"grant","line":1,"message":"no grant for `input: Dir`"}],"ok":false,"report":["main : input read"],"used":null,"value":null}
+{"audit":null,"diff":null,"errors":[{"col":9,"file":"job.kio","hint":"grant it: `--dir input=path`","kind":"grant","line":1,"message":"no grant for `input: Dir`"}],"hidden":{"no_capability":0,"unreached":0,"unreached_with_capability":0},"ok":false,"report":["main : input read"],"report_tests":[],"used":null,"value":null}
 $ kio run spin.kio --fuel 1000 --json
-{"audit":null,"diff":null,"errors":[{"col":null,"file":null,"hint":"raise it with --fuel","kind":"fuel","line":null,"message":"out of fuel (limit 1000)"}],"ok":false,"report":["main : none"],"used":{"calls":0,"fuel":1000,"io":0,"ms":0.2,"peak_memory":1179648},"value":null}
+{"audit":null,"diff":null,"errors":[{"col":null,"file":null,"hint":"raise it with --fuel","kind":"fuel","line":null,"message":"out of fuel (limit 1000)"}],"hidden":{"no_capability":0,"unreached":0,"unreached_with_capability":0},"ok":false,"report":["main : none"],"report_tests":[],"used":{"calls":0,"fuel":1000,"io":0,"ms":0.2,"peak_memory":1179648},"value":null}
 ```
 
 ## Tests

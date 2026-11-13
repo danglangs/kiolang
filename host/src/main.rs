@@ -27,9 +27,23 @@ struct JsonOut {
     value: Option<String>,
     errors: Vec<serde_json::Value>,
     report: Vec<String>,
+    /// The lines of functions only a test reaches (P8).
+    report_tests: Vec<String>,
+    /// How many functions the report counts without a line (P8); `null` when none was made.
+    hidden: Option<serde_json::Value>,
     diff: Option<serde_json::Value>,
     audit: Option<String>,
     used: Option<Used>,
+}
+
+/// `--json`'s report fields from `s` (P8): `report` holds `main`'s section only.
+fn set_json_shown(s: &lang::Shown) {
+    let hidden = json!({
+        "no_capability": s.no_capability,
+        "unreached": s.unreached,
+        "unreached_with_capability": s.unreached_with_capability,
+    });
+    set_json(|o| (o.report, o.report_tests, o.hidden) = (s.main.clone(), s.tests.clone(), Some(hidden)));
 }
 
 /// Whether output is `--json`'s object.
@@ -69,6 +83,8 @@ fn cli() -> i32 {
         "value": o.value,
         "errors": o.errors,
         "report": o.report,
+        "report_tests": o.report_tests,
+        "hidden": o.hidden,
         "diff": o.diff,
         "audit": o.audit,
         "used": used,
@@ -147,17 +163,17 @@ fn check(path: &str, all: bool) -> i32 {
         Ok(f) => f,
         Err(code) => return code,
     };
-    match kio_host::check_report(&files, all) {
-        Ok(report) if json_out() => {
-            set_json(|o| o.report = report.lines);
-            0
-        }
-        Ok(report) => {
-            println!("{}", report.lines.join("\n"));
-            0
-        }
-        Err(diags) => print_diags(&files, diags, "check"),
+    let p = match kio_host::check_program(&files) {
+        Ok(p) => p,
+        Err(diags) => return print_diags(&files, diags, "check"),
+    };
+    match (all, json_out()) {
+        (true, true) => set_json(|o| o.report = lang::report(&p).lines().map(String::from).collect()),
+        (true, false) => println!("{}", lang::report(&p)),
+        (false, true) => set_json_shown(&lang::shown(&p)),
+        (false, false) => println!("{}", lang::shown_report(&p)),
     }
+    0
 }
 
 /// The authority `path` adds over `base` and the authority it drops: exit 3 when any was added.
@@ -179,9 +195,11 @@ fn check_base(path: &str, base: &str, detail: bool) -> i32 {
         }
     };
     if json_out() {
-        let report = kio_host::check_files(&new).map_or(vec![], |r| r.lines);
+        if let Ok(p) = kio_host::check_program(&new) {
+            set_json_shown(&lang::shown(&p));
+        }
         let d = json!({"grants": diff.grants, "funcs": diff.funcs, "added": diff.added});
-        set_json(|o| (o.report, o.diff) = (report, Some(d)));
+        set_json(|o| o.diff = Some(d));
         return if diff.added { 3 } else { 0 };
     }
     if diff.grants.is_empty() && diff.funcs.is_empty() {
@@ -816,10 +834,16 @@ fn run_program(
     };
     // The report printed shows what `main` reaches (P8); every check below reads `report`.
     let printed = match &test {
-        Some(_) => report.clone(),
-        None => lang::shown_report(checked),
+        Some(_) => {
+            set_json(|o| o.report = report.lines().map(String::from).collect());
+            report.clone()
+        }
+        None => {
+            let shown = lang::shown(checked);
+            set_json_shown(&shown);
+            shown.text()
+        }
     };
-    set_json(|o| o.report = printed.lines().map(String::from).collect());
     // A read-only store or database is refused to a program that can write it (H12, H17); the
     // host also stops any write that reaches it.
     type WriteIn = fn(&str, &str) -> Option<&'static str>;
