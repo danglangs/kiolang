@@ -1245,7 +1245,8 @@ fn test(path: &str, flags: &[&str], json: bool) -> i32 {
             if let Some((input, shrunk)) = r.prop.as_ref().and_then(|p| p.input.as_ref()) {
                 let shown: Vec<String> = input.iter().map(|(n, v)| format!("{n} = {v}")).collect();
                 let label = if *shrunk { "minimal input" } else { "input" };
-                println!("  {label}: {}", kio_host::escape_line(&shown.join(", ")));
+                let line = lang::eval::clip(&shown.join(", ")).into_owned();
+                println!("  {label}: {}", kio_host::escape_line(&line));
                 if *shrunk {
                     let n = r.prop.as_ref().map_or(0, |p| p.shrinks);
                     let stopped = if n == MAX_SHRINK_RUNS {
@@ -1593,10 +1594,17 @@ fn run_property(tests: &Tests, t: &lang::TestFn) -> (Option<serde_json::Value>, 
     }
     let m = lang::lower::lower_entry(&tests.program, &lang::CapTable::v0(), &t.name);
     let (names, tys): (Vec<String>, Vec<lang::ir::Ty>) = lang::prop::inputs(&m).into_iter().unzip();
+    // Clipped as assert text is (open question 240), all literals together: the program chose
+    // the types.
     let shown = |vs: &[lang::Value]| -> Vec<(String, String)> {
-        // Clipped as assert text is (open question 240): the program chose the type.
-        let literals = (vs.iter()).map(|v| lang::eval::clip(&lang::prop::debug_literal(&m, v)).into_owned());
-        names.iter().cloned().zip(literals).collect()
+        let mut left = lang::eval::ASSERT_TEXT_MAX;
+        let mut each = Vec::new();
+        for (name, v) in names.iter().zip(vs) {
+            let literal = lang::prop::debug_literal(&m, v);
+            each.push((name.clone(), cut(&literal, left)));
+            left = left.saturating_sub(literal.len());
+        }
+        each
     };
     for i in 0..tests.cases {
         let mut rng = lang::prop::Rng::for_case(tests.seed, i as u64);
@@ -1680,6 +1688,15 @@ fn oracle(tests: &Tests, t: &lang::TestFn, case: lang::prop::Case, compiled: Ver
     );
     let hint = "a kio bug: please report it with the input and the rerun line";
     Verdict::Fail(test_error("internal", &msg, Some(hint)))
+}
+
+/// `s`, or its first `max` bytes cut back to a character boundary and `...` added.
+fn cut(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let end = (0..=max).rev().find(|&i| s.is_char_boundary(i)).unwrap_or(0);
+    format!("{}...", &s[..end])
 }
 
 /// `s` as one shell word: as is if it is plain, else single-quoted.

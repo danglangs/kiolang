@@ -398,12 +398,10 @@ fn a_parameter_has_a_bounded_size() {
         format!("struct Pair<T> {{ a: T, b: T }}\nstruct O {{ a: Int, b: Str, c: Float, d: Bool, e: Int, f: Str, g: Int, h: Option<Int>, i: Bytes, j: Int }}\nenum Tree {{ Leaf(Int), Node(List<Tree>) }}\n#[test]\nfn t(p: {ty}) {{}}\nfn main() {{}}")
     };
     let at = format!("p: {}", pairs(12));
-    rejects(
-        &src(&pairs(12)),
-        &format!("`{at}` has up to 8191 values; a property parameter may have at most 4096"),
-        "build the large value inside the test",
-        &at,
-    );
+    let too_many =
+        |n: u64| format!("`t`'s data parameters have up to {n} values together; a property may have at most 4096");
+    let hint = "build large values inside the test";
+    rejects(&src(&pairs(12)), &too_many(8191), hint, &at);
     for ok in [
         pairs(11),
         "List<O>".into(),
@@ -413,9 +411,29 @@ fn a_parameter_has_a_bounded_size() {
     ] {
         check(&src(&ok), &common::caps()).unwrap_or_else(|d| panic!("{ok}: {d:?}"));
     }
-    let at = "p: List<List<List<Pair<Pair<Pair<O>>>>>>";
-    let d = check(&src(&at[3..]), &common::caps()).unwrap_err();
-    assert!(d[0].msg.starts_with(&format!("`{at}` has up to ")), "{}", d[0].msg);
+    // One budget for every data parameter of a test, capabilities aside.
+    let two = format!(
+        "struct Pair<T> {{ a: T, b: T }}\n#[test]\nfn t(d: Dir, p: {}, q: {}) {{}}\nfn main() {{}}",
+        pairs(11),
+        pairs(10)
+    );
+    rejects(&two, &too_many(4095 + 2047), hint, &format!("q: {}", pairs(10)));
+    let many = |n: usize| {
+        let ps = (0..n)
+            .map(|i| format!("x{i}: List<List<Int>>"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("#[test]\nfn t({ps}) {{}}\nfn main() {{}}")
+    };
+    check(&many(14), &common::caps()).unwrap();
+    rejects(&many(15), &too_many(15 * 289), hint, "x14: List<List<Int>>");
+    // A `Bytes` counts its bytes, as a `List<Int>` does: 1 + 32.
+    let bytes = |n: usize| {
+        let fs = (0..n).map(|i| format!("b{i}: Bytes")).collect::<Vec<_>>().join(", ");
+        format!("struct B {{ {fs} }}\n#[test]\nfn t(b: B) {{}}\nfn main() {{}}")
+    };
+    check(&bytes(124), &common::caps()).unwrap();
+    rejects(&bytes(125), &too_many(1 + 125 * 33), hint, "b: B");
 }
 
 #[test]

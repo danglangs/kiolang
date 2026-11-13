@@ -1543,15 +1543,16 @@ fn not_builtin(name: &str, span: Span) -> Result<(), Diag> {
     }
 }
 
-/// The most values a property parameter may hold at the largest generated size: the host
-/// builds, compiles and shrinks every case outside the run's limits (T2 review).
+/// The most values a property's data parameters may hold together at the largest generated
+/// size: the host builds, compiles and shrinks every case outside the run's limits (T2 review).
 pub const MAX_INPUT_VALUES: u64 = 4096;
 
 type TypeShapes<'a> = (&'a Fields, &'a Variants, &'a TypeParams);
 
 /// The most values a generated `ty` holds, nested at container `depth`: one for itself, plus
 /// struct fields, the largest variant's payload, and each container slot at the length
-/// `prop::generate` reaches there (`MAX_SIZE`, a quarter per level). Saturating.
+/// `prop::generate` reaches there (`MAX_SIZE`, a quarter per level), a `Bytes` like a
+/// `List<Int>`. Saturating.
 fn input_values(shape: TypeShapes, ty: &Ty, depth: u32) -> u64 {
     let (fields, variants, tparams) = shape;
     let slots = (crate::prop::MAX_SIZE as u64) >> (2 * depth).min(63);
@@ -1560,6 +1561,7 @@ fn input_values(shape: TypeShapes, ty: &Ty, depth: u32) -> u64 {
         // Empty here: a type that contains itself through a container ends.
         Ty::List(_) | Ty::Map(..) | Ty::HashMap(..) if slots == 0 => 0,
         Ty::List(t) => slots.saturating_mul(input_values(shape, t, depth + 1)),
+        Ty::Bytes => slots,
         Ty::Map(k, v) | Ty::HashMap(k, v) => slots.saturating_mul(sum(&[(**k).clone(), (**v).clone()], depth + 1)),
         Ty::Struct(..) => {
             let fs: Vec<Ty> = fields_of(fields, tparams, ty).into_iter().map(|f| f.1).collect();
@@ -2590,7 +2592,8 @@ impl<'a> Checker<'a> {
         self.ret = sig.ret.clone();
         self.in_test = sig.test;
         // A property's data parameters are generated (`prop::generate`): no function inside, some
-        // value to generate, and a bounded size, since the host builds each case.
+        // value to generate, and a bounded size together, since the host builds each case.
+        let mut total = 0u64;
         for (p, ty) in f.params.iter().zip(&sig.params) {
             if !sig.test || matches!(ty, Ty::Cap(_)) {
                 continue;
@@ -2607,13 +2610,19 @@ impl<'a> Checker<'a> {
                 };
                 return Err(err(p.span, msg, hint));
             }
-            let n = input_values(shape, ty, 0);
-            if n > MAX_INPUT_VALUES {
+            total = total.saturating_add(input_values(shape, ty, 0));
+            if total > MAX_INPUT_VALUES {
+                let data = f
+                    .params
+                    .iter()
+                    .zip(&sig.params)
+                    .filter(|(_, t)| !matches!(t, Ty::Cap(_)));
+                let n = data.fold(0u64, |n, (_, t)| n.saturating_add(input_values(shape, t, 0)));
                 let msg = format!(
-                    "`{}: {ty}` has up to {n} values; a property parameter may have at most {MAX_INPUT_VALUES}",
-                    p.name
+                    "`{}`'s data parameters have up to {n} values together; a property may have at most {MAX_INPUT_VALUES}",
+                    f.name
                 );
-                return Err(err(p.span, msg, Some("build the large value inside the test")));
+                return Err(err(p.span, msg, Some("build large values inside the test")));
             }
         }
         let found = self.block(&f.body, Some(&sig.ret))?;

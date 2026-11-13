@@ -73,6 +73,12 @@ fn small(n: Int, o: Order) {
 #[test]
 fn sevens(n: Int) { assert(n % 10 != 7, "a seven"); }
 
+#[test]
+fn bytes_round_trip(b: Bytes, bs: List<Bytes>) {
+    assert_eq(b.to_hex().from_hex(), Some(b));
+    assert(bs.len() <= 32, "short");
+}
+
 fn main() {}
 "#;
 
@@ -285,16 +291,18 @@ fn properties_agree_with_the_interpreter() {
 
 #[test]
 fn a_long_input_is_clipped() {
-    // A limit is not shrunk, so the input shown is the generated one: about 15 KB as a literal.
+    // A limit is not shrunk, so the input shown is the generated one: about 15 KB as a literal
+    // per parameter. The line, and the `--json` literals together, stop at 4,096 bytes.
     let ty = (0..9).fold("Int".to_string(), |t, _| format!("Pair<{t}>"));
     let c = Case::new(&format!(
-        "struct Pair<T> {{ a: T, b: T }}\n#[test]\nfn spins(p: {ty}) {{ loop {{}} }}\nfn main() {{}}"
+        "struct Pair<T> {{ a: T, b: T }}\n#[test]\nfn spins(p: {ty}, q: {ty}) {{ loop {{}} }}\nfn main() {{}}"
     ));
     let (code, t) = c.json(&["--cases", "2", "--fuel", "100000"]);
     assert_eq!((code, t["error"]["kind"].clone()), (1, "fuel".into()), "{t}");
-    let p = t["input"]["p"].as_str().unwrap();
+    let (p, q) = (t["input"]["p"].as_str().unwrap(), t["input"]["q"].as_str().unwrap());
     assert!(p.len() == 4099 && p.ends_with("..."), "{}", p.len());
+    assert_eq!(q, "...");
     let (_, out, _) = c.kio(&["--cases", "2", "--fuel", "100000"]);
     let line = out.lines().find(|l| l.starts_with("  input: p = ")).unwrap();
-    assert_eq!(line.len(), "  input: p = ".len() + 4099);
+    assert_eq!(line.len(), "  input: ".len() + 4099);
 }

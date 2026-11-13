@@ -602,18 +602,17 @@ impl Build<'_> {
             (_, Value::Bool(b)) => ExprKind::Bool(*b),
             (_, Value::Str(s)) => ExprKind::Str(s.clone()),
             (_, Value::Unit) => ExprKind::Unit,
+            // `"00ff".from_hex().unwrap_or("".to_bytes())`: one constant, whatever the bytes.
             (_, Value::Bytes(bs)) => {
-                let empty = self.expr(ExprKind::Str("".into()), Ty::Str);
-                let init = self.expr(
-                    ExprKind::Builtin(Builtin::StrToBytes, Box::new(empty), vec![]),
+                let str = |s: String| self.expr(ExprKind::Str(s.into()), Ty::Str);
+                let hex = str(crate::digest::to_hex(bs));
+                let option = Ty::Option(Box::new(Ty::Bytes));
+                let parsed = self.expr(ExprKind::Builtin(Builtin::StrFromHex, Box::new(hex), vec![]), option);
+                let empty = self.expr(
+                    ExprKind::Builtin(Builtin::StrToBytes, Box::new(str(String::new())), vec![]),
                     Ty::Bytes,
                 );
-                let id = self.local(ty, init);
-                for b in bs.iter() {
-                    let b = self.expr(ExprKind::Int(i64::from(*b)), Ty::Int);
-                    self.mutate(id, Mut::BytesPush, vec![b]);
-                }
-                ExprKind::Local(id)
+                ExprKind::Builtin(Builtin::OptionUnwrapOr, Box::new(parsed), vec![empty])
             }
             (Ty::List(t), Value::List(vs)) => ExprKind::List(vs.iter().map(|v| self.literal(m, v, t)).collect()),
             (Ty::Map(k, t) | Ty::HashMap(k, t), Value::Map(_) | Value::HashMap(_)) => {
