@@ -1,64 +1,64 @@
 {
-  "kio": "kio 0.1.1 (a9f5f3e), Linux x86_64 CI, rustc 1.100.0",
+  "kio": "kio 0.1.1 (7b5cd10), Linux x86_64 CI, rustc 1.100.0",
   "rows": {
     "startup": {
       "value": "0",
-      "fuel": 6906,
+      "fuel": 6868,
       "peak_memory": 1769472
     },
     "fib": {
       "value": "9227465",
-      "fuel": 1060062021,
+      "fuel": 1060061983,
       "peak_memory": 1769472
     },
     "loop": {
       "value": "30993",
-      "fuel": 2100006799,
+      "fuel": 2100006761,
       "peak_memory": 1769472
     },
     "strings": {
       "value": "588890",
-      "fuel": 57509729,
+      "fuel": 57509691,
       "peak_memory": 3801088
     },
     "list": {
       "value": "1577147139",
-      "fuel": 958485052,
+      "fuel": 958485014,
       "peak_memory": 18874368
     },
     "map": {
       "value": "4770177159354",
-      "fuel": 339933894,
+      "fuel": 339933856,
       "peak_memory": 5701632
     },
     "hashmap": {
       "value": "4770177159354",
-      "fuel": 244428733,
+      "fuel": 244428695,
       "peak_memory": 6160384
     },
     "tree": {
       "value": "523822424596",
-      "fuel": 1299529318,
+      "fuel": 1299529280,
       "peak_memory": 94175232
     },
     "closures": {
       "value": "333334000000",
-      "fuel": 213757633,
+      "fuel": 213757595,
       "peak_memory": 27000832
     },
     "mandel": {
       "value": "3968704681311",
-      "fuel": 284564544,
+      "fuel": 284564506,
       "peak_memory": 1572864
     },
     "json": {
       "value": "1048619",
-      "fuel": 621002520,
+      "fuel": 621002482,
       "peak_memory": 15597568
     },
     "json_builtin": {
       "value": "1048619",
-      "fuel": 180196349,
+      "fuel": 180196311,
       "peak_memory": 16711680
     }
   }
