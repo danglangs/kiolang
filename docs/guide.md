@@ -339,7 +339,7 @@ FAIL small  (4 cases compiled; seed 1)
 
 ## Reviewing authority in a pull request
 
-`kio check NEW --base OLD` diffs the two programs' reports: what a reviewer approves. One line per grant (`main` parameter) whose authority changed, with the methods `main` reaches on it through any function: `+` a new grant, `~` methods gained (`+m`) or lost (`-m`) on one of the same name and type, `-` a removed grant (a changed type is one removed and one added).
+`kio check NEW --base OLD` diffs the two programs' reports: what a reviewer approves. The two sides are usually one file at two commits: `--base` takes a path, not a git revision, so write the old version out first (`git show main:app.kio > /tmp/base.kio`, then `kio check app.kio --base /tmp/base.kio`), or, for a program with modules, use `tools/authority-diff.sh` below. One line per grant (`main` parameter) whose authority changed, with the methods `main` reaches on it through any function: `+` a new grant, `~` methods gained (`+m`) or lost (`-m`) on one of the same name and type, `-` a removed grant (a changed type is one removed and one added).
 
 ```
 $ kio check app.kio --base old/app.kio
@@ -376,7 +376,7 @@ Exit 0: no authority added (`no change in authority`, `authority removed only`, 
 
 Each side's `mod NAME;` lines resolve to `NAME.kio` beside that side's entry, so an `old/app.kio` copied alone fails with `mod web: cannot read old/web.kio`: copy its modules beside it, or let `tools/authority-diff.sh` check the whole base out.
 
-`tools/authority-diff.sh BASE_REF ENTRY.kio [--detail]` checks `BASE_REF` out with `git worktree add` into a temporary directory and diffs `ENTRY.kio` against it (`KIO` names the binary). In CI, as a GitHub Actions job step that fails a pull request adding authority until someone with the right to approve it does:
+`tools/authority-diff.sh BASE_REF ENTRY.kio [--detail]` (in the repository, not in the release archives: copy it into yours) checks `BASE_REF` out with `git worktree add` into a temporary directory and diffs `ENTRY.kio` against it (`KIO` names the binary). In CI, as a GitHub Actions job step that fails a pull request adding authority until someone with the right to approve it does:
 
 ```yaml
 - uses: actions/checkout@v4

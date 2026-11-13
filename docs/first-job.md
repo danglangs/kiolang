@@ -124,7 +124,7 @@ $ kio check push-v2.kio --base push.kio
 authority added (exit 3); --detail lists each function
 ```
 
-One line: `orders` gains `remove`. The grants file still says `data:ro`, so the edit is refused before it runs:
+One line: `orders` gains `remove`. Here the two versions are two files; in a repository they are one file at two commits: `git show main:push.kio > /tmp/base.kio`, then `kio check push.kio --base /tmp/base.kio` ([guide](guide.md#reviewing-authority-in-a-pull-request) has the CI step). The grants file still says `data:ro`, so the edit is refused before it runs:
 
 ```console
 $ kio run push-v2.kio --grants app.grants

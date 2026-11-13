@@ -38,10 +38,11 @@ $ kio run sync.kio --dir orders=./orders:ro --http crm=api.crm.example \
     --http-methods crm=POST --http-header crm=Authorization:env:CRM_KEY
 ```
 
-Next week an instruction hidden in a ticket makes the agent "archive the file after import". The permission change is one line:
+Next week an instruction hidden in a ticket the agent reads (a prompt injection) makes it edit `sync.kio` to "archive the file after import". Before reading the diff, compare the edited file with the version on `main`; the permission change is one line:
 
 ```
-$ kio check archive.kio --base sync.kio
+$ git show main:sync.kio > /tmp/base.kio
+$ kio check sync.kio --base /tmp/base.kio
 ~ orders: Dir (+remove)
 authority added (exit 3); --detail lists each function
 ```

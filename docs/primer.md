@@ -1,6 +1,6 @@
 # kio by example
 
-kio is Rust syntax without references, traits, tuples or macros: values are copied, and everything a program touches (files, hosts, stores) is a parameter of `main`. Each snippet below is a whole program that passes `kio check`; copy the shape. The reference is [language.md](language.md); E4's `cookbook` prompt is this file followed by it.
+kio is Rust syntax without references, traits, tuples or macros: values are copied, and everything a program touches (files, hosts, stores) is a parameter of `main`. Each snippet below is a whole program that passes `kio check`; copy the shape. The reference is [language.md](language.md);
 
 ## Rust habits that kio rejects
 

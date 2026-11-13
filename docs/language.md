@@ -296,4 +296,4 @@ error: kio has no references
 - Traits and `impl`.
 - Tuples.
 - `use` and nested modules.
-- Globals (`static`); constants are literals only ([open_questions](open_questions.md) #34).
+- Globals (`static`); constants are literals only.
