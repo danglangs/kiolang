@@ -21,6 +21,8 @@ examples/fx/report.kio:10: error: no grant for `fx: Http`
   hint: grant it: `--http fx=host`
 ```
 
+`kio check` and `--base` without installing kio: the [playground](../site/playground.html) runs the same checker in a browser, on one file; nothing runs.
+
 ## Grants
 
 | Type | Flag | Grants |

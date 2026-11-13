@@ -9,6 +9,8 @@
   --link: #0757c9;
   --accent: #6d3fc0;
   --accent-fg: #ffffff;
+  --bad: #cf222e;
+  --bad-bg: #ffebe9;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -22,6 +24,8 @@
     --link: #6cb6ff;
     --accent: #b392f0;
     --accent-fg: #0f1115;
+    --bad: #ff7b72;
+    --bad-bg: #4b1d1d;
   }
 }
 
@@ -100,3 +104,26 @@ td code, th code { white-space: nowrap; overflow-wrap: normal; }
   .tagline { font-size: 1.1rem; }
   pre { padding: 0.7rem 0.75rem; font-size: 0.8rem; }
 }
+
+/* playground.html */
+.pg-bar { display: flex; flex-wrap: wrap; gap: 0.5rem 1.5rem; align-items: center; margin: 0 0 1rem; }
+.pg-bar select { font: inherit; padding: 0.2rem 0.3rem; background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 4px; max-width: 100%; }
+.pg-label { font: 0.8rem ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; color: var(--muted); margin: 0.75rem 0 0.25rem; }
+.pg-editor {
+  position: relative; font: 0.875rem/1.45 ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--pre-bg); overflow: hidden;
+}
+.pg-editor pre, .pg-editor textarea {
+  position: absolute; inset: 0; margin: 0; padding: 0.85em 1em; border: 0; border-radius: 0;
+  font: inherit; line-height: inherit; tab-size: 4; white-space: pre; overflow: auto; background: transparent;
+}
+.pg-editor pre { color: transparent; pointer-events: none; overflow: hidden; }
+.pg-editor textarea { color: var(--fg); caret-color: var(--fg); resize: none; outline: none; }
+.pg-editor:focus-within { border-color: var(--accent); }
+.pg-editor mark { color: transparent; background: var(--bad-bg); border-bottom: 2px solid var(--bad); border-radius: 2px; }
+.pg-out { min-height: 4rem; white-space: pre-wrap; }
+.pg-out.failed { border-color: var(--bad); }
+.pg-err { cursor: pointer; }
+.pg-err + .pg-err { margin-top: 0.6rem; }
+.pg-err:hover, .pg-err:focus { color: var(--link); outline: none; }
+.pg-note { color: var(--muted); font-size: 0.9rem; }

@@ -207,6 +207,45 @@ pub struct AuthorityDiff {
     pub grant_added: bool,
 }
 
+impl AuthorityDiff {
+    /// The lines `kio check --base` prints: one per changed grant; then, with `detail` or when
+    /// those lines do not show every addition, a blank line and one per changed function. And
+    /// whether the function lines are included.
+    pub fn lines(&self, detail: bool) -> (Vec<String>, bool) {
+        let funcs = detail || (self.added && !self.grant_added) || self.grants.is_empty();
+        let mut out = self.grants.clone();
+        if funcs {
+            if !out.is_empty() {
+                out.push(String::new());
+            }
+            out.extend(self.funcs.iter().cloned());
+        }
+        (out, funcs)
+    }
+
+    /// What `kio check --base` prints on stdout: `lines`, then whether authority was added
+    /// (exit 3), only removed, or covered.
+    pub fn text(&self, detail: bool) -> String {
+        if self.grants.is_empty() && self.funcs.is_empty() {
+            return "no change in authority".into();
+        }
+        let (mut out, funcs) = self.lines(detail);
+        let last = if !self.added {
+            // A gain a base method covers (P6) is shown but adds nothing; judged by the lines printed.
+            match out.iter().any(|l| l.contains(" is covered by ")) {
+                true => "no authority added",
+                false => "authority removed only",
+            }
+        } else if funcs || self.funcs.is_empty() {
+            "authority added (exit 3)"
+        } else {
+            "authority added (exit 3); --detail lists each function"
+        };
+        out.push(last.into());
+        out.join("\n")
+    }
+}
+
 /// Every capability method with the methods that cover it: a gained method that a covering
 /// one already reached on the same grant (or function parameter) in the base is not new
 /// authority (P6, open_questions #208). Every caps.wit method is listed; `[]` is standalone.

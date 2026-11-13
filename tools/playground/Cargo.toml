@@ -1,0 +1,12 @@
+[package]
+name = "playground"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Built for wasm32-unknown-unknown and loaded by site/playground.html; the rlib is for host tests.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+lang = { path = "../../lang" }

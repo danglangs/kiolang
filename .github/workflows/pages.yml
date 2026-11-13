@@ -13,6 +13,8 @@ on:
       - docs/language.md
       - docs/primer.md
       - docs/assets/**
+      - lang/**
+      - tools/playground/**
       - .github/workflows/pages.yml
   workflow_dispatch:
 permissions:
@@ -25,6 +27,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The playground's checker; the runner's rustup, as no other step needs a toolchain action.
+      - run: rustup target add wasm32-unknown-unknown
+      - run: cargo build -p playground --release --target wasm32-unknown-unknown
       - run: python3 site/build.py _site
       - if: vars.PAGES_ENABLED == 'true'
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0

@@ -1,0 +1,176 @@
+<h1 id="playground">Playground<a class="anchor" href="#playground" aria-label="link to this section">#</a></h1>
+<p><code>kio check</code> in your browser: errors with their hints, the authority report, and the grants a run would need. Nothing runs: this is kio's checker compiled to WebAssembly, with no capability and no network.</p>
+<div class="pg-bar">
+  <label>Example <select id="example"></select></label>
+  <label><input type="checkbox" id="compare"> Compare with a base (<code>--base</code>)</label>
+</div>
+<div id="base-box" hidden>
+  <div class="pg-label">base.kio</div>
+  <div class="pg-editor"><pre aria-hidden="true"></pre><textarea id="base" wrap="off" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="base program"></textarea></div>
+</div>
+<div class="pg-label">playground.kio</div>
+<div class="pg-editor"><pre aria-hidden="true"></pre><textarea id="src" wrap="off" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="program"></textarea></div>
+<div class="pg-label" id="cmd">$ kio check playground.kio</div>
+<pre id="out" class="pg-out" aria-live="polite">loading the checker…</pre>
+<p class="pg-note">Single file, up to 64 KB. The same checker as <code>kio check</code>; install kio to run a program (<a href="first-job.html">your first job</a>).</p>
+<script type="application/json" id="examples"><!-- examples --></script>
+<script>
+"use strict";
+const EXAMPLES = JSON.parse(document.getElementById("examples").textContent);
+const $ = (id) => document.getElementById(id);
+const src = $("src"), base = $("base"), out = $("out"), compare = $("compare"), picker = $("example");
+let wasm = null, module = null, timer = 0;
+
+async function load() {
+  let r;
+  try {
+    r = await WebAssembly.instantiateStreaming(fetch("playground.wasm"), {});
+  } catch (e) {
+    // A server that does not send application/wasm.
+    r = await WebAssembly.instantiate(await (await fetch("playground.wasm")).arrayBuffer(), {});
+  }
+  module = r.module;
+  wasm = r.instance.exports;
+}
+
+// Calls export `f` on the strings `args`; returns the parsed JSON. A trap leaves the instance's
+// memory in an unknown state, so the next call starts a fresh one.
+function call(f, ...args) {
+  const e = wasm, enc = new TextEncoder(), bufs = [];
+  try {
+    for (const s of args) {
+      const b = enc.encode(s), p = e.alloc(b.length);
+      new Uint8Array(e.memory.buffer, p, b.length).set(b);
+      bufs.push(p, b.length);
+    }
+    const r = e[f](...bufs);
+    const len = new DataView(e.memory.buffer).getUint32(r, true);
+    const json = new TextDecoder().decode(new Uint8Array(e.memory.buffer, r + 4, len));
+    e.free(r, len + 4);
+    for (let i = 0; i < bufs.length; i += 2) e.free(bufs[i], bufs[i + 1]);
+    return JSON.parse(json);
+  } catch (err) {
+    wasm = null;
+    WebAssembly.instantiate(module, {}).then((i) => { wasm = i.exports; });
+    return {ok: false, errors: [{message: "the checker stopped: " + err.message, hint: null, line: null}]};
+  }
+}
+
+// The UTF-16 index of 1-based `line` and `col` (in characters, as kio counts them) in `text`.
+function offset(text, line, col) {
+  let i = 0;
+  for (let l = 1; l < line; l++) {
+    const n = text.indexOf("\n", i);
+    if (n < 0) return text.length;
+    i = n + 1;
+  }
+  for (let c = 1; c < col && i < text.length && text[i] !== "\n"; c++) {
+    i += text.codePointAt(i) > 0xffff ? 2 : 1;
+  }
+  return i;
+}
+
+const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+// Mirrors `ta` in the <pre> behind it, each of `spans` ([start, end]) marked.
+function paint(ta, spans) {
+  const text = ta.value, pre = ta.previousElementSibling;
+  let html = "", at = 0;
+  for (const [s, e] of spans.sort((a, b) => a[0] - b[0])) {
+    if (s < at) continue;
+    const end = Math.max(e, s + 1);
+    html += esc(text.slice(at, s)) + "<mark>" + esc(text.slice(s, end) || " ") + "</mark>";
+    at = Math.min(end, text.length);
+  }
+  pre.innerHTML = html + esc(text.slice(at)) + "\n";
+  // Tall enough for every line, so only a long line scrolls (sideways).
+  ta.parentElement.style.height = Math.max(6, text.split("\n").length + 1) * 1.45 + 1.7 + "em";
+  pre.scrollTop = ta.scrollTop;
+  pre.scrollLeft = ta.scrollLeft;
+}
+
+function errorLine(e, file, ta) {
+  const div = document.createElement("div");
+  div.className = "pg-err";
+  const at = e.line == null ? "" : `${file}:${e.line}:${e.col}: `;
+  div.textContent = `${at}error: ${e.message}` + (e.hint ? `\n  hint: ${e.hint}` : "");
+  if (e.line != null) {
+    div.tabIndex = 0;
+    div.title = "select the span";
+    const go = () => {
+      ta.focus();
+      ta.setSelectionRange(offset(ta.value, e.line, e.col), offset(ta.value, e.end_line, e.end_col));
+    };
+    div.onclick = go;
+    div.onkeydown = (k) => k.key === "Enter" && go();
+  }
+  return div;
+}
+
+function run() {
+  if (!wasm) return;
+  const diff = compare.checked;
+  $("cmd").textContent = diff ? "$ kio check playground.kio --base base.kio" : "$ kio check playground.kio";
+  const r = diff ? call("diff", base.value, src.value) : call("check", src.value);
+  const spans = {src: [], base: []};
+  out.replaceChildren();
+  out.classList.toggle("failed", !r.ok);
+  if (!r.ok) {
+    for (const e of r.errors) {
+      const side = e.side === "base" ? "base" : "src";
+      const file = side === "base" ? "base.kio" : "playground.kio";
+      const ta = side === "base" ? base : src;
+      if (e.line != null) {
+        spans[side].push([offset(ta.value, e.line, e.col), offset(ta.value, e.end_line, e.end_col)]);
+      }
+      out.append(errorLine(e, file, ta));
+    }
+  } else if (diff) {
+    out.textContent = r.text;
+  } else {
+    let text = r.text;
+    const flags = r.grants.map((g) => g.flag).filter((f) => f);
+    text += "\n\n" + (r.grants.length
+      ? "grants a run needs:\n  " + r.grants.map((g) => g.param).join(", ") +
+        "\n  kio run playground.kio " + [...new Set(flags)].join(" ")
+      : "grants a run needs: none\n  kio run playground.kio");
+    out.textContent = text;
+  }
+  paint(src, spans.src);
+  paint(base, spans.base);
+}
+
+function schedule() {
+  paint(this, []);
+  clearTimeout(timer);
+  timer = setTimeout(run, 150);
+}
+
+function pick() {
+  const ex = EXAMPLES[picker.value];
+  src.value = ex.src;
+  compare.checked = !!ex.base;
+  if (ex.base) base.value = EXAMPLES[ex.base].src;
+  $("base-box").hidden = !compare.checked;
+  run();
+}
+
+for (const [key, ex] of Object.entries(EXAMPLES)) picker.add(new Option(ex.title, key));
+// playground.html#error opens that example.
+if (location.hash.slice(1) in EXAMPLES) picker.value = location.hash.slice(1);
+picker.onchange = () => { history.replaceState(null, "", "#" + picker.value); pick(); };
+compare.onchange = () => {
+  $("base-box").hidden = !compare.checked;
+  if (compare.checked && !base.value) base.value = src.value;
+  run();
+};
+for (const ta of [src, base]) {
+  ta.addEventListener("input", schedule);
+  ta.addEventListener("scroll", () => {
+    ta.previousElementSibling.scrollTop = ta.scrollTop;
+    ta.previousElementSibling.scrollLeft = ta.scrollLeft;
+  });
+}
+pick();
+load().then(run, (e) => { out.textContent = "could not load the checker: " + e.message; });
+</script>

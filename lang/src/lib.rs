@@ -36,3 +36,17 @@ pub struct Diag {
     pub msg: String,
     pub hint: Option<String>,
 }
+
+/// The 1-based line and column of byte `at` in `src`, the column in characters from the line's
+/// start, as `kio check --json` reports a diagnostic.
+pub fn line_col(src: &str, at: usize) -> (usize, usize) {
+    let at = (0..=at.min(src.len()))
+        .rev()
+        .find(|&i| src.is_char_boundary(i))
+        .unwrap_or(0);
+    let start = src[..at].rfind('\n').map_or(0, |i| i + 1);
+    (
+        src[..start].matches('\n').count() + 1,
+        src[start..at].chars().count() + 1,
+    )
+}

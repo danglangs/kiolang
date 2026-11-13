@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build the kio website from the repo's markdown. Python stdlib only.
 
-    python3 site/build.py OUT_DIR [--standalone FILE]
+    python3 site/build.py OUT_DIR [--standalone FILE] [--no-playground]
 
 Renders the subset of GitHub markdown the public docs use (headings with
 GitHub's anchors, paragraphs, fenced code, tables, lists with indented
@@ -9,7 +9,14 @@ continuation blocks, blockquotes, raw HTML blocks, inline code, bold, links),
 then checks that every relative link and #anchor in OUT_DIR resolves.
 --standalone also writes the landing page as one file: CSS and images inlined,
 site links pointing at the markdown on GitHub.
+
+The playground page needs the checker built first:
+    cargo build -p playground --release --target wasm32-unknown-unknown
+(found under $CARGO_TARGET_DIR, default target/). Without it the build fails;
+--no-playground builds the site without that page.
 """
+
+import json
 
 import base64
 import html
@@ -33,8 +40,23 @@ PAGES = {
     "docs/language.md": ("language.html", "Language", "Language"),
     "docs/primer.md": ("primer.html", "kio by example", "Primer"),
     "README.md": ("readme.html", "README", "README"),
+    "site/playground.html": ("playground.html", "Playground", "Playground"),
 }
 ASSETS = {"docs/assets/kio-unicorn.svg": "assets/kio-unicorn.svg"}
+SITE_URL = "https://danglangs.github.io/kiolang/"
+
+# The playground's examples, in picker order: site/playground/<key>.kio, a title, and the
+# example whose source is the base when it opens as a `--base` diff.
+EXAMPLES = [
+    ("hello", "hello", None),
+    ("count", "A Dir job: count words", None),
+    ("sync", "Sync orders to a CRM", None),
+    ("archive", "...then archive them: the diff", "sync"),
+    ("tests", "Tests and a property", None),
+    ("error", "An error and its hint", None),
+]
+WASM = os.path.join(os.environ.get("CARGO_TARGET_DIR") or os.path.join(ROOT, "target"),
+                    "wasm32-unknown-unknown", "release", "playground.wasm")
 
 
 class BuildError(Exception):
@@ -209,10 +231,23 @@ def blocks(lines, base, seen):
 # ---- pages
 
 def render(src):
+    if src == "site/playground.html":
+        return playground()
     with open(os.path.join(ROOT, src), encoding="utf-8") as f:
         lines = f.read().split("\n")
     base = "" if src == "site/index.md" else os.path.dirname(src)
     return blocks(lines, base, {})
+
+
+def playground():
+    """site/playground.html with the examples in its JSON block."""
+    examples = {}
+    for key, title, base in EXAMPLES:
+        with open(os.path.join(SITE, "playground", key + ".kio"), encoding="utf-8") as f:
+            examples[key] = {"title": title, "src": f.read(), "base": base}
+    with open(os.path.join(SITE, "playground.html"), encoding="utf-8") as f:
+        body = f.read()
+    return body.replace("<!-- examples -->", json.dumps(examples).replace("</", "<\\/"))
 
 
 def page(src, body):
@@ -274,17 +309,25 @@ def standalone(out, dest):
             data = base64.b64encode(f.read()).decode()
         doc = doc.replace(f'"{rel}"', f'"data:image/svg+xml;base64,{data}"')
     for src, (o, _, _) in PAGES.items():
+        url = SITE_URL + o if src.endswith(".html") else f"{GITHUB}/blob/main/{src}"
         doc = re.sub(rf'href="{re.escape(o)}(#[^"]*)?"',
-                     lambda m: f'href="{GITHUB}/blob/main/{src}{m.group(1) or ""}"', doc)
+                     lambda m: f'href="{url}{m.group(1) or ""}"', doc)
     os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
     with open(dest, "w", encoding="utf-8") as f:
         f.write(doc)
 
 
 def main(argv):
+    with_playground = "--no-playground" not in argv
+    argv = [a for a in argv if a != "--no-playground"]
     if len(argv) not in (2, 4) or (len(argv) == 4 and argv[2] != "--standalone"):
         sys.exit(__doc__)
     out = argv[1]
+    if not with_playground:
+        del PAGES["site/playground.html"]
+    elif not os.path.exists(WASM):
+        sys.exit(f"build: no {WASM}\n  build it first: cargo build -p playground --release "
+                 "--target wasm32-unknown-unknown\n  or pass --no-playground to build without that page")
     os.makedirs(out, exist_ok=True)
     try:
         for src in PAGES:
@@ -293,6 +336,8 @@ def main(argv):
     except BuildError as e:
         sys.exit(f"build: {e}")
     shutil.copy(os.path.join(SITE, "style.css"), out)
+    if with_playground:
+        shutil.copy(WASM, os.path.join(out, "playground.wasm"))
     for src, rel in ASSETS.items():
         os.makedirs(os.path.join(out, os.path.dirname(rel)), exist_ok=True)
         shutil.copy(os.path.join(ROOT, src), os.path.join(out, rel))

@@ -392,7 +392,7 @@ fn authority(inputs: &Inputs, page: &mut Page) -> (bool, bool) {
     let checks = match kio_host::diff_files(old, new) {
         Ok(diff) => {
             page.added = diff.added;
-            match base_lines(&diff, false).0 {
+            match diff.lines(false).0 {
                 lines if lines.is_empty() => page.authority.push(("enforced", "no change in authority".into())),
                 lines => page.authority.extend(labelled("enforced", &lines)),
             }

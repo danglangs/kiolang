@@ -1,0 +1,15 @@
+struct Count { word: Str, n: Int }
+
+fn main(input: Dir) -> Result<Str, IoErr> {
+  let text = input.read("words.txt")?.to_str();
+  let mut counts: Map<Str, Int> = Map::new();
+  for line in text.lines() {
+    let w = line.trim().to_lowercase();
+    if w == "" { continue; }
+    counts.insert(w, counts.get(w).unwrap_or(0) + 1);
+  }
+  let mut rows: List<Count> = [];
+  for w in counts.keys() { rows.push(Count { word: w, n: counts.get(w).unwrap_or(0) }); }
+  rows.sort_by(|a, b| a.n > b.n || (a.n == b.n && a.word < b.word));
+  Ok(rows.map(|r| r.word + " " + r.n.to_str()).join("\n"))
+}

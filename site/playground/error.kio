@@ -1,0 +1,5 @@
+fn main(orders: Dir, crm: Http) -> Result<Int, Str> {
+  let csv = orders.read("today.csv").unwrap();
+  let r = crm.send("POST", "/v1/import", [], csv, 5000).map_err(|_| "crm down")?;
+  Ok(r.status)
+}

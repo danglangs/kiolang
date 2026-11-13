@@ -40,5 +40,6 @@ wasmtime = { version = "50", default-features = false, features = ["anyhow", "ba
 [dev-dependencies]
 kio = { path = ".", features = ["test-hooks"] }
 kiogen = { path = "../tools/kiogen" }
+playground = { path = "../tools/playground" }
 tempfile = "3"
 tokio-tungstenite = { version = "0.30", features = ["connect"] }

@@ -206,42 +206,12 @@ fn check_base(path: &str, base: &str, detail: bool) -> i32 {
         set_json(|o| o.diff = Some(d));
         return if diff.added { 3 } else { 0 };
     }
-    if diff.grants.is_empty() && diff.funcs.is_empty() {
-        println!("no change in authority");
-        return 0;
-    }
-    let (out, funcs) = base_lines(&diff, detail);
-    println!("{}", out.join("\n"));
-    if !diff.added {
-        // A gain a base method covers (P6) is shown but adds nothing; judged by the lines printed.
-        match out.iter().any(|l| l.contains(" is covered by ")) {
-            true => println!("no authority added"),
-            false => println!("authority removed only"),
-        }
-        return 0;
-    }
-    let hint = if funcs || diff.funcs.is_empty() {
-        ""
+    println!("{}", diff.text(detail));
+    if diff.added {
+        3
     } else {
-        "; --detail lists each function"
-    };
-    println!("authority added (exit 3){hint}");
-    3
-}
-
-/// The lines `kio check --base` prints for `diff`: one per changed grant; then, with `detail` or
-/// when those lines do not show every addition, a blank line and one per changed function. And
-/// whether the function lines are included.
-fn base_lines(diff: &lang::AuthorityDiff, detail: bool) -> (Vec<String>, bool) {
-    let funcs = detail || (diff.added && !diff.grant_added) || diff.grants.is_empty();
-    let mut out = diff.grants.clone();
-    if funcs {
-        if !out.is_empty() {
-            out.push(String::new());
-        }
-        out.extend(diff.funcs.iter().cloned());
+        0
     }
-    (out, funcs)
 }
 
 /// Every flag of `kio run`, each with one value: what a grants file may hold.
@@ -1977,7 +1947,11 @@ fn locate(files: &[(String, String)], diags: &[Diag]) -> Vec<(usize, usize)> {
 fn print_diags(files: &[(String, String)], diags: Vec<Diag>, kind: &str) -> i32 {
     for (d, (file, line)) in diags.iter().zip(locate(files, &diags)) {
         if json_out() {
-            let at = (json_path(files, file), line, column(&files[file].1, d.start as usize));
+            let at = (
+                json_path(files, file),
+                line,
+                lang::line_col(&files[file].1, d.start as usize).1,
+            );
             push_error(kind, &d.message, d.hint.as_deref(), Some(at));
             continue;
         }
@@ -2048,16 +2022,6 @@ fn json_path(files: &[(String, String)], i: usize) -> String {
     }
     let dir = std::path::Path::new(&files[0].0).parent().unwrap_or(".".as_ref());
     dir.join(&files[i].0).display().to_string()
-}
-
-/// The 1-based column of byte `at` in `src`, in characters from its line's start.
-fn column(src: &str, at: usize) -> usize {
-    let at = (0..=at.min(src.len()))
-        .rev()
-        .find(|&i| src.is_char_boundary(i))
-        .unwrap_or(0);
-    let start = src[..at].rfind('\n').map_or(0, |i| i + 1);
-    src[start..at].chars().count() + 1
 }
 
 /// `main`'s value as `--json` shows it (D2): `printed` as `kio run` prints it, but `null` for
