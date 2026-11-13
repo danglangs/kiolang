@@ -294,7 +294,7 @@ impl G {
                     (format!("{a}.unwrap_or_else(|n: Int| n.to_str())"), x.max(INT_STR))
                 }
             },
-            T::Os => match self.rng.below(13) {
+            T::Os => match self.rng.below(14) {
                 0 => self.leaf(t, scope),
                 1 => {
                     let (s, x) = self.e(T::Str, scope, d1, f);
@@ -353,6 +353,18 @@ impl G {
                             x,
                         )
                     }
+                }
+                // L27: `try_to_str` on a string's bytes with one byte before or after them,
+                // mostly not UTF-8 when that byte is 0x80 or more.
+                12 => {
+                    let (a, x) = self.e(T::Str, scope, d1, f);
+                    let h = format!("{:02x}", self.rng.below(256));
+                    let hex = if self.rng.below(2) == 0 {
+                        format!("\"{h}\" + ({a}).to_bytes().to_hex()")
+                    } else {
+                        format!("({a}).to_bytes().to_hex() + \"{h}\"")
+                    };
+                    (format!("({hex}).from_hex().and_then(|b: Bytes| b.try_to_str())"), x + 1)
                 }
                 _ => {
                     let (a, _) = self.e(T::Rs, scope, d1, f);

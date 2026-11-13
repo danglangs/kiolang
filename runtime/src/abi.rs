@@ -698,6 +698,13 @@ pub unsafe extern "C" fn rt_str_from_hex_u(s: u32) -> u32 {
     unboxed(unsafe { text::from_hex_opt(ptr(s)) })
 }
 
+/// `b.try_to_str()`: the payload is a new `Str`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_bytes_try_to_str_u(b: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unboxed(unsafe { text::try_to_str_opt(ptr(b)) })
+}
+
 #[no_mangle]
 pub extern "C" fn rt_float_to_int_u(x: f64) -> u32 {
     unboxed(float::to_int_opt(x))

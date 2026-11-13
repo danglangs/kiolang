@@ -222,6 +222,15 @@ pub unsafe fn to_str(b: *mut Header) -> Result<*mut Header, Err> {
     }
 }
 
+/// `Bytes.try_to_str()`'s payload, a new `Str` (`to_str`'s check), without the `Option` object.
+///
+/// # Safety
+/// The module's contract.
+pub unsafe fn try_to_str_opt(b: *mut Header) -> Option<u64> {
+    // SAFETY: the caller's guarantee.
+    unsafe { to_str(b) }.ok().map(to_slot)
+}
+
 /// `Bytes.to_str()` taking `b`'s reference (C8c4): the bytes are checked as `to_str`'s; if the
 /// reference is the only one, `b` becomes the `Str`, otherwise the result is a copy and `b` is
 /// dropped. On `InvalidUtf8` the reference stays the caller's (which traps).

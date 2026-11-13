@@ -388,7 +388,7 @@ Every `kio run` compiles the program to native code in memory (about 20-25 ms of
 
 ## Built-ins
 
-`Json` (`s.parse_json()` gives `Result<Json, Str>`, `j.to_json()`, accessors `get`, `at`, `as_str`, ..), `HashMap<K, V>` (insertion-ordered, beside the key-ordered `Map`), generic functions and types with `T: Eq` and `T: Ord` bounds, `<` on `Str` by bytes, `sort_by`, `join`, `sha256`, `to_hex`, `from_hex` and `ct_eq` (constant-time compare). Every method: [language.md](language.md).
+`Json` (`s.parse_json()` gives `Result<Json, Str>`, `j.to_json()`, accessors `get`, `at`, `as_str`, ..), `HashMap<K, V>` (insertion-ordered, beside the key-ordered `Map`), generic functions and types with `T: Eq` and `T: Ord` bounds, `<` on `Str` by bytes, `sort_by`, `join`, `sha256`, `to_hex`, `from_hex`, `try_to_str` (`None` for bytes that are not UTF-8) and `ct_eq` (constant-time compare). Every method: [language.md](language.md).
 
 ## From source
 

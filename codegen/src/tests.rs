@@ -255,6 +255,7 @@ fn the_runtime_exports_every_operation() {
         "rt_str_strip_suffix_u",
         "rt_str_find_u",
         "rt_str_from_hex_u",
+        "rt_bytes_try_to_str_u",
         "rt_float_to_int_u",
         "rt_json_get_u",
         "rt_json_at_u",

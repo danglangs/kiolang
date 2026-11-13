@@ -882,6 +882,7 @@ impl<'a> Lowerer<'a> {
                     (T::List(_), "contains") => Builtin::ListContains,
                     (T::Bytes, "len") => Builtin::BytesLen,
                     (T::Bytes, "to_str") => Builtin::BytesToStr,
+                    (T::Bytes, "try_to_str") => Builtin::BytesTryToStr,
                     (T::List(_), "len") => Builtin::ListLen,
                     (T::Map(..) | T::HashMap(..), "len") => Builtin::MapLen,
                     (T::Map(..) | T::HashMap(..), "keys") => Builtin::MapKeys,

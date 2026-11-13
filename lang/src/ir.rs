@@ -283,6 +283,7 @@ pub enum Builtin {
     ListContains,
     BytesLen,
     BytesToStr,
+    BytesTryToStr,
     ListLen,
     MapLen,
     MapKeys,

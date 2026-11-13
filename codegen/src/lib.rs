@@ -2663,6 +2663,7 @@ impl<'m> FuncGen<'_, 'm> {
                     Builtin::ListContains => ("rt_list_contains", Nothing, None),
                     Builtin::BytesLen => ("rt_bytes_len", Nothing, None),
                     Builtin::BytesToStr => ("rt_bytes_to_str", Nothing, Some("invalid UTF-8")),
+                    Builtin::BytesTryToStr => ("rt_bytes_try_to_str_u", Nothing, None),
                     Builtin::ListLen => ("rt_list_len", Nothing, None),
                     Builtin::MapLen => ("rt_map_len", Nothing, None),
                     Builtin::MapKeys => ("rt_map_keys", Desc, None),

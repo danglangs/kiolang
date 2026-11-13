@@ -245,6 +245,25 @@ fn bytes_and_str_conversions() {
         let e = text::new_bytes(&[]);
         dec(text::to_str(e).unwrap());
         dec(e);
+        // L27: `try_to_str`, `None` where `to_str` errs.
+        for (x, want) in [
+            (&b""[..], Some("")),
+            ("h\u{e9}llo".as_bytes(), Some("h\u{e9}llo")),
+            (&[0x68, 0xff], None),
+            (&[0xc0, 0xaf], None),
+            (&[0x80], None),
+            (&[0xed, 0xa0, 0x80], None),
+            (&[0xe2, 0x82], None),
+        ] {
+            let p = text::new_bytes(x);
+            let got = text::try_to_str_opt(p).map(|v| {
+                let r = str_slot(v);
+                dec(from_slot(v));
+                r
+            });
+            assert_eq!(got.as_deref(), want);
+            dec(p);
+        }
     }
     assert_eq!(obj::live(), base);
 }

@@ -378,6 +378,38 @@ fn main() -> List<Str> {
     assert_eq!(msg, "no method `from_hex` on Bytes");
 }
 
+/// L27: `Bytes.try_to_str()`: `Some` for UTF-8, `None` where `to_str()` stops the run.
+#[test]
+fn try_to_str() {
+    let src = r#"
+fn main() -> List<Str> {
+    let show = |h: Str| match h.from_hex().unwrap_or("".to_bytes()).try_to_str() {
+        Some(s) => "some:" + s,
+        None => "none",
+    };
+    let t = "héllo €😀";
+    [show(""), show("616263"), show(t.to_bytes().to_hex()),
+     show("c0af"), show("e080af"), show("f08082ac"),
+     show("80"), show("61bf"),
+     show("eda080"), show("edbfbf"),
+     show("c3"), show("e282"), show("f09f98"), show("e28241"),
+     show("f4908080"), show("ff"),
+     (t.to_bytes().try_to_str().unwrap_or("?") == t.to_bytes().to_str()).to_str()]
+}"#;
+    assert_eq!(
+        shows(src),
+        concat!(
+            r#"["some:", "some:abc", "some:héllo €😀", "#,
+            r#""none", "none", "none", "none", "none", "none", "none", "#,
+            r#""none", "none", "none", "none", "none", "none", "true"]"#
+        )
+    );
+    let (msg, _) = rejects("fn main() { \"a\".try_to_str(); }");
+    assert_eq!(msg, "no method `try_to_str` on Str");
+    let src = "fn main() -> Str { \"80\".from_hex().unwrap_or(\"\".to_bytes()).to_str() }";
+    assert_eq!(fails(src).0, "invalid UTF-8");
+}
+
 #[test]
 fn ct_eq() {
     let src = r#"

@@ -1217,6 +1217,10 @@ fn builtin(recv: &Value, b: Builtin, (arg, arg2): Args, span: Span) -> Res {
             Ok(s) => Value::Str(s.into()),
             Err(_) => return Err(fail(span, "invalid UTF-8")),
         },
+        (B::BytesTryToStr, Value::Bytes(b)) => match std::str::from_utf8(b) {
+            Ok(s) => some(Value::Str(s.into())),
+            Err(_) => none(),
+        },
         (B::ListLen, Value::List(v)) => Value::Int(v.len() as i64),
         (B::MapLen, Value::Map(m)) => Value::Int(m.len() as i64),
         (B::MapKeys, Value::Map(m)) => Value::List(m.keys().map(Key::to_value).collect::<Vec<_>>().into()),

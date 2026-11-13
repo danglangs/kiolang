@@ -1639,6 +1639,7 @@ fn method(caps: &CapTable, recv: &Ty, name: &str) -> Option<(Vec<Ty>, Ty)> {
             Some((params.clone(), ret.clone()))
         }
         (Ty::Int | Ty::Bool | Ty::Bytes, "to_str") => Some((vec![], Ty::Str)),
+        (Ty::Bytes, "try_to_str") => Some((vec![], Ty::Option(Box::new(Ty::Str)))),
         (Ty::Str, "len") | (Ty::Bytes, "len") | (Ty::List(_), "len") => Some((vec![], Ty::Int)),
         (Ty::List(t), "push") => Some((vec![(**t).clone()], Ty::Unit)),
         (Ty::List(t), "contains") => Some((vec![(**t).clone()], Ty::Bool)),
@@ -1826,6 +1827,7 @@ const METHODS: &[&str] = &[
     "to_str",
     "to_uppercase",
     "trim",
+    "try_to_str",
     "unwrap_or",
     "unwrap_or_else",
 ];
