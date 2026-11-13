@@ -206,7 +206,7 @@ kio is a Rust subset on purpose, and its errors name the fix. Without the refere
 
 ## Roadmap
 
-- **Now:** a flagship application, a durable workflow service (webhook ingestion, a job queue, retries, idempotency, an API and a CLI), to prove kio at a larger scale, each change shipping its `kio test` results, properties included, beside its authority diff.
+- **Now:** a flagship application, a durable workflow service (webhook ingestion, a job queue, retries, idempotency, an API and a CLI), to prove kio at a larger scale, each change reviewed with `kio review`: its authority diff, `kio test` results (properties included), resource changes and what no check covers, on one page.
 - **Next:** packages, and narrowing a capability for a helper (a subdirectory, read-only, one host), as the application needs them; benchmark gates in CI so speed never regresses silently.
 - **Later:** contracts the application shows it needs; `par_map` and tasks (pinned).
 

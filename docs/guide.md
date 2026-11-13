@@ -9,6 +9,7 @@ kio check <prog.kio> --grants <file> [flags]   bind the file's grants to main wi
 kio run <prog.kio> [--grants file] [grants] [limits] [--audit log] [--listen addr]
 ... --json                       one JSON object on stdout (JSON output, below)
 kio test <prog.kio> [--grants file] [--filter substr] [--cases n] [--seed s] [limits]   run the #[test] functions (Tests, below)
+kio review <new.kio> --base <old.kio> [--grants file] [--test-grants file] [--requirements file] [--json]   one labelled page for a change (Reviewing a change, below)
 kio mcp                          the MCP server (README, "Use from an agent")
 ```
 
@@ -384,6 +385,52 @@ Each side's `mod NAME;` lines resolve to `NAME.kio` beside that side's entry, so
 - name: Authority diff
   run: tools/authority-diff.sh origin/${{ github.base_ref }} app.kio
 ```
+
+## Reviewing a change
+
+`kio review NEW --base OLD` puts the evidence kio has about a change on one page. Every line carries its label: `enforced` (the host refuses otherwise), `tested` (passed on generated or written cases), `measured` (deterministic numbers), `not checked` (a person must look or accept it), `error` (a failure; exit 1); a line under a labelled one shares its label. It never gives a verdict.
+
+Review runs the change's own test code, OLD's and NEW's, under `--test-grants T` or else the defaults (a temporary `Dir`, `:memory:` stores, a fixed clock); never under `main`'s grants.
+
+```
+$ kio review new/app.kio --base old/app.kio --requirements README.md
+Requirements
+  not checked  what the change claims; kio does not check it
+               --- old/README.md
+               +++ new/README.md
+               @@ -1,3 +1,4 @@
+               ...
+Authority
+  enforced     ~ d: Dir (+write)
+Tests
+  tested       grants: defaults (temporary Dir, :memory: stores, fixed clock)
+  tested       old: 4 passed, 0 failed
+  tested       new: 4 passed, 0 failed
+  tested       added: fresh
+  not checked  removed: gone
+  tested       small: 100 cases compiled; seed 1
+Resources
+  measured     counts: fuel 139802 -> 189802 (+35.77%), peak memory 1728 KB -> 1728 KB (+0.00%)
+  measured     total over 3 tests on both sides: fuel 9207154 -> 9257154 (+0.55%), largest peak memory 1728 KB -> 1728 KB (+0.00%)
+Not checked
+  not checked  d: Dir write: what is written or removed
+  not checked  tests and properties were written by the same author as the code unless stated
+Identity
+  kio 0.1.1 (9a423b4)
+  old old/app.kio sha256:9e33a9...
+  new new/app.kio sha256:1eccc5...
+  ...
+  test seed 1
+```
+
+- **Requirements** (`--requirements FILE`, a relative path, beside each side's entry, at most 1 MB): the file's unified diff, what the change claims.
+- **Authority**: `kio check NEW --base OLD`'s lines. `--grants G` binds G to NEW's `main` as `kio check --grants` does; if it does not bind, the errors are shown here labelled `error`.
+- **Tests**: `kio test` on both sides with T (else the defaults) and seed 1: the grants used, counts (`0 tests` for a side with none), each test added or removed by name, each property's cases, and each NEW failure as `kio test` prints it (`error`). A removed test, a property that ran fewer cases than in OLD, or a property now an example test is a `removed:` line (`not checked`: a person accepts it). T may not give a writable `--dir` or a file-backed `--kv` or `--db`: OLD's tests would leave their writes for NEW's (use `:ro` or `:memory:`).
+- **Resources**: per test on both sides, fuel and peak memory (a property's: fuel summed over its cases, peak memory their largest) when either changed by more than 2%; then the total fuel and the largest peak over the tests on both sides. Percentages are rounded away from zero, so a row never reads `2.00%`. Tests only; no wall time.
+- **Not checked**: for each method NEW's `main` reaches, what the host does not look at (the SQL, the bodies sent, what is written, ...).
+- **Identity**: kio's version and commit, and the sha256 of every file each side loads (root and modules), of G, of T and of the requirements files. Each is read again at the end; one that changed while the review ran is an `error`.
+
+Exit 1: a side does not check, G does not bind, a side's tests do not run, a NEW test fails, or a file changed during the review; 3: authority added or a test removed; 0 otherwise; 2: usage. `--json` gives one object with a field per section. `--base` takes a path: for a git revision, write each file out with `git show REV:app.kio > old/app.kio`, modules beside it.
 
 ## Compiling
 
