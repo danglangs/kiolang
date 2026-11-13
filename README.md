@@ -4,6 +4,8 @@
 
 **A general-purpose language for code AI agents write: review the contracts and the evidence, not every line.**
 
+Website and docs: [danglangs.github.io/kiolang](https://danglangs.github.io/kiolang/)
+
 kio is an experimental (v0) language and runtime for generated software whose important guarantees can be checked independently of the agent that wrote it: people approve intent, authority and evidence; machines handle the implementation ([trust](docs/proposals/trust.md)). It combines explicit authority, enforced isolation, value semantics and a compiler built for predictable performance.
 
 The first contract is authority, and it works today: what a program can touch is checked from its code, the host enforces it, and `kio check --base` prints what a change adds in one line. The safety you would otherwise assemble around Python (a sandbox, an egress proxy, a secret store, an authority report) is built in. Tests and property tests run with `kio test`; resource budgets come next ([roadmap](#roadmap)).
