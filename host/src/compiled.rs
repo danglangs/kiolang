@@ -288,7 +288,16 @@ fn instantiate(
             }
         })
         .collect();
-    let instance = program.pre.instantiate(&mut *store)?;
+    // Instantiating runs only Wasmtime's memory initialization (the component has no start
+    // function), and that is OS-dependent: Linux maps the data image copy-on-write for free,
+    // other hosts copy it in fuel-charged code padded to the host page (82K more fuel on macOS
+    // for an empty program). So fuel counts the program's work from `run` on; instantiation is
+    // bounded by the module's size and the timeout.
+    let fuel = store.get_fuel()?;
+    store.set_fuel(u64::MAX)?;
+    let instance = program.pre.instantiate(&mut *store);
+    store.set_fuel(fuel)?;
+    let instance = instance?;
     Ok(Ok((World::new(&mut *store, &instance)?, grants)))
 }
 

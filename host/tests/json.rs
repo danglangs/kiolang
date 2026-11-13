@@ -383,7 +383,8 @@ fn each_limit_is_its_own_kind_with_a_hint() {
     }
 }
 
-/// Fuel spent while the instance starts used to escape the limit message (D2).
+/// Fuel that ran out while the instance started used to escape the limit message (D2); the
+/// limit message holds wherever fuel runs out.
 #[test]
 fn fuel_spent_at_instantiation_is_kind_fuel() {
     let t = dir(&[("spin.kio", SPIN)]);
@@ -402,6 +403,17 @@ fn fuel_spent_at_instantiation_is_kind_fuel() {
         String::from_utf8_lossy(&out.stderr),
         "out of fuel (limit 1000; raise it with --fuel)\n"
     );
+}
+
+/// Fuel counts the program's work, not Wasmtime's memory initialization, which is free on Linux
+/// and a page-padded copy elsewhere: an empty program used 6,906 on Linux and 88,827 on macOS.
+#[test]
+fn fuel_is_the_same_on_every_os() {
+    let t = dir(&[("empty.kio", "fn main() -> Int { 0 }\n")]);
+    let (code, v, _) = kio(t.path(), &["run", "empty.kio", "--json"]);
+    assert_eq!(code, 0);
+    let fuel = v["used"]["fuel"].as_u64().unwrap();
+    assert!(fuel < 20_000, "{fuel}");
 }
 
 /// A call the host stops is `denied`: here one the report lacks (test hook; the CLI never
