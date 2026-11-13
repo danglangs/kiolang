@@ -1,6 +1,6 @@
-//! The interpreter, run natively as the reference compiled code is checked against: by tests
-//! (`Interp`, test only, with `Kio`'s API; docs/compiler-todo.md) and by `kio test`, which runs
-//! each property case both ways (`interpret`). Its capability calls go through the same host
+//! Test only: the interpreter, run natively as the reference compiled code is checked against:
+//! `Interp`, with `Kio`'s API (docs/compiler-todo.md), and `Kio::interpret_case`, the oracle a
+//! test build of `kio test` checks each property case against. Its capability calls go through the same host
 //! functions as compiled code (`State`'s caps.wit traits, called directly instead of through
 //! Wasm), so grants, quotas, the report check, the deadline and the audit log are the same; only
 //! the fuel, memory and stack limits do not apply.
@@ -15,24 +15,19 @@ use crate::kio::caps::net::{HostHttp, HttpErr, HttpRequest, HttpResponse};
 use crate::kio::caps::rng::HostRng;
 use crate::kio::caps::web::{HostIncoming, HostOutgoing, WebErr};
 use crate::kio::caps::ws::{HostWsMessage, HostWsSend, WsErr};
-#[cfg(feature = "test-hooks")]
 use crate::ws::{WsEvent, WsFrame};
-#[cfg(feature = "test-hooks")]
 use crate::{
     end_audit, grants, main_calls, named, on_run_stack, push_grants, single, start_audit, state_limit, web_grants,
     ws_grants, Diag, DirPaths, Handles, KvGrants, Limits, Origin, Outcome, Report, Request, Response, RunResult,
     Sources, Stopped,
 };
 use crate::{Bound, State};
-#[cfg(feature = "test-hooks")]
 use cap_std::fs::Dir as RealDir;
 use lang::ir::{EnumId, EnumRef, StructId};
 use lang::CapTable;
 use lang::{RunErr, Value};
 use std::collections::BTreeMap;
-#[cfg(feature = "test-hooks")]
 use std::io::Write;
-#[cfg(feature = "test-hooks")]
 use std::sync::PoisonError;
 use std::time::Instant;
 use wasmtime::component::Resource;
@@ -59,7 +54,6 @@ pub(crate) fn interpret(
 }
 
 /// Runs programs in the native interpreter, with grants and an audit log as `Kio` takes them.
-#[cfg(feature = "test-hooks")]
 pub struct Interp {
     limits: Limits,
     audit: Option<(Box<dyn Write + Send>, DirPaths)>,
@@ -69,7 +63,6 @@ pub struct Interp {
     calls: u32,
 }
 
-#[cfg(feature = "test-hooks")]
 impl Interp {
     pub fn new(limits: Limits) -> Result<Self> {
         Ok(Interp {

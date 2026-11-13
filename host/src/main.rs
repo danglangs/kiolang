@@ -533,7 +533,7 @@ struct TestRun<'a> {
     program: &'a lang::Program,
     test: &'a lang::TestFn,
     logs: Vec<(String, LogSink)>,
-    /// A property's case: its values, and whether it runs in the interpreter.
+    /// A property's case: its values, and whether it runs in the interpreter (test builds only).
     case: Option<(lang::prop::Case, bool)>,
 }
 
@@ -1036,9 +1036,15 @@ fn run_program(
     }
     kio.grant_sources(sources);
     let result = match &test {
+        #[cfg(feature = "test-hooks")]
+        Some(TestRun {
+            test,
+            case: Some((c, true)),
+            ..
+        }) => kio.interpret_case(files, &test.name, c, dirs, https),
         Some(TestRun {
             test, case: Some(c), ..
-        }) => kio.run_case(files, &test.name, &c.0, c.1, dirs, https),
+        }) => kio.run_case(files, &test.name, &c.0, dirs, https),
         Some(t) => kio.run_test(files, &t.test.name, dirs, https),
         None => kio.run_files(files, dirs, https),
     };
@@ -1143,25 +1149,23 @@ struct TestResult {
     prop: Option<PropInfo>,
 }
 
-/// How a property's cases ran: generated cases, how many ran in each engine, discards, and the
+/// How a property's cases ran: generated cases (each compiled), discards, shrink runs, and the
 /// input shown with a failure (`(name, literal)`, shrunk or not).
 #[derive(Default)]
 struct PropInfo {
-    cases: usize,
-    interpreted: usize,
     compiled: usize,
     seed: u64,
     discarded: usize,
     input: Option<(Vec<(String, String)>, bool)>,
-    /// Interpreted runs shrinking took; the minimal input then ran both ways.
+    /// Compiled runs shrinking took; the minimal input then ran once more.
     shrinks: usize,
 }
 
 impl PropInfo {
-    /// `100 cases: 100 interpreted, 100 compiled; seed 1`, and the discards if any.
+    /// `100 cases compiled; seed 1`, and the discards if any.
     fn summary(&self) -> String {
-        let (n, i, c, s) = (self.cases, self.interpreted, self.compiled, self.seed);
-        let mut line = format!("{n} cases: {i} interpreted, {c} compiled; seed {s}");
+        let cases = if self.compiled == 1 { "case" } else { "cases" };
+        let mut line = format!("{} {cases} compiled; seed {}", self.compiled, self.seed);
         if self.discarded > 0 {
             line += &format!("; {} discarded", self.discarded);
         }
@@ -1213,8 +1217,7 @@ fn test(path: &str, flags: &[&str], json: bool) -> i32 {
                             .map(|(k, v)| (k.clone(), json!(v)))
                             .collect::<serde_json::Map<_, _>>()
                     });
-                    row["cases"] = json!(p.cases);
-                    row["interpreted"] = json!(p.interpreted);
+                    row["cases"] = json!(p.compiled);
                     row["compiled"] = json!(p.compiled);
                     row["seed"] = json!(p.seed);
                     row["discarded"] = json!(p.discarded);
@@ -1245,7 +1248,12 @@ fn test(path: &str, flags: &[&str], json: bool) -> i32 {
                 println!("  {label}: {}", kio_host::escape_line(&shown.join(", ")));
                 if *shrunk {
                     let n = r.prop.as_ref().map_or(0, |p| p.shrinks);
-                    println!("  shrunk in {n} interpreted runs; the minimal input ran compiled and interpreted");
+                    let stopped = if n == MAX_SHRINK_RUNS {
+                        "; shrinking stopped after 200 runs"
+                    } else {
+                        ""
+                    };
+                    println!("  shrunk in {n} compiled runs{stopped}");
                 }
             }
             // The program writes the message: escaped as a log line is, it is one line and no
@@ -1480,7 +1488,7 @@ const DEFAULT_CASES: usize = 100;
 const MAX_CASES: usize = 100_000;
 
 /// The most runs shrinking a failing case may take.
-const MAX_SHRINK_RUNS: usize = 1_000;
+const MAX_SHRINK_RUNS: usize = 200;
 
 /// What one case did: passed, was discarded by `assume`, or failed with an error as `--json`
 /// shows one.
@@ -1557,10 +1565,9 @@ fn property_effect(tests: &Tests, t: &lang::TestFn) -> Option<(String, &'static 
     None
 }
 
-/// Runs property `t` on `tests.cases` generated cases, each compiled and interpreted in fresh
-/// instances with fresh grants; a disagreement fails it. A failing case is shrunk in the
-/// interpreter, and the smallest is run both ways again. Its error, the failing run's log, and
-/// how the cases ran.
+/// Runs property `t` on `tests.cases` generated cases, each compiled in a fresh instance with
+/// fresh grants. A failing case is shrunk, each candidate a compiled run, and the smallest runs
+/// once more. Its error, the failing run's log, and how the cases ran.
 fn run_property(tests: &Tests, t: &lang::TestFn) -> (Option<serde_json::Value>, String, PropInfo) {
     let mut info = PropInfo {
         seed: tests.seed,
@@ -1582,8 +1589,8 @@ fn run_property(tests: &Tests, t: &lang::TestFn) -> (Option<serde_json::Value>, 
             .iter()
             .map(|ty| lang::prop::generate(&m, ty, &mut rng, size))
             .collect();
-        info.cases += 1;
-        let (verdict, log) = run_both(tests, t, &values, &mut info);
+        info.compiled += 1;
+        let (verdict, log) = run_case(tests, t, &values);
         let error = match verdict {
             Verdict::Pass => continue,
             Verdict::Discard => {
@@ -1596,15 +1603,15 @@ fn run_property(tests: &Tests, t: &lang::TestFn) -> (Option<serde_json::Value>, 
             info.input = Some((shown(&values), false));
             return (Some(error), log, info);
         }
-        // Shrink in the interpreter to a smaller case failing the same way, then run that both ways.
+        // Shrink to a smaller case failing the same way, then run that again.
         let kind = error["kind"].clone();
         let fails = |vs: &[lang::Value]| {
-            let r = run_once(tests, t, Some((lang::prop::Case::new(vs), true)));
+            let r = run_once(tests, t, Some((lang::prop::Case::new(vs), false)));
             matches!(Verdict::of(&r), Verdict::Fail(e) if e["kind"] == kind)
         };
         let (minimal, runs) = lang::prop::minimize(&m, &tys, values, MAX_SHRINK_RUNS, fails);
         info.shrinks = runs;
-        let (verdict, log) = run_both(tests, t, &minimal, &mut PropInfo::default());
+        let (verdict, log) = run_case(tests, t, &minimal);
         info.input = Some((shown(&minimal), true));
         let error = match verdict {
             Verdict::Fail(e) => e,
@@ -1617,38 +1624,46 @@ fn run_property(tests: &Tests, t: &lang::TestFn) -> (Option<serde_json::Value>, 
         };
         return (Some(error), log, info);
     }
-    if info.discarded * 10 > info.cases * 9 {
-        let msg = format!("`{}` discarded {} of {} inputs", t.name, info.discarded, info.cases);
+    if info.discarded * 10 > info.compiled * 9 {
+        let msg = format!("`{}` discarded {} of {} inputs", t.name, info.discarded, info.compiled);
         let hint = "loosen `assume`, or build the inputs inside the test";
         return (Some(test_error("discard", &msg, Some(hint))), String::new(), info);
     }
     (None, String::new(), info)
 }
 
-/// Runs one case compiled, then (unless compiled code stopped at a limit) interpreted, each in a
-/// fresh instance with fresh grants: the verdict both give, or a failure naming both when they
-/// differ. The log of the compiled run.
-fn run_both(tests: &Tests, t: &lang::TestFn, values: &[lang::Value], info: &mut PropInfo) -> (Verdict, String) {
+/// Runs one case compiled, in a fresh instance with fresh grants: its verdict and log. In test
+/// builds the interpreter runs it too, as the oracle (`oracle`).
+fn run_case(tests: &Tests, t: &lang::TestFn, values: &[lang::Value]) -> (Verdict, String) {
     let case = lang::prop::Case::new(values);
     let compiled = run_once(tests, t, Some((case.clone(), false)));
-    info.compiled += 1;
     let verdict = Verdict::of(&compiled);
-    if verdict.unchecked() {
-        return (verdict, compiled.log);
+    #[cfg(feature = "test-hooks")]
+    let verdict = oracle(tests, t, case, verdict);
+    #[cfg(not(feature = "test-hooks"))]
+    drop(case);
+    (verdict, compiled.log)
+}
+
+/// Test builds only: kio's own CI checks compiled code against the interpreter on every property
+/// case its tests run. Unless compiled code stopped at a limit, runs the case in the interpreter
+/// with fresh grants; a different verdict is a failure naming both.
+#[cfg(feature = "test-hooks")]
+fn oracle(tests: &Tests, t: &lang::TestFn, case: lang::prop::Case, compiled: Verdict) -> Verdict {
+    if compiled.unchecked() {
+        return compiled;
     }
     let interpreted = Verdict::of(&run_once(tests, t, Some((case, true))));
-    info.interpreted += 1;
-    if interpreted.unchecked() || interpreted == verdict {
-        let v = if interpreted.unchecked() { interpreted } else { verdict };
-        return (v, compiled.log);
+    if interpreted.unchecked() || interpreted == compiled {
+        return compiled;
     }
     let msg = format!(
         "compiled and interpreted runs disagree: compiled {}, interpreted {}",
-        verdict.describe(),
+        compiled.describe(),
         interpreted.describe()
     );
     let hint = "a kio bug: please report it with the input and the rerun line";
-    (Verdict::Fail(test_error("internal", &msg, Some(hint))), compiled.log)
+    Verdict::Fail(test_error("internal", &msg, Some(hint)))
 }
 
 /// `s` as one shell word: as is if it is plain, else single-quoted.

@@ -317,22 +317,22 @@ $ kio test app.kio --filter parses --json
 
 ### Properties
 
-A test with data parameters is a property ([language.md](language.md#properties)). It runs on `--cases` generated inputs (default 100, at most 100,000) from `--seed` (default 1); case `i` depends only on the seed and `i`, so a run repeats exactly. Each case runs compiled, through an entry that calls the test with the case's values built in IR (never printed and reparsed), and again in the interpreter, each in a fresh instance with fresh grants (a new temporary `Dir` per case). A case where the two differ fails the test (kind `internal`) and names the input; a case compiled code stops at a limit is not run in the interpreter, which has no fuel, memory or stack limit, only the timeout. A failing case is shrunk in the interpreter (at most 1,000 runs, keeping the failure's kind); the smallest then runs both ways again.
+A test with data parameters is a property ([language.md](language.md#properties)). It runs on `--cases` generated inputs (default 100, at most 100,000) from `--seed` (default 1); case `i` depends only on the seed and `i`, so a run repeats exactly. Each case runs compiled, through an entry that calls the test with the case's values built in IR (never printed and reparsed), in a fresh instance with fresh grants (a new temporary `Dir` per case) under the limits. A failing case is shrunk, each candidate another compiled run (at most 200, keeping the failure's kind; "shrinking stopped after 200 runs" when the cap ends it), and the smallest runs once more. kio's own CI also runs every case its tests generate in the interpreter and fails on any difference; `kio test` itself has no interpreter.
 
 A property may not take `Http` ("a property runs many times; `api: Http` would repeat real requests", hint "test the call in an example test, or pass the data as a parameter"), nor a `Dir`, `Kv` or `Db` the grants file names unless it is `:ro` (or `:memory:`). More than 90% of cases discarded by `assume` fails it ("`t` discarded 95 of 100 inputs").
 
 ```
 $ kio test app.kio
-ok   reverse_twice  (100 cases: 100 interpreted, 100 compiled; seed 1)
-FAIL small  (4 cases: 4 interpreted, 4 compiled; seed 1)
+ok   reverse_twice  (100 cases compiled; seed 1)
+FAIL small  (4 cases compiled; seed 1)
   minimal input: n = 6, o = Order { id: "", total: 0 }
-  shrunk in 44 interpreted runs; the minimal input ran compiled and interpreted
+  shrunk in 44 compiled runs
   app.kio:13:5: assertion failed: too big
   rerun: kio test app.kio --filter small --seed 1
 1 passed, 1 failed
 ```
 
-`--json` adds to a property's entry `cases`, `interpreted`, `compiled`, `seed`, `discarded`, `shrinks` and `input` (each parameter's literal, or `null` when it passed). Compiling a case costs about 30 ms in a release build, so 100 cases take about 3 s.
+`--json` adds to a property's entry `cases`, `compiled`, `seed`, `discarded`, `shrinks` and `input` (each parameter's literal, or `null` when it passed). A case compiles and runs in about 30 ms in a release build: 100 cases take about 3 s, a shrink that hits the cap about 6 s more.
 
 ## Reviewing authority in a pull request
 

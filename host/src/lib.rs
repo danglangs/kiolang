@@ -31,6 +31,7 @@ mod compiled;
 mod config;
 pub mod db;
 mod grants;
+#[cfg(feature = "test-hooks")]
 mod interp;
 pub mod kv;
 pub use compiled::{Kio, Server};

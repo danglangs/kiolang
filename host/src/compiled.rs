@@ -7,13 +7,14 @@
 //! (lib.rs).
 
 use crate::bindings::{Compiled as World, CompiledImports, Grant};
+#[cfg(feature = "test-hooks")]
+use crate::state_limit;
 use crate::ws::{WsEvent, WsFrame};
 use crate::{
     audit_header, config, dir_id, end_audit, entry_report, grants, limit_message, main_calls, named, new_store,
     on_run_stack, push_grants, read_only_refusal, set_stack, single, source_places, source_refusal, spawn_ticker,
-    start_audit, state_limit, web_grants, write_line, ws_grants, Audit, Bound, Diag, DirPaths, FileId, Handles,
-    KvGrants, Limits, Origin, Outcome, Refused, Report, Request, Response, RunResult, SharedLog, Sources, State,
-    Stopped, Used,
+    start_audit, web_grants, write_line, ws_grants, Audit, Bound, Diag, DirPaths, FileId, Handles, KvGrants, Limits,
+    Origin, Outcome, Refused, Report, Request, Response, RunResult, SharedLog, Sources, State, Stopped, Used,
 };
 use cap_std::fs::Dir as RealDir;
 use codegen::Site;
@@ -354,7 +355,7 @@ pub struct Kio {
     /// The function the next run compiles as `main`: `main`, or a test's key (`run_test`).
     entry: String,
     /// The property case the next run calls the test with (`run_case`), and whether it is
-    /// interpreted rather than compiled.
+    /// interpreted rather than compiled (`interpret_case`, test only).
     case: Option<(lang::prop::Case, bool)>,
     /// Test only: a `(parameter, method)` pair to leave out of the authority report.
     #[cfg(feature = "test-hooks")]
@@ -505,19 +506,33 @@ impl Kio {
 
     /// Like `run_test` for a property `test` on one case: the test is called with `case`'s values
     /// by an entry built in IR (`lang::prop::case_entry`), which takes the test's capabilities
-    /// as `main` does. `interpret` runs it in the interpreter instead of compiled, with the same
-    /// grants, refusals, report check, quotas and deadline; fuel, memory and stack apply only to
-    /// compiled code.
+    /// as `main` does.
     pub fn run_case(
         &mut self,
         files: &[(String, String)],
         test: &str,
         case: &lang::prop::Case,
-        interpret: bool,
         dirs: Vec<(String, RealDir)>,
         https: Vec<(String, Origin)>,
     ) -> Result<RunResult> {
-        self.case = Some((case.clone(), interpret));
+        self.case = Some((case.clone(), false));
+        let r = self.run_entry(files, test, dirs, https);
+        self.case = None;
+        r
+    }
+
+    /// Test only: `run_case` in the interpreter, the oracle, with the same grants, refusals,
+    /// report check, quotas and deadline; fuel, memory and stack apply only to compiled code.
+    #[cfg(feature = "test-hooks")]
+    pub fn interpret_case(
+        &mut self,
+        files: &[(String, String)],
+        test: &str,
+        case: &lang::prop::Case,
+        dirs: Vec<(String, RealDir)>,
+        https: Vec<(String, Origin)>,
+    ) -> Result<RunResult> {
+        self.case = Some((case.clone(), true));
         let r = self.run_entry(files, test, dirs, https);
         self.case = None;
         r
@@ -635,8 +650,9 @@ impl Kio {
     ) -> Result<RunResult> {
         self.used = None;
         let case = match self.case.clone() {
-            Some((case, true)) => return self.interpret_case(files, dirs, https, &case),
-            Some((case, false)) => Some(case),
+            #[cfg(feature = "test-hooks")]
+            Some((case, true)) => return self.interpret_here(files, dirs, https, &case),
+            Some((case, _)) => Some(case),
             None => None,
         };
         let edit = |m: &mut lang::ir::Module| {
@@ -709,9 +725,10 @@ impl Kio {
     }
 }
 
+#[cfg(feature = "test-hooks")]
 impl Kio {
-    /// `run_here` for a property case in the interpreter (`run_case`).
-    fn interpret_case(
+    /// `run_here` for a property case in the interpreter (`interpret_case`).
+    fn interpret_here(
         &mut self,
         files: &[(String, String)],
         dirs: Vec<(String, RealDir)>,

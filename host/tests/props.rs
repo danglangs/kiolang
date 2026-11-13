@@ -1,5 +1,6 @@
 //! T2b: `kio test` runs a property (a test with data parameters) on generated cases, each
-//! compiled and interpreted in fresh instances with fresh grants, and shrinks a failure.
+//! compiled in a fresh instance with fresh grants, and shrinks a failure. This test build also
+//! runs each case in the interpreter (the oracle) and fails on a disagreement.
 use std::path::Path;
 use std::process::Command;
 
@@ -83,14 +84,14 @@ fn a_passing_property() {
         (code, out.as_str()),
         (
             0,
-            "ok   reverse_twice  (20 cases: 20 interpreted, 20 compiled; seed 1)\n1 passed, 0 failed\n"
+            "ok   reverse_twice  (20 cases compiled; seed 1)\n1 passed, 0 failed\n"
         ),
         "{err}"
     );
     let (code, t) = c.json(&["--filter", "reverse", "--cases", "7", "--seed", "9"]);
     assert_eq!(code, 0);
-    let fields = ["cases", "interpreted", "compiled", "seed", "discarded", "shrinks"].map(|k| t[k].clone());
-    assert_eq!(fields, [7, 7, 7, 9, 0, 0].map(serde_json::Value::from), "{t}");
+    let fields = ["cases", "compiled", "seed", "discarded", "shrinks"].map(|k| t[k].clone());
+    assert_eq!(fields, [7, 7, 9, 0, 0].map(serde_json::Value::from), "{t}");
     assert_eq!(t["input"], serde_json::Value::Null);
 }
 
@@ -104,8 +105,7 @@ fn a_failing_property_shrinks() {
     assert!(lines[0].ends_with(" compiled; seed 1)"), "{out}");
     assert_eq!(lines[1], "  minimal input: n = 6, o = Order { id: \"\", total: 0 }");
     assert!(
-        lines[2].starts_with("  shrunk in ")
-            && lines[2].ends_with(" interpreted runs; the minimal input ran compiled and interpreted"),
+        lines[2].starts_with("  shrunk in ") && lines[2].ends_with(" compiled runs"),
         "{out}"
     );
     assert!(lines[3].ends_with("app.kio:13:5: assertion failed: too big"), "{out}");
@@ -146,7 +146,7 @@ fn discards() {
     assert_eq!(code, 1, "{out}");
     let lines: Vec<&str> = out.lines().collect();
     assert!(
-        lines[0].starts_with("FAIL picky  (20 cases: 20 interpreted, 20 compiled; seed 1; "),
+        lines[0].starts_with("FAIL picky  (20 cases compiled; seed 1; "),
         "{out}"
     );
     assert!(
@@ -245,4 +245,24 @@ fn bad_case_flags() {
         (code, err.trim()),
         (2, "kio: --seed -1: expected a non-negative integer")
     );
+}
+
+/// The docs' property examples and this file's, run as kio's CI runs them: each case compiled
+/// and, in this test build, interpreted too, so a disagreement on any generated input fails.
+#[test]
+fn properties_agree_with_the_interpreter() {
+    let docs = Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs");
+    let block = |file: &str, heading: &str| {
+        let text = std::fs::read_to_string(docs.join(file)).unwrap();
+        let from = &text[text.find(heading).unwrap_or_else(|| panic!("{heading}"))..];
+        from.split("```\n").nth(1).unwrap().to_string()
+    };
+    let primer = block("primer.md", "## Tests: `#[test]`");
+    let language = block("language.md", "### Properties") + "fn main() {}\n";
+    for (src, failing) in [(primer.as_str(), 0), (language.as_str(), 0), (PROPS, 2)] {
+        let c = Case::new(src);
+        let (_, out, err) = c.kio(&["--cases", "60"]);
+        assert!(!out.contains("disagree"), "{out}{err}");
+        assert!(out.ends_with(&format!(" passed, {failing} failed\n")), "{out}{err}");
+    }
 }
