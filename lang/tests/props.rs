@@ -386,3 +386,74 @@ fn values_show_as_literals() {
         "[Some(1), None]"
     );
 }
+
+/// `Pair<..<Int>>`, `depth` deep.
+fn pairs(depth: usize) -> String {
+    (0..depth).fold("Int".to_string(), |t, _| format!("Pair<{t}>"))
+}
+
+#[test]
+fn a_parameter_has_a_bounded_size() {
+    let src = |ty: &str| {
+        format!("struct Pair<T> {{ a: T, b: T }}\nstruct O {{ a: Int, b: Str, c: Float, d: Bool, e: Int, f: Str, g: Int, h: Option<Int>, i: Bytes, j: Int }}\nenum Tree {{ Leaf(Int), Node(List<Tree>) }}\n#[test]\nfn t(p: {ty}) {{}}\nfn main() {{}}")
+    };
+    let at = format!("p: {}", pairs(12));
+    rejects(
+        &src(&pairs(12)),
+        &format!("`{at}` has up to 8191 values; a property parameter may have at most 4096"),
+        "build the large value inside the test",
+        &at,
+    );
+    for ok in [
+        pairs(11),
+        "List<O>".into(),
+        "List<List<O>>".into(),
+        "Tree".into(),
+        "Map<Str, List<Int>>".into(),
+    ] {
+        check(&src(&ok), &common::caps()).unwrap_or_else(|d| panic!("{ok}: {d:?}"));
+    }
+    let at = "p: List<List<List<Pair<Pair<Pair<O>>>>>>";
+    let d = check(&src(&at[3..]), &common::caps()).unwrap_err();
+    assert!(d[0].msg.starts_with(&format!("`{at}` has up to ")), "{}", d[0].msg);
+}
+
+#[test]
+fn a_parameter_needs_a_value() {
+    let src = |ty: &str| {
+        format!("enum Never {{}}\nenum Gone {{ A(Never), B(Int, Never) }}\nenum Some1 {{ A(Never), B(Int) }}\n#[test]\nfn t(x: {ty}) {{}}\nfn main() {{}}")
+    };
+    let hint = "build it inside the test";
+    rejects(
+        &src("Never"),
+        "a test cannot take `Never`: it has no values",
+        hint,
+        "x: Never",
+    );
+    rejects(
+        &src("Gone"),
+        "a test cannot take `Gone`: it has no values",
+        hint,
+        "x: Gone",
+    );
+    for ty in [
+        "Option<Never>",
+        "List<Never>",
+        "Map<Int, Gone>",
+        "Result<Int, Never>",
+        "Some1",
+    ] {
+        let empty = if ty.contains("Gone") { "Gone" } else { "Never" };
+        let msg = format!("a test cannot take `{ty}`: `{empty}` has no values");
+        rejects(&src(ty), &msg, hint, &format!("x: {ty}"));
+    }
+}
+
+#[test]
+fn shrinking_is_lazy() {
+    // A 4,095-value input: each candidate is made only when taken, so ten runs cost ten copies.
+    let (m, ty) = typed("struct Pair<T> { a: T, b: T }", &pairs(11));
+    let v = cases(&m, &ty, 1, 40).pop().unwrap();
+    let (_, runs) = minimize(&m, &[ty], vec![v], 10, |_| true);
+    assert_eq!(runs, 10);
+}

@@ -172,7 +172,7 @@ fn a_property_gets_a_fresh_dir_per_case() {
 
 #[test]
 fn effects_are_refused() {
-    let src = "#[test]\nfn calls(api: Http, n: Int) { let _ = api.get(\"/\"); }\n#[test]\nfn writes(d: Dir, n: Int) -> Result<(), IoErr> { d.write(\"x\", \"y\".to_bytes()) }\n#[test]\nfn reads(fx: Dir, n: Int) -> Result<(), IoErr> { assert_eq(fx.read(\"in.txt\")?.to_str(), \"hi\"); Ok(()) }\n#[test]\nfn stores(k: Kv, n: Int) {}\nfn main() {}";
+    let src = "#[test]\nfn calls(api: Http, n: Int) { let _ = api.get(\"/\"); }\n#[test]\nfn writes(d: Dir, n: Int) -> Result<(), IoErr> { d.write(\"x\", \"y\".to_bytes()) }\n#[test]\nfn reads(fx: Dir, n: Int) -> Result<(), IoErr> { assert_eq(fx.read(\"in.txt\")?.to_str(), \"hi\"); Ok(()) }\n#[test]\nfn stores(k: Kv, n: Int) {}\n#[test]\nfn logs(log: Log, n: Int) { let _ = log.write(\"x\"); }\nfn main() {}";
     let c = Case::new(src);
     let fx = c.dir.path().join("fx");
     std::fs::create_dir(&fx).unwrap();
@@ -186,6 +186,10 @@ fn effects_are_refused() {
         c.dir.path().join("k.kv").display()
     );
     let g = c.file("t.grants", &grants);
+    let log_grants = c.file(
+        "l.grants",
+        &format!("--log log={}\n", c.dir.path().join("t.log").display()),
+    );
     let error = |filter: &str| {
         let (_, t) = c.json(&["--grants", &g, "--filter", filter, "--cases", "3"]);
         (
@@ -210,6 +214,18 @@ fn effects_are_refused() {
             hint.into()
         )
     );
+    let (_, t) = c.json(&["--grants", &log_grants, "--filter", "logs", "--cases", "3"]);
+    assert_eq!(
+        t["error"]["message"],
+        "a property runs many times; `log: Log` from the grants file would share one file across cases"
+    );
+    assert_eq!(
+        t["error"]["hint"],
+        "use `--log log=-`, or leave it out of the grants file for a buffer per case"
+    );
+    let stderr_log = c.file("e.grants", "--log log=-\n");
+    let (code, t) = c.json(&["--grants", &stderr_log, "--filter", "logs", "--cases", "3"]);
+    assert_eq!(code, 0, "{t}");
     assert_eq!(
         error("stores").1,
         "a property runs many times; `k: Kv` from the grants file would share its writes across cases"
@@ -265,4 +281,20 @@ fn properties_agree_with_the_interpreter() {
         assert!(!out.contains("disagree"), "{out}{err}");
         assert!(out.ends_with(&format!(" passed, {failing} failed\n")), "{out}{err}");
     }
+}
+
+#[test]
+fn a_long_input_is_clipped() {
+    // A limit is not shrunk, so the input shown is the generated one: about 15 KB as a literal.
+    let ty = (0..9).fold("Int".to_string(), |t, _| format!("Pair<{t}>"));
+    let c = Case::new(&format!(
+        "struct Pair<T> {{ a: T, b: T }}\n#[test]\nfn spins(p: {ty}) {{ loop {{}} }}\nfn main() {{}}"
+    ));
+    let (code, t) = c.json(&["--cases", "2", "--fuel", "100000"]);
+    assert_eq!((code, t["error"]["kind"].clone()), (1, "fuel".into()), "{t}");
+    let p = t["input"]["p"].as_str().unwrap();
+    assert!(p.len() == 4099 && p.ends_with("..."), "{}", p.len());
+    let (_, out, _) = c.kio(&["--cases", "2", "--fuel", "100000"]);
+    let line = out.lines().find(|l| l.starts_with("  input: p = ")).unwrap();
+    assert_eq!(line.len(), "  input: p = ".len() + 4099);
 }

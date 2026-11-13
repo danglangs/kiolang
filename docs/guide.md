@@ -319,7 +319,7 @@ $ kio test app.kio --filter parses --json
 
 A test with data parameters is a property ([language.md](language.md#properties)). It runs on `--cases` generated inputs (default 100, at most 100,000) from `--seed` (default 1); case `i` depends only on the seed and `i`, so a run repeats exactly. Each case runs compiled, through an entry that calls the test with the case's values built in IR (never printed and reparsed), in a fresh instance with fresh grants (a new temporary `Dir` per case) under the limits. A failing case is shrunk, each candidate another compiled run (at most 200, keeping the failure's kind; "shrinking stopped after 200 runs" when the cap ends it), and the smallest runs once more. kio's own CI also runs every case its tests generate in the interpreter and fails on any difference; `kio test` itself has no interpreter.
 
-A property may not take `Http` ("a property runs many times; `api: Http` would repeat real requests", hint "test the call in an example test, or pass the data as a parameter"), nor a `Dir`, `Kv` or `Db` the grants file names unless it is `:ro` (or `:memory:`). More than 90% of cases discarded by `assume` fails it ("`t` discarded 95 of 100 inputs").
+A property may not take `Http` ("a property runs many times; `api: Http` would repeat real requests", hint "test the call in an example test, or pass the data as a parameter"), nor a `Dir`, `Kv` or `Db` the grants file names unless it is `:ro` (or `:memory:`), nor a `Log` to a file (`--log log=-` is allowed). A failing input is shown with each literal clipped at 4,096 bytes and `...`, in text and `--json`. More than 90% of cases discarded by `assume` fails it ("`t` discarded 95 of 100 inputs").
 
 ```
 $ kio test app.kio

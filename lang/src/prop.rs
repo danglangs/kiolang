@@ -191,129 +191,138 @@ fn mentions(m: &Module, ty: &Ty, e: EnumId, seen: &mut Vec<Ty>) -> bool {
 /// toward 0.0, `Str`, `Bytes`, `List` and maps by dropping elements then shrinking each,
 /// structs field by field, enums toward the first variant, then by their payload.
 pub fn shrink(m: &Module, ty: &Ty, v: &Value) -> Vec<Value> {
-    let mut out = match (ty, v) {
-        (_, Value::Int(n)) => shrink_int(*n).into_iter().map(Value::Int).collect(),
-        (_, Value::Float(x)) => shrink_float(*x).into_iter().map(Value::Float).collect(),
-        (_, Value::Bool(true)) => vec![Value::Bool(false)],
+    candidates(m, ty, v.clone()).collect()
+}
+
+/// A lazy sequence of smaller values.
+type Smaller<'a, T> = Box<dyn Iterator<Item = T> + 'a>;
+
+/// `shrink`, made one candidate at a time: shrinking takes only as many as it runs, so its
+/// host work is bounded by its runs times the value's size, not the size squared.
+fn candidates<'a>(m: &'a Module, ty: &'a Ty, v: Value) -> Smaller<'a, Value> {
+    match (ty, v) {
+        (_, Value::Int(n)) => Box::new(shrink_int(n).into_iter().map(Value::Int)),
+        (_, Value::Float(x)) => Box::new(shrink_float(x).into_iter().map(Value::Float)),
+        (_, Value::Bool(true)) => Box::new(std::iter::once(Value::Bool(false))),
         (_, Value::Str(s)) => {
-            let chars: Vec<char> = s.chars().collect();
-            let smaller = |c: &char| if *c == 'a' { vec![] } else { vec!['a'] };
-            let each = shrink_seq(&chars, smaller);
-            each.into_iter()
-                .map(|cs| Value::Str(cs.into_iter().collect::<String>().into()))
-                .collect()
+            let chars: Rc<Vec<char>> = Rc::new(s.chars().collect());
+            let each = seq(chars, |c: &char| -> Smaller<'a, char> {
+                Box::new((*c != 'a').then_some('a').into_iter())
+            });
+            Box::new(each.map(|cs| Value::Str(cs.into_iter().collect::<String>().into())))
         }
         (_, Value::Bytes(b)) => {
-            let smaller = |b: &u8| if *b == 0 { vec![] } else { vec![0] };
-            shrink_seq(b, smaller)
-                .into_iter()
-                .map(|b| Value::Bytes(Rc::new(b)))
-                .collect()
+            let each = seq(b, |b: &u8| -> Smaller<'a, u8> {
+                Box::new((*b != 0).then_some(0).into_iter())
+            });
+            Box::new(each.map(|b| Value::Bytes(Rc::new(b))))
         }
         (Ty::List(t), Value::List(xs)) => {
-            let each = shrink_seq(xs, |x| shrink(m, t, x));
-            each.into_iter().map(|xs| Value::List(Rc::new(xs))).collect()
+            let each = seq(xs, move |x: &Value| candidates(m, t, x.clone()));
+            Box::new(each.map(|xs| Value::List(Rc::new(xs))))
         }
-        (Ty::Map(_, t), Value::Map(map)) => {
-            let entries: Vec<(Key, Value)> = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-            let smaller = |(k, v): &(Key, Value)| shrink(m, t, v).into_iter().map(|v| (k.clone(), v)).collect();
-            let each = shrink_seq(&entries, smaller);
-            each.into_iter()
-                .map(|es| Value::Map(Rc::new(es.into_iter().collect())))
-                .collect()
-        }
-        (Ty::HashMap(_, t), Value::HashMap(map)) => {
-            let entries: Vec<(Key, Value)> = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-            let smaller = |(k, v): &(Key, Value)| shrink(m, t, v).into_iter().map(|v| (k.clone(), v)).collect();
-            let each = shrink_seq(&entries, smaller);
-            let map = |es: Vec<(Key, Value)>| {
-                let mut map = HashMap::new();
-                for (k, v) in es {
-                    map.insert(k, v);
-                }
-                Value::HashMap(Rc::new(map))
+        (Ty::Map(_, t) | Ty::HashMap(_, t), v @ (Value::Map(_) | Value::HashMap(_))) => {
+            let (entries, hashed): (Vec<(Key, Value)>, bool) = match &v {
+                Value::Map(map) => (map.iter().map(|(k, v)| (k.clone(), v.clone())).collect(), false),
+                Value::HashMap(map) => (map.iter().map(|(k, v)| (k.clone(), v.clone())).collect(), true),
+                _ => unreachable!(),
             };
-            each.into_iter().map(map).collect()
+            let smaller = move |(k, v): &(Key, Value)| -> Smaller<'a, (Key, Value)> {
+                let k = k.clone();
+                Box::new(candidates(m, t, v.clone()).map(move |v| (k.clone(), v)))
+            };
+            let map = move |es: Vec<(Key, Value)>| match hashed {
+                false => Value::Map(Rc::new(es.into_iter().collect())),
+                true => {
+                    let mut map = HashMap::new();
+                    for (k, v) in es {
+                        map.insert(k, v);
+                    }
+                    Value::HashMap(Rc::new(map))
+                }
+            };
+            Box::new(seq(Rc::new(entries), smaller).map(map))
         }
         (Ty::Struct(s), Value::Struct(_, vs)) => {
-            let fields = &m.structs[s.0 as usize].fields;
-            let tys: Vec<Ty> = fields.iter().map(|f| f.1.clone()).collect();
-            shrink_parts(m, &tys, vs)
-                .into_iter()
-                .map(|vs| Value::Struct(*s, vs))
-                .collect()
+            let tys: Vec<&'a Ty> = m.structs[s.0 as usize].fields.iter().map(|f| &f.1).collect();
+            let s = *s;
+            Box::new(parts(m, tys, vs).map(move |vs| Value::Struct(s, vs)))
         }
         (_, Value::Enum(en, i, vs)) => {
-            let variants = variants(m, ty);
-            let mut out: Vec<Value> = (0..*i)
-                .map(|j| Value::Enum(*en, j, variants[j].iter().map(|t| minimal(m, t)).collect()))
-                .collect();
-            let parts = shrink_parts(m, &variants[*i], vs);
-            out.extend(parts.into_iter().map(|vs| Value::Enum(*en, *i, vs)));
-            out
+            let variants = Rc::new(variants(m, ty));
+            let firsts = {
+                let variants = variants.clone();
+                (0..i).map(move |j| Value::Enum(en, j, variants[j].iter().map(|t| minimal(m, t)).collect()))
+            };
+            let payload = parts(m, variants[i].clone(), vs).map(move |vs| Value::Enum(en, i, vs));
+            Box::new(firsts.chain(payload))
         }
-        _ => vec![],
-    };
-    out.dedup();
-    out.retain(|c| c != v);
-    out
+        _ => Box::new(std::iter::empty()),
+    }
 }
 
 /// The payload types of each variant of the enum `ty`, `Option` and `Result` included.
-fn variants(m: &Module, ty: &Ty) -> Vec<Vec<Ty>> {
+fn variants<'a>(m: &'a Module, ty: &'a Ty) -> Vec<Vec<&'a Ty>> {
     match ty {
-        Ty::Option(t) => vec![vec![], vec![(**t).clone()]],
-        Ty::Result(t, e) => vec![vec![(**t).clone()], vec![(**e).clone()]],
-        Ty::Enum(e) => m.enums[e.0 as usize].variants.iter().map(|v| v.1.clone()).collect(),
+        Ty::Option(t) => vec![vec![], vec![&**t]],
+        Ty::Result(t, e) => vec![vec![&**t], vec![&**e]],
+        Ty::Enum(e) => m.enums[e.0 as usize]
+            .variants
+            .iter()
+            .map(|v| v.1.iter().collect())
+            .collect(),
         _ => unreachable!("an enum value has an enum type"),
     }
 }
 
 /// `vs` with one part, of type `tys[i]`, one step smaller: each part in order.
-fn shrink_parts(m: &Module, tys: &[Ty], vs: &[Value]) -> Vec<Vec<Value>> {
-    let mut out = Vec::new();
-    for (i, (t, v)) in tys.iter().zip(vs).enumerate() {
-        for c in shrink(m, t, v) {
+fn parts<'a>(m: &'a Module, tys: Vec<&'a Ty>, vs: Vec<Value>) -> Smaller<'a, Vec<Value>> {
+    let vs = Rc::new(vs);
+    Box::new((0..vs.len()).flat_map(move |i| {
+        let vs = vs.clone();
+        candidates(m, tys[i], vs[i].clone()).map(move |c| {
             let mut next = vs.to_vec();
             next[i] = c;
-            out.push(next);
-        }
-    }
-    out
+            next
+        })
+    }))
 }
 
 /// `xs` shorter (empty, either half, then each element dropped), then with one element one
 /// step smaller.
-fn shrink_seq<T: Clone>(xs: &[T], smaller: impl Fn(&T) -> Vec<T>) -> Vec<Vec<T>> {
+fn seq<'a, T: Clone + 'a>(xs: Rc<Vec<T>>, smaller: impl Fn(&T) -> Smaller<'a, T> + 'a) -> Smaller<'a, Vec<T>> {
     let n = xs.len();
-    let mut out = Vec::new();
     if n == 0 {
-        return out;
+        return Box::new(std::iter::empty());
     }
-    out.push(Vec::new());
-    if n >= 4 {
-        out.push(xs[n / 2..].to_vec());
-        out.push(xs[..n / 2].to_vec());
-    }
-    if n >= 2 {
-        for i in 0..n {
+    let halves = {
+        let xs = xs.clone();
+        (0..if n >= 4 { 2 } else { 0 }).map(move |h| match h {
+            0 => xs[n / 2..].to_vec(),
+            _ => xs[..n / 2].to_vec(),
+        })
+    };
+    let drops = {
+        let xs = xs.clone();
+        (0..if n >= 2 { n } else { 0 }).map(move |i| {
             let mut ys = xs.to_vec();
             ys.remove(i);
-            out.push(ys);
-        }
-    }
-    for i in 0..n {
-        for c in smaller(&xs[i]) {
+            ys
+        })
+    };
+    let each = (0..n).flat_map(move |i| {
+        let xs = xs.clone();
+        smaller(&xs[i]).map(move |c| {
             let mut ys = xs.to_vec();
             ys[i] = c;
-            out.push(ys);
-        }
-    }
-    out
+            ys
+        })
+    });
+    Box::new(std::iter::once(Vec::new()).chain(halves).chain(drops).chain(each))
 }
 
 /// 0, then `n` minus each of `n / 2`, `n / 4`, ... 1: halfway to 0, then ever closer to `n`.
-/// A negative `n` tries `-n` after 0.
+/// A negative `n` tries `-n` after 0. Never `n` itself.
 fn shrink_int(n: i64) -> Vec<i64> {
     let mut out = vec![0];
     if n < 0 && n != i64::MIN {
@@ -324,6 +333,8 @@ fn shrink_int(n: i64) -> Vec<i64> {
         out.push(n - d);
         d /= 2;
     }
+    out.dedup();
+    out.retain(|&c| c != n);
     out
 }
 
@@ -377,7 +388,7 @@ pub fn minimize(
     let mut runs = 0;
     'smaller: loop {
         for i in 0..case.len() {
-            for c in shrink(m, &tys[i], &case[i]) {
+            for c in candidates(m, &tys[i], case[i].clone()) {
                 if runs == max {
                     break 'smaller;
                 }

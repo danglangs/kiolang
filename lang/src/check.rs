@@ -1543,6 +1543,78 @@ fn not_builtin(name: &str, span: Span) -> Result<(), Diag> {
     }
 }
 
+/// The most values a property parameter may hold at the largest generated size: the host
+/// builds, compiles and shrinks every case outside the run's limits (T2 review).
+pub const MAX_INPUT_VALUES: u64 = 4096;
+
+type TypeShapes<'a> = (&'a Fields, &'a Variants, &'a TypeParams);
+
+/// The most values a generated `ty` holds, nested at container `depth`: one for itself, plus
+/// struct fields, the largest variant's payload, and each container slot at the length
+/// `prop::generate` reaches there (`MAX_SIZE`, a quarter per level). Saturating.
+fn input_values(shape: TypeShapes, ty: &Ty, depth: u32) -> u64 {
+    let (fields, variants, tparams) = shape;
+    let slots = (crate::prop::MAX_SIZE as u64) >> (2 * depth).min(63);
+    let sum = |ts: &[Ty], d| ts.iter().fold(0u64, |n, t| n.saturating_add(input_values(shape, t, d)));
+    let inner = match ty {
+        // Empty here: a type that contains itself through a container ends.
+        Ty::List(_) | Ty::Map(..) | Ty::HashMap(..) if slots == 0 => 0,
+        Ty::List(t) => slots.saturating_mul(input_values(shape, t, depth + 1)),
+        Ty::Map(k, v) | Ty::HashMap(k, v) => slots.saturating_mul(sum(&[(**k).clone(), (**v).clone()], depth + 1)),
+        Ty::Struct(..) => {
+            let fs: Vec<Ty> = fields_of(fields, tparams, ty).into_iter().map(|f| f.1).collect();
+            sum(&fs, depth)
+        }
+        Ty::Enum(..) | Ty::Option(_) | Ty::Result(..) => {
+            let vs = shape_of(variants, tparams, ty);
+            vs.iter().map(|ts| sum(ts, depth)).max().unwrap_or(0)
+        }
+        _ => 0,
+    };
+    inner.saturating_add(1)
+}
+
+/// The payload types of each variant of the enum, `Option` or `Result` `ty`.
+fn shape_of(variants: &Variants, tparams: &TypeParams, ty: &Ty) -> Vec<Vec<Ty>> {
+    shape(variants, tparams, ty).1.into_iter().map(|(_, ts)| ts).collect()
+}
+
+/// Whether some value has type `ty`: an enum with no variant, or only variants holding such a
+/// type, has none. A type contains itself only through a container, which can be empty.
+fn inhabited(shape: TypeShapes, ty: &Ty) -> bool {
+    let (fields, variants, tparams) = shape;
+    match ty {
+        Ty::Struct(..) => fields_of(fields, tparams, ty).iter().all(|(_, t)| inhabited(shape, t)),
+        Ty::Enum(..) => (shape_of(variants, tparams, ty).iter()).any(|ts| ts.iter().all(|t| inhabited(shape, t))),
+        Ty::Result(t, e) => inhabited(shape, t) || inhabited(shape, e),
+        _ => true,
+    }
+}
+
+/// A type with no values that `ty` holds anywhere (`Option<Never>` holds `Never`), which the
+/// generator could be asked for; `seen` are the structs and enums already looked into.
+fn uninhabited_in(shape: TypeShapes, ty: &Ty, seen: &mut Vec<Ty>) -> Option<Ty> {
+    let (fields, variants, tparams) = shape;
+    if !inhabited(shape, ty) {
+        return Some(ty.clone());
+    }
+    let parts: Vec<Ty> = match ty {
+        Ty::Option(t) | Ty::List(t) => vec![(**t).clone()],
+        Ty::Result(a, b) | Ty::Map(a, b) | Ty::HashMap(a, b) => vec![(**a).clone(), (**b).clone()],
+        Ty::Struct(..) | Ty::Enum(..) if seen.contains(ty) => vec![],
+        Ty::Struct(..) => {
+            seen.push(ty.clone());
+            fields_of(fields, tparams, ty).into_iter().map(|f| f.1).collect()
+        }
+        Ty::Enum(..) => {
+            seen.push(ty.clone());
+            shape_of(variants, tparams, ty).into_iter().flatten().collect()
+        }
+        _ => vec![],
+    };
+    parts.iter().find_map(|t| uninhabited_in(shape, t, seen))
+}
+
 /// The built-in functions, which no function may be named.
 const BUILTIN_FNS: [&str; 3] = ["assert", "assert_eq", "assume"];
 
@@ -2517,11 +2589,31 @@ impl<'a> Checker<'a> {
         self.scopes = vec![params.collect()];
         self.ret = sig.ret.clone();
         self.in_test = sig.test;
-        // A property's data parameters are generated (`prop::generate`): no function inside.
+        // A property's data parameters are generated (`prop::generate`): no function inside, some
+        // value to generate, and a bounded size, since the host builds each case.
         for (p, ty) in f.params.iter().zip(&sig.params) {
-            if sig.test && !matches!(ty, Ty::Cap(_)) && self.has_fn(ty) {
-                let msg = format!("a test cannot take `{ty}`");
-                return Err(err(p.span, msg, Some("build it inside the test")));
+            if !sig.test || matches!(ty, Ty::Cap(_)) {
+                continue;
+            }
+            let hint = Some("build it inside the test");
+            if self.has_fn(ty) {
+                return Err(err(p.span, format!("a test cannot take `{ty}`"), hint));
+            }
+            let shape = (self.fields, self.variants, self.tparams);
+            if let Some(empty) = uninhabited_in(shape, ty, &mut Vec::new()) {
+                let msg = match empty == *ty {
+                    true => format!("a test cannot take `{ty}`: it has no values"),
+                    false => format!("a test cannot take `{ty}`: `{empty}` has no values"),
+                };
+                return Err(err(p.span, msg, hint));
+            }
+            let n = input_values(shape, ty, 0);
+            if n > MAX_INPUT_VALUES {
+                let msg = format!(
+                    "`{}: {ty}` has up to {n} values; a property parameter may have at most {MAX_INPUT_VALUES}",
+                    p.name
+                );
+                return Err(err(p.span, msg, Some("build the large value inside the test")));
             }
         }
         let found = self.block(&f.body, Some(&sig.ret))?;

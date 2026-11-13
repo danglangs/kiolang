@@ -1537,15 +1537,30 @@ fn test_error(kind: &str, message: &str, hint: Option<&str>) -> serde_json::Valu
 }
 
 /// Why property `t` may not take the grant the grants file gives one of its parameters: an
-/// `Http` (every case would send real requests), or a writable `Dir`, `Kv` or `Db` (cases would
-/// share its state). A parameter the file leaves out gets a fresh grant per case.
-fn property_effect(tests: &Tests, t: &lang::TestFn) -> Option<(String, &'static str)> {
+/// `Http` (every case would send real requests), a writable `Dir`, `Kv` or `Db` (cases would
+/// share its state), or a `Log` to a file (cases would share it). A parameter the file leaves out gets a fresh grant per case.
+fn property_effect(tests: &Tests, t: &lang::TestFn) -> Option<(String, String)> {
     for (name, ty) in &t.params {
         if ty == "Http" {
             let msg = format!("a property runs many times; `{name}: Http` would repeat real requests");
-            return Some((msg, "test the call in an example test, or pass the data as a parameter"));
+            return Some((
+                msg,
+                "test the call in an example test, or pass the data as a parameter".into(),
+            ));
         }
         let flag = match ty.as_str() {
+            "Log" => {
+                let to_file = |pair: &[String]| {
+                    pair[0] == "--log" && pair[1].split_once('=').is_some_and(|(n, t)| n == name && t != "-")
+                };
+                if tests.flags.chunks(2).any(to_file) {
+                    let msg = format!("a property runs many times; `{name}: Log` from the grants file would share one file across cases");
+                    let hint =
+                        format!("use `--log {name}=-`, or leave it out of the grants file for a buffer per case");
+                    return Some((msg, hint));
+                }
+                continue;
+            }
             "Dir" => "--dir",
             "Kv" => "--kv",
             "Db" => "--db",
@@ -1558,7 +1573,7 @@ fn property_effect(tests: &Tests, t: &lang::TestFn) -> Option<(String, &'static 
             if pair[0] == flag && n == name && !target.ends_with(":ro") && target != ":memory:" {
                 let msg = format!("a property runs many times; `{name}: {ty}` from the grants file would share its writes across cases");
                 let hint = "grant it `:ro`, or leave it out of the grants file for a fresh one per case";
-                return Some((msg, hint));
+                return Some((msg, hint.into()));
             }
         }
     }
@@ -1574,12 +1589,13 @@ fn run_property(tests: &Tests, t: &lang::TestFn) -> (Option<serde_json::Value>, 
         ..PropInfo::default()
     };
     if let Some((msg, hint)) = property_effect(tests, t) {
-        return (Some(test_error("grant", &msg, Some(hint))), String::new(), info);
+        return (Some(test_error("grant", &msg, Some(&hint))), String::new(), info);
     }
     let m = lang::lower::lower_entry(&tests.program, &lang::CapTable::v0(), &t.name);
     let (names, tys): (Vec<String>, Vec<lang::ir::Ty>) = lang::prop::inputs(&m).into_iter().unzip();
     let shown = |vs: &[lang::Value]| -> Vec<(String, String)> {
-        let literals = vs.iter().map(|v| lang::prop::debug_literal(&m, v));
+        // Clipped as assert text is (open question 240): the program chose the type.
+        let literals = (vs.iter()).map(|v| lang::eval::clip(&lang::prop::debug_literal(&m, v)).into_owned());
         names.iter().cloned().zip(literals).collect()
     };
     for i in 0..tests.cases {
