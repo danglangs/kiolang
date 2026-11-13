@@ -18,6 +18,7 @@ Needs Rust, Python 3, `ab` (ApacheBench, on macOS by default) and a kio-web chec
 | `gen_data.py` | writes `data/words.txt` and `data/data.json` (1 MB each, deterministic) |
 | `run.py` | times everything and prints the table |
 | `profile.py` | a `sample` profile of one compiled run, naming compiled frames |
+| `gate.py`, `baseline.json` | the CI regression gate: fuel and peak memory per program against the baseline ([perf.md](../docs/perf.md#regression-gate)) |
 
 How times are taken:
 - Wall time of a whole process, best of `RUNS` (5) after one discarded run. Each column's startup (an empty program, `python3 -c pass`) is subtracted, so a time is the work alone.

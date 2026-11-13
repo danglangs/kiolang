@@ -26,6 +26,23 @@ Since C5 `kio run` and `--listen` run compiled code. Measured on an Apple Silico
 - Fuel defaults: 10 billion per `kio run` (a few seconds of compiled compute; fib(35) uses 1.1 billion), 10 million per request: see open_questions #76.
 - `cargo test --release --test serve -- --nocapture` prints the `Server::handle` median; `cargo test --release --test idle_rss -- --nocapture` prints idle RSS.
 
+## Regression gate
+
+CI's `perf` job runs `bench/gate.py` on every push and pull request: each `bench/kio` program once (the empty program is the `startup` row), with run.py's inputs and limits, compared with `bench/baseline.json`.
+
+| Gated | Fails when |
+|---|---|
+| fuel (`used.fuel`, counted exactly, so load-free) | grows over 2% |
+| peak memory (`used.peak_memory`) | grows over 2% |
+| the printed number | differs at all (never waived) |
+| the row set | a row is missing from the baseline or from the run |
+
+Time (`ms`) is printed, not gated: runners are noisy. A row shrinking over 2% prints a note.
+
+- Update: `python3 bench/gen_data.py && python3 bench/gate.py --update`, then commit `bench/baseline.json` (it records the `kio --version` it came from).
+- Waive: name the rows in the commit message (a push's head commit; a pull request's title or body): `perf-ok: fib, tree` or `perf-ok: all`. Then update the baseline, or the next push fails again.
+- Locally: `python3 bench/gate.py [--kio PATH] [--message TEXT]`; about 1.5 s on an Apple Silicon Mac after the release build.
+
 ## Interpreter guest (until C5)
 
 History: the guest, wizer and the pre-initialized checked program no longer exist (C5).

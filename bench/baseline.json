@@ -1,0 +1,65 @@
+{
+  "kio": "kio 0.1.1 (291556a)",
+  "rows": {
+    "startup": {
+      "value": "0",
+      "fuel": 88827,
+      "peak_memory": 1769472
+    },
+    "fib": {
+      "value": "9227465",
+      "fuel": 1060143942,
+      "peak_memory": 1769472
+    },
+    "loop": {
+      "value": "30993",
+      "fuel": 2100088720,
+      "peak_memory": 1769472
+    },
+    "strings": {
+      "value": "588890",
+      "fuel": 57591650,
+      "peak_memory": 3801088
+    },
+    "list": {
+      "value": "1577147139",
+      "fuel": 958567973,
+      "peak_memory": 18874368
+    },
+    "map": {
+      "value": "4770177159354",
+      "fuel": 340175169,
+      "peak_memory": 5701632
+    },
+    "hashmap": {
+      "value": "4770177159354",
+      "fuel": 244510587,
+      "peak_memory": 6160384
+    },
+    "tree": {
+      "value": "523822424596",
+      "fuel": 1299611239,
+      "peak_memory": 94175232
+    },
+    "closures": {
+      "value": "333334000000",
+      "fuel": 213839554,
+      "peak_memory": 27000832
+    },
+    "mandel": {
+      "value": "3968704681311",
+      "fuel": 284646465,
+      "peak_memory": 1572864
+    },
+    "json": {
+      "value": "1048619",
+      "fuel": 621151639,
+      "peak_memory": 15597568
+    },
+    "json_builtin": {
+      "value": "1048619",
+      "fuel": 180278270,
+      "peak_memory": 16711680
+    }
+  }
+}
