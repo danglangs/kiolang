@@ -134,13 +134,22 @@ pub fn bind_grants(program: &lang::Program, grants: &[(String, &str)]) -> std::r
     }
 }
 
-/// Check `files` (root first) in the host: the report, or the diagnostics.
+/// Check `files` (root first) in the host: the report `kio check` prints (`lang::shown_report`),
+/// or the diagnostics.
 pub fn check_files(files: &[(String, String)]) -> std::result::Result<Report, Vec<Diag>> {
+    check_report(files, false)
+}
+
+/// `check_files`, with every function's line when `all` (`lang::report`, `kio check --all`).
+pub fn check_report(files: &[(String, String)], all: bool) -> std::result::Result<Report, Vec<Diag>> {
     let pairs: Vec<(&str, &str)> = files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
     match lang::check_files(&pairs, &lang::CapTable::v0()) {
-        Ok(p) => Ok(Report {
-            lines: lang::report(&p).lines().map(String::from).collect(),
-        }),
+        Ok(p) => {
+            let report = if all { lang::report(&p) } else { lang::shown_report(&p) };
+            Ok(Report {
+                lines: report.lines().map(String::from).collect(),
+            })
+        }
         Err(diags) => Err(diags.into_iter().map(Diag::from).collect()),
     }
 }
@@ -149,10 +158,11 @@ pub fn check_files(files: &[(String, String)]) -> std::result::Result<Report, Ve
 /// or the test's line alone (`lang::entry_report`). `None` if `files` do not check or there is
 /// no such test.
 fn entry_report(files: &[(String, String)], entry: &str) -> Option<String> {
-    if entry == "main" {
-        return check_files(files).ok().map(|r| r.lines.join("\n"));
-    }
     let pairs: Vec<(&str, &str)> = files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
+    if entry == "main" {
+        let p = lang::check_files(&pairs, &lang::CapTable::v0()).ok()?;
+        return Some(lang::report(&p));
+    }
     let p = lang::check_files_for_tests(&pairs, &lang::CapTable::v0()).ok()?;
     p.tests()
         .iter()

@@ -87,6 +87,8 @@ impl CompiledImports for State {
 struct Program {
     files: Vec<(String, String)>,
     report: String,
+    /// The report printed (`lang::shown_report`); nothing checks against it.
+    shown: String,
     /// `(parameter, method)` pairs on `main`'s report line: every call the program may make.
     allowed: HashSet<(String, String)>,
     params: grants::Params,
@@ -97,6 +99,7 @@ struct Program {
 /// A program checked and lowered to a component, not yet compiled for an engine.
 struct Lowered {
     report: String,
+    shown: String,
     params: grants::Params,
     wasm: codegen::Wasm,
 }
@@ -136,13 +139,17 @@ fn lower(
         Ok(p) => p,
         Err(diags) => return Ok(Err(diags.into_iter().map(Diag::from).collect())),
     };
-    let (report, mut module) = match entry {
-        "main" => (lang::report(&program), lang::lower::lower(&program, &caps)),
-        _ if !program.tests().iter().any(|t| t.name == entry) => wasmtime::bail!("no test `{entry}`"),
-        _ => (
-            lang::entry_report(&program, entry),
-            lang::lower::lower_entry(&program, &caps, entry),
+    let (report, shown, mut module) = match entry {
+        "main" => (
+            lang::report(&program),
+            lang::shown_report(&program),
+            lang::lower::lower(&program, &caps),
         ),
+        _ if !program.tests().iter().any(|t| t.name == entry) => wasmtime::bail!("no test `{entry}`"),
+        _ => {
+            let report = lang::entry_report(&program, entry);
+            (report.clone(), report, lang::lower::lower_entry(&program, &caps, entry))
+        }
     };
     edit(&mut module);
     let wasm = generate(&module)?;
@@ -157,13 +164,23 @@ fn lower(
         return Err(wasmtime::Error::msg(Stopped(msg)));
     }
     let params = grants::main_params(&module);
-    Ok(Ok(Lowered { report, params, wasm }))
+    Ok(Ok(Lowered {
+        report,
+        shown,
+        params,
+        wasm,
+    }))
 }
 
 /// Compile `lowered` for `engine`. Native code is only ever compiled here, in this process: it is
 /// never loaded from disk (open question 75).
 fn link(engine: &Engine, files: &[(String, String)], lowered: Lowered) -> Result<Program> {
-    let Lowered { report, params, wasm } = lowered;
+    let Lowered {
+        report,
+        shown,
+        params,
+        wasm,
+    } = lowered;
     let component = Component::new(engine, &wasm.component)?;
     let mut linker = Linker::new(engine);
     World::add_to_linker::<State, HasSelf<State>>(&mut linker, |s| s)?;
@@ -171,6 +188,7 @@ fn link(engine: &Engine, files: &[(String, String)], lowered: Lowered) -> Result
         files: files.to_vec(),
         allowed: main_calls(&report),
         report,
+        shown,
         params,
         pre: linker.instantiate_pre(&component)?,
         sites: wasm.sites,
@@ -1001,9 +1019,9 @@ impl Server {
         &self.program.files
     }
 
-    /// The authority report, as `kio check` prints it.
-    pub fn report(&self) -> &str {
-        &self.program.report
+    /// The authority report, as `kio check` prints it (`lang::shown_report`). Display only.
+    pub fn shown_report(&self) -> &str {
+        &self.program.shown
     }
 
     /// Run `main` on `request` in a fresh instance, with `dirs` granted by name, and return the

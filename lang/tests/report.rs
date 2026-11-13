@@ -321,7 +321,12 @@ fn diff_removed_main_parameter() {
         diff(&[("a.kio", &old())], &[("a.kio", &new)]),
         want(
             &["~ links: Kv (-set)", "- log: Log (write)"],
-            &["- main: links set, log write"],
+            // `main` no longer reaches `create` or `delete`: their authority is dropped (P8).
+            &[
+                "- create: links set, log write",
+                "- delete: links delete, log write",
+                "- main: links set, log write"
+            ],
             false
         )
     );
@@ -338,13 +343,23 @@ fn diff_grant_type_changed() {
 
 #[test]
 fn diff_new_function_counts_in_full() {
-    // `log write` and `links keys` both count, though `main` could already write the log. `main`
-    // does not call `audit`, so no grant line changes.
-    let new = old() + r#"fn audit(log: Log, links: Kv) -> Int { let _w = log.write("x"); let _k = links.keys(""); 0 }"#;
+    // `log write` and `links keys` both count, though `main` could already write the log.
+    let audit = r#"fn audit(log: Log, links: Kv) -> Int { let _w = log.write("x"); let _k = links.keys(""); 0 }"#;
+    let new = old().replace(
+        "delete(links, log) }",
+        "let _a = audit(log, links); delete(links, log) }",
+    ) + audit;
     assert_eq!(
         diff(&[("a.kio", &old())], &[("a.kio", &new)]),
-        want(&[], &["+ audit: log write, links keys"], true)
+        want(
+            &["~ links: Kv (+keys)"],
+            &["+ audit: log write, links keys", "+ main: links keys"],
+            true
+        )
     );
+    // Uncalled, it adds nothing: no run can reach it (P8).
+    let new = old() + audit;
+    assert_eq!(diff(&[("a.kio", &old())], &[("a.kio", &new)]), want(&[], &[], false));
 }
 
 #[test]
@@ -831,4 +846,128 @@ fn diff_35d_shape_is_added() {
         "~ api: Http (+send POST +send PUT); send POST is covered by send_all POST"
     );
     assert!(added);
+}
+
+/// The report `kio check` prints, of `files` (root first).
+fn shown(files: &[(&str, &str)]) -> String {
+    lang::shown_report(&lang::check_files(files, &common::caps()).expect("program checks"))
+}
+
+const REACH: &str = r#"mod web;
+struct Holder { f: fn(Int) -> Int }
+fn by_value(n: Int) -> Int { n }
+fn in_closure(n: Int) -> Int { n }
+fn in_struct(n: Int) -> Int { n }
+fn in_list(n: Int) -> Int { n }
+fn in_map(n: Int) -> Int { n }
+fn returned() -> fn(Int) -> Int { in_dead }
+fn in_dead(n: Int) -> Int { if false { n } else { n } }
+fn generic<T>(x: T) -> T { x }
+fn apply(f: fn(Int) -> Int, n: Int) -> Int { f(n) }
+fn unused(n: Int) -> Int { by_value(n) }
+fn main() -> Int {
+    let c = |n: Int| in_closure(n);
+    let h = Holder { f: in_struct };
+    let fs = [in_list];
+    let mut m: Map<Str, fn(Int) -> Int> = Map::new();
+    m.insert("a", in_map);
+    let g = returned();
+    let f = h.f;
+    let _b = generic(true);
+    apply(by_value, 1) + c(1) + generic::<Int>(2) + web::helper(3) + f(1) + fs.len() + g(1)
+}
+"#;
+const REACH_WEB: &str = "pub fn helper(n: Int) -> Int { n }\nfn other() -> Int { 0 }";
+
+#[test]
+fn reachable_over_approximates() {
+    // A function named anywhere `main` reaches counts: as a value passed, stored in a struct, list
+    // or map, returned, in a closure, generic, or in a module.
+    let files = [("a.kio", REACH), ("web.kio", REACH_WEB)];
+    let p = lang::check_files(&files, &common::caps()).unwrap();
+    let got = lang::reachable(&p, ["main"]);
+    let want = [
+        "apply",
+        "by_value",
+        "generic",
+        "in_closure",
+        "in_dead",
+        "in_list",
+        "in_map",
+        "in_struct",
+        "main",
+        "returned",
+        "web::helper",
+    ];
+    assert_eq!(got.iter().map(String::as_str).collect::<Vec<_>>(), want);
+    assert_eq!(
+        shown(&files),
+        "main : none\n\n10 more use no capability, 2 are unreached; --all lists every function"
+    );
+}
+
+const VERIFY: &str = r#"let _ok = key.verify("m".to_bytes(), "x".to_bytes());"#;
+
+#[test]
+fn shown_report_lists_what_main_reaches() {
+    // `main` first; a reached function with authority; an unreached one only counted.
+    let src = format!(
+        r#"fn check(key: Hmac) -> Int {{ {VERIFY} 0 }}
+fn minter(key: Hmac) -> Int {{ let _s = key.sign("m".to_bytes()); 0 }}
+fn pure(n: Int) -> Int {{ n }}
+fn main(key: Hmac) -> Int {{ check(key) + pure(1) }}"#
+    );
+    let want = "main  : key verify\ncheck : key verify\n\n1 more uses no capability, 1 is unreached; --all lists every function";
+    assert_eq!(shown(&[("a.kio", &src)]), want);
+    // `--all` is `report`: every function.
+    assert_eq!(
+        rep(&src),
+        "check  : key verify\nmain   : key verify\nminter : key sign\npure   : none"
+    );
+}
+
+#[test]
+fn shown_report_without_a_rest_has_no_footer() {
+    assert_eq!(
+        shown(&[("a.kio", "fn main(d: Dir) { let _r = d.read(\"a\"); }")]),
+        "main : d read"
+    );
+}
+
+#[test]
+fn diff_counts_only_what_main_reaches() {
+    let helper = r#"fn helper(key: Hmac) -> Int { let _s = key.sign("m".to_bytes()); 0 }"#;
+    let old = format!("fn main(key: Hmac) -> Int {{ {VERIFY} 0 }}\nfn helper(key: Hmac) -> Int {{ 0 }}");
+    // An uncalled helper gaining `sign` is not `main` gaining it.
+    let new = format!("fn main(key: Hmac) -> Int {{ {VERIFY} 0 }}\n{helper}");
+    assert_eq!(diff(&[("a.kio", &old)], &[("a.kio", &new)]), want(&[], &[], false));
+    // Called, it is.
+    let new = format!("fn main(key: Hmac) -> Int {{ {VERIFY} helper(key) }}\n{helper}");
+    assert_eq!(
+        diff(&[("a.kio", &old)], &[("a.kio", &new)]),
+        want(
+            &["~ key: Hmac (+sign)"],
+            &["+ helper: key sign", "+ main: key sign"],
+            true
+        )
+    );
+}
+
+const TESTED: &str = r#"mod tests;
+fn main(key: Hmac) -> Bool { key.verify("m".to_bytes(), "x".to_bytes()) }
+"#;
+const TESTS: &str = r#"fn sig_of(key: Hmac) -> Int { let _s = key.sign("m".to_bytes()); 0 }
+fn unused(key: Hmac) -> Int { let _s = key.sign("n".to_bytes()); 0 }
+#[test]
+fn signs(key: Hmac) { assert_eq(sig_of(key), 0); }
+"#;
+
+#[test]
+fn test_only_helpers_are_shown_apart() {
+    let files = [("a.kio", TESTED), ("tests.kio", TESTS)];
+    let text = "main          : key verify\n\nreached only from tests:\ntests::sig_of : key sign\n\n1 is unreached; --all lists every function";
+    assert_eq!(shown(&files), text);
+    // Not `main`'s authority: the diff from the program without tests is empty.
+    let bare = TESTED.replace("mod tests;\n", "");
+    assert_eq!(diff(&[("a.kio", &bare)], &files), want(&[], &[], false));
 }

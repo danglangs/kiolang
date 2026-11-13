@@ -25,7 +25,7 @@ fn thousand_requests_get_the_right_body() {
         ("web.kio".to_string(), read("web.kio")),
     ];
     let server = Server::new(files, Limits::web()).unwrap().unwrap();
-    assert!(server.report().contains("main"));
+    assert!(server.shown_report().contains("main"));
     let public = tempfile::tempdir().unwrap();
     let mut times = vec![];
     for _ in 0..1000 {

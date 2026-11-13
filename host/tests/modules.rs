@@ -12,7 +12,14 @@ const GOOD: &str = "pub fn inc(n: Int) -> Int {\n    n + 1\n}\n";
 fn two_files_check_compile_and_run() {
     let mut kio = Kio::new(Limits::default()).unwrap();
     let report = kio.check_files(&files(GOOD)).unwrap().unwrap();
-    assert_eq!(report.lines.len(), 2);
+    assert_eq!(
+        report.lines,
+        [
+            "main : none",
+            "",
+            "1 more uses no capability; --all lists every function"
+        ]
+    );
     let out = kio.run_files(&files(GOOD), vec![], vec![]).unwrap().unwrap();
     assert_eq!(out.value, "2");
 }
@@ -66,4 +73,45 @@ fn cli_missing_module_file_is_exit_2() {
     let (code, _, err) = kio(&["run", app.to_str().unwrap()]);
     assert_eq!(code, 2);
     assert!(err.starts_with("kio: mod web: cannot read "), "{err}");
+}
+
+const P8_APP: &str = r#"mod tests;
+fn check(key: Hmac, m: Bytes) -> Bool { key.verify(m, "x".to_bytes()) }
+fn mint(key: Hmac) -> Int { let _s = key.sign("m".to_bytes()); 0 }
+fn main(key: Hmac) -> Bool { check(key, "m".to_bytes()) }
+"#;
+const P8_TESTS: &str = r#"fn sig_of(key: Hmac) -> Int { let _s = key.sign("m".to_bytes()); 0 }
+#[test]
+fn signs(key: Hmac) { assert_eq(sig_of(key), 0); }
+"#;
+
+/// P8: `kio check` shows what `main` reaches, test-only helpers apart; `--all` every function.
+/// The host's checks still read `main`'s line, which neither form changes.
+#[test]
+fn check_shows_what_main_reaches() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("app.kio"), P8_APP).unwrap();
+    std::fs::write(d.path().join("tests.kio"), P8_TESTS).unwrap();
+    let app = d.path().join("app.kio");
+    let app = app.to_str().unwrap();
+    let want = "main          : key verify\ncheck         : key verify\n\nreached only from tests:\ntests::sig_of : key sign\n\n1 is unreached; --all lists every function\n";
+    assert_eq!(kio(&["check", app]), (0, want.into(), "".into()));
+    let all =
+        "check         : key verify\nmain          : key verify\nmint          : key sign\ntests::sig_of : key sign\n";
+    assert_eq!(kio(&["check", app, "--all"]), (0, all.into(), "".into()));
+    // `:verify` is refused only for a `sign` on `main`'s line, as before P8: neither `mint` nor
+    // the test helper is reached from `main`.
+    let grants = d.path().join("app.grants");
+    std::fs::write(&grants, "--hmac key=env:P8_KEY:verify\n").unwrap();
+    let (code, out, err) = kio(&["check", app, "--grants", grants.to_str().unwrap()]);
+    assert_eq!((code, out.as_str(), err.as_str()), (0, want, ""));
+    // Reached, the `sign` is on `main`'s line and refused.
+    std::fs::write(
+        d.path().join("app.kio"),
+        P8_APP.replace("{ check(", "{ mint(key) == 0 && check("),
+    )
+    .unwrap();
+    let (code, _, err) = kio(&["check", app, "--grants", grants.to_str().unwrap()]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("can sign with it"), "{err}");
 }

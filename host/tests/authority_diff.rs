@@ -73,9 +73,12 @@ fn removed_method_exits_0() {
 
 #[test]
 fn function_lines_shown_when_no_grant_line_shows_the_addition() {
-    // `main` never calls `audit`: no grant changes, yet authority is added (exit 3 as before).
-    let new = format!("{OLD}fn audit(links: Kv) -> Int {{ let _k = links.keys(\"\"); 0 }}");
-    let want = "+ audit: links keys\nauthority added (exit 3)\n";
+    // `main` could already delete, so no grant changes, yet `audit` is new authority (exit 3).
+    let new = OLD.replace(
+        "{ delete(links, log) }",
+        "{ let _a = audit(links); delete(links, log) }",
+    ) + "fn audit(links: Kv) -> Int { let _d = links.delete(\"x\"); 0 }";
+    let want = "+ audit: links delete\nauthority added (exit 3)\n";
     assert_eq!(
         diff(&[("app.kio", OLD)], &[("app.kio", &new)]),
         (3, want.into(), "".into())
@@ -228,9 +231,10 @@ fn uncovered_gain_beside_a_covered_one_exits_3() {
 
 #[test]
 fn uncovered_function_gain_behind_covered_grant_lines_shows_functions() {
-    // The grant line's gain is covered, but `audit` (not called by `main`) gains `create` on a
-    // parameter its base only read: exit 3, with the function lines shown.
-    let old = format!("{SAVE_OLD}fn audit(o: Dir) -> Int {{ let _r = o.read(\"a\"); 0 }}\n");
+    // The grant line's gain is covered, but `audit` gains `create` on a parameter its base only
+    // read: exit 3, with the function lines shown.
+    let old = SAVE_OLD.replace("{ save(out) }", "{ let _a = audit(out); save(out) }")
+        + "fn audit(o: Dir) -> Int { let _r = o.read(\"a\"); 0 }\n";
     let new = old
         .replace("out.write(", "out.create(")
         .replace(r#"o.read("a");"#, r#"o.create("b", "y".to_bytes());"#);
@@ -242,8 +246,8 @@ fn uncovered_function_gain_behind_covered_grant_lines_shows_functions() {
 
 #[test]
 fn footer_follows_the_printed_lines() {
-    // `helper`'s covered line is hidden (a grant line shows the change), so the footer reads as
-    // the one grant line does.
+    // `main` reaches no `helper`, so its covered gain is not shown (P8): the footer reads as the
+    // one grant line does.
     let old = r#"fn helper(o: Dir) { let _r = o.write("a", "x".to_bytes()); }
 fn main(out: Dir) { let _r = out.remove("a"); }
 "#;

@@ -41,13 +41,13 @@ id,customer,cents
 fn main(orders: Dir, api: Http, out: Dir) -> Result<Str, Failed>
 ```
 
-`kio check` type-checks it and prints its authority: what each function can call on each grant.
+`kio check` type-checks it and prints its authority: what `main`, and each function it reaches, can call on each grant. Functions that call nothing are counted; `--all` lists them.
 
 ```console
 $ kio check push.kio
-main    : orders read, api send POST, out write
-parse   : none
-to_json : none
+main : orders read, api send POST, out write
+
+2 more use no capability; --all lists every function
 ```
 
 ## 3. The grants
@@ -70,9 +70,9 @@ $ cat app.grants
 
 ```console
 $ kio check push.kio --grants app.grants
-main    : orders read, api send POST, out write
-parse   : none
-to_json : none
+main : orders read, api send POST, out write
+
+2 more use no capability; --all lists every function
 ```
 
 ## 4. Run it
@@ -85,9 +85,9 @@ $ export API_KEY='Bearer demo-key-123'
 $ python3 api.py > api.log &
 $ sleep 1
 $ kio run push.kio --grants app.grants
-main    : orders read, api send POST, out write
-parse   : none
-to_json : none
+main : orders read, api send POST, out write
+
+2 more use no capability; --all lists every function
 Ok("sent 3 orders, 46550 cents\nbad row: 1003,initech,oops")
 $ cat out/summary.txt
 sent 3 orders, 46550 cents

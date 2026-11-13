@@ -242,9 +242,17 @@ A WebSocket server is `fn main(msg: WsMessage, conn: WsSend, ..)` under `--liste
 
 ## Authority report
 
-One line per function: each capability parameter with the methods it may call, including through helpers and recursion. A capability passed to a helper is charged with the helper's calls. The report describes possible authority, not an execution trace. Tests are left out: they are not `main`'s authority. An `Http` call names its method when it is a literal or a constant (`api send PUT`, `api send_all POST`) and `*` when the checker cannot see it (`api send *`); [guide.md](guide.md#http) has the rules.
+One line per function: each capability parameter with the methods it may call, including through helpers and recursion. A capability passed to a helper is charged with the helper's calls. The report describes possible authority, not an execution trace. An `Http` call names its method when it is a literal or a constant (`api send PUT`, `api send_all POST`) and `*` when the checker cannot see it (`api send *`); [guide.md](guide.md#http) has the rules.
+
+`kio check` shows `main`, then each function `main` reaches that uses a capability; then, under `reached only from tests:`, each one only a `#[test]` reaches (a helper in `mod tests`); then a count of the rest: reached functions that use no capability, and unreached ones. A function is reached when a reached body names it at all: called, passed or stored as a value, in a closure, in dead code, in any generic instance. Test functions themselves are left out. `kio check --all` prints every function's line, as below; `--base` compares only what `main` reaches.
 
 ```
+$ kio check app.kio
+main : input read, out create
+load : d read
+
+2 more use no capability; --all lists every function
+$ kio check app.kio --all
 load      : d read
 main      : input read, out create
 parse_row : none

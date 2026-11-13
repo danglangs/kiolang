@@ -2,12 +2,12 @@ use kio_host::{Kio, Limits};
 use lang::{check, CapTable};
 
 #[test]
-fn summarize_reports_two_lines() {
+fn summarize_reports_main_and_a_count() {
     let src = std::fs::read_to_string("../examples/summarize.kio").unwrap();
     let mut kio = Kio::new(Limits::default()).unwrap();
     let report = kio.check(&src).unwrap().unwrap();
-    let want = lang::report(&check(&src, &CapTable::v0()).unwrap());
-    assert_eq!(report.lines.len(), 2);
+    let want = lang::shown_report(&check(&src, &CapTable::v0()).unwrap());
+    assert_eq!(report.lines.len(), 3);
     assert_eq!(report.lines.join("\n"), want);
     assert_eq!(kio.import_calls(), 0);
 }

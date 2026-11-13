@@ -27,7 +27,7 @@ fn main(input: Dir, fx: Http, out: Dir) -> Result<List<Str>, Str> {
 ```
 
 ```
-$ kio check examples/fx/report.kio
+$ kio check examples/fx/report.kio --all
 main      : input read, fx get, out write
 summarize : none
 $ kio run examples/fx/report.kio --dir input=examples/in --http fx=api.frankfurter.dev --dir out=examples/tour/out

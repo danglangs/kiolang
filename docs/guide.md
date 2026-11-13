@@ -3,7 +3,7 @@
 The operator's and user's reference: every grant, limit and output of `kio run`. The language itself is [language.md](language.md).
 
 ```
-kio check <prog.kio>             the authority report, or errors with hints
+kio check <prog.kio> [--all]     the authority report of what main reaches (--all: every function), or errors with hints
 kio check <new.kio> --base <old.kio> [--detail]   grants new adds or drops; exit 3 if any added
 kio check <prog.kio> --grants <file> [flags]   bind the file's grants to main without running
 kio run <prog.kio> [--grants file] [grants] [limits] [--audit log] [--listen addr]
@@ -12,7 +12,7 @@ kio test <prog.kio> [--grants file] [--filter substr] [--cases n] [--seed s] [li
 kio mcp                          the MCP server (README, "Use from an agent")
 ```
 
-`kio run` prints the authority report, then `main`'s value; an `Err` exits 1. Every parameter of `main` is a capability, and each needs its grant: the flag's `name` is the parameter's name.
+`kio run` prints the authority report, then `main`'s value. The report shows `main` and each function it reaches that uses a capability, then under `reached only from tests:` those only a `#[test]` reaches, then a count of the rest ([language.md](language.md#authority-report)); `kio check --all` lists every function. The host holds a run to `main`'s line, the same in every form. An `Err` from `main` exits 1. Every parameter of `main` is a capability, and each needs its grant: the flag's `name` is the parameter's name.
 
 ```
 $ kio run examples/fx/report.kio --dir input=examples/in --dir out=examples/tour/out
@@ -86,8 +86,9 @@ Under `--listen` each request gets its own `Http` handle (its own DNS lookup, pi
 
 ```
 $ kio run examples/fx/report.kio --dir input=examples/in --http fx=api.frankfurter.dev --dir out=examples/tour/out
-main      : input read, fx get, out write
-summarize : none
+main : input read, fx get, out write
+
+1 more uses no capability; --all lists every function
 Ok(["acme 102 EUR", "globex 38 EUR", "initech 256 EUR"])
 ```
 
@@ -99,9 +100,10 @@ A store that outlives runs and is shared by every `--listen` request. `:memory:`
 
 ```
 $ kio run examples/ledger.kio --dir input=examples/in --kv totals=/tmp/ledger.kv
-load  : totals scan
-main  : input read, totals add scan
-parse : none
+main : input read, totals add scan
+load : totals scan
+
+1 more uses no capability; --all lists every function
 Ok(["initech 300", "acme 120", "globex 45"])
 $ kio run examples/ledger.kio --dir input=examples/in --kv totals=/tmp/ledger.kv:ro
 kio: `totals` is granted read-only but `main` can call `totals add`
@@ -155,10 +157,9 @@ The connection is fenced, since the SQL is the program's and SQLite runs outside
 
 ```
 $ kio run examples/totals.kio --dir input=examples/in --db totals=/tmp/totals.db
-int   : none
-main  : input read, totals exec query transaction
-parse : none
-text  : none
+main : input read, totals exec query transaction
+
+3 more use no capability; --all lists every function
 Ok(["initech 300", "acme 120", "globex 45"])
 $ kio run examples/totals.kio --dir input=examples/in --db totals=/tmp/totals.db
 ..
@@ -346,7 +347,7 @@ $ kio check app.kio --base old/app.kio
 authority added (exit 3); --detail lists each function
 ```
 
-`--detail` adds a blank line, then each function's capability methods added (`+`) or dropped (`-`). A function on one side only counts in full, so one moved into a module shows as removed and added. The function lines are shown without `--detail` when the grant lines show no addition, as when a helper starts calling a method `main` already reached elsewhere (`+ summarize: fx get`) or a function `main` does not call gains one.
+`--detail` adds a blank line, then each function's capability methods added (`+`) or dropped (`-`). A function on one side only counts in full, so one moved into a module shows as removed and added. The function lines are shown without `--detail` when the grant lines show no addition, as when a helper starts calling a method `main` already reached elsewhere (`+ summarize: fx get`). Only functions `main` reaches count: one no run can call (a test helper, an unused library function) adds no authority, and one `main` starts or stops reaching counts in full.
 
 ```
 $ kio check app.kio --base old/app.kio --detail

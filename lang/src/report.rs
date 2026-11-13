@@ -26,8 +26,15 @@ pub fn entry_report(p: &Program, entry: &str) -> String {
 
 fn print(a: &Authority) -> String {
     let width = a.funcs.keys().map(|n| n.len()).max().unwrap_or(0) + 1;
+    lines(a.funcs.iter(), width).join("\n")
+}
+
+type Line<'a> = (&'a String, &'a Vec<(String, BTreeSet<String>)>);
+
+/// `name : uses`, the name padded to `width`.
+fn lines<'a>(funcs: impl Iterator<Item = Line<'a>>, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
-    for (name, params) in &a.funcs {
+    for (name, params) in funcs {
         let used = if params.is_empty() {
             "none".to_string()
         } else {
@@ -35,7 +42,81 @@ fn print(a: &Authority) -> String {
         };
         lines.push(format!("{name:<width$}: {used}"));
     }
-    lines.join("\n")
+    lines
+}
+
+/// The report `kio check` prints (P8): `main`, and each function it reaches that uses a
+/// capability; then, after a heading, each that only a test reaches and uses one; then a count of
+/// the rest. `report` prints every function and is what the host checks a run against; this
+/// view is never checked.
+pub fn shown_report(p: &Program) -> String {
+    let a = authority(p);
+    let from_main = reachable(p, ["main"]);
+    let from_tests = reachable(p, p.funcs.iter().filter(|(_, f)| f.test).map(|(k, _)| k.as_str()));
+    let (mut main, mut tests, mut quiet, mut unreached) = (Vec::new(), Vec::new(), 0, 0);
+    for line @ (k, params) in &a.funcs {
+        match (from_main.contains(k), from_tests.contains(k)) {
+            _ if k == "main" => main.insert(0, line),
+            (false, false) => unreached += 1,
+            _ if params.is_empty() => quiet += 1,
+            (true, _) => main.push(line),
+            (false, true) => tests.push(line),
+        }
+    }
+    let width = main.iter().chain(&tests).map(|(n, _)| n.len()).max().unwrap_or(0) + 1;
+    let mut out = lines(main.into_iter(), width);
+    if !tests.is_empty() {
+        out.extend(["".into(), "reached only from tests:".into()]);
+        out.extend(lines(tests.into_iter(), width));
+    }
+    let mut rest = Vec::new();
+    if quiet > 0 {
+        rest.push(format!(
+            "{quiet} more use{} no capability",
+            if quiet == 1 { "s" } else { "" }
+        ));
+    }
+    if unreached > 0 {
+        rest.push(format!(
+            "{unreached} {} unreached",
+            if unreached == 1 { "is" } else { "are" }
+        ));
+    }
+    if !rest.is_empty() {
+        out.extend(["".into(), format!("{}; --all lists every function", rest.join(", "))]);
+    }
+    out.join("\n")
+}
+
+/// Every function a call of `roots` may run, `roots` included. A function counts once a reached
+/// body names it, called or not: as a value passed, returned or stored in a struct, list or map,
+/// in a closure (called or not) or in dead code, under any type arguments. A name counts as the
+/// checker resolved it and also by its spelling, so a gap in either over-reports.
+pub fn reachable<'a>(p: &Program, roots: impl IntoIterator<Item = &'a str>) -> BTreeSet<String> {
+    let mut seen = BTreeSet::new();
+    let mut todo: Vec<String> = roots.into_iter().map(String::from).collect();
+    while let Some(k) = todo.pop() {
+        let Some(f) = p.funcs.get(&k) else { continue };
+        if !seen.insert(k.clone()) {
+            continue;
+        }
+        let module = module_of(&k);
+        walk_block(&f.body, &mut |n| {
+            let Node::Expr(e) = n else { return };
+            todo.extend(p.item_uses.get(&e.span).cloned());
+            todo.extend(p.instances.get(&e.span).map(|(g, _)| g.clone()));
+            match &e.kind {
+                ExprKind::Name(g) | ExprKind::Turbofish(g, _) => todo.extend([key(module, g).into_owned(), g.clone()]),
+                ExprKind::Module(m, inner) => {
+                    if let ExprKind::Name(g) | ExprKind::Turbofish(g, _) = &inner.kind {
+                        todo.push(format!("{m}::{g}"));
+                    }
+                }
+                _ => {}
+            }
+        });
+    }
+    seen
 }
 
 /// `hook send POST PUT, log write`: an `Http` method's verbs follow it once.
@@ -174,8 +255,15 @@ fn param_ty(p: &Program, f: &str, d: &str) -> Option<String> {
 
 /// The authority `new` has that `old` lacks, and the reverse. A gained method covered by one
 /// the base reached on the same grant (or function parameter) carries a note and adds nothing.
+/// Only functions `main` reaches count (P8): code no run can call adds no authority.
 pub fn report_diff(old_p: &Program, new_p: &Program) -> AuthorityDiff {
-    let (old, new) = (authority(old_p), authority(new_p));
+    let main_authority = |p: &Program| {
+        let mut a = authority(p);
+        let from_main = reachable(p, ["main"]);
+        a.funcs.retain(|k, _| from_main.contains(k));
+        a
+    };
+    let (old, new) = (main_authority(old_p), main_authority(new_p));
     let mut diff = AuthorityDiff::default();
     for g @ (d, ty) in &new.main {
         let ms = reached(&new, d);

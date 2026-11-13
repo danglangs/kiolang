@@ -159,7 +159,7 @@ pub fn serve_with(
         let scheme = if server.ws_params().is_some() { "ws" } else { "http" };
         eprintln!(
             "{}\nprogram sha256:{}\nlistening on {scheme}://{local}",
-            server.report(),
+            server.shown_report(),
             crate::program_hash(server.files())
         );
         bound(local);

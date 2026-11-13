@@ -79,7 +79,8 @@ fn cli() -> i32 {
 
 fn command(args: &[String]) -> i32 {
     match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
-        ["check", path] => check(path),
+        ["check", path] => check(path, false),
+        ["check", path, "--all"] => check(path, true),
         ["check", path, "--base", base] => check_base(path, base, false),
         ["check", path, "--base", base, "--detail"] => check_base(path, base, true),
         ["check", path, ref flags @ ..] if flags.contains(&"--grants") => run(path, flags, true),
@@ -105,7 +106,7 @@ fn command(args: &[String]) -> i32 {
 }
 
 /// The commands, `{USAGE}` standing for `kio run`'s flags.
-const HELP: &str = "kio --version\n       kio check <prog.kio> [--base <old.kio> [--detail]]\n       kio check <prog.kio> --grants <file> [flags]\n       kio mcp\n       kio run <prog.kio> {USAGE}\n       kio test <prog.kio> {TEST_USAGE}";
+const HELP: &str = "kio --version\n       kio check <prog.kio> [--all | --base <old.kio> [--detail]]\n       kio check <prog.kio> --grants <file> [flags]\n       kio mcp\n       kio run <prog.kio> {USAGE}\n       kio test <prog.kio> {TEST_USAGE}";
 
 /// The root file, then `NAME.kio` beside it for each `mod NAME;` line. This is operator input,
 /// read by the host like the root; the program never sees the filesystem.
@@ -141,12 +142,12 @@ fn mod_name(line: &str) -> Option<&str> {
     ident.then_some(name)
 }
 
-fn check(path: &str) -> i32 {
+fn check(path: &str, all: bool) -> i32 {
     let files = match read_files(path) {
         Ok(f) => f,
         Err(code) => return code,
     };
-    match kio_host::check_files(&files) {
+    match kio_host::check_report(&files, all) {
         Ok(report) if json_out() => {
             set_json(|o| o.report = report.lines);
             0
@@ -813,9 +814,14 @@ fn run_program(
         ),
         None => (checked.main_params(), lang::report(checked), lang::authority(checked)),
     };
+    // The report printed shows what `main` reaches (P8); every check below reads `report`.
+    let printed = match &test {
+        Some(_) => report.clone(),
+        None => lang::shown_report(checked),
+    };
+    set_json(|o| o.report = printed.lines().map(String::from).collect());
     // A read-only store or database is refused to a program that can write it (H12, H17); the
     // host also stops any write that reaches it.
-    set_json(|o| o.report = report.lines().map(String::from).collect());
     type WriteIn = fn(&str, &str) -> Option<&'static str>;
     let readers = (kv_specs
         .iter()
@@ -919,7 +925,7 @@ fn run_program(
         return match kio_host::bind_grants(checked, &named) {
             Ok(()) if json_out() => 0,
             Ok(()) => {
-                println!("{}", report.lines().collect::<Vec<_>>().join("\n"));
+                println!("{printed}");
                 0
             }
             Err(diags) => print_diags(files, diags, "grant"),
@@ -1079,7 +1085,7 @@ fn run_program(
         }
         Ok(Ok(out)) => {
             if !params.is_empty() {
-                eprintln!("{}", out.report.lines.join("\n"));
+                eprintln!("{printed}");
             }
             // Like Rust's `main`: `()` and `Ok(())` print nothing, `Err(e)` goes to stderr and fails the run.
             if out.failed {

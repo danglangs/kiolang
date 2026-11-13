@@ -112,16 +112,17 @@ fn main(req: Incoming, res: Outgoing, links: Kv, auth: Kv, assets: Dir, links_rn
 ```
 
 ```
-$ kio check app.kio | grep -v ': none' | grep -v '^web::\|^api::'
-all_links           : links scan
-authorized          : auth get
-claim               : links delete swap
-create              : links delete swap, rng int, clock now_ms, log write
-delete              : links delete get, log write
-follow              : links get, clock now_ms
+$ kio check app.kio
+main               : req body header_names header_values method target, res send, links add delete get scan swap, ..
+all_links          : links scan
+authorized         : auth get
+claim              : links delete swap
+create             : links delete swap, rng int, clock now_ms, log write
 ...
-notify              : hook send *, log write
+notify             : hook send *, log write
 ...
+
+46 more use no capability, 12 are unreached; --all lists every function
 $ cat app.grants
 --kv links=links.kv
 --kv auth=auth.kv
