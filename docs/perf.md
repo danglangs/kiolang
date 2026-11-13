@@ -28,6 +28,8 @@ Since C5 `kio run` and `--listen` run compiled code. Measured on an Apple Silico
 
 ## Regression gate
 
+The baseline is CI's (Linux x86_64, the Rust pinned in rust-toolchain.toml: the runtime is compiled by it, so another Rust changes fuel). On macOS every row reads 81,921 more fuel, all of it at startup (being investigated), so run the gate on Linux or read it in CI.
+
 CI's `perf` job runs `bench/gate.py` on every push and pull request: each `bench/kio` program once (the empty program is the `startup` row), with run.py's inputs and limits, compared with `bench/baseline.json`.
 
 | Gated | Fails when |
