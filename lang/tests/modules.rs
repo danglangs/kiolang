@@ -205,7 +205,7 @@ fn file_list_errors() {
     fails(
         &[("app", "mod web; fn main() {}")],
         "unknown module `web`",
-        "add a file named web.kio",
+        "add a file named web.kio, or list it in kio.deps",
     );
     fails(
         &[("app", "fn main() {}"), ("web", "")],

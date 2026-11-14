@@ -116,7 +116,7 @@ Everything else is rejected with a message that names the kio alternative, for e
   ```
 - **Struct update.** `P { x: 1, ..p }` is a new `P` with the fields written and every other field from `p`, as in Rust: the written fields run in order, then `p` once. The base is a `P` (of a generic struct, the same instance: its type arguments are inferred with the fields'), and comes last; it may be any expression, and every field may be written. `p` itself is unchanged (values are copied).
 - **Constants.** `const MAX: Int = 64;` (or `pub const`) at the top level of a file: an `Int`, `Float`, `Bool` or `Str`, whose value is a literal of that type (`-1` and `-0.5` too), not an expression or another constant. A use is replaced by the literal when the program is checked, so there is no global state. `MAX` in its file, `web::MAX` from another (if `pub`). A function, type or other constant of the file cannot have its name; a local may shadow it. A constant cannot be assigned or be a pattern (`x => if x == MAX { .. }` instead).
-- **Modules.** `mod web;` in the root file loads `web.kio`; its `pub` items are used as `web::f`, `web::T`, `web::MAX`. Modules are flat: one file each, declared only in the root. A module may use another declared module's `pub` items the same way (cycles are fine) but not the root's.
+- **Modules.** `mod web;` in the root file loads `web.kio`; its `pub` items are used as `web::f`, `web::T`, `web::MAX`. Modules are flat: one file each, declared only in the root. A module may use another declared module's `pub` items the same way (cycles are fine) but not the root's. A `kio.deps` beside the root can load a module from another path, pinned by its sha256 ([guide.md](guide.md#dependencies)).
 
 ## Built-ins
 

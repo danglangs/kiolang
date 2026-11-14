@@ -1982,7 +1982,7 @@ fn declared_modules(names: &[&str], parsed: &[Vec<Item>]) -> Result<HashSet<Stri
                 let msg = "`mod` is only allowed in the root file".to_string();
                 diags.push(err(*span, msg, Some(&format!("declare `mod {m};` in {root}.kio"))));
             } else if !names[1..].contains(&m.as_str()) {
-                let hint = format!("add a file named {m}.kio");
+                let hint = format!("add a file named {m}.kio, or list it in kio.deps");
                 diags.push(err(*span, format!("unknown module `{m}`"), Some(&hint)));
             } else if !mods.insert(m.clone()) {
                 let msg = format!("duplicate `mod {m};`");

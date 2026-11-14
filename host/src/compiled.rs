@@ -12,9 +12,10 @@ use crate::state_limit;
 use crate::ws::{WsEvent, WsFrame};
 use crate::{
     audit_header, config, dir_id, end_audit, entry_report, grants, limit_message, main_calls, named, new_store,
-    on_run_stack, push_grants, read_only_refusal, set_stack, single, source_places, source_refusal, spawn_ticker,
-    start_audit, web_grants, write_line, ws_grants, Audit, Bound, Diag, DirPaths, FileId, Handles, KvGrants, Limits,
-    Origin, Outcome, Refused, Report, Request, Response, RunResult, SharedLog, Sources, State, Stopped, Used,
+    on_run_stack, places_of, push_grants, read_only_refusal, set_stack, single, source_places, source_refusal,
+    spawn_ticker, start_audit, web_grants, write_line, ws_grants, Audit, Bound, Dep, Diag, DirPaths, FileId, Handles,
+    KvGrants, Limits, Origin, Outcome, Refused, Report, Request, Response, RunResult, SharedLog, Sources, State,
+    Stopped, Used,
 };
 use cap_std::fs::Dir as RealDir;
 use codegen::Site;
@@ -370,6 +371,8 @@ pub struct Kio {
     _ticker: Ticker,
     /// The audit log and the `(name, path)` of each `Dir` grant, for the next run.
     audit: Option<(Box<dyn Write + Send>, DirPaths)>,
+    /// The dependencies the audit log's header names (PK1).
+    deps: Vec<Dep>,
     /// `Kv` grants for the next run.
     kvs: KvGrants,
     /// `Rng`, `Clock` and `Log` grants for the next run.
@@ -404,6 +407,7 @@ impl Kio {
             limits,
             _ticker: ticker,
             audit: None,
+            deps: vec![],
             kvs: vec![],
             sources: Sources::default(),
             calls: 0,
@@ -423,6 +427,11 @@ impl Kio {
     /// handle does not know its path. Sizes only, never contents.
     pub fn audit(&mut self, out: impl Write + Send + 'static, dir_paths: DirPaths) {
         self.audit = Some((Box::new(out), dir_paths));
+    }
+
+    /// The dependencies loaded through `kio.deps` (PK1), for the audit log's header.
+    pub fn deps(&mut self, deps: Vec<Dep>) {
+        self.deps = deps;
     }
 
     /// Grant `kvs` by name to the next run, with the other grants `run_*` is given.
@@ -703,7 +712,7 @@ impl Kio {
         let (kvs, sources) = (std::mem::take(&mut self.kvs), std::mem::take(&mut self.sources));
         let bound = push_grants(store.data_mut(), dirs, https, handles, kvs, sources, None)?;
         if let Some((out, paths)) = self.audit.take() {
-            start_audit(store.data_mut(), out, &paths, &self.limits, files, &bound)?;
+            start_audit(store.data_mut(), out, &paths, &self.limits, files, &self.deps, &bound)?;
         }
         let result = match &checked {
             Err(diags) => Ok(Err(diags.clone())),
@@ -779,7 +788,7 @@ impl Kio {
         let (kvs, sources) = (std::mem::take(&mut self.kvs), std::mem::take(&mut self.sources));
         let bound = push_grants(&mut s, dirs, https, Handles::default(), kvs, sources, None)?;
         if let Some((out, paths)) = self.audit.take() {
-            start_audit(&mut s, out, &paths, &self.limits, files, &bound)?;
+            start_audit(&mut s, out, &paths, &self.limits, files, &self.deps, &bound)?;
         }
         s.allowed = main_calls(&report);
         let mut bound_ok = false;
@@ -875,6 +884,8 @@ pub struct Server {
     /// The directories the program's files are reached through (`source_places`): a writable
     /// `Dir` grant of one is refused.
     places: Vec<(FileId, String)>,
+    /// The dependencies the audit log's header names (PK1).
+    deps: Vec<Dep>,
 }
 
 /// Requests `--listen` runs at once by default (`ListenLimits::workers`): two per core.
@@ -941,6 +952,7 @@ impl Server {
             audit: None,
             requests: AtomicU64::new(0),
             places: source_places(&files).0,
+            deps: vec![],
         }))
     }
 
@@ -953,7 +965,10 @@ impl Server {
         let shown = |n: &String, p: String| if ro.contains(n) { format!("{p}:ro") } else { p };
         let grants = self.grant_list(dir_paths.into_iter().map(|(n, p)| (n.clone(), Some(shown(&n, p)))));
         let out: SharedLog = Arc::new(Mutex::new(Box::new(out)));
-        write_line(&out, &audit_header(&self.program.files, &self.limits, &grants))?;
+        write_line(
+            &out,
+            &audit_header(&self.program.files, &self.deps, &self.limits, &grants),
+        )?;
         self.audit = Some(out);
         Ok(())
     }
@@ -1024,6 +1039,14 @@ impl Server {
     }
 
     /// The program's files, root first.
+    /// The program's files where they were read (PK1): a dependency in `kio.deps`, and
+    /// `kio.deps` itself, which `new`'s names beside the root do not show. A writable `Dir` grant
+    /// holding one is refused, and the audit log's header names `deps`. Call before `audit`.
+    pub fn sources_read(&mut self, paths: &[std::path::PathBuf], deps: Vec<Dep>) {
+        self.places.extend(places_of(paths).0);
+        self.deps = deps;
+    }
+
     pub fn files(&self) -> &[(String, String)] {
         &self.program.files
     }

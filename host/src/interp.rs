@@ -186,7 +186,7 @@ impl Interp {
         let (kvs, sources) = (std::mem::take(&mut self.kvs), std::mem::take(&mut self.sources));
         let bound = push_grants(&mut s, dirs, https, handles, kvs, sources, None)?;
         if let Some((out, paths)) = self.audit.take() {
-            start_audit(&mut s, out, &paths, &self.limits, files, &bound)?;
+            start_audit(&mut s, out, &paths, &self.limits, files, &[], &bound)?;
         }
         let result = match checked {
             Err(diags) => Ok(Err(diags.into_iter().map(Diag::from).collect())),

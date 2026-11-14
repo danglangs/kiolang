@@ -12,7 +12,7 @@ use cap_std::fs::{Dir as RealDir, OpenOptions, OpenOptionsExt};
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -899,16 +899,27 @@ fn lstat_id(path: &Path) -> Option<FileId> {
 }
 
 /// The contents of the program file at `path`, and the identity of the file read: opened once,
-/// so the identity is of the file the contents came from (`changed_refusal`).
+/// so the identity is of the file the contents came from (`changed_refusal`). Anything but a
+/// regular file (a FIFO or device would block or never end) is `NOT_REGULAR`: opened without
+/// blocking, then looked at before any read.
 pub fn read_source(path: &Path) -> io::Result<(String, FileId)> {
     use std::io::Read;
-    use std::os::unix::fs::MetadataExt;
-    let mut f = std::fs::File::open(path)?;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+        .open(path)?;
+    if !f.metadata()?.is_file() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, NOT_REGULAR));
+    }
     let mut src = String::new();
     f.read_to_string(&mut src)?;
     let m = f.metadata()?;
     Ok((src, (m.dev(), m.ino())))
 }
+
+/// `read_source`'s error for a path that is not a regular file.
+pub const NOT_REGULAR: &str = "not a regular file";
 
 /// Whether `dir` is a directory `place` is reached through (`reached_through`).
 pub fn within(place: &Path, dir: FileId) -> bool {
@@ -928,15 +939,32 @@ pub fn source_places(files: &[(String, String)]) -> Places {
         return (vec![], vec![]);
     };
     let dir = Path::new(root).parent().unwrap_or(".".as_ref());
-    let paths = std::iter::once(Path::new(root).to_path_buf()).chain(files[1..].iter().map(|(n, _)| dir.join(n)));
+    let paths: Vec<PathBuf> = std::iter::once(Path::new(root).to_path_buf())
+        .chain(files[1..].iter().map(|(n, _)| dir.join(n)))
+        .collect();
+    places_of(&paths)
+}
+
+/// `source_places` of the files at `paths`, in order: for a program whose files are not all
+/// beside the root (a dependency in `kio.deps`, PK1), and for `kio.deps` itself.
+pub fn places_of(paths: &[PathBuf]) -> Places {
     let (mut places, mut ends) = (vec![], vec![]);
     for p in paths {
         let name = p.display().to_string();
-        let (dirs, end) = chain(&p);
+        let (dirs, end) = chain(p);
         places.extend(dirs.into_iter().map(|id| (id, name.clone())));
         ends.push((end, name));
     }
     (places, ends)
+}
+
+/// A module loaded through `kio.deps` (PK1): its name, its path as `kio.deps` gives it, and the
+/// sha256 (hex) of the source read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Dep {
+    pub name: String,
+    pub path: String,
+    pub sha256: String,
 }
 
 /// Why startup is refused, if it is: a program file checked (`ends`, from `source_places`) is not
@@ -2930,6 +2958,7 @@ fn start_audit(
     dir_paths: &DirPaths,
     l: &Limits,
     files: &[(String, String)],
+    deps: &[Dep],
     bound: &[Bound],
 ) -> Result<()> {
     let grants: Vec<_> = bound
@@ -2947,7 +2976,7 @@ fn start_audit(
         })
         .collect();
     let out: SharedLog = Arc::new(Mutex::new(out));
-    write_line(&out, &audit_header(files, l, &grants))?;
+    write_line(&out, &audit_header(files, deps, l, &grants))?;
     s.audit = Some(Audit {
         out,
         seq: 0,
@@ -2956,8 +2985,14 @@ fn start_audit(
     Ok(())
 }
 
-/// The audit header: the program's hash, each `(name, kind, target)` grant and the limits.
-fn audit_header(files: &[(String, String)], l: &Limits, grants: &[(String, &str, Option<String>)]) -> String {
+/// The audit header: the program's hash, its dependencies, each `(name, kind, target)` grant
+/// and the limits.
+fn audit_header(
+    files: &[(String, String)],
+    deps: &[Dep],
+    l: &Limits,
+    grants: &[(String, &str, Option<String>)],
+) -> String {
     let grant_json: Vec<String> = grants
         .iter()
         .map(|(name, kind, target)| {
@@ -2965,9 +3000,20 @@ fn audit_header(files: &[(String, String)], l: &Limits, grants: &[(String, &str,
             format!(r#"{{"name":{},"kind":"{kind}","target":{t}}}"#, json(name))
         })
         .collect();
+    let dep_json: Vec<String> = (deps.iter())
+        .map(|d| {
+            format!(
+                r#"{{"name":{},"path":{},"sha256":"{}"}}"#,
+                json(&d.name),
+                json(&d.path),
+                d.sha256
+            )
+        })
+        .collect();
     format!(
-        r#"{{"event":"start","program_hash":"{}","grants":[{}],"limits":{{"fuel":{},"timeout_secs":{},"stack":{},"memory":{},"calls":{},"io":{}}}}}"#,
+        r#"{{"event":"start","program_hash":"{}","deps":[{}],"grants":[{}],"limits":{{"fuel":{},"timeout_secs":{},"stack":{},"memory":{},"calls":{},"io":{}}}}}"#,
         program_hash(files),
+        dep_json.join(","),
         grant_json.join(","),
         l.fuel,
         l.timeout_secs,

@@ -58,8 +58,8 @@ const SAME_AUTHOR: &str = "tests and properties were written by the same author 
 /// What the command line names, read: each side's files and path, the grants file for NEW's
 /// `main`, the tests' grants file, and the requirements file on each side (`None` when absent).
 struct Inputs {
-    old: (String, Vec<(String, String)>),
-    new: (String, Vec<(String, String)>),
+    old: (String, Program),
+    new: (String, Program),
     grants: Option<(String, Vec<u8>)>,
     test_grants: Option<(String, Vec<u8>)>,
     requirements: Option<[(String, Option<String>); 2]>,
@@ -180,8 +180,8 @@ fn inputs(path: &str, flags: &[&str]) -> Result<Inputs, i32> {
             "kio review needs the old program\n  hint: add `--base old.kio`; for a git revision, `git show REV:app.kio > old/app.kio` (guide, Reviewing a change)".into(),
         ));
     };
-    let old = (base.to_string(), read_files(base)?);
-    let new = (path.to_string(), read_files(path)?);
+    let old = (base.to_string(), read_program(base)?);
+    let new = (path.to_string(), read_program(path)?);
     let read = |flag: &str, g: Option<&str>| match g {
         Some(g) => match std::fs::read(g) {
             Ok(bytes) => Ok(Some((g.to_string(), bytes))),
@@ -389,7 +389,7 @@ fn unified(old: &str, new: &str) -> Result<Vec<String>, String> {
 fn authority(inputs: &Inputs, page: &mut Page) -> (bool, bool) {
     let (old, new) = (&inputs.old.1, &inputs.new.1);
     let mut errors = Vec::new();
-    let checks = match kio_host::diff_files(old, new) {
+    let checks = match kio_host::diff_files(&old.files, &new.files) {
         Ok(diff) => {
             page.added = diff.added;
             match diff.lines(false).0 {
@@ -400,10 +400,10 @@ fn authority(inputs: &Inputs, page: &mut Page) -> (bool, bool) {
             true
         }
         Err((is_base, diags)) => {
-            let (side, files) = if is_base { ("old", old) } else { ("new", new) };
-            let msg = format!("the {side} program {} does not check", files[0].0);
+            let (side, prog) = if is_base { ("old", old) } else { ("new", new) };
+            let msg = format!("the {side} program {} does not check", prog.files[0].0);
             page.authority.push(("error", msg));
-            let (_, out) = captured(true, || print_diags(files, diags, "check"));
+            let (_, out) = captured(true, || print_diags(prog, diags, "check"));
             push_errors(&mut page.authority, &out.errors);
             errors = out.errors;
             page.authority_json = json!({"grants": [], "funcs": [], "added": false});
@@ -435,7 +435,7 @@ fn bind(path: &str, g: &str) -> i32 {
     };
     let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
     match read_program(path) {
-        Ok((files, ids)) => run_program(&files, &ids, &flags, grants_file.as_deref(), true, None),
+        Ok(prog) => run_program(&prog, &flags, grants_file.as_deref(), true, None),
         Err(code) => code,
     }
 }
@@ -629,10 +629,11 @@ fn percent(old: u64, new: u64) -> String {
 }
 
 /// The Not checked section: for each capability method NEW's `main` reaches, what the host does
-/// not look at; then the line on who wrote the tests.
+/// not look at; each dependency added, removed or changed (PK1); then the line on who wrote the
+/// tests.
 fn not_checked(inputs: &Inputs, page: &mut Page) {
     let mut rows = Vec::new();
-    if let Ok(p) = kio_host::check_program(&inputs.new.1) {
+    if let Ok(p) = kio_host::check_program(&inputs.new.1.files) {
         let a = lang::authority(&p);
         for (param, methods) in a.funcs.get("main").into_iter().flatten() {
             let Some((_, ty)) = a.main.iter().find(|(n, _)| n == param) else {
@@ -652,8 +653,20 @@ fn not_checked(inputs: &Inputs, page: &mut Page) {
             rows.push(json!({"grant": param, "type": ty, "methods": reached, "what": what}));
         }
     }
+    let mut dep_rows = Vec::new();
+    for (name, o, n) in deps::changes(&inputs.old.1.deps, &inputs.new.1.deps) {
+        let change = match (&o, &n) {
+            (Some(o), Some(n)) => format!("changed ({} -> {})", deps::short(o), deps::short(n)),
+            (Some(o), None) => format!("removed ({})", deps::short(o)),
+            (_, n) => format!("added ({})", deps::short(n.as_deref().unwrap_or_default())),
+        };
+        page.not_checked.push(format!(
+            "dependency {name} {change}: its code is not shown; its authority is above"
+        ));
+        dep_rows.push(json!({"name": name, "old": o, "new": n}));
+    }
     page.not_checked.push(SAME_AUTHOR.into());
-    page.not_checked_json = json!({"methods": rows, "author": SAME_AUTHOR});
+    page.not_checked_json = json!({"methods": rows, "deps": dep_rows, "author": SAME_AUTHOR});
 }
 
 /// The Identity section: kio's version and commit, the sha256 of each file read, and the seed.
@@ -665,9 +678,11 @@ fn identity(inputs: &Inputs, page: &mut Page) -> serde_json::Value {
     let (version, commit) = (env!("CARGO_PKG_VERSION"), env!("KIO_COMMIT"));
     page.identity.push(format!("kio {version} ({commit})"));
     let mut sides = json!({});
-    for (side, (_, files)) in [("old", &inputs.old), ("new", &inputs.new)] {
+    let mut deps = json!({});
+    for (side, (_, prog)) in [("old", &inputs.old), ("new", &inputs.new)] {
+        let files = &prog.files;
         let mut each: Vec<(String, String)> = (0..files.len())
-            .map(|i| (json_path(files, i), hash(files[i].1.as_bytes())))
+            .map(|i| (json_path(prog, i), hash(files[i].1.as_bytes())))
             .collect();
         each.sort();
         shown.extend(each.iter().map(|(p, h)| (p.clone(), Some(h.clone()))));
@@ -677,6 +692,14 @@ fn identity(inputs: &Inputs, page: &mut Page) -> serde_json::Value {
             .iter()
             .map(|(p, h)| json!({"path": p, "sha256": h}))
             .collect::<Vec<_>>());
+        for d in &prog.deps {
+            page.identity
+                .push(format!("{side} dep {} {} sha256:{}", d.name, d.path, d.sha256));
+        }
+        let rows: Vec<_> = (prog.deps.iter())
+            .map(|d| json!({"name": d.name, "path": d.path, "sha256": d.sha256}))
+            .collect();
+        deps[side] = json!(rows);
     }
     let mut file = |what: &str, f: &Option<(String, Vec<u8>)>| {
         f.as_ref().map(|(g, bytes)| {
@@ -704,7 +727,7 @@ fn identity(inputs: &Inputs, page: &mut Page) -> serde_json::Value {
     shown.extend(files);
     page.changed = changed(&shown);
     json!({
-        "kio": version, "commit": commit, "old": sides["old"], "new": sides["new"],
+        "kio": version, "commit": commit, "old": sides["old"], "new": sides["new"], "deps": deps,
         "grants": grants, "test_grants": test_grants, "requirements": requirements, "seed": DEFAULT_SEED,
         "changed": page.changed,
     })

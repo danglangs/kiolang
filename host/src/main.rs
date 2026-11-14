@@ -1,3 +1,4 @@
+mod deps;
 mod mcp;
 mod review;
 
@@ -35,6 +36,8 @@ struct JsonOut {
     diff: Option<serde_json::Value>,
     audit: Option<String>,
     used: Option<Used>,
+    /// The dependencies `kio check` loaded through `kio.deps` (PK1).
+    deps: Vec<kio_host::Dep>,
 }
 
 /// `--json`'s report fields from `s` (P8): `report` holds `main`'s section only.
@@ -92,6 +95,7 @@ fn cli() -> i32 {
         "diff": o.diff,
         "audit": o.audit,
         "used": used,
+        "deps": o.deps.iter().map(|d| json!({"name": d.name, "path": d.path, "sha256": d.sha256})).collect::<Vec<_>>(),
     });
     println!("{line}");
     code
@@ -108,6 +112,9 @@ fn command(args: &[String]) -> i32 {
             fail("`--json` reports one run or check; `kio mcp` serves many\n  hint: drop --json".into())
         }
         ["mcp"] => mcp::serve(),
+        ["deps", ..] if json_out() => fail("`kio deps pin` prints the lines it changed\n  hint: drop --json".into()),
+        ["deps", "pin"] => deps::pin(None),
+        ["deps", "pin", root] => deps::pin(Some(root)),
         ["--version"] => {
             println!("kio {} ({})", env!("CARGO_PKG_VERSION"), env!("KIO_COMMIT"));
             0
@@ -126,56 +133,114 @@ fn command(args: &[String]) -> i32 {
 }
 
 /// The commands, `{USAGE}` standing for `kio run`'s flags.
-const HELP: &str = "kio --version\n       kio check <prog.kio> [--all | --base <old.kio> [--detail]]\n       kio check <prog.kio> --grants <file> [flags]\n       kio mcp\n       kio review <new.kio> --base <old.kio> [--grants file] [--test-grants file] [--requirements file] [--json]\n       kio run <prog.kio> {USAGE}\n       kio test <prog.kio> {TEST_USAGE}";
+const HELP: &str = "kio --version\n       kio deps pin [<prog.kio>]\n       kio check <prog.kio> [--all | --base <old.kio> [--detail]]\n       kio check <prog.kio> --grants <file> [flags]\n       kio mcp\n       kio review <new.kio> --base <old.kio> [--grants file] [--test-grants file] [--requirements file] [--json]\n       kio run <prog.kio> {USAGE}\n       kio test <prog.kio> {TEST_USAGE}";
 
-/// The root file, then `NAME.kio` beside it for each `mod NAME;` line. This is operator input,
-/// read by the host like the root; the program never sees the filesystem.
-fn read_files(path: &str) -> Result<Vec<(String, String)>, i32> {
-    read_program(path).map(|(files, _)| files)
+/// A program as read: its `(name, source)` files, root first, named as `lang` takes them
+/// (`web.kio` for `mod web;`); the path each was read from and its identity, then `kio.deps`'s
+/// when there is one; and the dependencies `kio.deps` loaded (PK1).
+struct Program {
+    files: Vec<(String, String)>,
+    paths: Vec<std::path::PathBuf>,
+    ids: Vec<FileId>,
+    deps: Vec<kio_host::Dep>,
 }
 
-/// A program's `(name, source)` files, root first, and the identity of each file read.
-type Program = (Vec<(String, String)>, Vec<kio_host::FileId>);
+impl Program {
+    /// File `i`'s path as an error names it: as given for the root, where it was read for a
+    /// dependency, its name beside the root for any other module.
+    fn shown(&self, i: usize) -> String {
+        let name = &self.files[i].0;
+        match self.deps.iter().any(|d| format!("{}.kio", d.name) == *name) {
+            true => self.paths[i].display().to_string(),
+            false => name.clone(),
+        }
+    }
+}
 
-/// `read_files`, and the identity of each file read, in the same order.
+/// The root file, then for each `mod NAME;` line the module: from the path `kio.deps` beside the
+/// root gives, if it lists NAME, else `NAME.kio` beside the root. This is operator input, read by
+/// the host like the root; the program never sees the filesystem.
 fn read_program(path: &str) -> Result<Program, i32> {
     let read = kio_host::read_source;
-    let (root, root_id) = read(path.as_ref()).map_err(|e| fail(format!("{path}: cannot read: {e}")))?;
+    let (root, root_id) = read(path.as_ref()).map_err(|e| fail(cannot_read(path, &e)))?;
     let dir = std::path::Path::new(path).parent().unwrap_or(".".as_ref());
-    let (mut files, mut ids) = (vec![(path.to_string(), String::new())], vec![root_id]);
-    for name in root.lines().filter_map(mod_name) {
+    let (listed, pins) = deps::read(dir)?;
+    let mods = mod_lines(&root);
+    let mut prog = Program {
+        files: vec![(path.to_string(), root)],
+        paths: vec![path.into()],
+        ids: vec![root_id],
+        deps: vec![],
+    };
+    for (name, span) in mods {
+        if let Some(line) = listed.iter().find(|l| l.name == name) {
+            deps::load(&mut prog, dir, line, span)?;
+            continue;
+        }
         let file = dir.join(format!("{name}.kio"));
         let (src, id) = read(&file).map_err(|e| fail(format!("mod {name}: cannot read {}: {e}", file.display())))?;
-        files.push((format!("{name}.kio"), src));
-        ids.push(id);
+        prog.files.push((format!("{name}.kio"), src));
+        prog.paths.push(file);
+        prog.ids.push(id);
     }
-    files[0].1 = root;
-    Ok((files, ids))
+    prog.paths.extend(pins.iter().map(|(p, _)| p.clone()));
+    prog.ids.extend(pins.iter().map(|(_, id)| *id));
+    Ok(prog)
+}
+
+/// Why the source file `path` could not be read.
+fn cannot_read(path: &str, e: &std::io::Error) -> String {
+    match e.to_string() == kio_host::NOT_REGULAR {
+        true => format!("{path} is not a regular file"),
+        false => format!("{path}: cannot read: {e}"),
+    }
+}
+
+/// Each `mod NAME;` line of `root`: the name and the line's byte span, without its indent.
+fn mod_lines(root: &str) -> Vec<(String, (usize, usize))> {
+    let (mut at, mut out) = (0, Vec::new());
+    for line in root.split_inclusive('\n') {
+        if let Some(name) = mod_name(line) {
+            let start = at + line.len() - line.trim_start().len();
+            out.push((name.to_string(), (start, at + line.trim_end().len())));
+        }
+        at += line.len();
+    }
+    out
 }
 
 /// `web` for a line that is `mod web;`.
 fn mod_name(line: &str) -> Option<&str> {
     let name = line.trim().strip_prefix("mod ")?.strip_suffix(';')?.trim();
+    is_ident(name).then_some(name)
+}
+
+/// Whether `name` can name a module.
+fn is_ident(name: &str) -> bool {
     let mut chars = name.chars();
-    let ident = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
-    ident.then_some(name)
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn check(path: &str, all: bool) -> i32 {
-    let files = match read_files(path) {
-        Ok(f) => f,
+    let prog = match read_program(path) {
+        Ok(p) => p,
         Err(code) => return code,
     };
-    let p = match kio_host::check_program(&files) {
+    let p = match kio_host::check_program(&prog.files) {
         Ok(p) => p,
-        Err(diags) => return print_diags(&files, diags, "check"),
+        Err(diags) => return print_diags(&prog, diags, "check"),
     };
     match (all, json_out()) {
         (true, true) => set_json(|o| o.report = lang::report(&p).lines().map(String::from).collect()),
         (true, false) => println!("{}", lang::report(&p)),
         (false, true) => set_json_shown(&lang::shown(&p)),
         (false, false) => println!("{}", lang::shown_report(&p)),
+    }
+    set_json(|o| o.deps = prog.deps.clone());
+    if !json_out() && !prog.deps.is_empty() {
+        println!();
+        (prog.deps.iter()).for_each(|d| println!("dep {} {} sha256:{}", d.name, d.path, d.sha256));
     }
     0
 }
@@ -184,29 +249,44 @@ fn check(path: &str, all: bool) -> i32 {
 /// One line per changed grant; then, with `detail` or when those lines do not show every
 /// addition, a blank line and one per changed function.
 fn check_base(path: &str, base: &str, detail: bool) -> i32 {
-    let (old, new) = match (read_files(base), read_files(path)) {
+    let (old, new) = match (read_program(base), read_program(path)) {
         (Ok(o), Ok(n)) => (o, n),
         (Err(code), _) | (_, Err(code)) => return code,
     };
-    let diff = match kio_host::diff_files(&old, &new) {
+    let diff = match kio_host::diff_files(&old.files, &new.files) {
         Ok(diff) => diff,
         Err((is_base, diags)) => {
-            let (side, files) = if is_base { ("base", &old) } else { ("new", &new) };
+            let (side, prog) = if is_base { ("base", &old) } else { ("new", &new) };
             if !json_out() {
-                eprintln!("kio: the {side} program {} does not check", files[0].0);
+                eprintln!("kio: the {side} program {} does not check", prog.files[0].0);
             }
-            return print_diags(files, diags, "check");
+            return print_diags(prog, diags, "check");
         }
     };
     if json_out() {
-        if let Ok(p) = kio_host::check_program(&new) {
+        if let Ok(p) = kio_host::check_program(&new.files) {
             set_json_shown(&lang::shown(&p));
         }
-        let d = json!({"grants": diff.grants, "funcs": diff.funcs, "added": diff.added});
+        let deps: Vec<_> = (deps::changes(&old.deps, &new.deps).into_iter())
+            .map(|(name, o, n)| json!({"name": name, "old": o, "new": n}))
+            .collect();
+        let d = json!({"grants": diff.grants, "funcs": diff.funcs, "added": diff.added, "deps": deps});
         set_json(|o| o.diff = Some(d));
         return if diff.added { 3 } else { 0 };
     }
     println!("{}", diff.text(detail));
+    // A dependency's new code shows above only through the authority it reaches: name each one.
+    let changed = deps::changes(&old.deps, &new.deps);
+    if !changed.is_empty() {
+        println!();
+    }
+    for (name, o, n) in changed {
+        match (o, n) {
+            (Some(o), Some(n)) => println!("dep {name} changed ({} -> {})", deps::short(&o), deps::short(&n)),
+            (None, _) => println!("dep {name} added"),
+            (_, None) => println!("dep {name} removed"),
+        }
+    }
     if diff.added {
         3
     } else {
@@ -521,11 +601,11 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
     if json_out() && flags.iter().step_by(2).any(|f| *f == "--listen") {
         return fail("`--json` reports one run; `--listen` serves many\n  hint: drop --json, or drop --listen".into());
     }
-    let (files, read_ids) = match read_program(path) {
-        Ok(f) => f,
+    let prog = match read_program(path) {
+        Ok(p) => p,
         Err(code) => return code,
     };
-    run_program(&files, &read_ids, &flags, grants_file.as_deref(), dry, None)
+    run_program(&prog, &flags, grants_file.as_deref(), dry, None)
 }
 
 /// One test `kio test` runs through `run_program`: the checked program, the test, and the
@@ -538,18 +618,13 @@ struct TestRun<'a> {
     case: Option<(lang::prop::Case, bool)>,
 }
 
-/// `run`'s work once the flags (`grants_file`'s first) and the program's `files`, with the
-/// identity of each file read, are known. With `test`, the test is the program's `main`: its
-/// parameters are bound, and its report line checked, as `main`'s are; nothing is printed but
-/// through `--json`'s object, which the caller captures.
-fn run_program(
-    files: &[(String, String)],
-    read_ids: &[FileId],
-    flags: &[&str],
-    grants_file: Option<&str>,
-    dry: bool,
-    mut test: Option<TestRun>,
-) -> i32 {
+/// `run`'s work once the flags (`grants_file`'s first) and the program, as read, are known.
+/// With `test`, the test is the program's `main`: its parameters are bound, and its report line
+/// checked, as `main`'s are; nothing is printed but through `--json`'s object, which the caller
+/// captures.
+fn run_program(prog: &Program, flags: &[&str], grants_file: Option<&str>, dry: bool, mut test: Option<TestRun>) -> i32 {
+    let files = &prog.files[..];
+    set_json(|o| o.deps = prog.deps.clone());
     let mut dirs = Vec::new();
     let mut https: Vec<(String, Origin)> = Vec::new();
     // `(name, methods)` of each `--http-methods`, applied once every `--http` is known.
@@ -740,9 +815,10 @@ fn run_program(
             Err(_) => {}
         }
     }
-    // Checked against the files read: a path changed since names another file.
-    let (places, ends) = kio_host::source_places(files);
-    if let Some(why) = kio_host::changed_refusal(&ends, read_ids)
+    // Checked against the files read: a path changed since names another file. A dependency and
+    // `kio.deps` count as the program's own source: the program could rewrite its next run.
+    let (places, ends) = kio_host::places_of(&prog.paths);
+    if let Some(why) = kio_host::changed_refusal(&ends, &prog.ids)
         .or_else(|| kio_host::source_refusal(&places, &granted, &sources.read_only_dirs))
     {
         return refuse(why);
@@ -800,7 +876,7 @@ fn run_program(
                 &lang::CapTable::v0(),
             ) {
                 Ok(p) => p,
-                Err(diags) => return print_diags(files, diags.into_iter().map(Diag::from).collect(), "check"),
+                Err(diags) => return print_diags(prog, diags.into_iter().map(Diag::from).collect(), "check"),
             };
             &owned
         }
@@ -934,7 +1010,7 @@ fn run_program(
                 println!("{printed}");
                 0
             }
-            Err(diags) => print_diags(files, diags, "grant"),
+            Err(diags) => print_diags(prog, diags, "grant"),
         };
     }
     // A program that can write a store's log or a database through a `Dir` could replace or
@@ -1016,18 +1092,7 @@ fn run_program(
     }
     if let Some(addr) = listen {
         let audit = audit.map(|path| (path, dir_paths));
-        return serve(
-            files.to_vec(),
-            dirs,
-            https,
-            kvs,
-            sources,
-            addr,
-            limits,
-            ws_origins,
-            hosts,
-            audit,
-        );
+        return serve(prog, dirs, https, kvs, sources, addr, limits, ws_origins, hosts, audit);
     }
     let mut kio = match Kio::new(limits) {
         Ok(k) => k,
@@ -1042,6 +1107,7 @@ fn run_program(
             Err(e) => return refuse(format!("--audit {path}: {e}")),
         }
     }
+    kio.deps(prog.deps.clone());
     kio.grant_kvs(kvs);
     if let Some(t) = &mut test {
         sources.logs.append(&mut t.logs);
@@ -1105,7 +1171,7 @@ fn run_program(
         // run-time error.
         Ok(Err(diags)) => {
             let kind = if kio.used().is_some() { "runtime" } else { "grant" };
-            print_diags(files, diags, kind)
+            print_diags(prog, diags, kind)
         }
     }
 }
@@ -1137,8 +1203,7 @@ const TEST_CLOCK: &str = "fixed:2026-01-01T00:00:00Z";
 
 /// A checked program and the flags each of its tests is run with.
 struct Tests {
-    files: Vec<(String, String)>,
-    read_ids: Vec<FileId>,
+    prog: Program,
     /// The grants file's flags, then the command line's limits.
     flags: Vec<String>,
     grants_file: Option<String>,
@@ -1374,12 +1439,12 @@ fn test_setup(path: &str, flags: &[&str]) -> Result<Tests, i32> {
             return Err(fail(format!("--stack {n}: at most {} KB", kio_host::MAX_STACK >> 10)));
         }
     }
-    let (files, read_ids) = read_program(path)?;
-    let pairs: Vec<(&str, &str)> = files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
+    let prog = read_program(path)?;
+    let pairs: Vec<(&str, &str)> = prog.files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
     let program = match lang::check_files_for_tests(&pairs, &lang::CapTable::v0()) {
         Ok(p) => p,
         Err(diags) => {
-            print_diags(&files, diags.into_iter().map(Diag::from).collect(), "check");
+            print_diags(&prog, diags.into_iter().map(Diag::from).collect(), "check");
             return Err(2);
         }
     };
@@ -1390,8 +1455,7 @@ fn test_setup(path: &str, flags: &[&str]) -> Result<Tests, i32> {
         )));
     }
     Ok(Tests {
-        files,
-        read_ids,
+        prog,
         flags,
         grants_file,
         program,
@@ -1510,7 +1574,7 @@ fn run_once(tests: &Tests, t: &lang::TestFn, case: Option<(lang::prop::Case, boo
                 case,
             };
             let grants = tests.grants_file.as_deref();
-            run_program(&tests.files, &tests.read_ids, &flags, grants, false, Some(run))
+            run_program(&tests.prog, &flags, grants, false, Some(run))
         }
     });
     drop(temps);
@@ -1824,7 +1888,7 @@ impl Drop for TempDir {
 /// log's path and each `Dir` grant's `(name, path)`.
 #[allow(clippy::too_many_arguments)]
 fn serve(
-    files: Vec<(String, String)>,
+    prog: &Program,
     dirs: Vec<(String, cap_std::fs::Dir)>,
     https: Vec<(String, kio_host::Origin)>,
     kvs: kio_host::KvGrants,
@@ -1835,18 +1899,19 @@ fn serve(
     hosts: Vec<String>,
     audit: Option<(String, kio_host::DirPaths)>,
 ) -> i32 {
-    let mut server = match Server::new(files.clone(), limits) {
+    let mut server = match Server::new(prog.files.clone(), limits) {
         Err(e) => return internal(format!("{e:#}")),
-        Ok(Err(diags)) => return print_diags(&files, diags, "check"),
+        Ok(Err(diags)) => return print_diags(prog, diags, "check"),
         Ok(Ok(s)) => s,
     };
+    server.sources_read(&prog.paths, prog.deps.clone());
     server.grant_https(https);
     server.grant_kvs(kvs);
     server.grant_sources(sources);
     // A grant `main` does not take is refused before binding, exit 1 as plain `kio run` (H21).
     let names: Vec<String> = dirs.iter().map(|(n, _)| n.clone()).collect();
     if let Err(diags) = server.check_grants(&names) {
-        return print_diags(&files, diags, "grant");
+        return print_diags(prog, diags, "grant");
     }
     if let Some((path, dir_paths)) = audit {
         let opened = open_append(&path).and_then(|f| server.audit(f, dir_paths));
@@ -1944,18 +2009,19 @@ fn locate(files: &[(String, String)], diags: &[Diag]) -> Vec<(usize, usize)> {
 }
 
 /// Each diag, of `kind` for `--json`; exit 1.
-fn print_diags(files: &[(String, String)], diags: Vec<Diag>, kind: &str) -> i32 {
+fn print_diags(prog: &Program, diags: Vec<Diag>, kind: &str) -> i32 {
+    let files = &prog.files;
     for (d, (file, line)) in diags.iter().zip(locate(files, &diags)) {
         if json_out() {
             let at = (
-                json_path(files, file),
+                json_path(prog, file),
                 line,
                 lang::line_col(&files[file].1, d.start as usize).1,
             );
             push_error(kind, &d.message, d.hint.as_deref(), Some(at));
             continue;
         }
-        eprintln!("{}:{line}: error: {}", files[file].0, d.message);
+        eprintln!("{}:{line}: error: {}", prog.shown(file), d.message);
         if let Some(h) = &d.hint {
             eprintln!("  hint: {h}");
         }
@@ -2015,13 +2081,9 @@ fn stopped(msg: &str) {
     push_error(kio_host::stop_kind(msg), &message, hint.as_deref(), None);
 }
 
-/// The path of source file `i` for `--json`: the root as given, a module beside it.
-fn json_path(files: &[(String, String)], i: usize) -> String {
-    if i == 0 {
-        return files[0].0.clone();
-    }
-    let dir = std::path::Path::new(&files[0].0).parent().unwrap_or(".".as_ref());
-    dir.join(&files[i].0).display().to_string()
+/// The path of source file `i` for `--json`: where it was read (the root as given).
+fn json_path(prog: &Program, i: usize) -> String {
+    prog.paths[i].display().to_string()
 }
 
 /// `main`'s value as `--json` shows it (D2): `printed` as `kio run` prints it, but `null` for

@@ -10,6 +10,7 @@ kio run <prog.kio> [--grants file] [grants] [limits] [--audit log] [--listen add
 ... --json                       one JSON object on stdout (JSON output, below)
 kio test <prog.kio> [--grants file] [--filter substr] [--cases n] [--seed s] [limits]   run the #[test] functions (Tests, below)
 kio review <new.kio> --base <old.kio> [--grants file] [--test-grants file] [--requirements file] [--json]   one labelled page for a change (Reviewing a change, below)
+kio deps pin [<prog.kio>]        rewrite the hashes in kio.deps beside prog (default ./kio.deps) (Dependencies, below)
 kio mcp                          the MCP server (README, "Use from an agent")
 ```
 
@@ -22,6 +23,28 @@ examples/fx/report.kio:10: error: no grant for `fx: Http`
 ```
 
 `kio check` and `--base` without installing kio: the [playground](../site/playground.html) runs the same checker in a browser, on one file; nothing runs.
+
+## Dependencies
+
+`mod web;` loads `web.kio` beside the root, unless `kio.deps` beside the root lists `web`: then it loads that path, and only if the file's sha256 is the one pinned. One line per module, `NAME  PATH  sha256:HEX`, PATH relative to `kio.deps` (never absolute, so the file reads the same on every checkout); `#` comments. Modules stay flat: a dependency that uses another (`web` uses `http`) needs `mod http;` in the root, and `http` listed or beside it. Local paths only: a sibling checkout, a submodule, a vendored copy.
+
+```
+$ cat kio.deps
+# kio-web's library, from a sibling checkout
+web  ../../web.kio  sha256:e4aad9a99560d8fd3d5f893e372764cc315c1b08611af9efce55b17e0fa6959e
+$ kio check app.kio
+...
+dep web ../../web.kio sha256:e4aad9a99560d8fd3d5f893e372764cc315c1b08611af9efce55b17e0fa6959e
+$ kio run app.kio            # after web.kio changed
+app.kio:1: error: ../../web.kio does not match kio.deps:2 (sha256:e4aad9a99560.. pinned, sha256:91c0a1b2c3d4.. found)
+  hint: review the change, then `kio deps pin app.kio`
+$ kio deps pin app.kio
+web  sha256:e4aad9a99560.. -> sha256:91c0a1b2c3d4..
+```
+
+`check` (each side of `--base` with its own `kio.deps`), `test`, `run`, `--listen` and `review` all refuse a mismatch before compiling; the file hashed is the file compiled. `kio deps pin` is the only command that writes `kio.deps`: it rehashes every line (a line `NAME  PATH` gets its hash), keeps comments and order, prints each change or `nothing changed`. A dependency cannot do anything on its own: its calls are charged to the caller's grants, so a change to it shows in `kio check --base`; `kio review` lists each dependency added, removed or changed under Not checked. A writable `--dir` holding `kio.deps` or a dependency is refused, as one holding the program is. Each `start` line of the audit log carries `deps`; `kio check --json` and `kio run --json` have `deps: [{name, path, sha256}]`. `kio check NEW --base OLD` ends with a line per dependency whose pin changed, `dep web changed (sha256:e4aad9a99560.. -> sha256:91c0a1b2c3d4..)`, `dep web added` or `dep web removed`; exit codes follow authority alone.
+
+Errors (exit 2): a malformed line (`kio.deps:3: ... is not a dependency line`: an absolute path or a control character is one), a name listed twice, a line without a hash, a missing file (`kio.deps:2: ../../web.kio does not exist`) or one that is not a regular file, a mismatch, and a name both listed and beside the root (`` `web` is in kio.deps:2 and beside app.kio``, hint `delete one`). A listed name no `mod` declares is ignored, so one `kio.deps` serves several roots. `--json` gives them kind `deps`.
 
 ## Grants
 
@@ -263,7 +286,7 @@ $ grep denied /tmp/leak.jsonl
 {"event":"call","seq":3,"cap":"fx","kind":"Http","method":"get","arg":"https://collect.example/?d=acme,120\u000aglobex,45\u000ainitech,300\u000a","bytes":0,"result":"denied","ms":0.0}
 ```
 
-Each run writes a `start` line (program hash, grants, limits), its calls, and an `end` line (outcome, calls, I/O, peak memory, fuel used). Under `--listen` it is one log for the server: the header once, then each request's calls and trailer, every line starting with `"req":N` (and `"conn":N` for a WebSocket event); the trailer counts calls made after the response was sent (`"after_send":N`).
+Each run writes a `start` line (program hash, dependencies, grants, limits), its calls, and an `end` line (outcome, calls, I/O, peak memory, fuel used). Under `--listen` it is one log for the server: the header once, then each request's calls and trailer, every line starting with `"req":N` (and `"conn":N` for a WebSocket event); the trailer counts calls made after the response was sent (`"after_send":N`).
 
 ## JSON output
 
@@ -277,19 +300,20 @@ Each run writes a `start` line (program hash, grants, limits), its calls, and an
 | `report` | the authority report's lines: `main`'s, then each function it reaches that uses a capability (`check --all`: every function) |
 | `report_tests` | the lines of functions only a test reaches |
 | `hidden` | the functions counted without a line: `{"no_capability", "unreached", "unreached_with_capability"}`; `null` when no report was made |
-| `diff` | `check --base`: `{"grants", "funcs", "added"}` |
+| `diff` | `check --base`: `{"grants", "funcs", "added", "deps"}`, `deps` each dependency whose pin changed, `[{"name", "old", "new"}]` (`null` where absent) |
 | `audit` | the `--audit` path (appended across runs) |
 | `used` | `run`: `{"fuel", "calls", "io", "peak_memory", "ms"}` |
+| `deps` | `check`, `run`: each dependency loaded through `kio.deps`, `[{"name", "path", "sha256"}]` |
 
-Kinds: `check`, `grant` (a grant that does not bind, exit 1; one the host refuses at startup, exit 2), `usage` (exit 2), `err` (`main` returned `Err`), `runtime`, `fuel`, `memory`, `timeout`, `stack`, `calls`, `io` (a limit; the hint names its flag), `denied` (the host stopped a call), `internal`.
+Kinds: `check`, `grant` (a grant that does not bind, exit 1; one the host refuses at startup, exit 2), `usage` (exit 2), `deps` (a `kio.deps` error, exit 2), `err` (`main` returned `Err`), `runtime`, `fuel`, `memory`, `timeout`, `stack`, `calls`, `io` (a limit; the hint names its flag), `denied` (the host stopped a call), `internal`.
 
 ```
 $ kio run job.kio --dir input=in:ro --json
-{"audit":null,"diff":null,"errors":[],"hidden":{"no_capability":0,"unreached":0,"unreached_with_capability":0},"ok":true,"report":["main : input read"],"report_tests":[],"used":{"calls":1,"fuel":98619,"io":5,"ms":0.5,"peak_memory":1966080},"value":"{\"alice\": 1}"}
+{"audit":null,"deps":[],"diff":null,"errors":[],"hidden":{"no_capability":0,"unreached":0,"unreached_with_capability":0},"ok":true,"report":["main : input read"],"report_tests":[],"used":{"calls":1,"fuel":98619,"io":5,"ms":0.5,"peak_memory":1966080},"value":"{\"alice\": 1}"}
 $ kio run job.kio --json
-{"audit":null,"diff":null,"errors":[{"col":9,"file":"job.kio","hint":"grant it: `--dir input=path`","kind":"grant","line":1,"message":"no grant for `input: Dir`"}],"hidden":{"no_capability":0,"unreached":0,"unreached_with_capability":0},"ok":false,"report":["main : input read"],"report_tests":[],"used":null,"value":null}
+{"audit":null,"deps":[],"diff":null,"errors":[{"col":9,"file":"job.kio","hint":"grant it: `--dir input=path`","kind":"grant","line":1,"message":"no grant for `input: Dir`"}],"hidden":{"no_capability":0,"unreached":0,"unreached_with_capability":0},"ok":false,"report":["main : input read"],"report_tests":[],"used":null,"value":null}
 $ kio run spin.kio --fuel 1000 --json
-{"audit":null,"diff":null,"errors":[{"col":null,"file":null,"hint":"raise it with --fuel","kind":"fuel","line":null,"message":"out of fuel (limit 1000)"}],"hidden":{"no_capability":0,"unreached":0,"unreached_with_capability":0},"ok":false,"report":["main : none"],"report_tests":[],"used":{"calls":0,"fuel":1000,"io":0,"ms":0.2,"peak_memory":1179648},"value":null}
+{"audit":null,"deps":[],"diff":null,"errors":[{"col":null,"file":null,"hint":"raise it with --fuel","kind":"fuel","line":null,"message":"out of fuel (limit 1000)"}],"hidden":{"no_capability":0,"unreached":0,"unreached_with_capability":0},"ok":false,"report":["main : none"],"report_tests":[],"used":{"calls":0,"fuel":1000,"io":0,"ms":0.2,"peak_memory":1179648},"value":null}
 ```
 
 ## Tests
@@ -377,9 +401,9 @@ no authority added
 
 Exit 0: no authority added (`no change in authority`, `authority removed only`, or `no authority added` when every gain is covered). Exit 3: some added. Exit 1: a side does not check (the message names `base` or `new`). Exit 2: a file is missing.
 
-Each side's `mod NAME;` lines resolve to `NAME.kio` beside that side's entry, so an `old/app.kio` copied alone fails with `mod web: cannot read old/web.kio`: copy its modules beside it, or let `tools/authority-diff.sh` check the whole base out.
+Each side's `mod NAME;` lines resolve to `NAME.kio` beside that side's entry (or where that side's `kio.deps` says), so an `old/app.kio` copied alone fails with `mod web: cannot read old/web.kio`: copy its modules beside it, or let `tools/authority-diff.sh` check the whole base out.
 
-`tools/authority-diff.sh BASE_REF ENTRY.kio [--detail]` (in the repository, not in the release archives: copy it into yours) checks `BASE_REF` out with `git worktree add` into a temporary directory and diffs `ENTRY.kio` against it (`KIO` names the binary). In CI, as a GitHub Actions job step that fails a pull request adding authority until someone with the right to approve it does:
+`tools/authority-diff.sh BASE_REF ENTRY.kio [--detail]` (in the repository, not in the release archives: copy it into yours) checks `BASE_REF` out with `git worktree add` into a temporary directory and diffs `ENTRY.kio` against it (`KIO` names the binary). In CI, as a GitHub Actions job step that fails a pull request adding authority until someone with the right to approve it does: It checks out only this repository: a `kio.deps` path outside it must exist at the same relative place for the base side too.
 
 ```yaml
 - uses: actions/checkout@v4
@@ -429,8 +453,8 @@ Identity
 - **Authority**: `kio check NEW --base OLD`'s lines. `--grants G` binds G to NEW's `main` as `kio check --grants` does; if it does not bind, the errors are shown here labelled `error`.
 - **Tests**: `kio test` on both sides with T (else the defaults) and seed 1: the grants used, counts (`0 tests` for a side with none), each test added or removed by name, each property's cases, and each NEW failure as `kio test` prints it (`error`). A removed test, a property that ran fewer cases than in OLD, or a property now an example test is a `removed:` line (`not checked`: a person accepts it). T may not give a writable `--dir` or a file-backed `--kv` or `--db`: OLD's tests would leave their writes for NEW's (use `:ro` or `:memory:`).
 - **Resources**: per test on both sides, fuel and peak memory (a property's: fuel summed over its cases, peak memory their largest) when either changed by more than 2%; then the total fuel and the largest peak over the tests on both sides. Percentages are rounded away from zero, so a row never reads `2.00%`. Tests only; no wall time.
-- **Not checked**: for each method NEW's `main` reaches, what the host does not look at (the SQL, the bodies sent, what is written, ...).
-- **Identity**: kio's version and commit, and the sha256 of every file each side loads (root and modules), of G, of T and of the requirements files. Each is read again at the end; one that changed while the review ran is an `error`.
+- **Not checked**: for each method NEW's `main` reaches, what the host does not look at (the SQL, the bodies sent, what is written, ...); each dependency added, removed or changed (`dependency web changed (sha256:e4aad9a99560.. -> sha256:91c0a1b2c3d4..): its code is not shown; its authority is above`).
+- **Identity**: kio's version and commit, and the sha256 of every file each side loads (root, modules and dependencies, and a `dep NAME PATH sha256:..` line per dependency), of G, of T and of the requirements files. Each is read again at the end; one that changed while the review ran is an `error`.
 
 Exit 1: a side does not check, G does not bind, a side's tests do not run, a NEW test fails, or a file changed during the review; 3: authority added or a test removed; 0 otherwise; 2: usage. `--json` gives one object with a field per section. `--base` takes a path: for a git revision, write each file out with `git show REV:app.kio > old/app.kio`, modules beside it.
 
