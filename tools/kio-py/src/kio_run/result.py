@@ -36,6 +36,8 @@ class Diff:
     grants: list[str]
     funcs: list[str]
     added: bool
+    # Dependencies whose pin changed (kio.deps): {"name", "old", "new"}, a side's hash or None.
+    deps: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,8 @@ class Result:
     diff: Diff | None
     audit: str | None
     used: Used | None
+    # The kio.deps dependencies loaded: {"name", "path", "sha256"}.
+    deps: list[dict[str, Any]] = field(default_factory=list)
     # Not in D2's object: the process exit code (3 = `check --base` added authority),
     # and the parsed audit records of a `run(audit=True)` (the file is temporary).
     exit_code: int = 0
@@ -71,10 +75,17 @@ class Result:
         return cls(
             ok=o["ok"],
             value=o["value"],
-            errors=[Error(**e) for e in o["errors"]],
+            errors=[Error(**_known(Error, e)) for e in o["errors"]],
             report=list(o["report"]),
-            diff=None if d is None else Diff(**d),
+            diff=None if d is None else Diff(**_known(Diff, d)),
             audit=o["audit"],
-            used=None if u is None else Used(**u),
+            used=None if u is None else Used(**_known(Used, u)),
+            deps=list(o.get("deps", [])),
             exit_code=exit_code,
         )
+
+
+def _known(cls: type, o: dict[str, Any]) -> dict[str, Any]:
+    """The fields of `o` that `cls` declares: a newer kio may add keys to its JSON."""
+    names = cls.__dataclass_fields__.keys()
+    return {k: v for k, v in o.items() if k in names}
