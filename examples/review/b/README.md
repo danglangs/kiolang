@@ -1,0 +1,5 @@
+# tally
+
+Sum the `cents` column of `orders/today.csv` (header `id,cents`) into `out/total.txt`.
+Rows without a number in `cents` are skipped.
+Also write the number of data rows to `out/count.txt`.

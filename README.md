@@ -222,6 +222,7 @@ source ─► check + report ─► lower ─► IR ─┬─► codegen ─► 
 ## Docs
 
 - [docs/first-job.md](docs/first-job.md): download a release and run a first job, no Rust.
+- [docs/review-a-change.md](docs/review-a-change.md): review an agent's change with `kio review` and decide: accept, reject or ask for evidence.
 - [docs/guide.md](docs/guide.md): every grant, flag, limit and the audit log.
 - [docs/tour.md](docs/tour.md): walkthroughs: a helper that gains the network (report, `--base`, the audit log), replaying a run.
 - [docs/language.md](docs/language.md): the language and the rules the checker enforces.

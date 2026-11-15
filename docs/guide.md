@@ -414,7 +414,7 @@ Each side's `mod NAME;` lines resolve to `NAME.kio` beside that side's entry (or
 
 ## Reviewing a change
 
-`kio review NEW --base OLD` puts the evidence kio has about a change on one page. Every line carries its label: `enforced` (the host refuses otherwise), `tested` (passed on generated or written cases), `measured` (deterministic numbers), `not checked` (a person must look or accept it), `error` (a failure; exit 1); a line under a labelled one shares its label. It never gives a verdict.
+`kio review NEW --base OLD` puts the evidence kio has about a change on one page. A walkthrough from getting the two versions to a decision: [review-a-change.md](review-a-change.md). Every line carries its label: `enforced` (the host refuses otherwise), `tested` (passed on generated or written cases), `measured` (deterministic numbers), `not checked` (a person must look or accept it), `error` (a failure; exit 1); a line under a labelled one shares its label. It never gives a verdict.
 
 Review runs the change's own test code, OLD's and NEW's, under `--test-grants T` or else the defaults (a temporary `Dir`, `:memory:` stores, a fixed clock); never under `main`'s grants.
 

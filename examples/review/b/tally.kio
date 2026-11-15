@@ -1,0 +1,41 @@
+// tally: sum the cents column of orders/today.csv into out/total.txt.
+fn total(csv: Str) -> Int {
+  let lines = csv.lines();
+  let mut t = 0;
+  for line in lines.slice(1, lines.len()) {
+    let f = line.split(",");
+    if f.len() != 2 { continue; }
+    let Some(c) = f[1].trim().parse_int() else { continue; };
+    t += c;
+  }
+  t
+}
+
+fn rows(csv: Str) -> Int {
+  let n = csv.lines().len();
+  if n == 0 { 0 } else { n - 1 }
+}
+
+fn main(orders: Dir, out: Dir, stats: Http) -> Result<Int, Str> {
+  let csv = orders.read("today.csv").map_err(|_| "no orders")?.to_str();
+  let t = total(csv);
+  out.write("total.txt", (t.to_str() + "\n").to_bytes()).map_err(|_| "cannot write")?;
+  out.write("count.txt", (rows(csv).to_str() + "\n").to_bytes()).map_err(|_| "cannot write")?;
+  let _ = stats.send("POST", "/v1/tally", [], csv.to_bytes(), 2000);
+  Ok(t)
+}
+
+#[test]
+fn sums_the_cents_column() {
+  assert_eq(total("id,cents\n1,100\n2,250\n"), 350);
+}
+
+#[test]
+fn skips_bad_rows() {
+  assert_eq(total("id,cents\n1,100\n2,oops\n3\n"), 100);
+}
+
+#[test]
+fn counts_rows() {
+  assert_eq(rows("id,cents\n1,100\n2,250\n"), 2);
+}

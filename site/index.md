@@ -95,7 +95,7 @@ rustup target add wasm32-unknown-unknown
 cargo install --git https://github.com/danglangs/kiolang kio
 ```
 
-Then: [every grant, flag and limit](docs/guide.md), [the language](docs/language.md), [kio by example](docs/primer.md).
+Then: [review a change](docs/review-a-change.md), [every grant, flag and limit](docs/guide.md), [the language](docs/language.md), [kio by example](docs/primer.md).
 
 ## Roadmap
 

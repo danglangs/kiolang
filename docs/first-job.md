@@ -133,4 +133,4 @@ kio: `orders` is granted `:ro` but the program can write it (`orders remove`)
 $ kill %1
 ```
 
-To allow it you would change `app.grants` (`--dir orders=data`), a one-line diff a reviewer sees. Next: [guide.md](guide.md) for every grant and flag, [primer.md](primer.md) for the language by example.
+To allow it you would change `app.grants` (`--dir orders=data`), a one-line diff a reviewer sees. Next: [review-a-change.md](review-a-change.md) to review a whole change (authority, tests, cost) and decide, [guide.md](guide.md) for every grant and flag, [primer.md](primer.md) for the language by example.

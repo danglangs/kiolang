@@ -36,6 +36,7 @@ GITHUB = "https://github.com/danglangs/kiolang"
 PAGES = {
     "site/index.md": ("index.html", "kio", "Home"),
     "docs/first-job.md": ("first-job.html", "Your first job", "First job"),
+    "docs/review-a-change.md": ("review-a-change.html", "Review a change", "Review"),
     "docs/guide.md": ("guide.html", "Guide", "Guide"),
     "docs/language.md": ("language.html", "Language", "Language"),
     "docs/primer.md": ("primer.html", "kio by example", "Primer"),
