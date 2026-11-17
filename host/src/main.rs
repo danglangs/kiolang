@@ -1160,7 +1160,12 @@ fn run_program(prog: &Program, flags: &[&str], grants_file: Option<&str>, dry: b
                 eprintln!("{printed}");
             }
             // Like Rust's `main`: `()` and `Ok(())` print nothing, `Err(e)` goes to stderr and fails the run.
-            if out.failed {
+            // A bare `Str` is the program's text, escaped to one line; other values print quoted.
+            use lang::check::Ty;
+            let str_err = matches!(checked.main_ret(), Some(Ty::Result(_, e)) if **e == Ty::Str);
+            if out.failed && str_err {
+                eprintln!("error: {}", kio_host::escape_line(&out.value));
+            } else if out.failed {
                 eprintln!("error: {}", out.value);
             } else if out.value != "()" && out.value != "Ok(())" {
                 println!("{}", out.value);
@@ -2021,7 +2026,13 @@ fn print_diags(prog: &Program, diags: Vec<Diag>, kind: &str) -> i32 {
             push_error(kind, &d.message, d.hint.as_deref(), Some(at));
             continue;
         }
-        eprintln!("{}:{line}: error: {}", prog.shown(file), d.message);
+        // A run-time message is the program's text (an assert message): escaped to one line
+        // with no terminal escape, as `kio test` shows it (H30).
+        let message = match kind {
+            "runtime" => kio_host::escape_line(&d.message),
+            _ => d.message.clone(),
+        };
+        eprintln!("{}:{line}: error: {message}", prog.shown(file));
         if let Some(h) = &d.hint {
             eprintln!("  hint: {h}");
         }

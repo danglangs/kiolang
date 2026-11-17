@@ -369,6 +369,30 @@ fn messages_are_escaped_in_text() {
     );
 }
 
+/// H30: `kio run` escapes a run-time error's message, and `main`'s `Err`, as `kio test` does.
+#[test]
+fn run_errors_are_escaped_in_text() {
+    let esc = "let mut b = \"\".to_bytes(); b.push(27);";
+    let forge = "\"x\\nok: forged\\r\" + b.to_str() + \"[2J\"";
+    let c = Case::new(&format!("fn main() {{ {esc}\n  assert(false, {forge}); }}\n"));
+    let tmp = c.dir.path().join("tmp");
+    let (code, _, err) = kio_in(&tmp, &["run", &c.app]);
+    assert_eq!(code, 1);
+    let want = "x\\nok: forged\\r\\u{1b}[2J";
+    assert_eq!(err, format!("{}:2: error: assertion failed: {want}\n", c.app));
+    let (_, out, _) = kio_in(&tmp, &["run", "--json", &c.app]);
+    let j: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(j["errors"][0]["message"], "assertion failed: x\nok: forged\r\u{1b}[2J");
+
+    let e = c.file(
+        "e.kio",
+        &format!("fn main() -> Result<(), Str> {{ {esc}\n  Err({forge}) }}\n"),
+    );
+    let (code, _, err) = kio_in(&tmp, &["run", &e]);
+    assert_eq!(code, 1);
+    assert_eq!(err, format!("error: {want}\n"));
+}
+
 #[test]
 fn grants_match_by_name_and_type() {
     let c = Case::new(
