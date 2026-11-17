@@ -2,7 +2,7 @@
 
 An agent hands you a change to a kio program. This walkthrough gets the two versions side by side, runs `kio review` on them, reads the page it prints, and ends in one of three decisions. Every flag and line format is in the reference, [guide.md, Reviewing a change](guide.md#reviewing-a-change); this page is the workflow.
 
-All output below is from real runs of kio 0.1.2 with the R1a2 review changes (the next release); the commit in each `Identity` is elided.
+All output below is from real runs of kio 0.1.2 with the R1a2 and R1a3 review changes (the next release); the commit in each `Identity` is elided.
 
 ## 1. What you need
 
@@ -46,7 +46,7 @@ $ git worktree remove ../../../base        # when done
 ## 3. Run `kio review`
 
 ```
-kio review NEW --base OLD [--grants G] [--test-grants T] [--requirements FILE]
+kio review NEW --base OLD [--grants G] [--test-grants T] [--requirements FILE] [--entry FILE [--entry-grants G2]]..
 ```
 
 | Flag | Give it | Why |
@@ -54,8 +54,12 @@ kio review NEW --base OLD [--grants G] [--test-grants T] [--requirements FILE]
 | `--grants G` | the operator's grants file for `main` (`app.grants`) | shows an `error` if NEW's `main` needs a grant G does not give |
 | `--test-grants T` | the tests' grants file, if tests need one (an `Http`, an `Hmac`) | without it a test that needs one fails |
 | `--requirements FILE` | the file that says what the program should do (`README.md`), a path relative to each side's entry | its diff is what the change claims |
+| `--entry FILE` | each other program the change touches (`worker.kio`), a path relative to NEW's entry, the same on OLD's side | its authority and blind spots, prefixed `worker.kio:`; an entry OLD lacks is all new authority |
+| `--entry-grants G2` | right after its `--entry`: that program's grants file (`worker.grants`) | as `--grants`, for that entry |
 
-For kio-web's flow: `--grants app.grants --test-grants test.grants --requirements README.md`, with `FLOW_KEY` set (test.grants reads the key from it). Forget `FLOW_KEY` and the Tests section is one `error`, `--hmac key: `FLOW_KEY` is not set`, and no test runs.
+Review every entry the change touches: an entry left out is authority nobody reviewed. Tests are the first entry's (the one before `--base`).
+
+For kio-web's flow: `--grants app.grants --test-grants test.grants --requirements README.md --entry worker.kio --entry-grants worker.grants`, with `FLOW_KEY` set (test.grants reads the key from it). Forget `FLOW_KEY` and the Tests section is one `error`, `--hmac key: `FLOW_KEY` is not set`, and no test runs.
 
 Exit codes: 0 nothing added; 3 authority added or a test removed; 1 an `error` line; 2 usage.
 
@@ -123,7 +127,8 @@ $ cp web.kio api.kio ../flow-old/examples/flow/
 $ cp web.kio api.kio ../flow-new/examples/flow/
 $ cd ../flow-new/examples/flow
 $ FLOW_KEY=test-key kio review app.kio --base ../../../flow-old/examples/flow/app.kio \
-    --grants app.grants --test-grants test.grants --requirements README.md
+    --grants app.grants --test-grants test.grants --requirements README.md \
+    --entry worker.kio --entry-grants worker.grants
 Requirements
   not checked  what the change claims; kio does not check it
                --- ../../../flow-old/examples/flow/README.md
@@ -136,6 +141,10 @@ Authority
   derived      grants unchanged; new functions reach: flow::init
   derived      + flow::init: db exec
   enforced     --grants app.grants binds app.kio's main
+  enforced     worker.kio: + db: Db (exec query)
+  enforced     worker.kio: + now: Clock (now_ms)
+  enforced     worker.kio: + dest: Http (send POST)
+  enforced     worker.kio: --entry-grants worker.grants binds worker.kio's main
 Tests
   tested       grants: test.grants
   tested       old: 10 passed, 0 failed
@@ -161,6 +170,8 @@ Resources
 Not checked
   not checked  res: Outgoing send: what the client receives
   not checked  db: Db exec: the SQL text and what it changes
+  not checked  worker.kio: db: Db exec, query: the SQL text and what it changes
+  not checked  worker.kio: dest: Http send POST: the paths, headers and bodies sent
   not checked  tests and properties were written by the same author as the code unless stated
 Identity
   kio 0.1.2 (<commit>)
@@ -174,25 +185,10 @@ $ echo $?
 Reading it:
 
 - **Authority**: grants unchanged (`main` already had `db exec`); exit 3 is `init`, new and reached from `main`. It is the `CREATE TABLE`, moved out of `store`. Expected.
+- **Authority, `worker.kio`**: a new program, so every grant is `+`: the database (`exec query`, to claim and finish jobs), the clock, and `POST` to one destination, whose key the host adds (`worker.grants`: `--http-header dest=Authorization:env:DEST_AUTH`). That is what the F1.2 requirement describes. `kio check worker.kio` shows which function makes each call.
 - **Tests**: 10 to 18, nothing removed; the 8 added are the worker's transitions and two properties against a model. The F1.1 properties still run 100 cases.
 - **Resources**: +3% to +10% fuel on the ingest tests, +1.96% in total, memory flat. Every ingest now runs `init`, a longer `CREATE TABLE` and a wider `INSERT`; acceptable.
-- **Not checked**: `db exec: the SQL text`. The table gains three columns, and the requirement diff says "An F1.1 database made before F1.2 has no migration": `CREATE TABLE IF NOT EXISTS` leaves an old table as it is, and the new `INSERT` names `next_ms`.
-
-`app.kio` is not the whole change: `worker.kio` is a new program with no base. Read its report and grants as new authority:
-
-```console
-$ kio check worker.kio --grants worker.grants
-main            : db exec query, now now_ms, dest send POST
-deliver         : dest send POST
-flow::claim     : db exec query
-flow::finish    : db exec
-flow::init      : db exec
-flow::try_claim : db exec query
-
-reached only from tests:
-...
-19 more use no capability, 36 are unreached (5 use a capability); --all lists every function
-```
+- **Not checked**: `db exec: the SQL text`. The table gains three columns, and the requirement diff says "An F1.1 database made before F1.2 has no migration": `CREATE TABLE IF NOT EXISTS` leaves an old table as it is, and the new `INSERT` names `next_ms`. The worker's lines add its SQL and the bodies it posts: the tests cover the claims and completions against a model, and `every_attempt_carries_the_event_id_as_the_key` the delivery key.
 
 **Decision: accept**, if no F1.1 database is deployed; the missing migration is a known, stated gap. If one is deployed, **ask for evidence**: a migration and a test that runs it on an F1.1 table.
 

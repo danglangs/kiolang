@@ -178,11 +178,22 @@ fn a_failing_test_in_new() {
         tests[at + 3].ends_with("app.kio:15:20: assertion failed: small"),
         "{out}"
     );
-    // Fewer cases ran than in OLD: the property tested less.
+    // R1a3: it stopped at the failing case, so its case count and fuel say nothing.
+    assert!(!tests.iter().any(|l| l.contains("removed: small")), "{out}");
+    let resources = Sides::section(&out, "Resources");
+    assert_eq!(resources[0], "  measured     1 test left out: failed", "{out}");
+    assert!(!resources.iter().any(|l| l.contains(" small: ")), "{out}");
     assert!(
-        tests.iter().any(|l| l.starts_with("  not checked  removed: small (")),
+        resources
+            .last()
+            .unwrap()
+            .starts_with("  measured     total over 2 tests on both sides: "),
         "{out}"
     );
+    let (_, out, _) = s.review(&["--json"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["tests"]["fewer_cases"], serde_json::json!([]));
+    assert_eq!(v["resources"]["failed"], 1);
 }
 
 #[test]
@@ -537,6 +548,138 @@ fn test_grants_that_cannot_be_applied() {
     assert_eq!(code, 1);
     assert!(!out.contains('\u{1b}') && !out.contains('\r'), "{out:?}");
     assert!(out.contains("NOPE\\u{1b}[2J\\r  enforced"), "{out}");
+}
+
+/// A second entry beside the root, sharing its module.
+const WORKER: &str = "mod lib;\n\nfn main(d: Dir) -> Result<(), IoErr> { lib::touch(d) }\n";
+const LIB: &str = "pub fn touch(d: Dir) -> Result<(), IoErr> { let _ = d.read(\"a\")?; Ok(()) }\n";
+
+/// R1a3: an entry OLD does not have is new: all its authority is `+`, with its grants, Not
+/// checked lines and files.
+#[test]
+fn an_added_entry() {
+    let s = Sides::new(NEW, NEW);
+    let root = s.dir.path();
+    write(root, "new/worker.kio", WORKER);
+    write(root, "new/lib.kio", LIB);
+    let w = write(root, "w.grants", "--dir d=.:ro\n");
+    let (code, out, err) = s.review(&["--entry", "worker.kio", "--entry-grants", &w]);
+    assert_eq!(code, 3, "{out}{err}");
+    let dir = root.to_str().unwrap();
+    assert_eq!(
+        Sides::section(&out, "Authority"),
+        [
+            "  enforced     no change in authority".to_string(),
+            "  enforced     worker.kio: + d: Dir (read)".into(),
+            format!("  enforced     worker.kio: --entry-grants {w} binds {dir}/new/worker.kio's main"),
+        ]
+    );
+    // Tests stay the root's.
+    assert!(out.contains("  tested       new: 4 passed, 0 failed\n"), "{out}");
+    let identity = Sides::section(&out, "Identity");
+    let hash = |text: &str| lang::digest::to_hex(&lang::digest::sha256(text.as_bytes()));
+    for line in [
+        format!("  new {dir}/new/lib.kio sha256:{}", hash(LIB)),
+        format!("  new {dir}/new/worker.kio sha256:{}", hash(WORKER)),
+        format!("  worker.kio: entry grants {w} sha256:{}", hash("--dir d=.:ro\n")),
+    ] {
+        assert!(identity.contains(&line), "{line}\n{out}");
+    }
+    assert!(!identity.iter().any(|l| l.contains("old/worker.kio")), "{out}");
+    let (_, out, _) = s.review(&["--entry", "worker.kio", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let e = &v["authority"]["entries"][0];
+    assert_eq!(e["entry"], "worker.kio");
+    assert_eq!(e["new_entry"], true);
+    assert_eq!(e["grants"], serde_json::json!(["+ d: Dir (read)"]));
+    // A grants file that does not bind is an error: exit 1.
+    let w = write(root, "w.grants", "--dir e=.\n");
+    let (code, out, _) = s.review(&["--entry", "worker.kio", "--entry-grants", &w]);
+    assert_eq!(code, 1, "{out}");
+    let authority = Sides::section(&out, "Authority");
+    assert_eq!(
+        authority[2],
+        format!("  error        worker.kio: --entry-grants {w} does not bind to {dir}/new/worker.kio's main:")
+    );
+    assert!(authority.iter().any(|l| l.contains("hint: ")), "{out}");
+}
+
+/// R1a3: an entry on both sides is diffed like the root, its lines after its name.
+#[test]
+fn an_entry_gaining_a_grant() {
+    let s = Sides::new(NEW, NEW);
+    let root = s.dir.path();
+    for side in ["old", "new"] {
+        write(root, &format!("{side}/lib.kio"), LIB);
+    }
+    write(root, "old/worker.kio", WORKER);
+    let gains = "mod lib;\n\nfn main(d: Dir, h: Http) -> Result<(), IoErr> { let _ = h.get(\"/\"); lib::touch(d) }\n";
+    write(root, "new/worker.kio", gains);
+    let (code, out, err) = s.review(&["--entry", "./worker.kio"]);
+    assert_eq!(code, 3, "{out}{err}");
+    assert_eq!(
+        Sides::section(&out, "Authority"),
+        [
+            "  enforced     no change in authority",
+            "  enforced     ./worker.kio: + h: Http (get)",
+        ]
+    );
+    assert!(
+        Sides::section(&out, "Not checked")
+            .contains(&"  not checked  ./worker.kio: h: Http get: the paths, headers and bodies sent".to_string()),
+        "{out}"
+    );
+    // The same entry on both sides: no line but "no change".
+    write(root, "new/worker.kio", WORKER);
+    let (code, out, _) = s.review(&["--entry", "worker.kio"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("  enforced     worker.kio: no change in authority\n"),
+        "{out}"
+    );
+    // An entry that does not check is an error: exit 1; the root's tests still run.
+    write(root, "new/worker.kio", "fn main() -> Int { \"x\" }\n");
+    let (code, out, _) = s.review(&["--entry", "worker.kio"]);
+    assert_eq!(code, 1, "{out}");
+    let dir = root.to_str().unwrap();
+    assert!(
+        out.contains(&format!(
+            "  error        worker.kio: the new program {dir}/new/worker.kio does not check\n"
+        )),
+        "{out}"
+    );
+    assert!(out.contains("  tested       new: 4 passed, 0 failed\n"), "{out}");
+}
+
+/// R1a3: `--entry` names the same place on both sides, inside each.
+#[test]
+fn entry_usage() {
+    let s = Sides::new(NEW, NEW);
+    write(s.dir.path(), "worker.kio", WORKER);
+    let abs = format!("{}/worker.kio", s.dir.path().display());
+    for bad in ["../worker.kio", abs.as_str(), "", "a\u{1b}[2J.kio", "x/../worker.kio"] {
+        let (code, out, err) = s.review(&["--entry", bad]);
+        assert_eq!((code, out.as_str()), (2, ""), "{bad}: {err}");
+        assert!(
+            err.contains("not a path inside the program's directory"),
+            "{bad}: {err}"
+        );
+        assert!(err.contains("hint: give a relative path without `..`"), "{err}");
+        assert!(!err.contains('\u{1b}'), "{err:?}");
+    }
+    let (code, _, err) = s.review(&["--entry", "nope.kio"]);
+    assert_eq!(code, 2);
+    assert!(err.contains("new/nope.kio does not exist"), "{err}");
+    assert!(err.contains("hint: the path is relative to the directory of"), "{err}");
+    let (code, _, err) = s.review(&["--entry-grants", "w.grants"]);
+    assert_eq!(code, 2);
+    assert!(
+        err.contains("hint: `--entry worker.kio --entry-grants worker.grants`"),
+        "{err}"
+    );
+    let (code, _, err) = s.review(&["--entry", "app.kio"]);
+    assert_eq!(code, 2);
+    assert!(err.contains("given twice, or it is the root"), "{err}");
 }
 
 #[test]

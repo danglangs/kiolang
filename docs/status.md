@@ -95,6 +95,7 @@ Compiled-only kio covers the whole language and every capability. Built and revi
 | H31 | `kio check --grants --json` binds a grants file with `--listen` (`"ok":true`); `run --json --listen` is still refused |
 | H32 | the host finds a root's modules from the parser's `mod` items, so `mod web; // the router` and two `mod`s on a line load, beside the root and from kio.deps |
 | R1a2 | `kio review`: function lines `derived`, grant lines `enforced`; `grants unchanged; new functions reach: F` when exit 3 adds no grant; `--grants G binds NEW's main`; a failing added test is `error`; unreadable test-grant secrets are one `error`; OLD's failures `not checked`. Fuel for types a test never touches (`rt_init`'s per-descriptor plans, +1,050 a test on tally) is stated, not fixed (#276) |
+| R1a3 | `kio review`: a test that failed on either side is out of fewer-cases and Resources (`N tests left out: failed`); `--entry worker.kio [--entry-grants G2]` reviews another entry's authority, grants, blind spots and files (kio-web flow: app.kio and worker.kio on one page) (#277) |
 
 ## Next
 
