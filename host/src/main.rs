@@ -598,7 +598,8 @@ fn run(path: &str, flags: &[&str], dry: bool) -> i32 {
         Err(code) => return code,
     };
     let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
-    if json_out() && flags.iter().step_by(2).any(|f| *f == "--listen") {
+    // `check --grants` serves nothing: a server's grants bind with `--json` too (H31).
+    if json_out() && !dry && flags.iter().step_by(2).any(|f| *f == "--listen") {
         return fail("`--json` reports one run; `--listen` serves many\n  hint: drop --json, or drop --listen".into());
     }
     let prog = match read_program(path) {

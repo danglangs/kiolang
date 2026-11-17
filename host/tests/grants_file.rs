@@ -225,6 +225,16 @@ fn check_grants_binds_a_server() {
     let (code, _, err) = kio(&["check", &app, "--grants", &g]);
     assert_eq!(code, 2);
     assert!(err.contains("hint: add `--listen 127.0.0.1:8080`"), "{err}");
+    // H31: with `--json` too: `check --grants` serves nothing, so `--listen` binds.
+    let g = write(t.path(), "app.grants", "--clock now\n--listen 127.0.0.1:8080\n");
+    let (code, out, err) = kio(&["check", &app, "--grants", &g, "--json"]);
+    assert_eq!(code, 0, "{err}");
+    let j: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(j["ok"], true, "{j}");
+    // `run --json` still refuses it.
+    let (code, out, _) = kio(&["run", &app, "--grants", &g, "--json"]);
+    assert_eq!(code, 2);
+    assert!(out.contains("drop --json, or drop --listen"), "{out}");
 }
 
 #[test]
