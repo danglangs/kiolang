@@ -328,13 +328,16 @@ fn grants_bind_to_new_main() {
         out.contains(&format!("  test grants {t} sha256:{}\n", hash(b"--fuel 100000000\n"))),
         "{out}"
     );
-    // One that binds: nothing under Authority but the diff. The tests take `--test-grants`.
+    // One that binds says so (R1a2). The tests take `--test-grants`.
     let g = write(s.dir.path(), "g.grants", "--dir d=.\n");
     let (code, out, _) = s.review(&["--grants", &g, "--test-grants", &t]);
     assert_eq!(code, 0, "{out}");
     assert_eq!(
         Sides::section(&out, "Authority"),
-        ["  enforced     no change in authority"]
+        [
+            "  enforced     no change in authority".to_string(),
+            format!("  enforced     --grants {g} binds {}'s main", s.new)
+        ]
     );
     assert!(out.contains(&format!("  tested       grants: {t}\n")), "{out}");
 }
@@ -446,6 +449,87 @@ fn a_base_without_tests() {
     assert_eq!(
         Sides::section(&out, "Resources"),
         ["  measured     no test ran on both sides"]
+    );
+}
+
+/// R1a2: a function line is the checker's attribution (`derived`); exit 3 with no grant added
+/// names the functions that add.
+#[test]
+fn a_new_function_with_no_new_grant() {
+    let new = NEW.replace("let _ = d.read(\"a.txt\")?;", "let _ = load(d)?;")
+        + "\nfn load(d: Dir) -> Result<Bytes, IoErr> { d.read(\"a.txt\") }\n";
+    let s = Sides::new(NEW, &new);
+    let (code, out, err) = s.review(&[]);
+    assert_eq!(code, 3, "{out}{err}");
+    assert_eq!(
+        Sides::section(&out, "Authority"),
+        [
+            "  derived      grants unchanged; new functions reach: load",
+            "  derived      + load: d read",
+        ],
+        "{out}"
+    );
+}
+
+/// R1a2: an added test that fails is an `error` on its `added:` line.
+#[test]
+fn an_added_test_that_fails() {
+    let s = Sides::new(OLD, &NEW.replace("count(2), 1", "count(2), 2"));
+    let (code, out, err) = s.review(&[]);
+    assert_eq!(code, 1, "{out}{err}");
+    let tests = Sides::section(&out, "Tests");
+    assert!(tests.contains(&"  error        added: fresh".to_string()), "{out}");
+    assert!(
+        tests.iter().any(|l| l.starts_with("  error        FAIL fresh")),
+        "{out}"
+    );
+}
+
+/// R1a2: OLD's own failures back nothing: `not checked`, and no exit 1.
+#[test]
+fn a_base_that_fails_its_own_tests() {
+    let s = Sides::new(&NEW.replace("count(2), 1", "count(2), 2"), NEW);
+    let (code, out, err) = s.review(&[]);
+    assert_eq!(code, 0, "{out}{err}");
+    let tests = Sides::section(&out, "Tests");
+    assert_eq!(
+        tests[1..3],
+        [
+            "  not checked  old: 3 passed, 1 failed; the base fails its own tests",
+            "  tested       new: 4 passed, 0 failed",
+        ],
+        "{out}"
+    );
+    assert!(
+        tests.contains(&"  not checked  failed in old: fresh".to_string()),
+        "{out}"
+    );
+}
+
+/// R1a2: test grants whose secret cannot be read are one error, before any test runs.
+#[test]
+fn test_grants_that_cannot_be_applied() {
+    let s = Sides::new(OLD, NEW);
+    let t = write(s.dir.path(), "t.grants", "--hmac k=env:KIO_R1A2_UNSET\n");
+    let (code, out, err) = s.review(&["--test-grants", &t]);
+    assert_eq!(code, 1, "{out}{err}");
+    assert_eq!(
+        Sides::section(&out, "Tests"),
+        [
+            format!("  error        --test-grants {t} cannot be applied; no test ran:"),
+            "                 --hmac k: `KIO_R1A2_UNSET` is not set".into(),
+            "                 hint: export KIO_R1A2_UNSET in the environment that runs kio, or use file:PATH".into(),
+        ]
+    );
+    assert_eq!(
+        Sides::section(&out, "Resources"),
+        ["  measured     no test ran on both sides"]
+    );
+    let (_, out, _) = s.review(&["--test-grants", &t, "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(
+        v["tests"]["setup_error"].as_str().unwrap().starts_with("--hmac k: "),
+        "{v}"
     );
 }
 

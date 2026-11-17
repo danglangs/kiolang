@@ -2,7 +2,7 @@
 
 An agent hands you a change to a kio program. This walkthrough gets the two versions side by side, runs `kio review` on them, reads the page it prints, and ends in one of three decisions. Every flag and line format is in the reference, [guide.md, Reviewing a change](guide.md#reviewing-a-change); this page is the workflow.
 
-All output below is from real runs of kio 0.1.2.
+All output below is from real runs of kio 0.1.2 with the R1a2 review changes (the next release); the commit in each `Identity` is elided.
 
 ## 1. What you need
 
@@ -55,7 +55,7 @@ kio review NEW --base OLD [--grants G] [--test-grants T] [--requirements FILE]
 | `--test-grants T` | the tests' grants file, if tests need one (an `Http`, an `Hmac`) | without it a test that needs one fails |
 | `--requirements FILE` | the file that says what the program should do (`README.md`), a path relative to each side's entry | its diff is what the change claims |
 
-For kio-web's flow: `--grants app.grants --test-grants test.grants --requirements README.md`, with `FLOW_KEY` set (test.grants reads the key from it). Forget `FLOW_KEY` and every test that signs fails with `--hmac key: FLOW_KEY is not set`.
+For kio-web's flow: `--grants app.grants --test-grants test.grants --requirements README.md`, with `FLOW_KEY` set (test.grants reads the key from it). Forget `FLOW_KEY` and the Tests section is one `error`, `--hmac key: `FLOW_KEY` is not set`, and no test runs.
 
 Exit codes: 0 nothing added; 3 authority added or a test removed; 1 an `error` line; 2 usage.
 
@@ -65,7 +65,8 @@ Every line carries a label; a line under a labelled one shares it. The label say
 
 | Label | Backed by | You can skip | You still own |
 |---|---|---|---|
-| `enforced` | the checker derives it from the code; the host refuses any call outside the grants | reading the code to learn what it can reach | whether that authority fits the requirement; what is done with it. Per-function lines (`+ flow::init: db exec`) are the checker's attribution; the host enforces per grant, not per function |
+| `enforced` | the checker derives it from the code; the host refuses any call outside the grants | reading the code to learn what it can reach | whether that authority fits the requirement; what is done with it |
+| `derived` | the checker's attribution of authority to a function (`+ flow::init: db exec`); the host enforces per grant, not per function | tracing which function makes each call | as for `enforced` |
 | `tested` | these tests passed, compiled, in this run (properties: on the generated cases shown) | rerunning the tests | whether the tests check the right thing |
 | `measured` | fuel and peak memory, deterministic, on the tests | profiling the tests | production load, wall time |
 | `not checked` | nothing | nothing | look at it, or accept it knowingly |
@@ -132,7 +133,9 @@ Requirements
                +# F1.2, Worker
                ...
 Authority
-  enforced     + flow::init: db exec
+  derived      grants unchanged; new functions reach: flow::init
+  derived      + flow::init: db exec
+  enforced     --grants app.grants binds app.kio's main
 Tests
   tested       grants: test.grants
   tested       old: 10 passed, 0 failed
@@ -160,7 +163,7 @@ Not checked
   not checked  db: Db exec: the SQL text and what it changes
   not checked  tests and properties were written by the same author as the code unless stated
 Identity
-  kio 0.1.2 (33c51c8)
+  kio 0.1.2 (<commit>)
   old ../../../flow-old/examples/flow/api.kio sha256:889e267b...
   ...
   test seed 1
@@ -170,7 +173,7 @@ $ echo $?
 
 Reading it:
 
-- **Authority**: no grant line, so `main`'s grants are unchanged (it already had `db exec`). Exit 3 comes from one function line: `init` is new and `main` reaches it, and a new function counts in full. It is the `CREATE TABLE`, moved out of `store`. Expected.
+- **Authority**: grants unchanged (`main` already had `db exec`); exit 3 is `init`, new and reached from `main`. It is the `CREATE TABLE`, moved out of `store`. Expected.
 - **Tests**: 10 to 18, nothing removed; the 8 added are the worker's transitions and two properties against a model. The F1.1 properties still run 100 cases.
 - **Resources**: +3% to +10% fuel on the ingest tests, +1.96% in total, memory flat. Every ingest now runs `init`, a longer `CREATE TABLE` and a wider `INSERT`; acceptable.
 - **Not checked**: `db exec: the SQL text`. The table gains three columns, and the requirement diff says "An F1.1 database made before F1.2 has no migration": `CREATE TABLE IF NOT EXISTS` leaves an old table as it is, and the new `INSERT` names `next_ms`.
@@ -265,7 +268,7 @@ $ echo $?
 1
 ```
 
-**Decision: reject.** `+ stats: Http (send POST)` is a new grant the requirement does not mention, carrying the whole CSV; the grants file does not give it (`error`); and the only test of `main` was removed. You decided this from the Authority and Tests sections, without reading the diff. (Without `--grants` the page is the same minus the `error`, and exits 3.)
+**Decision: reject.** `+ stats: Http (send POST)` is a new grant the requirement does not mention, carrying the whole CSV; the grants file does not give it (`error`); and the only test of `main` was removed. You decided this from the Authority and Tests sections, without reading the diff. (Without `--grants` the page is the same minus the `error`, and exits 3.) Resources moved +6% on tests that never call `main`: each run first sets up every type the program uses, and `stats.send` brings `HttpResponse` and `HttpErr` (about 1,000 fuel a run; [guide, Resources](guide.md#reviewing-a-change)).
 
 ### c. A change that stays inside its authority and is wrong
 
@@ -300,6 +303,7 @@ Requirements
                no change
 Authority
   enforced     no change in authority
+  enforced     --grants c/tally.grants binds c/tally.kio's main
 Tests
   tested       grants: defaults (temporary Dir, :memory: stores, fixed clock)
   tested       old: 3 passed, 0 failed
@@ -326,7 +330,7 @@ Tests
   tested       grants: defaults (temporary Dir, :memory: stores, fixed clock)
   tested       old: 3 passed, 0 failed
   tested       new: 3 passed, 1 failed
-  tested       added: refunds_count_against_the_total
+  error        added: refunds_count_against_the_total
   error        FAIL refunds_count_against_the_total
                  c2/tally.kio:47:3: assert_eq failed: left `100`, right `70`
 ...

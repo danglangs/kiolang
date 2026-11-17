@@ -392,9 +392,27 @@ fn authority(inputs: &Inputs, page: &mut Page) -> (bool, bool) {
     let checks = match kio_host::diff_files(&old.files, &new.files) {
         Ok(diff) => {
             page.added = diff.added;
-            match diff.lines(false).0 {
-                lines if lines.is_empty() => page.authority.push(("enforced", "no change in authority".into())),
-                lines => page.authority.extend(labelled("enforced", &lines)),
+            // Grant lines are what the host enforces; function lines the checker's attribution.
+            let (lines, funcs) = diff.lines(false);
+            if lines.is_empty() {
+                page.authority.push(("enforced", "no change in authority".into()));
+            }
+            page.authority.extend(labelled("enforced", &diff.grants));
+            if funcs && diff.added && !diff.grant_added {
+                // Exit 3 with no grant added: name the functions whose lines add.
+                let names: Vec<&str> = (diff.funcs.iter())
+                    .filter_map(|l| Some(l.strip_prefix("+ ")?.split_once(": ")?.0))
+                    .collect();
+                let grants = if diff.grants.is_empty() {
+                    "grants unchanged"
+                } else {
+                    "no grant added"
+                };
+                let line = format!("{grants}; new functions reach: {}", names.join(", "));
+                page.authority.push(("derived", line));
+            }
+            if funcs {
+                page.authority.extend(labelled("derived", &diff.funcs));
             }
             page.authority_json = json!({"grants": diff.grants, "funcs": diff.funcs, "added": diff.added});
             true
@@ -413,7 +431,10 @@ fn authority(inputs: &Inputs, page: &mut Page) -> (bool, bool) {
     let mut grant_errors = Vec::new();
     if let Some((g, _)) = &inputs.grants {
         let (_, out) = captured(true, || bind(&inputs.new.0, g));
-        if !out.errors.is_empty() {
+        if out.errors.is_empty() {
+            let msg = format!("--grants {g} binds {}'s main", inputs.new.0);
+            page.authority.push(("enforced", msg));
+        } else {
             let msg = format!("--grants {g} does not bind to {}'s main:", inputs.new.0);
             page.authority.push(("error", msg));
             push_errors(&mut page.authority, &out.errors);
@@ -426,8 +447,8 @@ fn authority(inputs: &Inputs, page: &mut Page) -> (bool, bool) {
     (checks, binds)
 }
 
-/// `kio check path --grants g`'s binding, its errors in `--json`'s object. Not `run`, which
-/// refuses `--listen` under `--json`: binding is dry, so a server's grants bind here too.
+/// `kio check path --grants g`'s binding, its errors in `--json`'s object; dry, so a server's
+/// grants bind here too.
 fn bind(path: &str, g: &str) -> i32 {
     let (flags, grants_file) = match with_grants(&["--grants", g]) {
         Ok(f) => f,
@@ -458,6 +479,17 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
         Some((t, _)) => (vec!["--grants", t], t),
         None => (vec![], DEFAULT_TEST_GRANTS),
     };
+    // A secret T names that cannot be read fails every test granted it, on both sides: one error.
+    if let Some(e) = unreadable_secret(&flags) {
+        page.tests.push((
+            "error",
+            format!("--test-grants {shown} cannot be applied; no test ran:"),
+        ));
+        page.tests
+            .extend(e.lines().map(|l| ("", format!("  {}", l.trim_start()))));
+        resources(&[], &[], page);
+        return (json!({"grants": shown, "setup_error": e}), false, true);
+    }
     page.tests.push(("tested", format!("grants: {shown}")));
     let side = |path: &str| {
         let (tests, out) = captured(true, || test_setup(path, &flags));
@@ -474,8 +506,16 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
             }
             Ok((results, _)) => {
                 let failed = results.iter().filter(|r| r.error.is_some()).count();
-                let line = format!("{name}: {} passed, {failed} failed", results.len() - failed);
-                page.tests.push(("tested", line));
+                let mut line = format!("{name}: {} passed, {failed} failed", results.len() - failed);
+                // OLD's failures back nothing; NEW's are the `error` lines below.
+                let label = match (name, failed) {
+                    ("old", 1..) => {
+                        line += "; the base fails its own tests";
+                        "not checked"
+                    }
+                    _ => "tested",
+                };
+                page.tests.push((label, line));
                 json!({"passed": results.len() - failed, "failed": failed, "errors": []})
             }
             Err(errors) => {
@@ -497,8 +537,13 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
     let removed: Vec<&str> = (old_r.iter().map(|r| r.name.as_str()))
         .filter(|n| find(new_r, n).is_none())
         .collect();
-    page.tests
-        .extend(added.iter().map(|n| ("tested", format!("added: {n}"))));
+    // An added test that fails is an `error`, not evidence.
+    let fails = |n: &str| find(new_r, n).is_some_and(|i| new_r[i].error.is_some());
+    page.tests.extend(
+        added
+            .iter()
+            .map(|n| (if fails(n) { "error" } else { "tested" }, format!("added: {n}"))),
+    );
     page.tests
         .extend(removed.iter().map(|n| ("not checked", format!("removed: {n}"))));
     // A property that ran fewer cases than in OLD, or became an example test, tests less.
@@ -546,16 +591,49 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
         .filter(|r| r.error.is_some())
         .map(|r| r.name.as_str())
         .collect();
-    page.tests
-        .extend(old_failed.iter().map(|n| ("error", format!("failed in old: {n}"))));
+    page.tests.extend(
+        old_failed
+            .iter()
+            .map(|n| ("not checked", format!("failed in old: {n}"))),
+    );
     resources(old_r, new_r, page);
     let failed = new.is_err() || old.is_err() || !failures.is_empty();
     let value = json!({
         "grants": inputs.test_grants.as_ref().map(|(t, _)| t),
         "old": sides["old"], "new": sides["new"], "added": added, "removed": removed,
         "fewer_cases": fewer, "properties": properties, "failures": failures, "old_failed": old_failed,
+        "setup_error": null,
     });
     (value, !removed.is_empty() || !fewer.is_empty(), failed)
+}
+
+/// The first `--hmac` or `--http-header` secret the tests' grants `flags` name that cannot be
+/// read, as `kio run` refuses it. Granted dirs are not known here: a key file inside one is
+/// refused per test, as before.
+fn unreadable_secret(flags: &[&str]) -> Option<String> {
+    let (flags, _) = with_grants(flags).ok()?;
+    for pair in flags.chunks(2) {
+        let (flag, spec) = (pair[0].as_str(), pair[1].as_str());
+        let e = match flag {
+            "--hmac" => hmac(spec, &[], &[], false).err(),
+            "--http-header" => {
+                let Some((_, source)) = spec.split_once('=').and_then(|(_, r)| r.split_once(':')) else {
+                    continue;
+                };
+                let usage = "expected name=Header:env:VAR or name=Header:file:PATH";
+                secret(source, usage, "the header's value", &[], &[], false).err()
+            }
+            _ => None,
+        };
+        if let Some(e) = e {
+            let label = match flag {
+                "--hmac" => spec.split_once('=').map_or("", |(n, _)| n),
+                _ => header_label(spec),
+            };
+            return Some(flag_error(flag, label, &e));
+        }
+    }
+    None
 }
 
 /// The Resources section: per test on both sides, fuel and peak memory old -> new when either
