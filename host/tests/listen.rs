@@ -1075,3 +1075,32 @@ fn background_work_holds_its_worker() {
     std::thread::sleep(std::time::Duration::from_millis(2300).saturating_sub(start.elapsed()));
     assert_eq!(send(port, "GET", "/", b""), (200, b"ok".to_vec()));
 }
+
+/// A handler's failure text is the program's (an assert message): the operator's terminal gets
+/// it as one escaped line (H30).
+#[test]
+fn request_failures_are_escaped() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app.kio");
+    let src = "fn main(req: Incoming, res: Outgoing) {\n  let mut b = \"\".to_bytes(); b.push(27);\n  assert(false, \"x\\nok: forged\\r\" + b.to_str() + \"[2J\");\n}\n";
+    std::fs::write(&app, src).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_kio"))
+        .args(["run", app.to_str().unwrap(), "--listen", "127.0.0.1:0"])
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    while !line.starts_with("listening on http://") {
+        line.clear();
+        assert!(stderr.read_line(&mut line).unwrap() > 0, "kio exited before listening");
+    }
+    let port: u16 = line.trim().rsplit(':').next().unwrap().parse().unwrap();
+    let (status, _) = send(port, "GET", "/", b"");
+    assert_eq!(status, 500);
+    line.clear();
+    stderr.read_line(&mut line).unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(line, "request failed: assertion failed: x\\nok: forged\\r\\u{1b}[2J\n");
+}

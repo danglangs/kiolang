@@ -531,6 +531,12 @@ fn test_grants_that_cannot_be_applied() {
         v["tests"]["setup_error"].as_str().unwrap().starts_with("--hmac k: "),
         "{v}"
     );
+    // T is the change author's: its text reaches the page escaped.
+    let t = write(s.dir.path(), "t2.grants", "--hmac k=env:NOPE\u{1b}[2J\r  enforced  x\n");
+    let (code, out, _) = s.review(&["--test-grants", &t]);
+    assert_eq!(code, 1);
+    assert!(!out.contains('\u{1b}') && !out.contains('\r'), "{out:?}");
+    assert!(out.contains("NOPE\\u{1b}[2J\\r  enforced"), "{out}");
 }
 
 #[test]

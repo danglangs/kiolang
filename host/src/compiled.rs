@@ -1085,10 +1085,13 @@ impl Server {
         let unsent = sent.and_then(|s| s.lock().unwrap_or_else(PoisonError::into_inner).take());
         match (result, unsent) {
             (Ok(_), None) => {}
-            (Err(why), None) => eprintln!("request failed after its response was sent: {why}"),
+            (Err(why), None) => eprintln!(
+                "request failed after its response was sent: {}",
+                crate::escape_line(&why)
+            ),
             (result, Some(deliver)) => {
                 let why = result.err().unwrap_or("no response sent".into());
-                eprintln!("request failed: {why}");
+                eprintln!("request failed: {}", crate::escape_line(&why));
                 let _ = deliver.send(Response::internal_error());
             }
         }
@@ -1129,7 +1132,8 @@ impl Server {
             Ok(o) => format!("main returned Err: {}", o.value),
             Err(why) => why,
         };
-        eprintln!("websocket event failed: {why}");
+        // `why` carries the program's text (an assert message, `main`'s `Err`): one escaped line (H30).
+        eprintln!("websocket event failed: {}", crate::escape_line(&why));
         Ok(None)
     }
 

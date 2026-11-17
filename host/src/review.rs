@@ -485,8 +485,10 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
             "error",
             format!("--test-grants {shown} cannot be applied; no test ran:"),
         ));
-        page.tests
-            .extend(e.lines().map(|l| ("", format!("  {}", l.trim_start()))));
+        page.tests.extend(
+            e.lines()
+                .map(|l| ("", format!("  {}", kio_host::escape_line(l.trim_start())))),
+        );
         resources(&[], &[], page);
         return (json!({"grants": shown, "setup_error": e}), false, true);
     }

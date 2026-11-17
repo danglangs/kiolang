@@ -2021,12 +2021,9 @@ fn print_diags(prog: &Program, diags: Vec<Diag>, kind: &str) -> i32 {
             push_error(kind, &d.message, d.hint.as_deref(), Some(at));
             continue;
         }
-        // A run-time message is the program's text (an assert message): escaped to one line
-        // with no terminal escape, as `kio test` shows it (H30).
-        let message = match kind {
-            "runtime" => kio_host::escape_line(&d.message),
-            _ => d.message.clone(),
-        };
+        // A run-time message is the program's text (an assert message), and a parse message may
+        // quote a source character: escaped to one line with no terminal escape (H30).
+        let message = kio_host::escape_line(&d.message);
         eprintln!("{}:{line}: error: {message}", prog.shown(file));
         if let Some(h) = &d.hint {
             eprintln!("  hint: {h}");

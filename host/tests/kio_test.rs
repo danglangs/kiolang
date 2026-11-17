@@ -391,6 +391,12 @@ fn run_errors_are_escaped_in_text() {
     let (code, _, err) = kio_in(&tmp, &["run", &e]);
     assert_eq!(code, 1);
     assert_eq!(err, format!("error: {want}\n"));
+
+    // A diagnostic quoting a source character escapes it too.
+    let l = c.file("l.kio", "fn main() -> Int { 1 \u{1b}[2J }\n");
+    let (code, _, err) = kio_in(&tmp, &["check", &l]);
+    assert_eq!(code, 1);
+    assert!(err.contains("unexpected character `\\u{1b}`"), "{err:?}");
 }
 
 #[test]
