@@ -65,6 +65,25 @@ fn a_listed_module_loads_from_its_path_and_others_from_beside_the_root() {
 }
 
 /// Each error, at the `mod` line where there is one, with its hint; exit 2, nothing run.
+/// H32: `mod` items are found by the parser, so a comment after one, or two on a line, load.
+#[test]
+fn mod_items_after_a_comment_or_on_one_line_load() {
+    // `web` from kio.deps and `util` from beside the root share a line; `two` has a comment.
+    let app = "mod web; mod util; // the router\nmod two; // helpers\n// mod nope;\nfn main() -> Int {\n    web::inc(util::one() + two::two())\n}\n";
+    let (_t, dir) = project(app, &pinned());
+    std::fs::write(dir.join("util.kio"), "pub fn one() -> Int {\n    1\n}\n").unwrap();
+    std::fs::write(dir.join("two.kio"), "pub fn two() -> Int {\n    2\n}\n").unwrap();
+    assert_eq!(kio(&dir, &["run", "app.kio"]), (0, "4\n".into(), "".into()));
+    // A mismatch is still shown at the `mod` item.
+    std::fs::write(dir.join("../lib/web.kio"), WEB.replace("+ 1", "+ 2")).unwrap();
+    let (code, _, err) = kio(&dir, &["check", "app.kio"]);
+    assert_eq!(code, 2);
+    assert!(
+        err.starts_with("app.kio:1: error: ../lib/web.kio does not match kio.deps:2"),
+        "{err}"
+    );
+}
+
 #[test]
 fn errors_and_hints() {
     let hash = sha(WEB);

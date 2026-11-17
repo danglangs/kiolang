@@ -196,23 +196,17 @@ fn cannot_read(path: &str, e: &std::io::Error) -> String {
     }
 }
 
-/// Each `mod NAME;` line of `root`: the name and the line's byte span, without its indent.
+/// Each `mod NAME;` item of `root`, as the parser finds it: the name and its byte span. A root
+/// that does not parse yields the items it recovers; the checker reports the error.
 fn mod_lines(root: &str) -> Vec<(String, (usize, usize))> {
-    let (mut at, mut out) = (0, Vec::new());
-    for line in root.split_inclusive('\n') {
-        if let Some(name) = mod_name(line) {
-            let start = at + line.len() - line.trim_start().len();
-            out.push((name.to_string(), (start, at + line.trim_end().len())));
-        }
-        at += line.len();
-    }
-    out
-}
-
-/// `web` for a line that is `mod web;`.
-fn mod_name(line: &str) -> Option<&str> {
-    let name = line.trim().strip_prefix("mod ")?.strip_suffix(';')?.trim();
-    is_ident(name).then_some(name)
+    let items = lang::parse::parse_all(root, 0).items;
+    items
+        .into_iter()
+        .filter_map(|item| match item {
+            lang::ast::Item::Mod(name, span) => Some((name, (span.start, span.end))),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Whether `name` can name a module.

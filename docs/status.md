@@ -93,6 +93,7 @@ Compiled-only kio covers the whole language and every capability. Built and revi
 | T2 | Property tests: a `#[test]` with data parameters runs on 100 generated cases at seed 1 (`--cases`, `--seed`), each compiled through a typed IR entry; `assume` discards; a failure shrinks (compiled, at most 200 runs) to a minimal input shown as literals with a rerun line. The interpreter checks every case kio's own tests generate (test builds only; the release binary links no interpreter). About 31 ms a compiled case in release (3.1 s per 100; a capped shrink 6 s). Properties may not take `Http` or a writable grants-file store |
 | H30 | `kio run` escapes a run-time error's message and `main`'s `Err(Str)` as log lines are (`\n`, `\r`, `\u{1b}`): a program cannot print forged lines or terminal escapes; `--json` keeps the raw text |
 | H31 | `kio check --grants --json` binds a grants file with `--listen` (`"ok":true`); `run --json --listen` is still refused |
+| H32 | the host finds a root's modules from the parser's `mod` items, so `mod web; // the router` and two `mod`s on a line load, beside the root and from kio.deps |
 
 ## Next
 
