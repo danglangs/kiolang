@@ -180,6 +180,8 @@ fn a_failing_test_in_new() {
     );
     // R1a3: it stopped at the failing case, so its case count and fuel say nothing.
     assert!(!tests.iter().any(|l| l.contains("removed: small")), "{out}");
+    assert!(tests.iter().any(|l| l.starts_with("  error        small: ")), "{out}");
+    assert!(!tests.iter().any(|l| l.starts_with("  tested       small: ")), "{out}");
     let resources = Sides::section(&out, "Resources");
     assert_eq!(resources[0], "  measured     1 test left out: failed", "{out}");
     assert!(!resources.iter().any(|l| l.contains(" small: ")), "{out}");

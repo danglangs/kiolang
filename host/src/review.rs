@@ -696,7 +696,9 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
     let mut properties = Vec::new();
     for r in new.as_ref().map_or(&[][..], |(r, _)| r) {
         if let Some(p) = &r.prop {
-            page.tests.push(("tested", format!("{}: {}", r.name, p.summary())));
+            // A failed property's cases are its FAIL line below, not evidence.
+            let label = if r.error.is_some() { "error" } else { "tested" };
+            page.tests.push((label, format!("{}: {}", r.name, p.summary())));
             properties.push(json!({"name": r.name, "cases": p.compiled, "seed": p.seed, "discarded": p.discarded}));
         }
     }
