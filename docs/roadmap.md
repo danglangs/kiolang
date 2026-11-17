@@ -103,7 +103,7 @@ Most-used Rust crates, and kio's answer to each:
 | CLI parsing | clap | none | Needs an `Args` capability; the operator grants argv. |
 | Floats | f64 | `Float` (f64, compiled at Rust's speed) | |
 | Abstraction | traits, generics, closures | function values (`fn(T) -> R`, L6a), closures (L6b) and built-ins taking them (`map`, `filter`, `any`, `all`, `and_then`, `map_err`; L6c), compiled (C9); generic functions (L7a) and generic structs and enums (L7b, L7d), monomorphized, with bounds `T: Eq`/`T: Ord` (L7c) | No traits: a bound is `Eq` or `Ord` only, `Ord` for `Int` and `Str`. |
-| Packages | cargo, crates.io | copy one file | A package manager, once there are a few libraries. |
+| Packages | cargo, crates.io | `kio.deps`: local files pinned by sha256 (PK1) | Fetching and a registry, once a second team publishes a library ([proposal](proposals/packages.md)). |
 
 The two that blocked a real backend first, an HTTP client beyond GET (H16) and SQL (H17), are built. `Http` under `--listen` (H19) is built too. What is left, in order: typed JSON decode, streaming bodies, a server database.
 
