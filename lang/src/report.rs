@@ -340,12 +340,6 @@ fn param_ty(p: &Program, f: &str, d: &str) -> Option<String> {
 /// the base reached on the same grant (or function parameter) carries a note and adds nothing.
 /// Only functions `main` reaches count (P8): code no run can call adds no authority.
 pub fn report_diff(old_p: &Program, new_p: &Program) -> AuthorityDiff {
-    let main_authority = |p: &Program| {
-        let mut a = authority(p);
-        let from_main = reachable(p, ["main"]);
-        a.funcs.retain(|k, _| from_main.contains(k));
-        a
-    };
     let (old, new) = (main_authority(old_p), main_authority(new_p));
     let mut diff = AuthorityDiff::default();
     for g @ (d, ty) in &new.main {
@@ -406,6 +400,35 @@ pub fn report_diff(old_p: &Program, new_p: &Program) -> AuthorityDiff {
         }
     }
     diff
+}
+
+/// `authority` of the functions `main` reaches (P8).
+fn main_authority(p: &Program) -> Authority {
+    let mut a = authority(p);
+    let from_main = reachable(p, ["main"]);
+    a.funcs.retain(|k, _| from_main.contains(k));
+    a
+}
+
+/// The functions `main` reaches whose report line has one of `methods` on `main`'s parameter
+/// `grant` (for `main`) or on a parameter of type `ty` (any other function), in key order.
+pub fn users(p: &Program, grant: &str, ty: &str, methods: &[&str]) -> Vec<String> {
+    let a = main_authority(p);
+    let uses = |f: &str, params: &[(String, BTreeSet<String>)]| {
+        params.iter().any(|(d, ms)| {
+            let of = if f == "main" {
+                d == grant
+            } else {
+                param_ty(p, f, d).as_deref() == Some(ty)
+            };
+            of && methods.iter().any(|m| ms.contains(*m))
+        })
+    };
+    a.funcs
+        .iter()
+        .filter(|(f, ps)| uses(f, ps))
+        .map(|(f, _)| f.clone())
+        .collect()
 }
 
 /// The methods `main` reaches on its parameter `d`, through any function.

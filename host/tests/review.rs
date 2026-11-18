@@ -99,7 +99,10 @@ fn a_change_on_one_page() {
     assert_eq!(code, 3, "{out}{err}");
     let titles: Vec<&str> = out.lines().filter(|l| !l.starts_with(' ')).collect();
     assert_eq!(titles, ["Authority", "Tests", "Resources", "Not checked", "Identity"]);
-    assert_eq!(Sides::section(&out, "Authority"), ["  enforced     ~ d: Dir (+write)"]);
+    assert_eq!(
+        Sides::section(&out, "Authority"),
+        ["  enforced     ~ d: Dir (+write)", "  derived        write in main"]
+    );
     assert_eq!(
         Sides::section(&out, "Tests"),
         [
@@ -108,6 +111,7 @@ fn a_change_on_one_page() {
             "  tested       new: 4 passed, 0 failed",
             "  tested       added: fresh",
             "  not checked  removed: gone",
+            "  not checked  changed: counts",
             "  tested       small: 100 cases compiled; seed 1",
         ]
     );
@@ -124,7 +128,10 @@ fn a_change_on_one_page() {
     );
     assert_eq!(
         Sides::section(&out, "Not checked"),
-        ["  not checked  d: Dir write: what is written or removed", SAME_AUTHOR]
+        [
+            "  not checked  d: Dir write: what is written or removed (changed: main)",
+            SAME_AUTHOR
+        ]
     );
     let identity = Sides::section(&out, "Identity");
     assert!(identity[0].starts_with("  kio "), "{out}");
@@ -183,7 +190,10 @@ fn a_failing_test_in_new() {
     assert!(tests.iter().any(|l| l.starts_with("  error        small: ")), "{out}");
     assert!(!tests.iter().any(|l| l.starts_with("  tested       small: ")), "{out}");
     let resources = Sides::section(&out, "Resources");
-    assert_eq!(resources[0], "  measured     1 test left out: failed", "{out}");
+    assert_eq!(
+        resources[0], "  measured     1 test failed in new; left out of Resources",
+        "{out}"
+    );
     assert!(!resources.iter().any(|l| l.contains(" small: ")), "{out}");
     assert!(
         resources
@@ -328,8 +338,11 @@ fn grants_bind_to_new_main() {
     assert_eq!(code, 1, "{out}");
     let authority = Sides::section(&out, "Authority");
     assert_eq!(
-        authority[1],
-        format!("  error        --grants {g} does not bind to {}'s main:", s.new)
+        authority[1..3],
+        [
+            format!("  not checked  {g}: outside the program's directory; not compared with the base"),
+            format!("  error        --grants {g} does not bind to {}'s main:", s.new)
+        ]
     );
     assert!(authority.iter().any(|l| l.contains("hint: ")), "{out}");
     let hash = |b: &[u8]| lang::digest::to_hex(&lang::digest::sha256(b));
@@ -349,7 +362,8 @@ fn grants_bind_to_new_main() {
         Sides::section(&out, "Authority"),
         [
             "  enforced     no change in authority".to_string(),
-            format!("  enforced     --grants {g} binds {}'s main", s.new)
+            format!("  not checked  {g}: outside the program's directory; not compared with the base"),
+            format!("  enforced     --grants {g} binds {}'s main", s.new),
         ]
     );
     assert!(out.contains(&format!("  tested       grants: {t}\n")), "{out}");
@@ -573,6 +587,8 @@ fn an_added_entry() {
         [
             "  enforced     no change in authority".to_string(),
             "  enforced     worker.kio: + d: Dir (read)".into(),
+            "  derived      worker.kio:   read in lib::touch".into(),
+            format!("  not checked  worker.kio: {w}: outside the program's directory; not compared with the base"),
             format!("  enforced     worker.kio: --entry-grants {w} binds {dir}/new/worker.kio's main"),
         ]
     );
@@ -600,7 +616,7 @@ fn an_added_entry() {
     assert_eq!(code, 1, "{out}");
     let authority = Sides::section(&out, "Authority");
     assert_eq!(
-        authority[2],
+        authority[4],
         format!("  error        worker.kio: --entry-grants {w} does not bind to {dir}/new/worker.kio's main:")
     );
     assert!(authority.iter().any(|l| l.contains("hint: ")), "{out}");
@@ -624,11 +640,13 @@ fn an_entry_gaining_a_grant() {
         [
             "  enforced     no change in authority",
             "  enforced     ./worker.kio: + h: Http (get)",
+            "  derived      ./worker.kio:   get in main",
         ]
     );
     assert!(
-        Sides::section(&out, "Not checked")
-            .contains(&"  not checked  ./worker.kio: h: Http get: the paths, headers and bodies sent".to_string()),
+        Sides::section(&out, "Not checked").contains(
+            &"  not checked  ./worker.kio: h: Http get: the paths, headers and bodies sent (changed: main)".to_string()
+        ),
         "{out}"
     );
     // The same entry on both sides: no line but "no change".
@@ -696,4 +714,146 @@ fn usage() {
     let (code, _, err) = s.review(&["--seed", "2"]);
     assert_eq!(code, 2);
     assert!(err.contains("usage: kio review"), "{err}");
+}
+
+/// R1a4: a test on both sides whose text changed is listed; whitespace alone is no change.
+#[test]
+fn a_changed_test() {
+    let new = NEW
+        .replace(
+            "fn kept() { assert_eq(count(3), 3); }",
+            "fn kept()  {\n    assert_eq(count(3),  3);\n}",
+        )
+        .replace("count(2), 1", "count(2), 1); assert_eq(count(1), 0");
+    let s = Sides::new(NEW, &new);
+    let (code, out, err) = s.review(&[]);
+    assert_eq!(code, 0, "{out}{err}");
+    let tests = Sides::section(&out, "Tests");
+    let changed: Vec<&String> = tests.iter().filter(|l| l.contains("changed:")).collect();
+    assert_eq!(changed, ["  not checked  changed: fresh"], "{out}");
+    let (_, out, _) = s.review(&["--json"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["tests"]["changed"], serde_json::json!(["fresh"]));
+}
+
+/// A program whose helper `save` uses `d`.
+const SAVES: &str = r#"fn save(d: Dir) -> Result<(), IoErr> { let _ = d.read("a")?; Ok(()) }
+
+fn shown(r: Dir) -> Result<(), IoErr> { let _ = r.list(".")?; Ok(()) }
+
+fn main(d: Dir, r: Dir) -> Result<(), IoErr> { save(d)?; shown(r) }
+"#;
+
+/// R1a4: under a grant line, each gained method and the functions that newly use it; the Not
+/// checked line those functions reach is marked when their text changed.
+#[test]
+fn where_a_gained_method_is_used() {
+    let new = SAVES.replace("Ok(()) }\n\nfn shown", "d.write(\"b\", \"x\".to_bytes()) }\n\nfn shown");
+    let s = Sides::new(SAVES, &new);
+    let (code, out, err) = s.review(&[]);
+    assert_eq!(code, 3, "{out}{err}");
+    assert_eq!(
+        Sides::section(&out, "Authority"),
+        ["  enforced     ~ d: Dir (+write)", "  derived        write in save"],
+        "{out}"
+    );
+    assert_eq!(
+        Sides::section(&out, "Not checked"),
+        [
+            "  not checked  d: Dir write: what is written or removed (changed: save)",
+            SAME_AUTHOR
+        ]
+    );
+    let (_, out, _) = s.review(&["--json"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        v["authority"]["gained"],
+        serde_json::json!([{"grant": "d", "method": "write", "functions": ["save"]}])
+    );
+    assert_eq!(v["not_checked"]["methods"][0]["changed"], serde_json::json!(["save"]));
+    // `main` changed, `save` did not: the line is unmarked.
+    let moved = SAVES.replace("save(d)?; shown(r)", "save(d)?;\n    shown(r)");
+    let s = Sides::new(
+        &new,
+        &moved.replace("Ok(()) }\n\nfn shown", "d.write(\"b\", \"x\".to_bytes()) }\n\nfn shown"),
+    );
+    let (code, out, err) = s.review(&[]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert_eq!(
+        Sides::section(&out, "Not checked")[0],
+        "  not checked  d: Dir write: what is written or removed"
+    );
+}
+
+/// R1a4: the grants file is part of the change: its flags against the file at the same path
+/// beside OLD's program, which Identity hashes.
+#[test]
+fn the_grants_file_is_part_of_the_change() {
+    let s = Sides::new(SAVES, SAVES);
+    let root = s.dir.path();
+    std::fs::create_dir(root.join("new/rejects")).unwrap();
+    let old_g = write(root, "old/app.grants", "--dir d=.\n# reports\n--dir r=.:ro\n");
+    let g = write(root, "new/app.grants", "--dir d=.\n--dir r=rejects\n");
+    let (code, out, err) = s.review(&["--grants", &g]);
+    assert_eq!(code, 0, "{out}{err}");
+    let authority = Sides::section(&out, "Authority");
+    assert_eq!(
+        authority[1..],
+        [
+            "  enforced     app.grants: + --dir r=rejects".to_string(),
+            "  enforced     app.grants: - --dir r=.:ro".into(),
+            format!("  enforced     --grants {g} binds {}'s main", s.new),
+        ],
+        "{out}"
+    );
+    let hash = |b: &str| lang::digest::to_hex(&lang::digest::sha256(b.as_bytes()));
+    let line = format!(
+        "  old grants {old_g} sha256:{}",
+        hash("--dir d=.\n# reports\n--dir r=.:ro\n")
+    );
+    assert!(Sides::section(&out, "Identity").contains(&line), "{out}");
+    let (_, out, _) = s.review(&["--grants", &g, "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        v["authority"]["grants_file"]["diff"],
+        serde_json::json!(["+ --dir r=rejects", "- --dir r=.:ro"])
+    );
+    assert_eq!(v["identity"]["old_grants"]["path"], old_g.as_str());
+    // The same flags (comments aside): unchanged.
+    write(root, "old/app.grants", "# all\n--dir d=.\n--dir r=rejects\n");
+    let (_, out, _) = s.review(&["--grants", &g]);
+    assert!(out.contains("  enforced     app.grants: unchanged\n"), "{out}");
+    // None beside OLD: a new file.
+    std::fs::remove_file(root.join("old/app.grants")).unwrap();
+    let (_, out, _) = s.review(&["--grants", &g]);
+    assert!(out.contains("  enforced     app.grants: new file\n"), "{out}");
+    // Its text reaches the page escaped.
+    write(root, "old/app.grants", "--dir d=.\n--dir r=x\u{1b}[2J\n");
+    let (_, out, _) = s.review(&["--grants", &g]);
+    assert!(
+        out.contains("  enforced     app.grants: - --dir r=x\\u{1b}[2J\n"),
+        "{out}"
+    );
+}
+
+/// R1a4: every test that failed in NEW is counted, an added one and a property included.
+#[test]
+fn every_failed_test_is_counted() {
+    let new = NEW
+        .replace(
+            r#"assert(count(n % 10) >= 0, "non-negative")"#,
+            r#"assert(n < 5, "small")"#,
+        )
+        .replace("count(2), 1", "count(2), 2");
+    let s = Sides::new(OLD, &new);
+    let (code, out, err) = s.review(&[]);
+    assert_eq!(code, 1, "{out}{err}");
+    assert_eq!(
+        Sides::section(&out, "Resources")[0],
+        "  measured     2 tests failed in new; left out of Resources",
+        "{out}"
+    );
+    let (_, out, _) = s.review(&["--json"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["resources"]["failed"], 2);
 }
