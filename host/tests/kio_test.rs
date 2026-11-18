@@ -438,3 +438,84 @@ fn sets(k: Kv) -> Result<(), KvErr> { k.set("a", "1".to_bytes()) }
     assert_eq!(code, 0, "{j}");
     assert_eq!(j["passed"], 2);
 }
+
+/// T3: `--json` gives each test's fuel and peak memory, `--verbose` shows them, and an example
+/// test over `--listen`'s per-request fuel gets a note.
+#[test]
+fn fuel_and_peak_memory() {
+    let c = Case::new(
+        r#"#[test]
+fn heavy() { let mut i = 0; while i < 500000 { i += 1; } assert_eq(i, 500000); }
+
+#[test]
+fn heavy_fails() { let mut i = 0; while i < 500000 { i += 1; } assert(false, "late"); }
+
+#[test]
+fn prop(n: Int) { assert_eq(n, n); }
+
+#[test]
+fn small() { assert_eq(1 + 1, 2); }
+
+#[test]
+fn ungranted(api: Http) {}
+"#,
+    );
+    let (code, j) = c.json(&["--cases", "3"]);
+    assert_eq!(code, 1, "{j}");
+    let t = &j["tests"];
+    let used = |i: usize| {
+        (
+            t[i]["fuel"].as_u64().unwrap(),
+            t[i]["peak_memory"].as_u64().unwrap() >> 10,
+        )
+    };
+    let (heavy, fails, prop, small) = (used(0), used(1), used(2), used(3));
+    assert!(heavy.0 > 10_000_000 && fails.0 > 10_000_000, "{j}");
+    assert!(prop.0 > 0 && small.0 < 10_000_000 && small.1 > 0, "{j}");
+    // A test whose run never started used nothing.
+    assert_eq!((t[4]["fuel"].is_null(), t[4]["peak_memory"].is_null()), (true, true));
+
+    let commas = |n: u64| {
+        let s = n.to_string();
+        let mut out = String::new();
+        for (i, c) in s.chars().enumerate() {
+            if i > 0 && (s.len() - i).is_multiple_of(3) {
+                out.push(',');
+            }
+            out.push(c);
+        }
+        out
+    };
+    let note = |name: &str, f: u64| {
+        format!(
+            "note: {name} used {} fuel; --listen gives each request 10,000,000 (raise it with --fuel)\n",
+            commas(f)
+        )
+    };
+    let app = &c.app;
+    let failures = format!(
+        "FAIL heavy_fails\n  {app}:5:64: assertion failed: late\n{}",
+        note("heavy_fails", fails.0)
+    );
+    let ungranted = "FAIL ungranted\n  test `ungranted` needs `api: Http`\n  hint: name it in a --grants file\n";
+    let (code, out, _) = c.kio(&["--cases", "3"]);
+    assert_eq!(code, 1);
+    let want = format!(
+        "ok   heavy\n{}{failures}ok   prop  (3 cases compiled; seed 1)\nok   small\n{ungranted}3 passed, 2 failed\n",
+        note("heavy", heavy.0)
+    );
+    assert_eq!(out, want);
+
+    let (code, out, _) = c.kio(&["--cases", "3", "--verbose"]);
+    assert_eq!(code, 1);
+    let v = |(f, kb): (u64, u64)| format!("  (fuel {}; peak memory {kb} KB)", commas(f));
+    let failures = failures.replacen("heavy_fails\n", &format!("heavy_fails{}\n", v(fails)), 1);
+    let want = format!(
+        "ok   heavy{}\n{}{failures}ok   prop  (3 cases compiled; seed 1){}\nok   small{}\n{ungranted}3 passed, 2 failed\n",
+        v(heavy),
+        note("heavy", heavy.0),
+        v(prop),
+        v(small)
+    );
+    assert_eq!(out, want);
+}

@@ -8,7 +8,7 @@ kio check <new.kio> --base <old.kio> [--detail]   grants new adds or drops; exit
 kio check <prog.kio> --grants <file> [flags]   bind the file's grants to main without running
 kio run <prog.kio> [--grants file] [grants] [limits] [--audit log] [--listen addr]
 ... --json                       one JSON object on stdout (JSON output, below)
-kio test <prog.kio> [--grants file] [--filter substr] [--cases n] [--seed s] [limits]   run the #[test] functions (Tests, below)
+kio test <prog.kio> [--grants file] [--filter substr] [--cases n] [--seed s] [--verbose] [limits]   run the #[test] functions (Tests, below)
 kio review <new.kio> --base <old.kio> [--grants file] [--test-grants file] [--requirements file] [--entry file [--entry-grants file]].. [--json]   one labelled page for a change (Reviewing a change, below)
 kio deps pin [<prog.kio>]        rewrite the hashes in kio.deps beside prog (default ./kio.deps) (Dependencies, below)
 kio mcp                          the MCP server (README, "Use from an agent")
@@ -334,7 +334,7 @@ $ kio run spin.kio --fuel 1000 --json
 
 ## Tests
 
-`kio test prog.kio [--grants file] [--filter substr] [--cases n] [--seed s] [--json] [limits]` runs every `#[test]` function ([language.md](language.md#tests)) whose name contains `--filter`, sorted by name (`util::t` for one in `util.kio`). The program needs no `main`. Each test is compiled as the entry and runs in a fresh instance with the default limits (or the limit flags given). Each parameter gets the grants file's grant of its name and type (`--kv k=..` is for `k: Kv`, `--hmac k=..` for `k: Hmac`, `--secret k=..` for `k: Secret`); the file's other grants are ignored for that test, and a test is held to its own authority as `kio run` holds `main` (`:ro`, `:verify`, the source and grants-file checks). A parameter the file does not name gets, by type:
+`kio test prog.kio [--grants file] [--filter substr] [--cases n] [--seed s] [--json] [--verbose] [limits]` runs every `#[test]` function ([language.md](language.md#tests)) whose name contains `--filter`, sorted by name (`util::t` for one in `util.kio`). The program needs no `main`. Each test is compiled as the entry and runs in a fresh instance with the default limits (or the limit flags given). Each parameter gets the grants file's grant of its name and type (`--kv k=..` is for `k: Kv`, `--hmac k=..` for `k: Hmac`, `--secret k=..` for `k: Secret`); the file's other grants are ignored for that test, and a test is held to its own authority as `kio run` holds `main` (`:ro`, `:verify`, the source and grants-file checks). A parameter the file does not name gets, by type:
 
 | Type | Default |
 |---|---|
@@ -356,10 +356,20 @@ FAIL totals
     read 2 rows
 1 passed, 1 failed
 $ kio test app.kio --filter parses --json
-{"failed":0,"ok":true,"passed":1,"tests":[{"error":null,"log":"","ms":41.2,"name":"parses","ok":true}]}
+{"failed":0,"ok":true,"passed":1,"tests":[{"error":null,"fuel":6739,"log":"","ms":41.2,"name":"parses","ok":true,"peak_memory":1769472}]}
 ```
 
 `--json`'s `error` is an `errors` entry of [JSON output](#json-output) (an assertion is `runtime`, an `Err` return `err`). A check or usage error prints `{"ok": false, "passed": 0, "failed": 0, "tests": [], "errors": [..]}`.
+
+Each `--json` entry has `fuel` and `peak_memory` (bytes): what the run used, `null` when it never started (a missing grant); a property's fuel is summed over its cases, its peak memory their largest. `--verbose` adds both to each text line. An example test that uses more fuel than `--listen` gives a request (10,000,000) gets a note, so a handler's logic tested here is not first stopped in production:
+
+```
+$ kio test app.kio --verbose
+ok   handles  (fuel 14,006,746; peak memory 1728 KB)
+note: handles used 14,006,746 fuel; --listen gives each request 10,000,000 (raise it with --fuel)
+ok   parses  (fuel 6,739; peak memory 1728 KB)
+2 passed, 0 failed
+```
 
 ### Properties
 

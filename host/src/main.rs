@@ -68,9 +68,12 @@ fn cli() -> i32 {
     if let [cmd, path, flags @ ..] = &args[..] {
         if cmd == "test" || cmd == "review" {
             let json = flags.iter().any(|a| a == "--json");
-            let flags: Vec<&str> = flags.iter().map(String::as_str).filter(|a| *a != "--json").collect();
+            let verbose = cmd == "test" && flags.iter().any(|a| a == "--verbose");
+            let flags: Vec<&str> = (flags.iter().map(String::as_str))
+                .filter(|a| *a != "--json" && !(verbose && *a == "--verbose"))
+                .collect();
             return match cmd.as_str() {
-                "test" => test(path, &flags, json),
+                "test" => test(path, &flags, json, verbose),
                 _ => review::review(path, &flags, json),
             };
         }
@@ -1277,7 +1280,7 @@ fn run_program(prog: &Program, flags: &[&str], grants_file: Option<&str>, dry: b
 
 /// `kio test`'s flags.
 const TEST_USAGE: &str =
-    "[--grants file] [--filter substr] [--cases n] [--seed s] [--json] [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb]";
+    "[--grants file] [--filter substr] [--cases n] [--seed s] [--json] [--verbose] [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb]";
 
 /// The limit flags `kio test` takes on its command line; grants come from `--grants`.
 const LIMIT_FLAGS: [&str; 6] = ["--fuel", "--timeout", "--memory", "--stack", "--calls", "--io"];
@@ -1368,8 +1371,9 @@ fn captured<T>(capture: bool, f: impl FnOnce() -> T) -> (T, JsonOut) {
 
 /// `kio test`: every test function (sorted by key, those containing `--filter`), each compiled
 /// as the entry and run in a fresh instance with default limits. Exit 0 when all pass, 1 when
-/// any fails, 2 for a check error or usage.
-fn test(path: &str, flags: &[&str], json: bool) -> i32 {
+/// any fails, 2 for a check error or usage. `verbose` adds each test's fuel and peak memory to
+/// the text (T3).
+fn test(path: &str, flags: &[&str], json: bool, verbose: bool) -> i32 {
     let (tests, out) = captured(json, || test_setup(path, flags));
     let tests = match tests {
         Ok(t) => t,
@@ -1392,7 +1396,7 @@ fn test(path: &str, flags: &[&str], json: bool) -> i32 {
         );
     } else {
         for r in &results {
-            result_lines(&tests, r).iter().for_each(|l| println!("{l}"));
+            test_lines(&tests, r, verbose).iter().for_each(|l| println!("{l}"));
         }
         println!("{passed} passed, {failed} failed");
     }
@@ -1402,7 +1406,8 @@ fn test(path: &str, flags: &[&str], json: bool) -> i32 {
 /// `kio test --json`'s row for `r`.
 fn result_json(r: &TestResult) -> serde_json::Value {
     let ms = (r.ms * 10.0).round() / 10.0;
-    let mut row = json!({"name": r.name, "ok": r.error.is_none(), "ms": ms, "error": r.error, "log": r.log});
+    let mut row = json!({"name": r.name, "ok": r.error.is_none(), "ms": ms, "error": r.error, "log": r.log,
+        "fuel": r.used.map(|u| u.fuel), "peak_memory": r.used.map(|u| u.peak_memory)});
     if let Some(p) = &r.prop {
         let input = (p.input.as_ref()).map(|(vs, _)| {
             vs.iter()
@@ -1426,6 +1431,26 @@ fn run_tests(tests: &Tests) -> Vec<TestResult> {
         .filter(|t| t.name.contains(&tests.filter))
         .map(|t| run_test(tests, t))
         .collect()
+}
+
+/// `result_lines`, with `verbose` the fuel and peak memory `r` used on its first line, and a note
+/// when an example test used more fuel than `--listen` gives a request (T3).
+fn test_lines(tests: &Tests, r: &TestResult, verbose: bool) -> Vec<String> {
+    let mut out = result_lines(tests, r);
+    let Some(u) = r.used else { return out };
+    if verbose {
+        out[0] += &format!("  (fuel {}; peak memory {} KB)", commas(u.fuel), u.peak_memory >> 10);
+    }
+    let per_request = Limits::web().fuel;
+    if r.prop.is_none() && u.fuel > per_request {
+        out.push(format!(
+            "note: {} used {} fuel; --listen gives each request {} (raise it with --fuel)",
+            r.name,
+            commas(u.fuel),
+            commas(per_request)
+        ));
+    }
+    out
 }
 
 /// The lines `kio test` prints for `r`: `ok   name`, or `FAIL name` and the failure in full.
@@ -1469,6 +1494,19 @@ fn result_lines(tests: &Tests, r: &TestResult) -> Vec<String> {
             "  rerun: kio test {file} --filter {name} --seed {}{cases}",
             p.seed
         ));
+    }
+    out
+}
+
+/// `n` with a comma every three digits: `10,000,000`.
+fn commas(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
     }
     out
 }

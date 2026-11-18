@@ -100,6 +100,7 @@ Compiled-only kio covers the whole language and every capability. Built and revi
 | R1a3 | `kio review`: a test that failed on either side is out of fewer-cases and Resources (`N tests left out: failed`); `--entry worker.kio [--entry-grants G2]` reviews another entry's authority, grants, blind spots and files (kio-web flow: app.kio and worker.kio on one page) (#277) |
 | R1a4 | `kio review` (from W1a): `changed: T` for a test whose text changed; under each `+`/`~` grant the functions that newly use each gained method (`  query in flow::claim`); the grants file diffed by flag against OLD's (`app.grants: + --dir ..`, `unchanged`, `new file`), both hashed; a Not checked line ends `(changed: F)` when a function using it changed; `N tests failed in new; left out of Resources` counts every failure (#281, #282). Adversarial review fixes: OLD's grants file read only as a regular file inside its directory, `changed` follows the call graph (#288) |
 | L28 | A2's diagnostics: `file:line:col:` in text; "in argument 2 of `inv::handle`"; "kio has no bitwise operators"; `[None, Some("a")]` checks; `\` shown once in diagnostics and test failures; a Db `too-large` audit line names its limit (#283-#285) |
+| T3 | `kio test --json` gives each test's `fuel` and `peak_memory`; `--verbose` prints them; an example test over `--listen`'s 10,000,000 per-request fuel gets a `note:` line (#291-#293) |
 
 ## Next
 
