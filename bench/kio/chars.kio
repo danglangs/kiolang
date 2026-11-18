@@ -1,0 +1,11 @@
+// A `chars()` loop over 100 characters with one comparison each (P9).
+fn main() -> Int {
+    let s = "abcdefghixabcdefghixabcdefghixabcdefghixabcdefghixabcdefghixabcdefghixabcdefghixabcdefghixabcdefghix";
+    let mut n = 0;
+    for c in s.chars() {
+        if c == "x" {
+            n = n + 1;
+        }
+    }
+    n
+}

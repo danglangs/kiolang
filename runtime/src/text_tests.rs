@@ -162,6 +162,30 @@ fn split_one_byte_matches_str_split() {
     assert_eq!(obj::live(), base);
 }
 
+/// P9: an ASCII character from `chars()` is a shared pinned `Str`, never freed; any other is
+/// its own, freed with the list.
+#[test]
+fn chars_shares_ascii() {
+    let _g = lock();
+    let base = obj::live();
+    let c = s("ab\u{7f}é");
+    // SAFETY: a live `Str` and the `List<Str>` descriptor; the list is freed last.
+    unsafe {
+        let (l1, l2) = (text::chars(LIST_STR, c), text::chars(LIST_STR, c));
+        let (e1, e2) = (obj::elems(l1), obj::elems(l2));
+        assert_eq!(obj::live(), base + 5);
+        for i in 0..3 {
+            assert_eq!(e1[i], e2[i]);
+            assert_eq!((*from_slot(e1[i])).rc, obj::PINNED);
+        }
+        assert_ne!(e1[3], e2[3]);
+        assert_eq!(take_list(l1), ["a", "b", "\u{7f}", "é"]);
+        assert_eq!(take_list(l2), ["a", "b", "\u{7f}", "é"]);
+    }
+    dec(c);
+    assert_eq!(obj::live(), base);
+}
+
 #[test]
 fn lines_trim_contains() {
     let _g = lock();

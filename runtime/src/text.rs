@@ -411,7 +411,42 @@ pub unsafe fn lines(list: u32, s: *mut Header) -> *mut Header {
 pub unsafe fn chars(list: u32, s: *mut Header) -> *mut Header {
     // SAFETY: the caller's guarantee.
     let s = unsafe { str_of(s) };
-    strs(list, s.char_indices().map(|(i, c)| &s[i..i + c.len_utf8()]))
+    let v: List = if s.is_ascii() {
+        let base = to_slot(ascii(0));
+        s.bytes()
+            .map(|b| base + u64::from(b) * size_of::<Char1>() as u64)
+            .collect()
+    } else {
+        let mut v = List::with_capacity(s.chars().count());
+        v.extend(s.char_indices().map(|(i, c)| match c.is_ascii() {
+            true => to_slot(ascii(c as u8)),
+            false => to_slot(new_str(&s[i..i + c.len_utf8()])),
+        }));
+        v
+    };
+    obj::new_list(list, v)
+}
+
+/// A one-byte `Str`, pinned like a literal: `chars()` shares these rather than allocating one
+/// per ASCII character (P9). Never written: `inc`, `dec` and `unique` leave a pinned object
+/// alone, and a `Str` is changed in place only at count 1.
+#[repr(C, align(8))]
+struct Char1([u32; 4], [u8; 8]);
+const _: () = assert!(core::mem::offset_of!(Char1, 1) == obj::BYTES_DATA);
+
+static ASCII: [Char1; 128] = {
+    let mut t = [const { Char1([obj::PINNED, desc::STR, 1, 1], [0; 8]) }; 128];
+    let mut i = 0;
+    while i < 128 {
+        t[i].1[0] = i as u8;
+        i += 1;
+    }
+    t
+};
+
+/// The pinned `Str` holding ASCII byte `b`.
+fn ascii(b: u8) -> *mut Header {
+    (&raw const ASCII[b as usize]).cast::<Header>().cast_mut()
 }
 
 /// `Str.trim()`: Unicode whitespace off both ends.

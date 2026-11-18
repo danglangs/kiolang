@@ -441,6 +441,14 @@ pub unsafe fn map_insert(t: &Table, p: *mut Header, k: u64, v: u64) {
             }
         }
         b.last = None;
+        // An `Int` key costs nothing to make, so one search inserts it (P9). A `Str` key is
+        // copied only when absent, so it is looked up first.
+        if key == desc::INT {
+            if let Some(old) = b.map.insert(Key::Int(k as i64), Cell::new(v)) {
+                release(t, value, old.into_inner());
+            }
+            return;
+        }
         match b.map.get(&probe) {
             Some(slot) => release(t, value, slot.replace(v)),
             None => drop(b.map.insert(key_of(key, k), Cell::new(v))),
@@ -476,7 +484,13 @@ pub unsafe fn map_remove(t: &Table, p: *mut Header, k: u64) {
 /// # Safety
 /// `a` and `b` are slot values of descriptor `d`.
 pub unsafe fn eq(t: &Table, d: u32, a: u64, b: u64) -> bool {
-    let mut work = alloc::vec![(d, a, b)];
+    // The first pair outside the list: a `Str` or scalar needs no more, so `==` on one
+    // allocates nothing (P9).
+    let mut work = Vec::new();
+    // SAFETY: the caller's guarantee.
+    if !unsafe { eq_one(t, &mut work, d, a, b) } {
+        return false;
+    }
     while let Some((d, a, b)) = work.pop() {
         // SAFETY: each pair is slot values of its descriptor, by the caller and by induction.
         if !unsafe { eq_one(t, &mut work, d, a, b) } {

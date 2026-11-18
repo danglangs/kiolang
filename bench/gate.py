@@ -28,10 +28,11 @@ BASELINE = os.path.join(BENCH, "baseline.json")
 LIMITS = ["--fuel", str(10**15), "--timeout", "3600", "--memory", "4096"]
 TOLERANCE = 0.02
 
-# (row, program in bench/kio, needs data/); the empty program is the startup row.
+# (row, program in bench/kio, needs data/); the empty program is the startup row. The last
+# rows are gated only, with no Rust or Python version to time against (P9).
 ROWS = [("startup", "empty", False)] + [
     (name, "jsonb" if name == "json" else name, data is not None) for name, _, data in BENCHES
-]
+] + [("chars", "chars", False), ("map_insert", "map_insert", False)]
 
 
 def measure(kio, build, prog, data):
@@ -77,7 +78,7 @@ def main():
     progs = {f[:-4] for f in os.listdir(os.path.join(BENCH, "kio")) if f.endswith(".kio")}
     unrun = progs - {p for _, p, _ in ROWS} - {"json_kio"}
     if unrun:
-        sys.exit(f"bench/kio/{sorted(unrun)[0]}.kio is not a row: add it to BENCHES in bench/run.py")
+        sys.exit(f"bench/kio/{sorted(unrun)[0]}.kio is not a row: add it to BENCHES in bench/run.py or to ROWS")
     version = subprocess.run([a.kio, "--version"], capture_output=True, text=True).stdout.strip()
 
     # As run.sh: json.kio beside jsonb.kio is the vendored json_kio.kio.
