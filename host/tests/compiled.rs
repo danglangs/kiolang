@@ -292,6 +292,40 @@ fn strings_and_bytes_values_and_builtins() {
     );
 }
 
+/// P9: `chars()` shares a pinned `Str` per ASCII character, `==` on `Str` has its own path
+/// (inline against a one-byte literal), and an `Int`-keyed `insert` searches once.
+#[test]
+fn chars_equality_and_int_map_inserts_agree() {
+    let src = r#"fn main() -> Str {
+        let s = "axé日x!x";
+        let mut n = 0;
+        for c in s.chars() {
+            if c == "x" { n += 1; }
+            if "x" != c { n += 10; }
+            if c == "é" || c == "日" { n += 100; }
+            if c == "" || c == "xx" { n += 1000; }
+            n += match c { "!" => 10000, "é" => 100000, _ => 0 };
+        }
+        let mut c = s.chars()[0];
+        c = c + "z";
+        let mut b = s.chars()[0].to_bytes();
+        b.push(66);
+        let cs = s.chars();
+        n.to_str() + c + b.to_str() + cs[0] + cs[1] + cs.join("|")
+            + ("a".to_bytes() == "a".to_bytes()).to_str() + (cs[3] == "日").to_str()
+    }"#;
+    assert_eq!(value(src), "110243azaBaxa|x|é|日|x|!|xtruetrue");
+    let src = r#"fn main() -> Str {
+        let mut m: Map<Int, List<Int>> = Map::new();
+        for i in 0..50 { m.insert(i % 7, [i]); m.insert(i % 7 + 100, [i, i]); }
+        let mut t: Map<Str, Int> = Map::new();
+        for c in "hello world".chars() { t.insert(c, t.get(c).unwrap_or(0) + 1); }
+        m.len().to_str() + m.get(3).unwrap_or([]).len().to_str() + m.get(103).unwrap_or([])[0].to_str()
+            + t.get("l").unwrap_or(0).to_str() + t.keys().join("")
+    }"#;
+    assert_eq!(value(src), "141453 dehlorw");
+}
+
 #[test]
 fn string_and_bytes_errors_match() {
     let src = r#"fn main() -> Int { let b = "ab".to_bytes(); b[2] }"#;

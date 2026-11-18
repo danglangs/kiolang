@@ -1,5 +1,5 @@
 {
-  "kio": "kio 0.1.1 (7b5cd10), Linux x86_64 CI, rustc 1.100.0",
+  "kio": "kio 0.1.3 (002311f + P9), macOS arm64, rustc 1.100.0",
   "rows": {
     "startup": {
       "value": "0",
@@ -18,7 +18,7 @@
     },
     "strings": {
       "value": "588890",
-      "fuel": 57509691,
+      "fuel": 56109691,
       "peak_memory": 3801088
     },
     "list": {
@@ -28,12 +28,12 @@
     },
     "map": {
       "value": "4770177159354",
-      "fuel": 339933856,
+      "fuel": 339680045,
       "peak_memory": 5701632
     },
     "hashmap": {
       "value": "4770177159354",
-      "fuel": 244428695,
+      "fuel": 244151033,
       "peak_memory": 6160384
     },
     "tree": {
@@ -53,13 +53,23 @@
     },
     "json": {
       "value": "1048619",
-      "fuel": 621002482,
+      "fuel": 619093579,
       "peak_memory": 15597568
     },
     "json_builtin": {
       "value": "1048619",
-      "fuel": 180196311,
+      "fuel": 180196297,
       "peak_memory": 16711680
+    },
+    "chars": {
+      "value": "10",
+      "fuel": 15600,
+      "peak_memory": 1769472
+    },
+    "map_insert": {
+      "value": "1000",
+      "fuel": 2747216,
+      "peak_memory": 1769472
     }
   }
 }

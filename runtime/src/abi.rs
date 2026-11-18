@@ -196,6 +196,18 @@ pub unsafe extern "C" fn rt_assert_eq(desc: u32, a: i64, b: i64, site: u32) {
     }
 }
 
+/// `a == b` on two `Str`s or two `Bytes`: `rt_eq` without the descriptor lookup (P9).
+#[no_mangle]
+pub unsafe extern "C" fn rt_str_eq(a: u32, b: u32) -> bool {
+    // SAFETY: the group's contract.
+    let (x, y) = unsafe { (obj::bytes(ptr(a)), obj::bytes(ptr(b))) };
+    // One character, as `chars()` gives, without `bytes_eq`'s word loop.
+    match (x, y) {
+        ([p], [q]) => p == q,
+        _ => a == b || text::bytes_eq(x, y),
+    }
+}
+
 /// `a.cmp(b)` on two `Str`s by bytes, as Rust's `str`: -1, 0 or 1.
 #[no_mangle]
 pub unsafe extern "C" fn rt_str_cmp(a: u32, b: u32) -> i32 {

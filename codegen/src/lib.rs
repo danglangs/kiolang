@@ -988,8 +988,6 @@ enum Open {
 /// An error message template; `{a}` and `{b}` are `trap`'s arguments.
 const OVERFLOW: &str = "Int overflow";
 const DIV_ZERO: &str = "division by zero";
-/// The `Str` descriptor's index (runtime/src/desc.rs).
-const STR_DESC: u32 = 3;
 const OUT_OF_BOUNDS: &str = "index {a} out of bounds for length {b}";
 /// `{c}` is the length, which the runtime passes through its `EXTRA` site.
 const SLICE_BOUNDS: &str = "slice {a}..{b} out of bounds for length {c}";
@@ -1618,6 +1616,15 @@ impl<'m> FuncGen<'_, 'm> {
                     borrowed.push(true);
                     continue;
                 }
+            }
+            // A literal is pinned: borrowed, it needs no `dec` after (P9).
+            if let (ExprKind::Str(_), true, false) = (&x.kind, borrow(i), slot(i)) {
+                self.expr(x);
+                let t = self.temp_val(&x.ty);
+                self.set_val(t);
+                temps.push(t);
+                borrowed.push(true);
+                continue;
             }
             let t = if slot(i) {
                 self.slot_expr(x);
@@ -2497,6 +2504,31 @@ impl<'m> FuncGen<'_, 'm> {
                 self.close();
             }
             ExprKind::Binary(BinOp::Concat, a, b) => self.rt_op("rt_concat", &[&**a, &**b], None),
+            // `==` on `Str` or `Bytes`: the bytes, with no descriptor; against a one-byte
+            // literal (`c == "x"` in a `chars()` loop), inline (P9).
+            ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), a, b) if matches!(a.ty, Ty::Str | Ty::Bytes) => {
+                match (&a.kind, &b.kind) {
+                    (_, ExprKind::Str(lit)) | (ExprKind::Str(lit), _) if lit.len() == 1 => {
+                        let x = if matches!(b.kind, ExprKind::Str(_)) { a } else { b };
+                        let byte = lit.as_bytes()[0];
+                        self.borrowing(&[&**x], |g, temps, _| {
+                            let Val::One(l) = temps[0] else { unreachable!("a Str") };
+                            let mut s = g.sink();
+                            s.local_get(l).i32_load(BYTES_LEN).i32_const(1).i32_eq();
+                            s.if_(BlockType::Result(ValType::I32));
+                            s.local_get(l)
+                                .i32_load8_u(BYTES_DATA)
+                                .i32_const(i32::from(byte))
+                                .i32_eq();
+                            s.else_().i32_const(0).end();
+                        });
+                    }
+                    _ => self.rt_op("rt_str_eq", &[&**a, &**b], None),
+                }
+                if *op == BinOp::Ne {
+                    self.sink().i32_eqz();
+                }
+            }
             // `==` on objects is the runtime's; unboxed enums are boxed for it (C8c1).
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), a, b) if slot_ptr(&a.ty) => {
                 let desc = self.statics.desc(&a.ty);
@@ -3796,10 +3828,9 @@ impl<'m> FuncGen<'_, 'm> {
             }
             ir::Pat::Str(lit) => {
                 let a = self.statics.str(lit);
-                self.sink().i32_const(STR_DESC as i32);
                 self.part_value(s, path, ty);
-                self.sink().i64_extend_i32_u().i64_const(i64::from(a));
-                self.call_rt("rt_eq");
+                self.sink().i32_const(a as i32);
+                self.call_rt("rt_str_eq");
                 self.sink().i32_eqz();
             }
             ir::Pat::Variant(v, ps) => {

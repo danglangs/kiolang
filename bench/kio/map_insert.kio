@@ -1,0 +1,8 @@
+// 1,000 `Map.insert`s of new `Str` keys (P9).
+fn main() -> Int {
+    let mut m: Map<Str, Int> = Map::new();
+    for i in 0..1000 {
+        m.insert(i.to_str(), i);
+    }
+    m.len()
+}
