@@ -163,7 +163,8 @@ fn beside_old(old: &str, new: &str, g: &str) -> Beside {
 }
 
 /// `kio review`: exit 1 if a side or entry does not check, a grants file does not bind, or a NEW test
-/// fails; else 3 if authority was added or a test removed; else 0. 2 for usage.
+/// fails; else 3 if authority was added, a dependency added or changed, or a test removed; else
+/// 0. 2 for usage.
 pub(crate) fn review(path: &str, flags: &[&str], json: bool) -> i32 {
     let (inputs, out) = captured(json, || inputs(path, flags));
     let inputs = match inputs {
@@ -702,8 +703,14 @@ fn entry_authority(
             value["grants_file"] = json!(null);
         }
         if out.errors.is_empty() {
-            let msg = format!("{prefix}{flag} {shown_g} binds {shown}'s main");
+            let items = bound(g, bytes);
+            let what = match items.is_empty() {
+                true => String::new(),
+                false => format!(": {}", items.join(", ")),
+            };
+            let msg = format!("{prefix}{flag} {shown_g} binds {shown}'s main{what}");
             page.authority.push(("enforced", msg));
+            value["bound"] = json!(items);
         } else {
             let msg = format!("{prefix}{flag} {shown_g} does not bind to {shown}'s main:");
             page.authority.push(("error", msg));
@@ -784,6 +791,56 @@ fn grants_diff(new: (&String, &Vec<u8>), old: Option<&(String, Vec<u8>)>) -> (Ve
         lines.push("unchanged".into());
     }
     (lines.iter().map(|l| kio_host::escape_line(l)).collect(), v)
+}
+
+/// What the grants file `g`, read once as `bytes`, binds, for a file that bound (R1a5): one item
+/// a grant in file order, `name=value` as written (a secret's value is its source, `env:VAR` or
+/// `file:PATH`: binding refuses any other form), an `Http` grant's `--http-methods` and
+/// `--http-header`s after it in parentheses, and `--listen`, `--host` and `--ws-origin` (who may
+/// reach the program). Limits and `--audit` are left out (#290). Each part ASCII, every other
+/// character and `\` escaped, and quoted when it holds a character that separates parts here.
+fn bound(g: &str, bytes: &[u8]) -> Vec<String> {
+    let text = std::str::from_utf8(bytes).unwrap_or_default();
+    let Ok(flags) = captured(true, || grants_flags(text, g, &[])).0 else {
+        return vec![];
+    };
+    // ASCII only, `\` doubled: no character can pass for another (`о` for `o`, `，` for `,`).
+    let shown = |s: &str| {
+        let s: String = (s.chars())
+            .map(|c| match c {
+                '\\' => "\\\\".to_string(),
+                ' '..='~' => c.to_string(),
+                c => format!("\\u{{{:02x}}}", c as u32),
+            })
+            .collect();
+        match s.contains([',', ';', '(', ')', '"', ' ']) {
+            true => format!("\"{}\"", s.replace('"', "\\\"")),
+            false => s,
+        }
+    };
+    let pairs: Vec<(&str, &str)> = flags.chunks(2).map(|p| (p[0].as_str(), p[1].as_str())).collect();
+    let mut items = Vec::new();
+    for &(flag, spec) in &pairs {
+        let item = match flag {
+            "--dir" | "--kv" | "--db" | "--rng" | "--clock" | "--log" | "--hmac" | "--secret" => shown(spec),
+            "--listen" | "--host" | "--ws-origin" => format!("{flag} {}", shown(spec)),
+            "--http" => {
+                let name = spec.split_once('=').map_or(spec, |(n, _)| n);
+                let extras: Vec<String> = (pairs.iter())
+                    .filter(|(f, _)| *f == "--http-methods" || *f == "--http-header")
+                    .filter_map(|(_, s)| s.split_once('=').filter(|(n, _)| *n == name))
+                    .map(|(_, v)| shown(v))
+                    .collect();
+                match extras.is_empty() {
+                    true => shown(spec),
+                    false => format!("{} ({})", shown(spec), extras.join("; ")),
+                }
+            }
+            _ => continue,
+        };
+        items.push(item);
+    }
+    items
 }
 
 /// `kio check path --grants g`'s binding, its errors in `--json`'s object; dry, so a server's
@@ -904,6 +961,16 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
         };
         page.tests.push(("not checked", line));
     }
+    // A changed function no test reaches ran in no test: per program, one line naming them.
+    let unreached = unreached_changed(inputs, &changes);
+    for (entry, fs) in &unreached {
+        let prefix = entry.map_or(String::new(), |e| format!("{e}: "));
+        let line = format!("changed, reached by no test: {prefix}{}", fs.join(", "));
+        page.tests.push(("not checked", line));
+    }
+    let unreached: Vec<_> = (unreached.iter())
+        .flat_map(|(e, fs)| fs.iter().map(move |f| json!({"entry": e, "function": f})))
+        .collect();
     // A property that ran fewer cases than in OLD, or became an example test, tests less. One
     // that failed stopped at the failing case: its count says nothing.
     let mut fewer = Vec::new();
@@ -965,7 +1032,7 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
     let value = json!({
         "grants": inputs.test_grants.as_ref().map(|(t, _)| t),
         "old": sides["old"], "new": sides["new"], "added": added, "removed": removed, "changed": changed,
-        "fewer_cases": fewer, "properties": properties, "failures": failures, "old_failed": old_failed,
+        "unreached_changed": unreached, "fewer_cases": fewer, "properties": properties, "failures": failures, "old_failed": old_failed,
         "setup_error": null,
     });
     (value, !removed.is_empty() || !fewer.is_empty(), failed)
@@ -994,18 +1061,22 @@ fn fn_texts(prog: &Program) -> BTreeMap<String, String> {
 struct Changes {
     new: Option<lang::Program>,
     changed: BTreeSet<String>,
+    /// NEW's `fn_texts`.
+    texts: BTreeMap<String, String>,
 }
 
 impl Changes {
     fn of(old: &Program, new: &Program) -> Changes {
         let old_texts = fn_texts(old);
-        let changed = (fn_texts(new).into_iter())
-            .filter(|(k, t)| old_texts.get(k) != Some(t))
-            .map(|(k, _)| k)
+        let texts = fn_texts(new);
+        let changed = (texts.iter())
+            .filter(|(k, t)| old_texts.get(*k) != Some(t))
+            .map(|(k, _)| k.clone())
             .collect();
         Changes {
             new: kio_host::check_program(&new.files).ok(),
             changed,
+            texts,
         }
     }
 
@@ -1015,6 +1086,32 @@ impl Changes {
         let reach = lang::reachable(p, roots.iter().copied());
         reach.intersection(&self.changed).cloned().collect()
     }
+}
+
+/// Per program, the root (`changes` is its) then each `--entry`, its changed functions `main`
+/// reaches that no test of the root's reaches (`lang::reachable` from every test, as the report's
+/// `reached only from tests:`), in key order; a program with none is left out. An entry's
+/// function counts as reached when the root's tests reach one of its key and every function it
+/// may run in the entry has the same tokens as the root's of that key (#290).
+fn unreached_changed<'a>(inputs: &'a Inputs, changes: &Changes) -> Vec<(Option<&'a str>, Vec<String>)> {
+    let Some(root) = &changes.new else { return vec![] };
+    let tests: Vec<String> = root.tests().into_iter().map(|t| t.name).collect();
+    let reach = lang::reachable(root, tests.iter().map(String::as_str));
+    let unreached = |c: &Changes| -> Vec<String> {
+        let Some(p) = &c.new else { return vec![] };
+        let same = |k: &String| changes.texts.get(k) == c.texts.get(k);
+        (c.reached(&["main"]).into_iter())
+            .filter(|k| !reach.contains(k) || !lang::reachable(p, [k.as_str()]).iter().all(same))
+            .collect()
+    };
+    let mut out = vec![(None, unreached(changes))];
+    let none = no_program();
+    for e in &inputs.entries {
+        let c = Changes::of(e.old.as_ref().map_or(&none, |o| &o.1), &e.new.1);
+        out.push((Some(e.name.as_str()), unreached(&c)));
+    }
+    out.retain(|(_, fs)| !fs.is_empty());
+    out
 }
 
 /// The first `--hmac`, `--secret` or `--http-header` secret the tests' grants `flags` name that
@@ -1115,19 +1212,31 @@ fn resources(old: &[TestResult], new: &[TestResult], page: &mut Page) {
         ms: 0.0,
     };
     let (o, n) = (sum(of, om), sum(nf, nm));
+    // Each test only in NEW that passed (R1a5): its own numbers, no old to compare.
+    let added: Vec<(&str, Used)> = (new.iter())
+        .filter(|n| n.error.is_none() && !old.iter().any(|o| o.name == n.name))
+        .filter_map(|n| Some((n.name.as_str(), n.used?)))
+        .collect();
+    let added_lines = added
+        .iter()
+        .map(|(name, u)| format!("added: {name}: fuel {}, peak memory {} KB", u.fuel, u.peak_memory >> 10));
+    let added: Vec<_> = (added.iter())
+        .map(|(name, u)| json!({"name": name, "fuel": u.fuel, "peak_memory": u.peak_memory}))
+        .collect();
     if pairs.is_empty() {
+        page.resources.extend(added_lines);
         let ran = if failed + failed_old == 0 { "ran" } else { "passed" };
         page.resources.push(format!("no test {ran} on both sides"));
-        page.resources_json =
-            json!({"rows": rows, "total": null, "tests": 0, "failed": failed, "failed_old": failed_old});
+        page.resources_json = json!({"rows": rows, "added": added, "total": null, "tests": 0, "failed": failed, "failed_old": failed_old});
         return;
     }
     if rows.is_empty() {
         page.resources.push("no test changed by more than 2%".into());
     }
+    page.resources.extend(added_lines);
     let label = format!("total over {} tests on both sides", pairs.len());
     page.resources.push(row(&label, "largest peak memory", &o, &n));
-    page.resources_json = json!({"rows": rows, "total": as_json("total", &o, &n), "tests": pairs.len(), "failed": failed, "failed_old": failed_old});
+    page.resources_json = json!({"rows": rows, "added": added, "total": as_json("total", &o, &n), "tests": pairs.len(), "failed": failed, "failed_old": failed_old});
 }
 
 /// The change from `old` to `new` in percent, two decimals, rounded away from zero so a change
@@ -1188,18 +1297,39 @@ fn not_checked(inputs: &Inputs, page: &mut Page) {
             );
         }
     }
+    // Per program, each its own `kio.deps`: two programs may pin one name to different files. A
+    // change two programs share is shown once, for the first.
     let mut dep_rows = Vec::new();
-    let (old_deps, new_deps) = (side_deps(inputs, false), side_deps(inputs, true));
-    for (name, o, n) in deps::changes(&old_deps, &new_deps) {
-        let change = match (&o, &n) {
-            (Some(o), Some(n)) => format!("changed ({} -> {})", deps::short(o), deps::short(n)),
-            (Some(o), None) => format!("removed ({})", deps::short(o)),
-            (_, n) => format!("added ({})", deps::short(n.as_deref().unwrap_or_default())),
-        };
-        page.not_checked.push(format!(
-            "dependency {name} {change}: its code is not shown; its authority is above"
-        ));
-        dep_rows.push(json!({"name": name, "old": o, "new": n}));
+    let mut seen = Vec::new();
+    let programs = [(None, &inputs.old.1.deps, &inputs.new.1.deps)]
+        .into_iter()
+        .chain((inputs.entries.iter()).map(|e| {
+            (
+                Some(e.name.as_str()),
+                e.old.as_ref().map_or(&none.deps, |o| &o.1.deps),
+                &e.new.1.deps,
+            )
+        }));
+    for (entry, old_deps, new_deps) in programs {
+        for change in deps::changes(old_deps, new_deps) {
+            if seen.contains(&change) {
+                continue;
+            }
+            let (name, o, n) = &change;
+            // Code added or changed that the page does not show: exit 3, as authority added (#280).
+            page.added |= n.is_some();
+            let what = match (o, n) {
+                (Some(o), Some(n)) => format!("changed ({} -> {})", deps::short(o), deps::short(n)),
+                (Some(o), None) => format!("removed ({})", deps::short(o)),
+                (_, n) => format!("added ({})", deps::short(n.as_deref().unwrap_or_default())),
+            };
+            let prefix = entry.map_or(String::new(), |e| format!("{e}: "));
+            page.not_checked.push(format!(
+                "{prefix}dependency {name} {what}: its code is not shown; its authority is above"
+            ));
+            dep_rows.push(json!({"entry": entry, "name": name, "old": o, "new": n}));
+            seen.push(change);
+        }
     }
     page.not_checked.push(SAME_AUTHOR.into());
     page.not_checked_json = json!({"methods": rows, "deps": dep_rows, "author": SAME_AUTHOR});

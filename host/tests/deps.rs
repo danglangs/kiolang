@@ -294,7 +294,7 @@ fn base_uses_each_sides_kio_deps() {
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(
         v["not_checked"]["deps"],
-        serde_json::json!([{"name": "web", "old": n, "new": null}])
+        serde_json::json!([{"entry": null, "name": "web", "old": n, "new": null}])
     );
     assert_eq!(v["identity"]["deps"]["old"][0]["sha256"], n);
 }
