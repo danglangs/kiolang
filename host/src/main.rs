@@ -349,7 +349,70 @@ fn with_grants(flags: &[&str]) -> Result<(Vec<String>, Option<String>), i32> {
     let Some(path) = path else {
         return Ok((rest, None));
     };
-    let text = std::fs::read_to_string(&path).map_err(|e| fail(format!("--grants {path}: cannot read: {e}")))?;
+    let text = match read_regular(path.as_ref(), GRANTS_MAX, false) {
+        Ok(bytes) => String::from_utf8(bytes).map_err(|_| fail(format!("--grants {path}: not UTF-8")))?,
+        Err(Unread::TooLarge) => {
+            return Err(fail(format!(
+                "--grants {path}: over 1 MiB\n  hint: a grants file is one flag a line; name the large values by path"
+            )))
+        }
+        Err(e) => return Err(fail(format!("--grants {path}: {e}"))),
+    };
+    let mut out = grants_flags(&text, &path, &rest)?;
+    out.extend(rest);
+    Ok((out, Some(path)))
+}
+
+/// The most bytes of a grants file kio reads.
+const GRANTS_MAX: u64 = 1 << 20;
+
+/// Why `read_regular` read nothing.
+enum Unread {
+    NotRegular,
+    TooLarge,
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for Unread {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Unread::NotRegular => write!(f, "not a regular file"),
+            Unread::TooLarge => write!(f, "too large"),
+            Unread::Io(e) => write!(f, "cannot read: {e}"),
+        }
+    }
+}
+
+/// The contents of the regular file at `path`, at most `max` bytes. Opened without blocking (a
+/// FIFO would wait for a writer); anything but a regular file is refused before a read. With
+/// `nofollow`, for a file anyone may have placed, neither a symlink as its last component nor a
+/// file with other hard links (another name for any file) is read: both seen on the file opened.
+fn read_regular(path: &std::path::Path, max: u64, nofollow: bool) -> Result<Vec<u8>, Unread> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let mut flags = rustix::fs::OFlags::NONBLOCK;
+    if nofollow {
+        flags |= rustix::fs::OFlags::NOFOLLOW;
+    }
+    let f = (std::fs::OpenOptions::new().read(true))
+        .custom_flags(flags.bits() as i32)
+        .open(path)
+        .map_err(Unread::Io)?;
+    let m = f.metadata().map_err(Unread::Io)?;
+    if !m.is_file() || (nofollow && m.nlink() > 1) {
+        return Err(Unread::NotRegular);
+    }
+    let mut bytes = Vec::new();
+    f.take(max + 1).read_to_end(&mut bytes).map_err(Unread::Io)?;
+    match bytes.len() as u64 > max {
+        true => Err(Unread::TooLarge),
+        false => Ok(bytes),
+    }
+}
+
+/// The flags of the grants file `path`, whose contents are `text`, each followed by its value;
+/// `rest` is the command line's other flags, which a `ONCE` flag must not repeat.
+fn grants_flags(text: &str, path: &str, rest: &[String]) -> Result<Vec<String>, i32> {
     let mut out: Vec<String> = Vec::new();
     // Each `ONCE` flag in the file and its line.
     let mut once: Vec<(&str, usize)> = Vec::new();
@@ -400,8 +463,7 @@ fn with_grants(flags: &[&str]) -> Result<(Vec<String>, Option<String>), i32> {
         out.push(flag.into());
         out.push(value.into());
     }
-    out.extend(rest);
-    Ok((out, Some(path)))
+    Ok(out)
 }
 
 /// Why the grants file `path` is refused, if it is: the program could change it, and so its own
@@ -1379,7 +1441,7 @@ fn result_lines(tests: &Tests, r: &TestResult) -> Vec<String> {
 fn error_lines(e: &serde_json::Value) -> Vec<String> {
     let message = kio_host::escape_shown(e["message"].as_str().unwrap_or_default());
     let mut out = vec![match (e["file"].as_str(), e["line"].as_u64(), e["col"].as_u64()) {
-        (Some(f), Some(l), Some(c)) => format!("{f}:{l}:{c}: {message}"),
+        (Some(f), Some(l), Some(c)) => format!("{}:{l}:{c}: {message}", kio_host::escape_shown(f)),
         _ => message,
     }];
     if let Some(h) = e["hint"].as_str() {
@@ -2025,9 +2087,10 @@ fn print_diags(prog: &Program, diags: Vec<Diag>, kind: &str) -> i32 {
         // A run-time message is the program's text (an assert message), and a parse message may
         // quote a source character: escaped to one line with no terminal escape (H30).
         let message = kio_host::escape_shown(&d.message);
-        eprintln!("{}:{line}:{col}: error: {message}", prog.shown(file));
+        let shown = kio_host::escape_shown(&prog.shown(file));
+        eprintln!("{shown}:{line}:{col}: error: {message}");
         if let Some(h) = &d.hint {
-            eprintln!("  hint: {h}");
+            eprintln!("  hint: {}", kio_host::escape_shown(h));
         }
     }
     1

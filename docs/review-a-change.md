@@ -95,7 +95,7 @@ Checklist:
 1. Any `error`? Reject, or ask for a fix.
 2. Authority: for each `+` or `~` line, does the requirement diff ask for it? A `~` method on an existing grant is authority added like a `+` grant: the requirement must ask for it. If not, reject. The `derived` line under it names where to read. Do the same for each grants-file line (`app.grants: + --dir ..`).
 3. Tests: is any test `removed:`, or a property running fewer cases? Find out why before accepting.
-4. Do the added tests cover what the requirement diff claims? A `changed:` test is read like an added one: it tests something else now. Name tests are a claim too: read the one or two that matter.
+4. Do the added tests cover what the requirement diff claims? A `changed:` test (its own code or a function it reaches changed) is read like an added one: it tests something else now. Name tests are a claim too: read the one or two that matter.
 5. Resources: any change you would not accept in production?
 6. Not checked: for each line, is it covered by a test you trust, or by a function you read? Otherwise ask.
 7. Identity: is this the commit you meant to review?

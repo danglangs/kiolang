@@ -410,3 +410,23 @@ fn base_names_a_dependency_whose_pin_changed() {
     let removed = "no change in authority\n\ndep web removed\n";
     assert_eq!(kio(&root, &back), (0, removed.into(), "".into()));
 }
+
+/// An invisible or bidirectional character in a dependency line is refused by its code point;
+/// one in the root's path is escaped where a diagnostic names it.
+#[test]
+fn bidirectional_characters_are_refused_or_escaped() {
+    let (_t, dir) = project(APP, "web  ../lib/w\u{202e}eb.kio\n");
+    let (code, out, err) = kio(&dir, &["check", "app.kio"]);
+    assert_eq!((code, out.as_str()), (2, ""));
+    assert_eq!(
+        err,
+        "kio: kio.deps:1: the line holds U+202E, an invisible or bidirectional character\n  hint: name the module and its file in characters that show as they are\n"
+    );
+    let odd = dir.join("a\u{202e}b");
+    std::fs::create_dir(&odd).unwrap();
+    std::fs::write(odd.join("app.kio"), "fn main() -> Int { nope }\n").unwrap();
+    let (code, _, err) = kio(&dir, &["check", "a\u{202e}b/app.kio"]);
+    assert_eq!(code, 1);
+    assert!(!err.contains('\u{202e}'), "{err}");
+    assert!(err.starts_with("a\\u{202e}b/app.kio:1:"), "{err}");
+}

@@ -54,6 +54,12 @@ fn parse(text: &str, shown: &str) -> Result<Vec<Line>, String> {
         if l.is_empty() || l.starts_with('#') {
             continue;
         }
+        if let Some(c) = l.chars().find(|c| invisible(*c)) {
+            return Err(format!(
+                "{shown}:{i}: the line holds U+{:04X}, an invisible or bidirectional character\n  hint: name the module and its file in characters that show as they are",
+                c as u32
+            ));
+        }
         let f: Vec<&str> = l.split([' ', '\t']).filter(|f| !f.is_empty()).collect();
         let hex = |h: &str| h.len() == 64 && h.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
         let hash = match f.get(2) {
@@ -86,6 +92,12 @@ fn parse(text: &str, shown: &str) -> Result<Vec<Line>, String> {
         });
     }
     Ok(lines)
+}
+
+/// A format character a path could hide behind: zero-width, direction marks and overrides, the
+/// line and paragraph separators, word joiners and invisible operators, the byte-order mark.
+fn invisible(c: char) -> bool {
+    matches!(c, '\u{061c}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}')
 }
 
 /// Read the module `line` lists into `prog`, for the root's `mod` line at `span`: from its path,

@@ -82,32 +82,78 @@ struct Entry {
 }
 
 /// Where a grants file of NEW's sits beside OLD's program: G's path relative to NEW's directory,
-/// escaped, and OLD's file there if it exists (`Err` when G is outside NEW's directory).
-type Beside = Result<(String, Option<(String, Vec<u8>)>), ()>;
+/// escaped, and what is there (`Err` when G is outside NEW's directory).
+type Beside = Result<(String, OldGrants), ()>;
+
+/// What is beside OLD's program at a grants file's place. OLD's tree may be anyone's: only a
+/// regular file inside its directory, reached through no symlink, is read, and why another is
+/// not is never shown.
+enum OldGrants {
+    /// Nothing: the file is new.
+    Absent,
+    /// The file's path and contents.
+    File(String, Vec<u8>),
+    /// Not compared, and why: the end of the page's line.
+    NotCompared(&'static str),
+    /// Not compared: OLD's program is in NEW's directory, so the file there is NEW's.
+    Shared,
+}
+
+impl OldGrants {
+    fn file(&self) -> Option<(String, Vec<u8>)> {
+        match self {
+            OldGrants::File(p, b) => Some((p.clone(), b.clone())),
+            _ => None,
+        }
+    }
+}
+
+/// The most bytes of OLD's grants file read; a longer one is not compared.
+const OLD_GRANTS_MAX: u64 = 64 << 10;
 
 /// The file at `g`'s path relative to `new`'s directory, beside the program `old`.
-fn beside_old(old: &str, new: &str, g: &str) -> Result<Beside, i32> {
+fn beside_old(old: &str, new: &str, g: &str) -> Beside {
     let dir = |p: &str| match Path::new(p).parent() {
         Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
         _ => ".".into(),
     };
     let (Ok(nd), Ok(gc)) = (dir(new).canonicalize(), Path::new(g).canonicalize()) else {
-        return Ok(Err(()));
+        return Err(());
     };
     let Ok(rel) = gc.strip_prefix(&nd) else {
-        return Ok(Err(()));
+        return Err(());
     };
-    let path = dir(old).join(rel);
     let shown = kio_host::escape_line(&rel.display().to_string());
-    match std::fs::symlink_metadata(&path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Ok((shown, None))),
-        _ => match std::fs::read(&path) {
-            Ok(bytes) => Ok(Ok((shown, Some((path.display().to_string(), bytes))))),
-            Err(e) => Err(fail(format!(
-                "{}: cannot read: {e}",
-                kio_host::escape_line(&path.display().to_string())
-            ))),
-        },
+    let not = |why| Ok((shown.clone(), OldGrants::NotCompared(why)));
+    let refused = "is not a regular file inside its directory";
+    let Ok(od) = dir(old).canonicalize() else {
+        return not(refused);
+    };
+    if od == nd {
+        return Ok((shown, OldGrants::Shared));
+    }
+    // Every component below OLD's directory a directory, the last a regular file, none a symlink
+    // (`rel` has no `..`: it is below a canonical path).
+    let mut path = dir(old);
+    let parts: Vec<_> = rel.components().collect();
+    for (i, c) in parts.iter().enumerate() {
+        path.push(c);
+        let last = i + 1 == parts.len();
+        match std::fs::symlink_metadata(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((shown, OldGrants::Absent)),
+            Ok(m) if last && m.is_file() => {}
+            Ok(m) if !last && m.is_dir() => {}
+            _ => return not(refused),
+        }
+    }
+    if !path.canonicalize().is_ok_and(|p| p.starts_with(&od)) {
+        return not(refused);
+    }
+    // A hard link could be to any file (NEW's own included): `nofollow` refuses one too.
+    match read_regular(&path, OLD_GRANTS_MAX, true) {
+        Ok(bytes) => Ok((shown, OldGrants::File(path.display().to_string(), bytes))),
+        Err(Unread::TooLarge) => not("is over 64 KiB"),
+        Err(_) => not(refused),
     }
 }
 
@@ -247,15 +293,19 @@ fn inputs(path: &str, flags: &[&str]) -> Result<Inputs, i32> {
     let old = (base.to_string(), read_program(base)?);
     let new = (path.to_string(), read_program(path)?);
     let read = |flag: &str, g: Option<&str>| match g {
-        Some(g) => match std::fs::read(g) {
+        Some(g) => match read_regular(g.as_ref(), GRANTS_MAX, false) {
             Ok(bytes) => Ok(Some((g.to_string(), bytes))),
-            Err(e) => Err(fail(format!("{flag} {g}: cannot read: {e}"))),
+            Err(Unread::TooLarge) => Err(fail(format!(
+                "{flag} {}: over 1 MiB\n  hint: a grants file is one flag a line",
+                kio_host::escape_line(g)
+            ))),
+            Err(e) => Err(fail(format!("{flag} {}: {e}", kio_host::escape_line(g)))),
         },
         None => Ok(None),
     };
     let grants = read("--grants", grants)?;
     let old_grants = match &grants {
-        Some((g, _)) => beside_old(base, path, g)?,
+        Some((g, _)) => beside_old(base, path, g),
         None => Err(()),
     };
     let test_grants = read("--test-grants", test_grants)?;
@@ -280,7 +330,7 @@ fn inputs(path: &str, flags: &[&str]) -> Result<Inputs, i32> {
     for (rel, g) in entries {
         let mut e = entry(base, path, rel, read("--entry-grants", g)?)?;
         if let Some((g, _)) = &e.grants {
-            e.old_grants = beside_old(&e.old_path, &e.new.0, g)?;
+            e.old_grants = beside_old(&e.old_path, &e.new.0, g);
         }
         if e.new.0 == new.0 || read_entries.iter().any(|x| x.new.0 == e.new.0) {
             return Err(fail(format!(
@@ -514,7 +564,7 @@ fn unified(old: &str, new: &str) -> Result<Vec<String>, String> {
 /// root's two sides check (its tests run), and whether every entry checks and every grants file
 /// binds.
 fn authority(inputs: &Inputs, page: &mut Page) -> (bool, bool) {
-    let grants = inputs.grants.as_ref().map(|g| g.0.as_str());
+    let grants = inputs.grants.as_ref();
     let (mut value, checks, binds) = entry_authority(
         &inputs.old.1,
         &inputs.new,
@@ -529,7 +579,7 @@ fn authority(inputs: &Inputs, page: &mut Page) -> (bool, bool) {
     for e in &inputs.entries {
         let prefix = format!("{}: ", e.name);
         let old = e.old.as_ref().map_or(&none, |o| &o.1);
-        let grants = e.grants.as_ref().map(|g| g.0.as_str());
+        let grants = e.grants.as_ref();
         let grants = (grants, &e.old_grants);
         let (mut v, checks, binds) = entry_authority(old, &e.new, grants, &prefix, "--entry-grants", page);
         ok &= checks && binds;
@@ -560,7 +610,7 @@ fn no_program() -> Program {
 fn entry_authority(
     old: &Program,
     (new_path, new): &(String, Program),
-    (grants, old_grants): (Option<&str>, &Beside),
+    (grants, old_grants): (Option<&(String, Vec<u8>)>, &Beside),
     prefix: &str,
     flag: &str,
     page: &mut Page,
@@ -619,16 +669,28 @@ fn entry_authority(
         }
     };
     let mut grant_errors = Vec::new();
-    if let Some(g) = grants {
+    if let Some((g, bytes)) = grants {
         let (_, out) = captured(true, || bind(new_path, g));
         let (shown_g, shown) = (kio_host::escape_line(g), kio_host::escape_line(new_path));
         // The file's change from OLD's, then whether it binds.
         if let Ok((rel, old_g)) = old_grants {
-            let (lines, v) = grants_diff(g, old_g.as_ref().map(|o| o.0.as_str()));
-            lines
-                .iter()
-                .for_each(|l| page.authority.push(("enforced", format!("{prefix}{rel}: {l}"))));
-            value["grants_file"] = json!({"path": rel, "old": old_g.as_ref().map(|o| &o.0), "diff": v});
+            let not = match old_g {
+                OldGrants::NotCompared(why) => Some(format!("the base's {rel} {why}; not compared")),
+                OldGrants::Shared => Some("the base shares this directory; not compared".to_string()),
+                _ => None,
+            };
+            if let Some(line) = &not {
+                page.authority.push(("not checked", format!("{prefix}{rel}: {line}")));
+                value["grants_file"] = json!({"path": rel, "old": null, "diff": null, "not_compared": line});
+            } else {
+                let old_g = old_g.file();
+                let (lines, v) = grants_diff((g, bytes), old_g.as_ref());
+                lines
+                    .iter()
+                    .for_each(|l| page.authority.push(("enforced", format!("{prefix}{rel}: {l}"))));
+                value["grants_file"] =
+                    json!({"path": rel, "old": old_g.as_ref().map(|o| &o.0), "diff": v, "not_compared": null});
+            }
         } else {
             let line = format!("{prefix}{shown_g}: outside the program's directory; not compared with the base");
             page.authority.push(("not checked", line));
@@ -666,15 +728,15 @@ fn gained(old: &Program, new: &Program) -> Vec<(String, String, Vec<String>)> {
             .unwrap_or_default()
     };
     let mut out = Vec::new();
-    for g @ (d, ty) in &na.main {
+    for g @ (d, _) in &na.main {
         let was = if oa.main.contains(g) {
             reached(&oa, d)
         } else {
             BTreeSet::new()
         };
         for m in reached(&na, d).difference(&was) {
-            let before = lang::users(&o, d, ty, &[m]);
-            let mut fs: Vec<String> = (lang::users(&n, d, ty, &[m]).into_iter())
+            let before = lang::users(&o, d, &[m]);
+            let mut fs: Vec<String> = (lang::users(&n, d, &[m]).into_iter())
                 .filter(|f| !before.contains(f))
                 .collect();
             if fs.len() > 1 {
@@ -686,15 +748,17 @@ fn gained(old: &Program, new: &Program) -> Vec<(String, String, Vec<String>)> {
     out
 }
 
-/// The flag-level change from OLD's grants file `old` (`None`: there is none) to `new`: lines
-/// (`+ --dir x=y`, `- ..`, `unchanged`, `new file`) and `--json`'s value. A file that does not
-/// parse is named; its binding error is above (NEW) or it is the base's (OLD).
-fn grants_diff(new: &str, old: Option<&str>) -> (Vec<String>, serde_json::Value) {
-    let parse = |g: &str| {
-        let (flags, _) = captured(true, || with_grants(&["--grants", g]));
-        let flags = flags.ok()?.0;
-        Some(flags.chunks(2).map(|p| p.join(" ")).collect::<Vec<String>>())
+/// The flag-level change from OLD's grants file `old` (`None`: there is none) to `new`, each a
+/// path and the bytes read once: lines (`+ --dir x=y`, `- ..`, `unchanged`, `new file`) and
+/// `--json`'s value. A file that does not parse is named; its binding error is above (NEW) or it
+/// is the base's (OLD).
+fn grants_diff(new: (&String, &Vec<u8>), old: Option<&(String, Vec<u8>)>) -> (Vec<String>, serde_json::Value) {
+    let parse = |(g, bytes): (&String, &Vec<u8>)| {
+        let text = std::str::from_utf8(bytes).ok()?;
+        let (flags, _) = captured(true, || grants_flags(text, g, &[]));
+        Some(flags.ok()?.chunks(2).map(|p| p.join(" ")).collect::<Vec<String>>())
     };
+    let old = old.map(|(g, b)| (g, b));
     let Some(old) = old else {
         return (vec!["new file".into()], json!("new file"));
     };
@@ -818,13 +882,23 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
     );
     page.tests
         .extend(removed.iter().map(|n| ("not checked", format!("removed: {n}"))));
-    // A test on both sides whose text changed tests something else now: read it like an added one.
-    let (old_texts, new_texts) = (fn_texts(&inputs.old.1), fn_texts(&inputs.new.1));
-    let changed: Vec<&str> = (new_r.iter().map(|r| r.name.as_str()))
-        .filter(|n| find(old_r, n).is_some() && old_texts.get(*n) != new_texts.get(*n))
-        .collect();
-    page.tests
-        .extend(changed.iter().map(|n| ("not checked", format!("changed: {n}"))));
+    // A test on both sides that changed, or reaches a function that did, tests something else
+    // now: read it like an added one.
+    let changes = Changes::of(&inputs.old.1, &inputs.new.1);
+    let mut changed: Vec<&str> = Vec::new();
+    for n in (new_r.iter().map(|r| r.name.as_str())).filter(|n| find(old_r, n).is_some()) {
+        let mut fs = changes.reached(&[n]);
+        if fs.is_empty() {
+            continue;
+        }
+        changed.push(n);
+        fs.retain(|f| f != n);
+        let line = match fs.is_empty() {
+            true => format!("changed: {n}"),
+            false => format!("changed: {n} (reaches changed {})", fs.join(", ")),
+        };
+        page.tests.push(("not checked", line));
+    }
     // A property that ran fewer cases than in OLD, or became an example test, tests less. One
     // that failed stopped at the failing case: its count says nothing.
     let mut fewer = Vec::new();
@@ -892,8 +966,8 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
     (value, !removed.is_empty() || !fewer.is_empty(), failed)
 }
 
-/// Each function's text by key (tests included), whitespace-normalised; none if `prog` does not
-/// check.
+/// Each function's tokens by key (tests included), as text: whitespace and comments aside,
+/// string literals exact. None if `prog` does not check.
 fn fn_texts(prog: &Program) -> BTreeMap<String, String> {
     let Ok(p) = kio_host::check_program(&prog.files) else {
         return BTreeMap::new();
@@ -901,18 +975,41 @@ fn fn_texts(prog: &Program) -> BTreeMap<String, String> {
     (p.fn_spans().into_iter())
         .filter_map(|(k, s)| {
             let text = prog.files.get(s.file as usize)?.1.get(s.start..s.end)?;
-            Some((k, text.split_whitespace().collect::<Vec<_>>().join(" ")))
+            let tokens = match lang::lex::lex(text) {
+                Ok(ts) => format!("{:?}", ts.into_iter().map(|t| t.kind).collect::<Vec<_>>()),
+                Err(_) => text.to_string(),
+            };
+            Some((k, tokens))
         })
         .collect()
 }
 
-/// The functions of `new` whose text is not `old`'s; a new function counts.
-fn changed_fns(old: &Program, new: &Program) -> BTreeSet<String> {
-    let old = fn_texts(old);
-    (fn_texts(new).into_iter())
-        .filter(|(k, t)| old.get(k) != Some(t))
-        .map(|(k, _)| k)
-        .collect()
+/// NEW's functions against OLD's: NEW checked, and the functions whose tokens are not OLD's (a
+/// new function counts).
+struct Changes {
+    new: Option<lang::Program>,
+    changed: BTreeSet<String>,
+}
+
+impl Changes {
+    fn of(old: &Program, new: &Program) -> Changes {
+        let old_texts = fn_texts(old);
+        let changed = (fn_texts(new).into_iter())
+            .filter(|(k, t)| old_texts.get(k) != Some(t))
+            .map(|(k, _)| k)
+            .collect();
+        Changes {
+            new: kio_host::check_program(&new.files).ok(),
+            changed,
+        }
+    }
+
+    /// The changed functions a call of any of `roots` may run, `roots` included, in key order.
+    fn reached(&self, roots: &[&str]) -> Vec<String> {
+        let Some(p) = &self.new else { return vec![] };
+        let reach = lang::reachable(p, roots.iter().copied());
+        reach.intersection(&self.changed).cloned().collect()
+    }
 }
 
 /// The first `--hmac` or `--http-header` secret the tests' grants `flags` name that cannot be
@@ -1051,7 +1148,7 @@ fn not_checked(inputs: &Inputs, page: &mut Page) {
         let Ok(p) = kio_host::check_program(&prog.files) else {
             continue;
         };
-        let changed = changed_fns(old, prog);
+        let changes = Changes::of(old, prog);
         let prefix = entry.map_or(String::new(), |e| format!("{e}: "));
         let a = lang::authority(&p);
         for (param, methods) in a.funcs.get("main").into_iter().flatten() {
@@ -1067,12 +1164,13 @@ fn not_checked(inputs: &Inputs, page: &mut Page) {
             if reached.is_empty() {
                 continue;
             }
-            // The functions that use these methods (`main` only when no other does), changed ones.
-            let mut users = lang::users(&p, param, ty, &reached);
+            // The functions that use these methods (`main` only when no other does): the changed
+            // functions they reach, themselves included.
+            let mut users = lang::users(&p, param, &reached);
             if users.len() > 1 {
                 users.retain(|f| f != "main");
             }
-            users.retain(|f| changed.contains(f));
+            let users = changes.reached(&users.iter().map(String::as_str).collect::<Vec<_>>());
             let mark = match users.is_empty() {
                 true => String::new(),
                 false => format!(" (changed: {})", users.join(", ")),
@@ -1167,7 +1265,7 @@ fn identity(inputs: &Inputs, page: &mut Page) -> serde_json::Value {
             json!({"path": g, "sha256": hash(bytes)})
         })
     };
-    let old_of = |b: &Beside| b.as_ref().ok().and_then(|(_, o)| o.clone());
+    let old_of = |b: &Beside| b.as_ref().ok().and_then(|(_, o)| o.file());
     let grants = file("grants", &inputs.grants);
     let old_grants = file("old grants", &old_of(&inputs.old_grants));
     let test_grants = file("test grants", &inputs.test_grants);
@@ -1200,12 +1298,21 @@ fn identity(inputs: &Inputs, page: &mut Page) -> serde_json::Value {
     })
 }
 
+/// The most bytes of a file read again for `changed`: one longer, or not a regular file now
+/// (a FIFO would block), has changed.
+const CHANGED_READ_MAX: u64 = 64 << 20;
+
 /// Each of `files` (a path and its sha256, `None` for absent) whose contents on disk differ now.
 fn changed(files: &[(String, Option<String>)]) -> Vec<String> {
     let hash = |b: &[u8]| lang::digest::to_hex(&lang::digest::sha256(b));
     let mut out: Vec<String> = Vec::new();
     for (path, h) in files {
-        if std::fs::read(path).ok().map(|b| hash(&b)) != *h && !out.contains(path) {
+        if read_regular(path.as_ref(), CHANGED_READ_MAX, false)
+            .ok()
+            .map(|b| hash(&b))
+            != *h
+            && !out.contains(path)
+        {
             out.push(path.clone());
         }
     }

@@ -857,3 +857,205 @@ fn every_failed_test_is_counted() {
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["resources"]["failed"], 2);
 }
+
+/// Review: OLD's tree may be anyone's. A grants file beside OLD's program that is a symlink, a
+/// device, a FIFO, a hard link or under a symlinked directory is not read: one line says so, and
+/// neither the page nor `--json` shows a hash or a line of what it points at.
+#[test]
+fn an_old_grants_file_that_is_not_a_regular_file_inside_its_directory() {
+    let s = Sides::new(SAVES, SAVES);
+    let root = s.dir.path();
+    let secret = write(root, "secret", "--dir d=/etc\n");
+    let hash = lang::digest::to_hex(&lang::digest::sha256(b"--dir d=/etc\n"));
+    let g = write(root, "new/app.grants", "--dir d=.\n--dir r=.\n");
+    let why = "app.grants: the base's app.grants is not a regular file inside its directory; not compared";
+    let check = |what: &str| {
+        let (code, out, err) = s.review(&["--grants", &g]);
+        assert_eq!(code, 0, "{what}: {out}{err}");
+        assert_eq!(
+            Sides::section(&out, "Authority")[1],
+            format!("  not checked  {why}"),
+            "{what}: {out}"
+        );
+        let (_, json, _) = s.review(&["--grants", &g, "--json"]);
+        for text in [&out, &json] {
+            assert!(!text.contains(&hash) && !text.contains("/etc"), "{what}: {text}");
+        }
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["identity"]["old_grants"], serde_json::Value::Null);
+        assert_eq!(
+            v["authority"]["grants_file"]["not_compared"].as_str(),
+            why.strip_prefix("app.grants: ")
+        );
+    };
+    let old_g = root.join("old/app.grants");
+    std::os::unix::fs::symlink(&secret, &old_g).unwrap();
+    check("symlink");
+    std::fs::remove_file(&old_g).unwrap();
+    std::os::unix::fs::symlink("/dev/zero", &old_g).unwrap();
+    check("device");
+    std::fs::remove_file(&old_g).unwrap();
+    assert!(Command::new("mkfifo").arg(&old_g).status().unwrap().success());
+    check("fifo");
+    std::fs::remove_file(&old_g).unwrap();
+    // A hard link could be to any file on the same filesystem.
+    std::fs::hard_link(&secret, &old_g).unwrap();
+    check("hard link");
+    std::fs::remove_file(&old_g).unwrap();
+    // A directory on the way that is a symlink out of OLD's tree.
+    std::fs::create_dir(root.join("new/conf")).unwrap();
+    let g = write(root, "new/conf/app.grants", "--dir d=.\n--dir r=.\n");
+    std::fs::create_dir(root.join("elsewhere")).unwrap();
+    write(root, "elsewhere/app.grants", "--dir d=/etc\n");
+    std::os::unix::fs::symlink(root.join("elsewhere"), root.join("old/conf")).unwrap();
+    let (code, out, err) = s.review(&["--grants", &g]);
+    assert_eq!(code, 0, "{out}{err}");
+    let line = "  not checked  conf/app.grants: the base's conf/app.grants is not a regular file inside its directory; not compared\n";
+    assert!(out.contains(line), "{out}");
+    assert!(!out.contains(&hash) && !out.contains("/etc"), "{out}");
+}
+
+/// Review: an OLD grants file over 64 KiB is not compared; a NEW one over 1 MiB, or one that is
+/// not a regular file, is refused, as `kio run --grants` refuses one over 1 MiB.
+#[test]
+fn grants_files_have_a_size_cap() {
+    let s = Sides::new(SAVES, SAVES);
+    let root = s.dir.path();
+    let g = write(root, "new/app.grants", "--dir d=.\n--dir r=.\n");
+    write(root, "old/app.grants", &format!("--dir d=.\n{}", "#\n".repeat(40_000)));
+    let (code, out, err) = s.review(&["--grants", &g]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert_eq!(
+        Sides::section(&out, "Authority")[1],
+        "  not checked  app.grants: the base's app.grants is over 64 KiB; not compared"
+    );
+    assert!(!out.contains("old grants"), "{out}");
+    let big = write(root, "new/big.grants", &format!("--dir d=.\n{}", "#\n".repeat(600_000)));
+    let (code, _, err) = s.review(&["--grants", &big]);
+    assert_eq!(code, 2);
+    assert!(err.contains(&format!("--grants {big}: over 1 MiB\n  hint: ")), "{err}");
+    let (code, _, err) = s.review(&["--test-grants", "/dev/zero"]);
+    assert_eq!(code, 2);
+    assert!(err.contains("--test-grants /dev/zero: not a regular file"), "{err}");
+    let (code, _, err) = kio(&root.join("tmp"), &["run", &s.new, "--grants", &big]);
+    assert_eq!(code, 2);
+    assert!(err.contains(&format!("--grants {big}: over 1 MiB\n  hint: ")), "{err}");
+}
+
+/// Review: when OLD's program sits in NEW's directory, the grants file beside it is NEW's own:
+/// not compared, never `unchanged`.
+#[test]
+fn a_base_in_the_same_directory() {
+    let s = Sides::new(SAVES, SAVES);
+    let root = s.dir.path();
+    let old = write(root, "new/app.old.kio", SAVES);
+    let g = write(root, "new/app.grants", "--dir d=.\n--dir r=.\n");
+    let tmp = root.join("tmp");
+    let (code, out, err) = kio(&tmp, &["review", &s.new, "--base", &old, "--grants", &g]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert_eq!(
+        Sides::section(&out, "Authority")[1],
+        "  not checked  app.grants: the base shares this directory; not compared"
+    );
+}
+
+/// Review: a test whose own text is unchanged but that reaches a changed function is changed;
+/// whitespace inside a string literal is a change, outside one and in comments it is not.
+#[test]
+fn a_test_reaching_a_changed_function() {
+    let new = OLD
+        .replace("s += i; i += 1;", "s += i;\n    // step\n    i += 1;")
+        .replace("fn main(d: Dir)", "fn main(d: Dir)  ");
+    let s = Sides::new(OLD, &new);
+    let (code, out, err) = s.review(&[]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(!out.contains("changed:"), "{out}");
+    let new = OLD
+        .replace("s += i; i += 1;", "s += i + 0; i += 1;")
+        .replace("\"non-negative\"", "\"non- negative\"");
+    let s = Sides::new(OLD, &new);
+    let (code, out, err) = s.review(&[]);
+    assert_eq!(code, 0, "{out}{err}");
+    let changed: Vec<String> = (Sides::section(&out, "Tests").into_iter())
+        .filter(|l| l.contains("changed:"))
+        .collect();
+    assert_eq!(
+        changed,
+        [
+            "  not checked  changed: counts (reaches changed count)",
+            "  not checked  changed: gone (reaches changed count)",
+            "  not checked  changed: kept (reaches changed count)",
+            "  not checked  changed: small (reaches changed count)",
+        ],
+        "{out}"
+    );
+    let (_, out, _) = s.review(&["--json"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        v["tests"]["changed"],
+        serde_json::json!(["counts", "gone", "kept", "small"])
+    );
+}
+
+/// A program whose writer takes its path from `target`.
+const TARGETS: &str = r#"fn target() -> Str { "out.txt" }
+
+fn save(d: Dir) -> Result<(), IoErr> { d.write(target(), "x".to_bytes()) }
+
+fn main(d: Dir) -> Result<(), IoErr> { save(d) }
+"#;
+
+/// Review: the Not checked line of a method is marked when a function using it reaches a changed
+/// function, though its own text is unchanged.
+#[test]
+fn a_changed_path_function_marks_the_writer() {
+    let s = Sides::new(TARGETS, &TARGETS.replace("\"out.txt\"", "\"../out.txt\""));
+    let (code, out, err) = s.review(&[]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert_eq!(
+        Sides::section(&out, "Not checked")[0],
+        "  not checked  d: Dir write: what is written or removed (changed: target)",
+        "{out}"
+    );
+}
+
+/// Review: with two grants of one type, a function is listed under the grant passed to it only.
+#[test]
+fn two_grants_of_one_type() {
+    let old = r#"fn wa(a: Dir) -> Result<(), IoErr> { let _ = a.read("x")?; Ok(()) }
+
+fn wb(b: Dir) -> Result<(), IoErr> { b.write("y", "y".to_bytes()) }
+
+fn main(a: Dir, b: Dir) -> Result<(), IoErr> { wa(a)?; wb(b) }
+"#;
+    let new = old.replace("let _ = a.read(\"x\")?; Ok(())", "a.write(\"x\", \"x\".to_bytes())");
+    let s = Sides::new(old, &new);
+    let (code, out, err) = s.review(&[]);
+    assert_eq!(code, 3, "{out}{err}");
+    assert_eq!(
+        Sides::section(&out, "Authority"),
+        ["  enforced     ~ a: Dir (+write -read)", "  derived        write in wa"],
+        "{out}"
+    );
+    assert_eq!(
+        Sides::section(&out, "Not checked")[..2],
+        [
+            "  not checked  a: Dir write: what is written or removed (changed: wa)",
+            "  not checked  b: Dir write: what is written or removed",
+        ],
+        "{out}"
+    );
+}
+
+/// Review: an error's file name reaches the page escaped.
+#[test]
+fn an_error_path_is_escaped() {
+    let s = Sides::new(SAVES, SAVES);
+    let dir = s.dir.path().join("n\u{202e}ew");
+    std::fs::create_dir(&dir).unwrap();
+    let new = write(&dir, "app.kio", "fn main() -> Int { nope }\n");
+    let (code, out, err) = kio(&s.dir.path().join("tmp"), &["review", &new, "--base", &s.old]);
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(!out.contains('\u{202e}'), "{out}");
+    assert!(out.contains("n\\u{202e}ew/app.kio:1:"), "{out}");
+}

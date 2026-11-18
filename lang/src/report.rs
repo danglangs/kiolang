@@ -410,25 +410,56 @@ fn main_authority(p: &Program) -> Authority {
     a
 }
 
-/// The functions `main` reaches whose report line has one of `methods` on `main`'s parameter
-/// `grant` (for `main`) or on a parameter of type `ty` (any other function), in key order.
-pub fn users(p: &Program, grant: &str, ty: &str, methods: &[&str]) -> Vec<String> {
+/// The functions `main` reaches whose report line has one of `methods` on a parameter `main`'s
+/// parameter `grant` is passed to (`passed`), `main`'s own `grant` included, in key order.
+pub fn users(p: &Program, grant: &str, methods: &[&str]) -> Vec<String> {
     let a = main_authority(p);
-    let uses = |f: &str, params: &[(String, BTreeSet<String>)]| {
-        params.iter().any(|(d, ms)| {
-            let of = if f == "main" {
-                d == grant
-            } else {
-                param_ty(p, f, d).as_deref() == Some(ty)
-            };
-            of && methods.iter().any(|m| ms.contains(*m))
-        })
+    let to = passed(p, grant);
+    let uses = |f: &String, params: &[(String, BTreeSet<String>)]| {
+        (params.iter()).any(|(d, ms)| to.contains(&(f.clone(), d.clone())) && methods.iter().any(|m| ms.contains(*m)))
     };
     a.funcs
         .iter()
         .filter(|(f, ps)| uses(f, ps))
         .map(|(f, _)| f.clone())
         .collect()
+}
+
+/// Each `(function, parameter)` `main`'s parameter `grant` reaches, `("main", grant)` included:
+/// passed whole as a call's argument, parameter to parameter, as `uses` charges methods.
+fn passed(p: &Program, grant: &str) -> BTreeSet<(String, String)> {
+    let mut seen = BTreeSet::new();
+    let mut todo = vec![("main".to_string(), grant.to_string())];
+    while let Some(fd) = todo.pop() {
+        let Some(f) = p.funcs.get(&fd.0) else { continue };
+        if !seen.insert(fd.clone()) {
+            continue;
+        }
+        walk_block(&f.body, &mut |n| {
+            let Node::Expr(e) = n else { return };
+            let ExprKind::Call(callee, args) = &e.kind else { return };
+            let Some(g) = callee_key(&fd.0, callee) else { return };
+            let Some(g_fn) = p.funcs.get(&g) else { return };
+            for (arg, param) in args.iter().zip(&g_fn.params) {
+                if cap_param(p, arg) == Some(fd.1.as_str()) {
+                    todo.push((g.clone(), param.name.clone()));
+                }
+            }
+        });
+    }
+    seen
+}
+
+/// The key of the function a call in function `name` names as `callee`, if it names one.
+fn callee_key(name: &str, callee: &Expr) -> Option<String> {
+    match &callee.kind {
+        ExprKind::Name(g) | ExprKind::Turbofish(g, _) => Some(key(module_of(name), g).into_owned()),
+        ExprKind::Module(m, inner) => match &inner.kind {
+            ExprKind::Name(g) | ExprKind::Turbofish(g, _) => Some(format!("{m}::{g}")),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// The methods `main` reaches on its parameter `d`, through any function.
@@ -530,14 +561,7 @@ fn uses(p: &Program) -> Uses {
                         // `Some(x)` and the like are calls on names that are not functions. A
                         // generic function's capability parameters are concrete, so every instance
                         // is charged the same.
-                        let g = match &callee.kind {
-                            ExprKind::Name(g) | ExprKind::Turbofish(g, _) => key(module_of(name), g).into_owned(),
-                            ExprKind::Module(m, inner) => match &inner.kind {
-                                ExprKind::Name(g) | ExprKind::Turbofish(g, _) => format!("{m}::{g}"),
-                                _ => return,
-                            },
-                            _ => return,
-                        };
+                        let Some(g) = callee_key(name, callee) else { return };
                         let Some(g_fn) = p.funcs.get(&g) else { return };
                         for (arg, param) in args.iter().zip(&g_fn.params) {
                             if let (Some(d), Some(ms)) = (cap_param(p, arg), uses.get(&(g.clone(), param.name.clone())))
