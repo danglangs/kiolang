@@ -124,6 +124,11 @@ impl Program {
         tests
     }
 
+    /// The span of every function, tests included, by key: its whole text, `fn` to `}`.
+    pub fn fn_spans(&self) -> Vec<(String, crate::Span)> {
+        self.funcs.iter().map(|(k, f)| (k.clone(), f.span)).collect()
+    }
+
     /// `main`'s return type, which `kio run --json` reads its value by.
     pub fn main_ret(&self) -> Option<&Ty> {
         self.sigs.get("main").map(|s| &s.ret)

@@ -70,7 +70,7 @@ Every line carries a label; a line under a labelled one shares it. The label say
 | Label | Backed by | You can skip | You still own |
 |---|---|---|---|
 | `enforced` | the checker derives it from the code; the host refuses any call outside the grants | reading the code to learn what it can reach | whether that authority fits the requirement; what is done with it |
-| `derived` | the checker's attribution of authority to a function (`+ flow::init: db exec`); the host enforces per grant, not per function | tracing which function makes each call | as for `enforced` |
+| `derived` | the checker's attribution of authority to a function (`+ flow::init: db exec`, `  query in flow::claim` under a grant line); the host enforces per grant, not per function | tracing which function makes each call | as for `enforced` |
 | `tested` | these tests passed, compiled, in this run (properties: on the generated cases shown) | rerunning the tests | whether the tests check the right thing |
 | `measured` | fuel and peak memory, deterministic, on the tests | profiling the tests | production load, wall time |
 | `not checked` | nothing | nothing | look at it, or accept it knowingly |
@@ -93,9 +93,9 @@ Ask for evidence is a correct outcome, not a failure to decide: it names the one
 Checklist:
 
 1. Any `error`? Reject, or ask for a fix.
-2. Authority: for each `+` or `~` line, does the requirement diff ask for it? If not, reject.
+2. Authority: for each `+` or `~` line, does the requirement diff ask for it? A `~` method on an existing grant is authority added like a `+` grant: the requirement must ask for it. If not, reject. The `derived` line under it names where to read. Do the same for each grants-file line (`app.grants: + --dir ..`).
 3. Tests: is any test `removed:`, or a property running fewer cases? Find out why before accepting.
-4. Do the added tests cover what the requirement diff claims? Name tests are a claim too: read the one or two that matter.
+4. Do the added tests cover what the requirement diff claims? A `changed:` test is read like an added one: it tests something else now. Name tests are a claim too: read the one or two that matter.
 5. Resources: any change you would not accept in production?
 6. Not checked: for each line, is it covered by a test you trust, or by a function you read? Otherwise ask.
 7. Identity: is this the commit you meant to review?
@@ -140,10 +140,16 @@ Requirements
 Authority
   derived      grants unchanged; new functions reach: flow::init
   derived      + flow::init: db exec
+  enforced     app.grants: unchanged
   enforced     --grants app.grants binds app.kio's main
   enforced     worker.kio: + db: Db (exec query)
+  derived      worker.kio:   exec in flow::claim, flow::finish, flow::init, flow::try_claim
+  derived      worker.kio:   query in flow::claim, flow::try_claim
   enforced     worker.kio: + now: Clock (now_ms)
+  derived      worker.kio:   now_ms in main
   enforced     worker.kio: + dest: Http (send POST)
+  derived      worker.kio:   send POST in deliver
+  enforced     worker.kio: worker.grants: new file
   enforced     worker.kio: --entry-grants worker.grants binds worker.kio's main
 Tests
   tested       grants: test.grants
@@ -169,9 +175,9 @@ Resources
   measured     total over 10 tests on both sides: fuel 71107433 -> 72494821 (+1.96%), largest peak memory 2112 KB -> 2112 KB (+0.00%)
 Not checked
   not checked  res: Outgoing send: what the client receives
-  not checked  db: Db exec: the SQL text and what it changes
-  not checked  worker.kio: db: Db exec, query: the SQL text and what it changes
-  not checked  worker.kio: dest: Http send POST: the paths, headers and bodies sent
+  not checked  db: Db exec: the SQL text and what it changes (changed: flow::init, flow::store)
+  not checked  worker.kio: db: Db exec, query: the SQL text and what it changes (changed: flow::claim, flow::finish, flow::init, flow::try_claim)
+  not checked  worker.kio: dest: Http send POST: the paths, headers and bodies sent (changed: deliver)
   not checked  tests and properties were written by the same author as the code unless stated
 Identity
   kio 0.1.3 (<commit>)
@@ -185,7 +191,7 @@ $ echo $?
 Reading it:
 
 - **Authority**: grants unchanged (`main` already had `db exec`); exit 3 is `init`, new and reached from `main`. It is the `CREATE TABLE`, moved out of `store`. Expected.
-- **Authority, `worker.kio`**: a new program, so every grant is `+`: the database (`exec query`, to claim and finish jobs), the clock, and `POST` to one destination, whose key the host adds (`worker.grants`: `--http-header dest=Authorization:env:DEST_AUTH`). That is what the F1.2 requirement describes. `kio check worker.kio` shows which function makes each call.
+- **Authority, `worker.kio`**: a new program, so every grant is `+`: the database (`exec query`, to claim and finish jobs), the clock, and `POST` to one destination, whose key the host adds (`worker.grants`: `--http-header dest=Authorization:env:DEST_AUTH`). That is what the F1.2 requirement describes. The `derived` lines under each grant name the functions that make each call: `deliver` posts, `flow::claim` and `flow::try_claim` query.
 - **Tests**: 10 to 18, nothing removed; the 8 added are the worker's transitions and two properties against a model. The F1.1 properties still run 100 cases.
 - **Resources**: +3% to +10% fuel on the ingest tests, +1.96% in total, memory flat. Every ingest now runs `init`, a longer `CREATE TABLE` and a wider `INSERT`; acceptable.
 - **Not checked**: `db exec: the SQL text`. The table gains three columns, and the requirement diff says "An F1.1 database made before F1.2 has no migration": `CREATE TABLE IF NOT EXISTS` leaves an old table as it is, and the new `INSERT` names `next_ms`. The worker's lines add its SQL and the bodies it posts: the tests cover the claims and completions against a model, and `every_attempt_carries_the_event_id_as_the_key` the delivery key.
@@ -242,6 +248,8 @@ Requirements
                +Also write the number of data rows to `out/count.txt`.
 Authority
   enforced     + stats: Http (send POST)
+  derived        send POST in main
+  enforced     tally.grants: unchanged
   error        --grants b/tally.grants does not bind to b/tally.kio's main:
                  b/tally.kio:19:32: no grant for `stats: Http`
                  hint: grant it: `--http stats=host`
@@ -256,15 +264,15 @@ Resources
   measured     sums_the_cents_column: fuel 15345 -> 16395 (+6.85%), peak memory 1600 KB -> 1600 KB (+0.00%)
   measured     total over 2 tests on both sides: fuel 31951 -> 34051 (+6.58%), largest peak memory 1600 KB -> 1600 KB (+0.00%)
 Not checked
-  not checked  out: Dir write: what is written or removed
-  not checked  stats: Http send POST: the paths, headers and bodies sent
+  not checked  out: Dir write: what is written or removed (changed: main)
+  not checked  stats: Http send POST: the paths, headers and bodies sent (changed: main)
   not checked  tests and properties were written by the same author as the code unless stated
 ...
 $ echo $?
 1
 ```
 
-**Decision: reject.** `+ stats: Http (send POST)` is a new grant the requirement does not mention, carrying the whole CSV; the grants file does not give it (`error`); and the only test of `main` was removed. You decided this from the Authority and Tests sections, without reading the diff. (Without `--grants` the page is the same minus the `error`, and exits 3.) Resources moved +6% on tests that never call `main`: each run first sets up every type the program uses, and `stats.send` brings `HttpResponse` and `HttpErr` (about 1,000 fuel a run; [guide, Resources](guide.md#reviewing-a-change)).
+**Decision: reject.** `+ stats: Http (send POST)` is a new grant the requirement does not mention, carrying the whole CSV; the grants file does not give it (`error`); and the only test of `main` was removed. You decided this from the Authority and Tests sections, without reading the diff. (Without `--grants` the page is the same minus the grants lines and the `error`, and exits 3.) Resources moved +6% on tests that never call `main`: each run first sets up every type the program uses, and `stats.send` brings `HttpResponse` and `HttpErr` (about 1,000 fuel a run; [guide, Resources](guide.md#reviewing-a-change)).
 
 ### c. A change that stays inside its authority and is wrong
 
@@ -299,6 +307,7 @@ Requirements
                no change
 Authority
   enforced     no change in authority
+  enforced     tally.grants: unchanged
   enforced     --grants c/tally.grants binds c/tally.kio's main
 Tests
   tested       grants: defaults (temporary Dir, :memory: stores, fixed clock)
@@ -315,7 +324,7 @@ $ echo $?
 0
 ```
 
-Exit 0 and a clean page, but `if c > 0` now drops refunds (negative cents) from the total. kio cannot see that: the authority is the same, and no test has a negative row. The page does tell you where to look: the one effect is `out: Dir write: what is written`, and no test covers a refund.
+Exit 0 and a clean page, but `if c > 0` now drops refunds (negative cents) from the total. kio cannot see that: the authority is the same, and no test has a negative row. The page does tell you where to look: the one effect is `out: Dir write: what is written`, and no test covers a refund. It carries no `(changed: ..)` mark: `cents` changed, but `main` writes, and the mark follows which functions call a method, not where the data comes from.
 
 **Decision: ask for evidence.** Either read `cents` (6 lines), or ask for a test of the requirement's edge: a row with a negative and a zero amount. Here the author adds it, and the next review answers:
 
