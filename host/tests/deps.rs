@@ -79,7 +79,7 @@ fn mod_items_after_a_comment_or_on_one_line_load() {
     let (code, _, err) = kio(&dir, &["check", "app.kio"]);
     assert_eq!(code, 2);
     assert!(
-        err.starts_with("app.kio:1: error: ../lib/web.kio does not match kio.deps:2"),
+        err.starts_with("app.kio:1:1: error: ../lib/web.kio does not match kio.deps:2"),
         "{err}"
     );
 }
@@ -91,7 +91,7 @@ fn errors_and_hints() {
         (
             "web  ../lib/web.kio\n".into(),
             None,
-            "app.kio:1: error: `web` has no hash in kio.deps:1\n  hint: review it, then `kio deps pin app.kio`\n".into(),
+            "app.kio:1:1: error: `web` has no hash in kio.deps:1\n  hint: review it, then `kio deps pin app.kio`\n".into(),
         ),
         (
             "# c\n\nweb ../lib/web.kio sha256:12ab\n".into(),
@@ -111,13 +111,13 @@ fn errors_and_hints() {
         (
             format!("web  ../lib/nope.kio  sha256:{hash}\n"),
             None,
-            "app.kio:1: error: kio.deps:1: ../lib/nope.kio does not exist\n  hint: a path in kio.deps is relative to the directory kio.deps is in\n".into(),
+            "app.kio:1:1: error: kio.deps:1: ../lib/nope.kio does not exist\n  hint: a path in kio.deps is relative to the directory kio.deps is in\n".into(),
         ),
         (
             format!("web  ../lib/web.kio  sha256:{}\n", sha("old")),
             None,
             format!(
-                "app.kio:1: error: ../lib/web.kio does not match kio.deps:1 (sha256:{}.. pinned, sha256:{}.. found)\n  hint: review the change, then `kio deps pin app.kio`\n",
+                "app.kio:1:1: error: ../lib/web.kio does not match kio.deps:1 (sha256:{}.. pinned, sha256:{}.. found)\n  hint: review the change, then `kio deps pin app.kio`\n",
                 &sha("old")[..12],
                 &hash[..12]
             ),
@@ -125,7 +125,7 @@ fn errors_and_hints() {
         (
             format!("web  ../lib/web.kio  sha256:{hash}\n"),
             Some("web.kio"),
-            "app.kio:1: error: `web` is in kio.deps:1 and beside app.kio\n  hint: delete one\n".into(),
+            "app.kio:1:1: error: `web` is in kio.deps:1 and beside app.kio\n  hint: delete one\n".into(),
         ),
     ];
     for (deps, beside, want) in cases {
@@ -170,7 +170,10 @@ fn an_error_in_a_dependency_names_its_path() {
     std::fs::write(dir.join("../lib/web.kio"), bad).unwrap();
     let (code, _, err) = kio(&dir, &["check", "app.kio"]);
     assert_eq!(code, 1);
-    assert!(err.starts_with("../lib/web.kio:2: error: unknown name `nope`"), "{err}");
+    assert!(
+        err.starts_with("../lib/web.kio:2:5: error: unknown name `nope`"),
+        "{err}"
+    );
 }
 
 /// `run`, `run --listen` and `test` stop on a mismatch before anything runs.
@@ -188,7 +191,7 @@ fn a_mismatch_stops_run_listen_and_test() {
         let (code, _, err) = kio(&dir, args);
         assert_eq!(code, 2, "{args:?}");
         assert!(
-            err.contains("app.kio:1: error: ../lib/web.kio does not match kio.deps:2"),
+            err.contains("app.kio:1:1: error: ../lib/web.kio does not match kio.deps:2"),
             "{args:?}: {err}"
         );
     }
@@ -340,7 +343,7 @@ fn a_dependency_that_is_not_a_regular_file_is_refused() {
     let (_t, dir) = project(APP, &format!("web  ../lib/fifo.kio  sha256:{}\n", sha(WEB)));
     let fifo = dir.join("../lib/fifo.kio");
     assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
-    let want = "app.kio:1: error: kio.deps:1: ../lib/fifo.kio is not a regular file\n";
+    let want = "app.kio:1:1: error: kio.deps:1: ../lib/fifo.kio is not a regular file\n";
     assert_eq!(kio(&dir, &["check", "app.kio"]), (2, "".into(), want.into()));
     std::os::unix::fs::symlink("/dev/zero", dir.join("../lib/zero.kio")).unwrap();
     std::fs::write(dir.join("kio.deps"), "web  ../lib/zero.kio\n").unwrap();

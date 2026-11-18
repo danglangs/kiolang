@@ -101,7 +101,7 @@ fn base_that_fails_to_check_exits_1_and_names_the_base() {
         err.starts_with("kio: the base program ") && err.contains("old/app.kio does not check"),
         "{err}"
     );
-    assert!(err.contains("app.kio:1: error:"), "{err}");
+    assert!(err.contains("app.kio:1:20: error:"), "{err}");
 }
 
 #[test]

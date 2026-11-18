@@ -766,6 +766,18 @@ fn want_expr(e: &Expr, found: &Ty, expected: &Ty) -> Result<(), Diag> {
     })
 }
 
+/// A mismatch `d` at argument `arg` (from 1) of a call of `written`: "expected Dir, found Str
+/// in argument 2 of `inv::handle`", with the declaration as hint unless `d` has one. A
+/// struct literal or variant (`sig.parts`) names its values itself.
+fn in_arg(mut d: Diag, (written, sig): Generic, arg: usize) -> Diag {
+    if sig.parts.is_none() {
+        d.msg = format!("{} in argument {arg} of `{written}`", d.msg);
+        d.hint
+            .get_or_insert_with(|| format!("`{written}` is declared as `{}`", sig.decl));
+    }
+    d
+}
+
 /// Edits to turn `a` into `b`, counting a swap of neighbours as one (`cuont` -> `count`).
 fn edit_distance(a: &str, b: &str) -> usize {
     let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
@@ -3091,26 +3103,42 @@ impl<'a> Checker<'a> {
         Ok(elem)
     }
 
-    /// `[a, b]`: the elements share the expected element type, else the first one's.
+    /// `[a, b]`: the elements share the expected element type, else the first one's that is
+    /// not `None`; a `None` before it is checked after it, as in `[None, Some("a")]`.
     fn list_lit(&mut self, e: &Expr, items: &[Expr], expected: Option<&Ty>) -> Result<Ty, Diag> {
         let mut elem = match expected {
             Some(Ty::List(t)) => Some((**t).clone()),
             _ => None,
         };
+        let mut nones = Vec::new();
         for item in items {
+            if elem.is_none() && matches!(&item.kind, ExprKind::Name(n) if n == "None") {
+                nones.push(item);
+                continue;
+            }
             let found = self.expr(item, elem.as_ref())?;
             match &elem {
                 Some(t) => want_expr(item, &found, t)?,
                 None => elem = Some(found),
             }
         }
-        match elem {
-            Some(t) => Ok(Ty::List(Box::new(t))),
-            None => {
+        let Some(t) = elem else {
+            let Some(none) = nones.first() else {
                 let hint = "add a type: `let xs: List<Int> = [];`";
-                Err(err(e.span, "cannot tell the type of `[]`".to_string(), Some(hint)))
-            }
+                return Err(err(e.span, "cannot tell the type of `[]`".to_string(), Some(hint)));
+            };
+            let hint = "add the list's type: `let xs: List<Option<Int>> = [None];`";
+            return Err(err(none.span, "cannot tell the type of `None`".to_string(), Some(hint)));
+        };
+        for none in nones {
+            self.expr(none, Some(&t)).map_err(|mut d| {
+                d.hint = Some(format!(
+                    "the list's elements are {t}, from its first element that is not `None`"
+                ));
+                d
+            })?;
         }
+        Ok(Ty::List(Box::new(t)))
     }
 
     fn method_call(&mut self, e: &Expr, recv: &Expr, name: &str, args: &[Expr]) -> Result<Ty, Diag> {
@@ -3982,13 +4010,14 @@ impl<'a> Checker<'a> {
             let hint = format!("`{name}` is declared as `{}`", sig.decl);
             return Err(err(e.span, msg, Some(&hint)));
         }
+        let written = module.map_or(name.to_string(), |m| format!("{m}::{name}"));
         if !sig.tparams.is_empty() || explicit.is_some() {
-            let written = module.map_or(name.to_string(), |m| format!("{m}::{name}"));
             let (at, sig) = (callee.span, (k.as_str(), written.as_str(), sig));
             return self.generic_call(e, at, sig, explicit, args, expected);
         }
-        for (a, param) in args.iter().zip(&sig.params) {
-            want_expr(a, &self.operand(a, Some(param))?, param)?;
+        for (i, (a, param)) in args.iter().zip(&sig.params).enumerate() {
+            let found = self.operand(a, Some(param))?;
+            want_expr(a, &found, param).map_err(|d| in_arg(d, (&written, sig), i + 1))?;
         }
         Ok(sig.ret.clone())
     }
@@ -4143,8 +4172,9 @@ impl<'a> Checker<'a> {
         }
         let tys = all_bound(e.span, g, &binds, true).map_err(|_| open(&binds))?;
         let pairs: Vec<(String, Ty)> = sig.tparams.iter().cloned().zip(tys.iter().cloned()).collect();
-        for ((a, p), t) in args.iter().zip(&sig.params).zip(found) {
-            want_expr(a, &t.expect("every argument is checked"), &subst(p, &pairs))?;
+        for (i, ((a, p), t)) in args.iter().zip(&sig.params).zip(found).enumerate() {
+            let t = t.expect("every argument is checked");
+            want_expr(a, &t, &subst(p, &pairs)).map_err(|d| in_arg(d, g, i + 1))?;
         }
         self.bounds_hold(g, &binds)?;
         Ok(tys)

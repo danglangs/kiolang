@@ -352,7 +352,10 @@ fn hashmap_is_not_map() {
     let src = "fn f(m: Map<Str, Int>) {} fn main() { let m: HashMap<Str, Int> = HashMap::new(); f(m); }";
     assert_eq!(
         reject(src),
-        ("expected Map<Str, Int>, found HashMap<Str, Int>".into(), "m".into())
+        (
+            "expected Map<Str, Int>, found HashMap<Str, Int> in argument 1 of `f`".into(),
+            "m".into()
+        )
     );
     let src =
         "fn main() -> Bool { let a: Map<Int, Int> = Map::new(); let b: HashMap<Int, Int> = HashMap::new(); a == b }";

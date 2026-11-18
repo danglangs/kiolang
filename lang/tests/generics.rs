@@ -241,7 +241,10 @@ fn turbofish_errors() {
     let (msg, at, _) = reject(&format!("{FIRST} fn main() {{ first::<Str>([1]); }}"));
     assert_eq!((msg.as_str(), at.as_str()), ("expected Str, found Int", "1"));
     let (msg, at, _) = reject("fn id<T>(x: T) -> T { x } fn main() { id::<Str>(1); }");
-    assert_eq!((msg.as_str(), at.as_str()), ("expected Str, found Int", "1"));
+    assert_eq!(
+        (msg.as_str(), at.as_str()),
+        ("expected Str, found Int in argument 1 of `id`", "1")
+    );
     let (msg, _, hint) = reject(&format!("{FIRST} fn main() {{ let first = 1; first::<Int>([1]); }}"));
     assert_eq!(
         (msg.as_str(), hint.as_str()),

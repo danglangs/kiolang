@@ -27,7 +27,7 @@ $ kio review tally.kio --base old/tally.kio --requirements README.md
 ```console
 $ git show HEAD:examples/flow/kio.deps > old/kio.deps    # with app.kio, flow.kio, tests.kio
 $ kio check examples/flow/app.kio --base old/app.kio
-old/app.kio:9: error: old/kio.deps:2: ../../web.kio does not exist
+old/app.kio:9:1: error: old/kio.deps:2: ../../web.kio does not exist
   hint: a path in kio.deps is relative to the directory kio.deps is in
 ```
 

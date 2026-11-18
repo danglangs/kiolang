@@ -2648,10 +2648,21 @@ const LOG_RUN_MAX: u64 = 1 << 20;
 /// terminal escape, and reads in the order it was written (no Trojan-source reordering can hide
 /// its prefix). Never shorter than `s`.
 pub fn escape_line(s: &str) -> String {
+    escape(s, true)
+}
+
+/// `escape_line` with `\` kept as it is, for a diagnostic: its message quotes source text or a
+/// value already written as a kio literal (`"x\"y"`), which doubling would garble. Still one
+/// line with no terminal escape (H30), though a `\n` it shows may be the two characters.
+pub fn escape_shown(s: &str) -> String {
+    escape(s, false)
+}
+
+fn escape(s: &str, backslash: bool) -> String {
     let mut o = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
-            '\\' => o.push_str("\\\\"),
+            '\\' if backslash => o.push_str("\\\\"),
             '\n' => o.push_str("\\n"),
             '\r' => o.push_str("\\r"),
             '\t' => o.push_str("\\t"),

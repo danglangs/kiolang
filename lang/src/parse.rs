@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::lex::{lex_all, Kind, Token};
+use crate::lex::{bitwise_hint, lex_all, Kind, Token, BITWISE};
 use crate::{Diag, Span};
 
 const MAX_DEPTH: usize = 64;
@@ -938,8 +938,18 @@ impl Parser {
         let mut lhs = self.unary()?;
         while let Some(&Kind::Sym(op)) = self.peek() {
             if op == "|" {
-                let hint = "use `||` for logical or; `|x| ..` starts a closure only where a value starts";
-                return Err(err(self.span(), "`|` is not an operator in kio", Some(hint)));
+                return Err(err(self.span(), BITWISE, Some(bitwise_hint("|"))));
+            }
+            // `<<` and `>>` lex as two `<` or `>`, which no expression puts side by side.
+            if let ("<" | ">", Some(next)) = (op, self.toks.get(self.pos + 1)) {
+                if next.kind == Kind::Sym(op) && next.span.start == self.span().end {
+                    let span = Span {
+                        end: next.span.end,
+                        ..self.span()
+                    };
+                    let shift = if op == "<" { "<<" } else { ">>" };
+                    return Err(err(span, BITWISE, Some(bitwise_hint(shift))));
+                }
             }
             let p = prec(op);
             if p < min || p == 0 {

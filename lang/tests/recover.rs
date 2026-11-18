@@ -111,7 +111,7 @@ fn lexer_errors_step_over_without_cascades() {
         lifetime,
         lifetime,
         reference,
-        reference,
+        "kio has no bitwise operators",
         "kio has no block comments",
     ];
     assert_eq!(msgs, want);

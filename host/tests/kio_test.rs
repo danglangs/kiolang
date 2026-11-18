@@ -379,7 +379,7 @@ fn run_errors_are_escaped_in_text() {
     let (code, _, err) = kio_in(&tmp, &["run", &c.app]);
     assert_eq!(code, 1);
     let want = "x\\nok: forged\\r\\u{1b}[2J";
-    assert_eq!(err, format!("{}:2: error: assertion failed: {want}\n", c.app));
+    assert_eq!(err, format!("{}:2:3: error: assertion failed: {want}\n", c.app));
     let (_, out, _) = kio_in(&tmp, &["run", "--json", &c.app]);
     let j: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(j["errors"][0]["message"], "assertion failed: x\nok: forged\r\u{1b}[2J");
@@ -397,6 +397,29 @@ fn run_errors_are_escaped_in_text() {
     let (code, _, err) = kio_in(&tmp, &["check", &l]);
     assert_eq!(code, 1);
     assert!(err.contains("unexpected character `\\u{1b}`"), "{err:?}");
+}
+
+/// L28 1 and 5: a diagnostic is `file:line:col:`, and a `\` in it is shown once: in a quoted
+/// escape, in an `assert_eq` value already written as a literal, in an `assert` message. A
+/// newline and ESC are still escaped (H30).
+#[test]
+fn backslashes_are_not_doubled() {
+    let c = Case::new("fn main() -> Str {\n  \"\\u{feff}\" }\n");
+    let tmp = c.dir.path().join("tmp");
+    let (code, _, err) = kio_in(&tmp, &["check", &c.app]);
+    assert_eq!(code, 1);
+    let want = "error: unknown escape `\\u`\n  hint: escapes are \\n \\r \\t \\0 \\\" \\\\\n";
+    assert_eq!(err, format!("{}:2:4: {want}", c.app));
+
+    let src = "#[test]\nfn quotes() { assert_eq(\"x\\\"y\", \"x\\\\y\"); }\n#[test]\nfn says() { let mut b = \"\".to_bytes(); b.push(27);\n  assert(false, \"a\\\\b\\n\" + b.to_str()); }\n";
+    let t = Case::new(src);
+    let (code, out, _) = t.kio(&[]);
+    assert_eq!(code, 1);
+    let want = format!(
+        "FAIL quotes\n  {0}:2:15: assert_eq failed: left `\"x\\\"y\"`, right `\"x\\\\y\"`\nFAIL says\n  {0}:5:3: assertion failed: a\\b\\n\\u{{1b}}\n0 passed, 2 failed\n",
+        t.app
+    );
+    assert_eq!(out, want);
 }
 
 #[test]

@@ -18,7 +18,7 @@ kio mcp                          the MCP server (README, "Use from an agent")
 
 ```
 $ kio run examples/fx/report.kio --dir input=examples/in --dir out=examples/tour/out
-examples/fx/report.kio:10: error: no grant for `fx: Http`
+examples/fx/report.kio:10:21: error: no grant for `fx: Http`
   hint: grant it: `--http fx=host`
 ```
 
@@ -36,7 +36,7 @@ $ kio check app.kio
 ...
 dep web ../../web.kio sha256:e4aad9a99560d8fd3d5f893e372764cc315c1b08611af9efce55b17e0fa6959e
 $ kio run app.kio            # after web.kio changed
-app.kio:1: error: ../../web.kio does not match kio.deps:2 (sha256:e4aad9a99560.. pinned, sha256:91c0a1b2c3d4.. found)
+app.kio:1:1: error: ../../web.kio does not match kio.deps:2 (sha256:e4aad9a99560.. pinned, sha256:91c0a1b2c3d4.. found)
   hint: review the change, then `kio deps pin app.kio`
 $ kio deps pin app.kio
 web  sha256:e4aad9a99560.. -> sha256:91c0a1b2c3d4..
@@ -195,7 +195,7 @@ kio: `totals` is granted read-only but `main` can call `totals exec`
   hint: drop `:ro` or remove the writes
 ```
 
-The audit log has a line per call with the SQL (cut at 256 characters), the parameter count, the rows or rows changed and the bytes, never a parameter value:
+The audit log has a line per call with the SQL (cut at 256 characters), the parameter count, the rows or rows changed and the bytes, never a parameter value; a `too-large` result names the limit hit, `"limit":` `"rows"`, `"bytes"` (a result over 8 MB), `"value"`, `"sql"`, `"statements"`, `"memory"` or `"db-mb"`:
 
 ```
 {"event":"call","seq":4,"cap":"totals","kind":"Db","method":"query","arg":"SELECT name, amount FROM totals ORDER BY amount DESC LIMIT ?","bytes":49,"result":"ok","params":1,"rows":3,"ms":0.1}
