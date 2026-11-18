@@ -1223,3 +1223,90 @@ fn an_added_tests_resources() {
         "{out}"
     );
 }
+
+/// Each program's `kio.deps` is compared on its own: an entry may pin a name the root pins too,
+/// to another file.
+#[test]
+fn an_entrys_dependency_of_a_name_the_root_has() {
+    let app = "mod web;\n\nfn main(d: Dir) -> Result<Int, IoErr> { web::look(d) }\n";
+    let v1 = "pub fn look(d: Dir) -> Result<Int, IoErr> { Ok(d.list(\"\")?.len()) }\n";
+    let v2 = "pub fn look(d: Dir) -> Result<Int, IoErr> { Ok(d.list(\"\")?.len() + 1) }\n";
+    let s = Sides::new(app, app);
+    let root = s.dir.path();
+    let sha = |t: &str| lang::digest::to_hex(&lang::digest::sha256(t.as_bytes()));
+    for (side, lib2) in [("old", v1), ("new", v2)] {
+        for d in ["lib", "lib2", "sub"] {
+            std::fs::create_dir(root.join(side).join(d)).unwrap();
+        }
+        write(root, &format!("{side}/lib/web.kio"), v1);
+        write(
+            root,
+            &format!("{side}/kio.deps"),
+            &format!("web lib/web.kio sha256:{}\n", sha(v1)),
+        );
+        write(root, &format!("{side}/lib2/web.kio"), lib2);
+        write(root, &format!("{side}/sub/worker.kio"), app);
+        let pin = format!("web ../lib2/web.kio sha256:{}\n", sha(lib2));
+        write(root, &format!("{side}/sub/kio.deps"), &pin);
+    }
+    let (code, out, err) = s.review(&["--entry", "sub/worker.kio"]);
+    assert_eq!(code, 3, "{out}{err}");
+    let line = format!(
+        "  not checked  sub/worker.kio: dependency web changed (sha256:{}.. -> sha256:{}..): its code is not shown; its authority is above",
+        &sha(v1)[..12],
+        &sha(v2)[..12]
+    );
+    assert!(Sides::section(&out, "Not checked").contains(&line), "{out}");
+}
+
+/// An entry's function is reached by a root test only if all it may run is the root's too: an
+/// identical `deliver` calling a different `wipe` is not.
+#[test]
+fn an_entry_function_whose_callee_differs_from_the_roots() {
+    let app =
+        "fn wipe(d: Dir) -> Result<(), IoErr> { Ok(()) }\n\nfn deliver(d: Dir) -> Result<(), IoErr> { wipe(d) }\n\n\
+        fn main(d: Dir) -> Result<(), IoErr> { deliver(d) }\n\n#[test]\nfn delivers(d: Dir) { let _ = deliver(d); }\n";
+    let s = Sides::new(app, app);
+    let root = s.dir.path();
+    let wipe = "fn wipe(d: Dir) -> Result<(), IoErr> { d.remove(\"x\") }\n\nfn main(d: Dir) -> Result<(), IoErr> { deliver(d) }\n";
+    write(
+        root,
+        "old/worker.kio",
+        &format!("{wipe}\nfn deliver(d: Dir) -> Result<(), IoErr> {{ Ok(()) }}\n"),
+    );
+    write(
+        root,
+        "new/worker.kio",
+        &format!("{wipe}\nfn deliver(d: Dir) -> Result<(), IoErr> {{ wipe(d) }}\n"),
+    );
+    let (code, out, err) = s.review(&["--entry", "worker.kio"]);
+    assert_eq!(code, 3, "{out}{err}");
+    let unreached: Vec<String> = (Sides::section(&out, "Tests").into_iter())
+        .filter(|l| l.contains("reached by no test"))
+        .collect();
+    assert_eq!(
+        unreached,
+        ["  not checked  changed, reached by no test: worker.kio: deliver"],
+        "{out}"
+    );
+}
+
+/// The binds line is ASCII: a look-alike letter or comma is escaped, not shown; `--listen`,
+/// `--host` and `--ws-origin` are listed, as they widen who may reach the program.
+#[test]
+fn the_binds_line_cannot_be_mistaken() {
+    let app = "fn main(msg: WsMessage, conn: WsSend, d: Dir, e: Dir) -> Result<(), WsErr> { let _ = d.list(\".\"); let _ = e.list(\".\"); conn.text(msg.data().to_str()) }\n";
+    let s = Sides::new(app, app);
+    let grants = "--listen 127.0.0.1:8080\n--host app.example\n--ws-origin https://app.example\n\
+        --dir d=./data:r\u{43e}\n--dir e=a\u{ff0c}\u{a0}f=b\\c\n--timeout 20\n";
+    let g = write(s.dir.path(), "app.grants", grants);
+    let t = write(s.dir.path(), "test.grants", "--timeout 20\n");
+    let (code, out, err) = s.review(&["--grants", &g, "--test-grants", &t]);
+    assert_eq!(code, 0, "{out}{err}");
+    let binds = format!(
+        "  enforced     --grants {g} binds {}'s main: --listen 127.0.0.1:8080, --host app.example, \
+         --ws-origin https://app.example, d=./data:r\\u{{43e}}, e=a\\u{{ff0c}}\\u{{a0}}f=b\\\\c",
+        s.new
+    );
+    assert!(Sides::section(&out, "Authority").contains(&binds), "{out}");
+}
