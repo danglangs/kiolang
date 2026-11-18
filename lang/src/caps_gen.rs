@@ -258,6 +258,10 @@ pub fn v0() -> CapTable {
                     method("verify", vec![Ty::Bytes, Ty::Bytes], Ty::Bool),
                 ],
             },
+            CapType {
+                name: "Secret".into(),
+                methods: vec![method("matches", vec![Ty::Str], Ty::Bool)],
+            },
         ],
         enums: vec![
             Enum {

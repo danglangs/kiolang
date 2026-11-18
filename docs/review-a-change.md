@@ -52,7 +52,7 @@ kio review NEW --base OLD [--grants G] [--test-grants T] [--requirements FILE] [
 | Flag | Give it | Why |
 |---|---|---|
 | `--grants G` | the operator's grants file for `main` (`app.grants`) | shows an `error` if NEW's `main` needs a grant G does not give |
-| `--test-grants T` | the tests' grants file, if tests need one (an `Http`, an `Hmac`) | without it a test that needs one fails |
+| `--test-grants T` | the tests' grants file, if tests need one (an `Http`, an `Hmac`, a `Secret`) | without it a test that needs one fails |
 | `--requirements FILE` | the file that says what the program should do (`README.md`), a path relative to each side's entry | its diff is what the change claims |
 | `--entry FILE` | each other program the change touches (`worker.kio`), a path relative to NEW's entry, the same on OLD's side | its authority and blind spots, prefixed `worker.kio:`; an entry OLD lacks is all new authority |
 | `--entry-grants G2` | right after its `--entry`: that program's grants file (`worker.grants`) | as `--grants`, for that entry |

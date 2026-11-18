@@ -128,7 +128,7 @@ fn flag(name: &str, ty: &str) -> Option<String> {
         "Kv" | "Db" => "=PATH",
         "Rng" | "Clock" => "",
         "Log" => "=PATH",
-        "Hmac" => "=env:VAR",
+        "Hmac" | "Secret" => "=env:VAR",
         "Incoming" | "Outgoing" | "WsMessage" | "WsSend" => return Some("--listen ADDR".into()),
         _ => return None,
     };

@@ -434,6 +434,7 @@ fn call(ty: &str, m: &str) -> String {
         ("Db", _) => r#""select 1", []"#,
         ("Hmac", "sign") => r#""m".to_bytes()"#,
         ("Hmac", "verify") => r#""m".to_bytes(), "m".to_bytes()"#,
+        ("Secret", "matches") => r#""m""#,
         ("WsSend", "text") => r#""hi""#,
         ("WsSend", "binary") => r#""hi".to_bytes()"#,
         ("WsSend", "close") => "1000",

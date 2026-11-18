@@ -3,13 +3,14 @@ mod mcp;
 mod review;
 
 use kio_host::{
-    listen, open_dir, ClockSpec, Diag, FileId, HmacKey, Kio, Limits, LogSink, Origin, RngSpec, Server, Sources, Used,
+    listen, open_dir, ClockSpec, Diag, FileId, HmacKey, Kio, Limits, LogSink, Origin, RngSpec, SecretValue, Server,
+    Sources, Used,
 };
 use serde_json::json;
 use std::cell::RefCell;
 
 /// `kio run`'s flags.
-const USAGE: &str = "[--grants file] [--dir name=path[:ro]]... [--http name=host]... [--http-methods name=POST,PUT,..]... [--http-header name=Header:env:VAR|file:path]... [--kv name=path[:ro]|:memory:]... [--kv-mb mb] [--db name=path[:ro]|:memory:]... [--db-mb mb] [--rng name[=seed:N]]... [--clock name[=fixed:T]]... [--log name=path|-]... [--hmac name=env:VAR|file:path[:verify]]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]...";
+const USAGE: &str = "[--grants file] [--dir name=path[:ro]]... [--http name=host]... [--http-methods name=POST,PUT,..]... [--http-header name=Header:env:VAR|file:path]... [--kv name=path[:ro]|:memory:]... [--kv-mb mb] [--db name=path[:ro]|:memory:]... [--db-mb mb] [--rng name[=seed:N]]... [--clock name[=fixed:T]]... [--log name=path|-]... [--hmac name=env:VAR|file:path[:verify]]... [--secret name=env:VAR|file:path]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]...";
 
 fn main() {
     // The host checks and lowers programs natively, and compiled code runs on this thread's stack
@@ -289,7 +290,7 @@ fn check_base(path: &str, base: &str, detail: bool) -> i32 {
 }
 
 /// Every flag of `kio run`, each with one value: what a grants file may hold.
-const RUN_FLAGS: [&str; 22] = [
+const RUN_FLAGS: [&str; 23] = [
     "--dir",
     "--http",
     "--http-methods",
@@ -302,6 +303,7 @@ const RUN_FLAGS: [&str; 22] = [
     "--clock",
     "--log",
     "--hmac",
+    "--secret",
     "--fuel",
     "--timeout",
     "--memory",
@@ -483,6 +485,22 @@ fn hmac(spec: &str, dirs: &[Granted], files: &[(String, &str)], dry: bool) -> Re
     Ok((name.into(), HmacKey::new(value, verify_only)?))
 }
 
+/// Grant one `--secret name=env:VAR` or `name=file:PATH` (H33): the value is read now, once,
+/// with `--http-header`'s rules (`secret`). Errors never hold the value.
+fn secret_grant(
+    spec: &str,
+    dirs: &[Granted],
+    files: &[(String, &str)],
+    dry: bool,
+) -> Result<(String, SecretValue), String> {
+    let usage = "expected name=env:VAR or name=file:PATH";
+    let Some((name, source)) = spec.split_once('=').filter(|(n, _)| !n.is_empty()) else {
+        return Err(usage.into());
+    };
+    let value = secret(source, usage, "the secret", dirs, files, dry)?;
+    Ok((name.into(), SecretValue::new(value)?))
+}
+
 /// The secret `source` names, `env:VAR` or `file:PATH` (`read_secret`), read once; `usage` for
 /// any other form; `what` names it in the hint for an empty one. Errors never hold the value.
 /// With `dry` (`kio check --grants`) only the form is checked: nothing is read, and `UNREAD`
@@ -626,8 +644,10 @@ fn run_program(prog: &Program, flags: &[&str], grants_file: Option<&str>, dry: b
     let mut http_methods: Vec<(String, String)> = Vec::new();
     // Each `--http-header` as given, read once every `--http` is known.
     let mut http_headers: Vec<&str> = Vec::new();
-    // Each `--hmac` as given, read once the `--dir`, `--audit` and `--log` paths are known.
+    // Each `--hmac` and `--secret` as given, read once the `--dir`, `--audit` and `--log` paths
+    // are known.
     let mut hmac_specs: Vec<&str> = Vec::new();
+    let mut secret_specs: Vec<&str> = Vec::new();
     let mut limits = if flags.contains(&"--listen") {
         Limits::web()
     } else {
@@ -672,6 +692,10 @@ fn run_program(prog: &Program, flags: &[&str], grants_file: Option<&str>, dry: b
             }
             ["--hmac", spec] => {
                 hmac_specs.push(spec);
+                continue;
+            }
+            ["--secret", spec] => {
+                secret_specs.push(spec);
                 continue;
             }
             [flag @ ("--fuel" | "--timeout" | "--memory" | "--stack" | "--calls" | "--io"), n] => {
@@ -861,6 +885,15 @@ fn run_program(prog: &Program, flags: &[&str], grants_file: Option<&str>, dry: b
             }
         }
     }
+    for spec in secret_specs {
+        match secret_grant(spec, &granted, &written, dry) {
+            Ok(grant) => sources.secrets.push(grant),
+            Err(e) => {
+                let name = spec.split_once('=').map_or("", |(n, _)| n);
+                return refuse(flag_error("--secret", name, &e));
+            }
+        }
+    }
     // A program that fails to check says so before any check of `main`'s shape (H20).
     let owned;
     let checked = match &test {
@@ -992,6 +1025,7 @@ fn run_program(prog: &Program, flags: &[&str], grants_file: Option<&str>, dry: b
         named.extend(sources.logs.iter().map(|(n, _)| (n.clone(), "Log")));
         named.extend(log_paths.iter().map(|(n, _)| (n.clone(), "Log")));
         named.extend(sources.hmacs.iter().map(|(n, _)| (n.clone(), "Hmac")));
+        named.extend(sources.secrets.iter().map(|(n, _)| (n.clone(), "Secret")));
         // `--listen` grants these by type, to the parameters of that type.
         let socket = ["Incoming", "Outgoing", "WsMessage", "WsSend"];
         for (n, ty) in params.iter().filter(|_| listen.is_some()) {
@@ -1185,7 +1219,7 @@ const LIMIT_FLAGS: [&str; 6] = ["--fuel", "--timeout", "--memory", "--stack", "-
 
 /// The flags of a grant to one parameter, `--flag name=..` (`--rng name` and `--clock name`
 /// too), and the parameter's capability type.
-const NAMED: [(&str, &str); 10] = [
+const NAMED: [(&str, &str); 11] = [
     ("--dir", "Dir"),
     ("--http", "Http"),
     ("--http-methods", "Http"),
@@ -1196,6 +1230,7 @@ const NAMED: [(&str, &str); 10] = [
     ("--clock", "Clock"),
     ("--log", "Log"),
     ("--hmac", "Hmac"),
+    ("--secret", "Secret"),
 ];
 
 /// The time a test's `Clock` reads unless the grants file names it.
@@ -1543,7 +1578,7 @@ fn run_once(tests: &Tests, t: &lang::TestFn, case: Option<(lang::prop::Case, boo
                 logs.push((name.clone(), LogSink::new(Box::new(log.clone()), "test")));
                 None
             }
-            "Http" | "Hmac" => {
+            "Http" | "Hmac" | "Secret" => {
                 let msg = format!("test `{}` needs `{name}: {ty}`", t.name);
                 missing = Some(("grant", msg, Some("name it in a --grants file")));
                 break;

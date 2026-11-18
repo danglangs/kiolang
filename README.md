@@ -162,7 +162,7 @@ v0, working end to end.
 | | |
 |---|---|
 | Language | structs, enums, generics, closures, `match` with nested and `\|` patterns, `let`-else, constants, `Float`, `HashMap`, built-in JSON, SHA-256 |
-| Resources, each a grant | files (`Dir`), a key-value store (`Kv`), SQLite (`Db`), an HTTP client (`Http`: any granted method, headers, parallel `send_all`), `Rng`, `Clock`, `Log`, `Hmac` (sign and verify under a key the program never holds); serving HTTP and WebSockets |
+| Resources, each a grant | files (`Dir`), a key-value store (`Kv`), SQLite (`Db`), an HTTP client (`Http`: any granted method, headers, parallel `send_all`), `Rng`, `Clock`, `Log`, `Hmac` (sign and verify under a key the program never holds), `Secret` (a value the program can compare, never read); serving HTTP and WebSockets |
 | Safety | the authority report before a run; a Wasm sandbox with fuel, memory, time, call and I/O limits; an audit log |
 | Review | `kio review`: a change's authority diff, tests on both sides, fuel and memory per test and what no check covers, on one page; dependencies listed in `kio.deps`, pinned by sha256 |
 | Tests | `#[test]` functions with `assert`/`assert_eq`; `kio test` runs each compiled, with throwaway grants (a temp dir, in-memory stores, a fixed clock, a seeded random source). A test with data parameters is a property: 100 generated inputs, each compiled, a failure shrunk to a minimal input |

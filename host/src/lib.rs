@@ -5,8 +5,8 @@
 //! WebSocket event and its sends (ws.rs); `rng`, `clock` and `log` are the OS's randomness (or a
 //! seeded stream), the system clock (or a fixed time) and an appended file (or stderr); `db` is
 //! a fenced SQLite connection shared across runs (db.rs); `hmac` signs and verifies under a key
-//! the host read at start. Every import is counted and, if asked,
-//! written to an audit log.
+//! the host read at start; `secret` compares a value the host read at start. Every import is
+//! counted and, if asked, written to an audit log.
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir as RealDir, OpenOptions, OpenOptionsExt};
 use std::collections::{HashMap, HashSet};
@@ -207,9 +207,9 @@ pub struct Origin {
     inject: Vec<(String, Secret)>,
 }
 
-/// A header value from `--http-header` or an `--hmac` key. It is only ever written to a request
-/// or keyed into an HMAC: it has no `Display`, and its `Debug` prints `<redacted>`, so no message
-/// or log can carry it.
+/// A header value from `--http-header`, an `--hmac` key or a `--secret` value. It is only ever
+/// written to a request, keyed into an HMAC or compared in constant time: it has no `Display`,
+/// and its `Debug` prints `<redacted>`, so no message or log can carry it.
 #[derive(Clone)]
 pub struct Secret(Arc<str>);
 
@@ -2366,10 +2366,10 @@ impl LogSink {
     }
 }
 
-/// The `--rng`, `--clock`, `--log`, `--db` and `--hmac` grants, by `main` parameter name. Every
+/// The `--rng`, `--clock`, `--log`, `--db`, `--hmac` and `--secret` grants, by `main` parameter name. Every
 /// run (every request under `--listen`) gets fresh handles to them; a `Log`'s byte budget is per
-/// run; a `Db` outlives runs, so each run gets a handle to the same one (db.rs); an `Hmac` key is
-/// read once, at start.
+/// run; a `Db` outlives runs, so each run gets a handle to the same one (db.rs); an `Hmac` key
+/// and a `Secret` value are read once, at start.
 #[derive(Clone, Default)]
 pub struct Sources {
     pub rngs: Vec<(String, RngSpec)>,
@@ -2377,6 +2377,7 @@ pub struct Sources {
     pub logs: Vec<(String, LogSink)>,
     pub dbs: Vec<(String, Arc<db::Db>)>,
     pub hmacs: Vec<(String, HmacKey)>,
+    pub secrets: Vec<(String, SecretValue)>,
     /// The `Dir` grants given `:ro` (H27), by name.
     pub read_only_dirs: Vec<String>,
 }
@@ -2413,6 +2414,32 @@ impl HmacKey {
     /// Whether `sign` is refused (`:verify`).
     pub fn verify_only(&self) -> bool {
         self.verify_only
+    }
+}
+
+/// A `--secret` grant (H33): a value the program can only compare. Its `Debug` never shows it.
+#[derive(Clone, Debug)]
+pub struct SecretValue(Secret);
+
+impl SecretValue {
+    /// A value of `value`'s bytes as given. Refused: empty, or over 8 KB (a file is read only
+    /// that far, so a longer value would be cut short). `kio run` also refuses one of only
+    /// whitespace.
+    pub fn new(value: String) -> std::result::Result<Self, String> {
+        if value.is_empty() {
+            return Err("the value is empty\n  hint: set it to the secret".into());
+        }
+        if value.len() > HEADER_MAX {
+            return Err(format!(
+                "the value is over {HEADER_MAX} bytes\n  hint: use a shorter secret"
+            ));
+        }
+        Ok(SecretValue(Secret(value.into())))
+    }
+
+    /// What the audit header shows: the one method the grant allows, never the value.
+    pub(crate) fn label(&self) -> String {
+        "matches".into()
     }
 }
 
@@ -2541,6 +2568,32 @@ impl kio::caps::hmac::HostHmac for State {
 
     fn drop(&mut self, h: Resource<kio::caps::hmac::Hmac>) -> Result<()> {
         let _ = self.table.delete(Resource::<HmacKey>::new_own(h.rep()));
+        Ok(())
+    }
+}
+
+impl kio::caps::secret::Host for State {}
+
+impl kio::caps::secret::HostSecret for State {
+    /// Whether `presented` is the value, compared in constant time; `false` at once for another
+    /// length. The audit line has the result and the presented length (`bytes`, charged to
+    /// `--io`), never either value.
+    fn matches(&mut self, h: Resource<kio::caps::secret::Secret>, presented: String) -> Result<bool> {
+        self.call(
+            h.rep(),
+            "matches",
+            "matches",
+            |s| {
+                s.spend_io(presented.len())?;
+                let v = s.table.get(&Resource::<SecretValue>::new_borrow(h.rep()))?;
+                Ok(lang::digest::ct_eq(v.0 .0.as_bytes(), presented.as_bytes()))
+            },
+            |v| v.to_string(),
+        )
+    }
+
+    fn drop(&mut self, h: Resource<kio::caps::secret::Secret>) -> Result<()> {
+        let _ = self.table.delete(Resource::<SecretValue>::new_own(h.rep()));
         Ok(())
     }
 }
@@ -2955,6 +3008,10 @@ fn push_grants(
         let target = Some(key.label());
         add(name, "Hmac", s.table.push(key)?.rep(), target);
     }
+    for (name, value) in sources.secrets {
+        let target = Some(value.label());
+        add(name, "Secret", s.table.push(value)?.rep(), target);
+    }
     for b in &bound {
         s.handles.insert(b.rep, (b.name.clone(), b.kind));
     }
@@ -3152,5 +3209,14 @@ mod tests {
         assert!(HmacKey::new(String::new(), false).is_err());
         assert!(HmacKey::new("k".repeat(HEADER_MAX + 1), false).is_err());
         assert!(HmacKey::new("k".repeat(HEADER_MAX), false).is_ok());
+    }
+
+    #[test]
+    fn a_secret_value_never_shows() {
+        let v = SecretValue::new("tok_never_shown".into()).unwrap();
+        assert_eq!(format!("{v:?}"), "SecretValue(<redacted>)");
+        assert!(SecretValue::new(String::new()).is_err());
+        assert!(SecretValue::new("v".repeat(HEADER_MAX + 1)).is_err());
+        assert!(SecretValue::new("v".repeat(HEADER_MAX)).is_ok());
     }
 }
