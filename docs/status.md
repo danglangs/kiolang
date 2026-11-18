@@ -102,6 +102,7 @@ Compiled-only kio covers the whole language and every capability. Built and revi
 | R1a5 | `kio review` (from E3c, A2): `changed, reached by no test: worker.kio: deliver, main` (`tests.unreached_changed`); a dependency added or changed exits 3 (#280); each binds line lists its grants, escaped, secrets by source (`dest=https://dest.example (POST; Authorization:env:DEST_AUTH)`); `added: T: fuel N, peak memory M KB` under Resources (#290) |
 | L28 | A2's diagnostics: `file:line:col:` in text; "in argument 2 of `inv::handle`"; "kio has no bitwise operators"; `[None, Some("a")]` checks; `\` shown once in diagnostics and test failures; a Db `too-large` audit line names its limit (#283-#285) |
 | T3 | `kio test --json` gives each test's `fuel` and `peak_memory`; `--verbose` prints them; an example test over `--listen`'s 10,000,000 per-request fuel gets a `note:` line (#291-#293) |
+| D6 | A2's docs: server capabilities in the test-defaults table; which characters a generated `Str` holds; property cost measured per program size (31-52 ms a case, M3 Max); the schema statement runs per request; `chars()` against a byte scan (77 vs 29 fuel a character) |
 
 ## Next
 

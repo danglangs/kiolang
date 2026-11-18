@@ -191,7 +191,7 @@ The alternative without a grant: keep the token's `sha256().to_hex()` in a file 
 
 ### Db
 
-A SQLite database (the bundled SQLite, in the host) that outlives runs and is shared by every `--listen` request, one statement at a time. `--db name=path` opens or creates the file (WAL mode); `:memory:` keeps it for the process only. The program runs SQL with `query(sql, params)` (the rows, as `List<List<SqlValue>>`), `exec(sql, params)` (a statement that returns no rows: the rows it changed) and `transaction(sqls, params)` (each statement with its own parameter list, all applied or none). Values go in as `?` parameters, `SqlValue::Int(n)`, `Text(s)`, `Float(x)`, `Blob(b)` or `Null`, never as SQL text; the schema is the program's to create (`CREATE TABLE IF NOT EXISTS ..`).
+A SQLite database (the bundled SQLite, in the host) that outlives runs and is shared by every `--listen` request, one statement at a time. `--db name=path` opens or creates the file (WAL mode); `:memory:` keeps it for the process only. The program runs SQL with `query(sql, params)` (the rows, as `List<List<SqlValue>>`), `exec(sql, params)` (a statement that returns no rows: the rows it changed) and `transaction(sqls, params)` (each statement with its own parameter list, all applied or none). Values go in as `?` parameters, `SqlValue::Int(n)`, `Text(s)`, `Float(x)`, `Blob(b)` or `Null`, never as SQL text; the schema is the program's to create (`CREATE TABLE IF NOT EXISTS ..`). Nothing runs once at a server's startup, so a `--listen` server runs that statement at the start of every request: an `exec` that changes nothing once the table exists, and one `call` line per request in the audit log (kio-web's sqlnotes).
 
 `path:ro` is read-only: a program that can call `exec` or `transaction` on it is refused at startup, and a `query` that would write is `Denied`.
 
@@ -277,7 +277,7 @@ Flags on the command line are added after the file's. A flag that takes one valu
 
 ## Limits
 
-Every run is bounded; each limit's error names the flag that raises it. Under `--listen` the limits are per request, and the defaults are smaller: fuel 10,000,000, memory 64 MB, timeout 5 s, calls 1,000 (the flags override them).
+Every run is bounded; each limit's error names the flag that raises it. Under `--listen` the limits are per request, and the defaults are smaller: fuel 10,000,000, memory 64 MB, timeout 5 s, calls 1,000 (the flags override them). `kio test` uses the `kio run` defaults, 1,000 times a request's fuel, and notes a test that would not fit in a request ([Tests](#tests)).
 
 | Flag | Default |
 |---|---|
@@ -344,6 +344,7 @@ $ kio run spin.kio --fuel 1000 --json
 | `Rng` | `seed:1` |
 | `Log` | a buffer, printed when the test fails |
 | `Http`, `Hmac`, `Secret` | none: the test fails with "test `t` needs `api: Http`", hint "name it in a --grants file" |
+| `Incoming`, `Outgoing`, `WsMessage`, `WsSend` | never (a grants file's `--listen` is refused): "test `t` needs `req: Incoming`", hint "only `kio run --listen` grants a server's capabilities; test the handler's logic in a function" |
 
 A test fails on a failed `assert` or `assert_eq`, an `Err` return (shown as `Err("..")`), a runtime error, a limit or a refused grant. Exit 0 when every test passes (a file with no tests prints `0 passed, 0 failed`), 1 when any fails, 2 for a check error or a usage error: a bad limit, or a `--filter` no test name contains ("no test matches `x`"). A failure's message and hint are printed with control characters escaped as `Log` lines are (`\n`, `\u{1b}`); `--json` carries them as they are. `--audit`, `--listen`, `--ws-origin` and `--host` are refused, and grants go in the file, not on the command line.
 
@@ -377,6 +378,8 @@ A test with data parameters is a property ([language.md](language.md#properties)
 
 A property may not take `Http` ("a property runs many times; `api: Http` would repeat real requests", hint "test the call in an example test, or pass the data as a parameter"), nor a `Dir`, `Kv` or `Db` the grants file names unless it is `:ro` (or `:memory:`), nor a `Log` to a file (`--log log=-` is allowed). A failing input is shown clipped at 4,096 bytes and `...`: the whole line in text, the literals together in `--json`. More than 90% of cases discarded by `assume` fails it ("`t` discarded 95 of 100 inputs").
 
+A generated `Str` is printable ASCII (space to `~`), with about one character in ten from `é ß λ ж 中 日 😀 🦀`; it never holds a control character (`\n`, `\r`, `\t`, `\0`) or any other character. A property will not find a bug that only those trigger: test them in example tests (`"two\nlines"`).
+
 ```
 $ kio test app.kio
 ok   reverse_twice  (100 cases compiled; seed 1)
@@ -388,7 +391,7 @@ FAIL small  (4 cases compiled; seed 1)
 1 passed, 1 failed
 ```
 
-`--json` adds to a property's entry `cases`, `compiled`, `seed`, `discarded`, `shrinks` and `input` (each parameter's literal, or `null` when it passed). A case compiles and runs in about 30 ms in a release build: 100 cases take about 3 s, a shrink that hits the cap about 6 s more.
+`--json` adds to a property's entry `cases`, `compiled`, `seed`, `discarded`, `shrinks` and `input` (each parameter's literal, or `null` when it passed). Each case compiles the whole program again, so its cost grows with the program: measured on an Apple M3 Max, release build, about 31 ms a case for a 20-line file, 45 ms for kio-web's flow (515 lines and its library), 52 ms for a 1,200-line app; 100 cases take 3-5 s, a shrink that hits the cap up to 200 cases more. Tests run one after another; use `--filter` while editing.
 
 ## Reviewing authority in a pull request
 
