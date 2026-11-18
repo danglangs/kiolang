@@ -15,6 +15,7 @@ interface fs {
     write:  func(path: string, data: list<u8>) -> result<_, io-err>;     // create or replace, atomically
     remove: func(path: string) -> result<_, io-err>;                     // one regular file
     exists: func(path: string) -> result<bool, io-err>;
+    append: func(path: string, data: list<u8>) -> result<_, io-err>;     // create or append, one write per call
   }
 }
 

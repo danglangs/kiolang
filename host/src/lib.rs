@@ -1384,8 +1384,8 @@ impl State {
         g.0.try_clone().ok()
     }
 
-    /// Whether the directory behind a guest handle is granted `:ro`: `write`, `create` and
-    /// `remove` are then `denied`.
+    /// Whether the directory behind a guest handle is granted `:ro`: `write`, `create`, `append`
+    /// and `remove` are then `denied`.
     fn read_only(&self, h: &Resource<kio::caps::fs::Dir>) -> bool {
         let g = self.table.get(&Resource::<Granted>::new_borrow(h.rep()));
         g.is_ok_and(|g| g.1)
@@ -1517,6 +1517,15 @@ impl kio::caps::fs::HostDir for State {
             },
         };
         self.call(d.rep(), "exists", &arg, |s| s.on_dir(&d, path, work), outcome)
+    }
+
+    fn append(&mut self, d: Resource<kio::caps::fs::Dir>, path: String, data: Vec<u8>) -> Result<Result<(), IoErr>> {
+        let arg = path.clone();
+        let append = |s: &mut Self| match s.read_only(&d) {
+            true => Ok(Err(IoErr::Denied)),
+            false => s.append_file(&d, path, data),
+        };
+        self.call(d.rep(), "append", &arg, append, outcome)
     }
 
     fn drop(&mut self, d: Resource<kio::caps::fs::Dir>) -> Result<()> {
@@ -1653,6 +1662,43 @@ impl State {
                 return Err(io_err(&e));
             }
             Ok(())
+        })
+    }
+
+    /// Append `data` to the regular file at `path`, created if missing, with one `write` under
+    /// `O_APPEND`: the kernel places the bytes at the end atomically, so concurrent appends (the
+    /// requests of a `--listen` server) never interleave within a call. A short write (the disk
+    /// is full) is `denied` rather than retried, which could interleave.
+    fn append_file(
+        &mut self,
+        d: &Resource<kio::caps::fs::Dir>,
+        path: String,
+        data: Vec<u8>,
+    ) -> Result<Result<(), IoErr>> {
+        self.spend_io(data.len())?;
+        self.on_dir(d, path, move |dir, path| {
+            // As `write`: `a/` and anything but a regular file (a symlink too) are `denied`.
+            if path.ends_with('/') || kind(dir, path)?.is_some_and(|t| !t.is_file()) {
+                return Err(IoErr::Denied);
+            }
+            let mut opts = OpenOptions::new();
+            opts.append(true).create(true);
+            // cap-std's resolver (4.0.3, macOS) reports `ENOENT` to a loser of a concurrent create
+            // of the same name, where a plain `open(O_CREAT)` does not: the file then exists, so
+            // one more try opens it. Bounded, in case a concurrent `remove` keeps winning (#288).
+            let mut file = open_regular(dir, path, &mut opts);
+            for _ in 0..3 {
+                match &file {
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => file = open_regular(dir, path, &mut opts),
+                    _ => break,
+                }
+            }
+            let mut file = file.map_err(|e| io_err(&e))?;
+            match file.write(&data) {
+                Ok(n) if n == data.len() => Ok(()),
+                Ok(_) => Err(IoErr::Denied),
+                Err(e) => Err(io_err(&e)),
+            }
         })
     }
 
@@ -2443,11 +2489,11 @@ impl SecretValue {
     }
 }
 
-/// The first write (`write`, `create`, `remove`) an authority report's `main` line shows on the
-/// `Dir` `name`: a `:ro` grant of `name` is then refused (H27).
+/// The first write (`write`, `create`, `append`, `remove`) an authority report's `main` line
+/// shows on the `Dir` `name`: a `:ro` grant of `name` is then refused (H27).
 pub fn dir_write_in_report(report: &str, name: &str) -> Option<&'static str> {
     let calls = main_calls(report);
-    ["write", "create", "remove"]
+    ["write", "create", "append", "remove"]
         .into_iter()
         .find(|m| calls.contains(&(name.to_string(), m.to_string())))
 }

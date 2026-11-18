@@ -50,7 +50,7 @@ Errors (exit 2): a malformed line (`kio.deps:3: ... is not a dependency line`: a
 
 | Type | Flag | Grants |
 |---|---|---|
-| `Dir` | `--dir name=path`, `name=path:ro` | a directory: `read`, `create`, `list`, `write`, `remove`, `exists` |
+| `Dir` | `--dir name=path`, `name=path:ro` | a directory: `read`, `create`, `list`, `write`, `append`, `remove`, `exists` |
 | `Http` | `--http name=host`, `--http-methods name=POST,..`, `--http-header name=Header:env:VAR` | one host over HTTPS, GET unless more methods are granted; `--http name=http://127.0.0.1:9000` plain HTTP, for local testing |
 | `Kv` | `--kv name=path`, `name=path:ro`, `name=:memory:` | a key-value store |
 | `Db` | `--db name=path`, `name=path:ro`, `name=:memory:` | a SQLite database: `query`, `exec`, `transaction` |
@@ -71,7 +71,9 @@ main : input read
 error: IoErr::InvalidPath
 ```
 
-`path:ro` is read-only: `write`, `create` and `remove` are `Err(IoErr::Denied)` (audited `denied`), and a program whose report shows any of them on that grant is refused at startup, under `--listen` and by `kio check --grants`. The audit header shows the grant as `path:ro`.
+`write` replaces a file atomically (a reader sees the old or the new file); `append(path, data)` creates the file if missing and adds `data` at its end in one `O_APPEND` write, so the concurrent requests of a `--listen` server never interleave within a call (a log file). Both charge `data` to `--io`; `append` on a directory, a symlink or a path ending in `/` is `Denied`, as `write` is.
+
+`path:ro` is read-only: `write`, `create`, `append` and `remove` are `Err(IoErr::Denied)` (audited `denied`), and a program whose report shows any of them on that grant is refused at startup, under `--listen` and by `kio check --grants`. The audit header shows the grant as `path:ro`.
 
 A writable `--dir` that contains the program's own source (the root file or a module file, also through any link of a symlink chain or a symlinked directory) is refused by `kio run`, `--listen` and `kio check --grants`: the program could rewrite itself for the next run. Keep the program outside every granted directory, or grant that directory `:ro`. A source file that changes between being read and being checked (`app.kio` changed while kio was starting) is refused too; run again.
 

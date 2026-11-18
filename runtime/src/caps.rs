@@ -237,6 +237,13 @@ pub unsafe extern "C" fn rt_cap_dir_write(ret: u32, h: u32, path: u32, data: u32
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn rt_cap_dir_append(ret: u32, h: u32, path: u32, data: u32) -> u32 {
+    // SAFETY: the contract above.
+    let (d, path, data) = unsafe { (handle(h, Dir::from_handle), text(path), bytes(data)) };
+    result(ret, in_place(|| d.append(path, data)), unit, io_err)
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn rt_cap_dir_remove(ret: u32, h: u32, path: u32) -> u32 {
     // SAFETY: the contract above.
     let (d, path) = unsafe { (handle(h, Dir::from_handle), text(path)) };

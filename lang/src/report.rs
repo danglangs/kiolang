@@ -258,6 +258,7 @@ pub const COVERS: &[(&str, &str, &[&str])] = &[
     ("Dir", "write", &[]),
     ("Dir", "remove", &[]),
     ("Dir", "exists", &["read"]),
+    ("Dir", "append", &["write"]),
     ("Http", "get", &["send", "send_all"]),
     ("Http", "send", &["send_all"]),
     ("Http", "send_all", &["send"]),

@@ -324,6 +324,10 @@ impl lang::Caps for Native<'_> {
                 let r = HostDir::write(s, own(rep), p.to_string(), b.to_vec()).map_err(stop)?;
                 result(r.map(unit).map_err(io_err))
             }
+            ("Dir", "append", [Value::Str(p), Value::Bytes(b)]) => {
+                let r = HostDir::append(s, own(rep), p.to_string(), b.to_vec()).map_err(stop)?;
+                result(r.map(unit).map_err(io_err))
+            }
             ("Dir", "remove", [Value::Str(p)]) => result(
                 HostDir::remove(s, own(rep), p.to_string())
                     .map_err(stop)?

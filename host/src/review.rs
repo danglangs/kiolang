@@ -30,7 +30,11 @@ const BLIND_SPOTS: [(&str, &[&str], &str); 8] = [
         &["send", "get", "send_all"],
         "the paths, headers and bodies sent",
     ),
-    ("Dir", &["write", "create", "remove"], "what is written or removed"),
+    (
+        "Dir",
+        &["write", "create", "append", "remove"],
+        "what is written or removed",
+    ),
     ("Kv", &["set", "swap", "delete", "add"], "the values"),
     ("Outgoing", &["send"], "what the client receives"),
     ("WsSend", &["text", "binary", "close"], "what the client receives"),

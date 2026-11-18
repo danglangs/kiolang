@@ -418,7 +418,7 @@ fn main(log: Log, stripe: Hmac, now: Clock) { let _w = log.write(receive(stripe,
 /// A call of each capability method on `x`, for the coverage tests (P6).
 fn call(ty: &str, m: &str) -> String {
     let args = match (ty, m) {
-        ("Dir", "create" | "write") => r#""a", "x".to_bytes()"#,
+        ("Dir", "create" | "write" | "append") => r#""a", "x".to_bytes()"#,
         ("Dir", "list") => r#""""#,
         ("Dir", _) => r#""a""#,
         ("Http", "get") => r#""/""#,
