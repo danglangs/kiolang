@@ -65,6 +65,11 @@ pub fn v0() -> CapTable {
                         vec![Ty::Str],
                         Ty::Result(Box::new(Ty::Bool), Box::new(Ty::Enum("IoErr".into(), vec![]))),
                     ),
+                    method(
+                        "append",
+                        vec![Ty::Str, Ty::Bytes],
+                        Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Enum("IoErr".into(), vec![]))),
+                    ),
                 ],
             },
             CapType {
@@ -257,6 +262,10 @@ pub fn v0() -> CapTable {
                     ),
                     method("verify", vec![Ty::Bytes, Ty::Bytes], Ty::Bool),
                 ],
+            },
+            CapType {
+                name: "Secret".into(),
+                methods: vec![method("matches", vec![Ty::Str], Ty::Bool)],
             },
         ],
         enums: vec![

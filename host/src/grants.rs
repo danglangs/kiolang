@@ -72,6 +72,7 @@ fn hint(name: &str, ty: &str) -> String {
         "Hmac" => {
             format!("grant it: `--hmac {name}=env:VAR` or `--hmac {name}=file:PATH` (add `:verify` to refuse `sign`)")
         }
+        "Secret" => format!("grant it: `--secret {name}=env:VAR` or `--secret {name}=file:PATH`"),
         "WsMessage" | "WsSend" => "`--listen` grants WsMessage and WsSend".into(),
         _ => "`--listen` grants Incoming and Outgoing".into(),
     }

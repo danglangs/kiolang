@@ -50,7 +50,7 @@ Errors (exit 2): a malformed line (`kio.deps:3: ... is not a dependency line`: a
 
 | Type | Flag | Grants |
 |---|---|---|
-| `Dir` | `--dir name=path`, `name=path:ro` | a directory: `read`, `create`, `list`, `write`, `remove`, `exists` |
+| `Dir` | `--dir name=path`, `name=path:ro` | a directory: `read`, `create`, `list`, `write`, `append`, `remove`, `exists` |
 | `Http` | `--http name=host`, `--http-methods name=POST,..`, `--http-header name=Header:env:VAR` | one host over HTTPS, GET unless more methods are granted; `--http name=http://127.0.0.1:9000` plain HTTP, for local testing |
 | `Kv` | `--kv name=path`, `name=path:ro`, `name=:memory:` | a key-value store |
 | `Db` | `--db name=path`, `name=path:ro`, `name=:memory:` | a SQLite database: `query`, `exec`, `transaction` |
@@ -58,6 +58,7 @@ Errors (exit 2): a malformed line (`kio.deps:3: ... is not a dependency line`: a
 | `Clock` | `--clock name`, `--clock name=fixed:T` | the system clock, or one fixed time |
 | `Log` | `--log name=path`, `--log name=-` | an append-only log file, or stderr |
 | `Hmac` | `--hmac name=env:VAR`, `name=file:PATH`, either with `:verify` | HMAC-SHA256 under a key the program never holds: `sign`, `verify` |
+| `Secret` | `--secret name=env:VAR`, `name=file:PATH` | a value the program can compare (`matches`), never read |
 | `Incoming`, `Outgoing`, `WsMessage`, `WsSend` | `--listen addr` | a listening socket; bound by type, not name |
 
 ### Dir
@@ -70,7 +71,9 @@ main : input read
 error: IoErr::InvalidPath
 ```
 
-`path:ro` is read-only: `write`, `create` and `remove` are `Err(IoErr::Denied)` (audited `denied`), and a program whose report shows any of them on that grant is refused at startup, under `--listen` and by `kio check --grants`. The audit header shows the grant as `path:ro`.
+`write` replaces a file atomically (a reader sees the old or the new file); `append(path, data)` creates the file if missing and adds `data` at its end in one `O_APPEND` write, so the concurrent requests of a `--listen` server never interleave within a call (a log file). Both charge `data` to `--io`; `append` on a directory, a symlink or a path ending in `/` is `Denied`, as `write` is.
+
+`path:ro` is read-only: `write`, `create`, `append` and `remove` are `Err(IoErr::Denied)` (audited `denied`), and a program whose report shows any of them on that grant is refused at startup, under `--listen` and by `kio check --grants`. The audit header shows the grant as `path:ro`.
 
 A writable `--dir` that contains the program's own source (the root file or a module file, also through any link of a symlink chain or a symlinked directory) is refused by `kio run`, `--listen` and `kio check --grants`: the program could rewrite itself for the next run. Keep the program outside every granted directory, or grant that directory `:ro`. A source file that changes between being read and being checked (`app.kio` changed while kio was starting) is refused too; run again.
 
@@ -172,6 +175,19 @@ fn signed(k: Hmac, header: Str, body: Bytes) -> Bool {   // stripe-signature: t=
   t != "" && k.verify(msg, unhex(sig))      // unhex: your own hex decoder
 }
 ```
+
+### Secret
+
+`--secret token=env:API_TOKEN` (or `file:PATH`) grants `token: Secret`, a value with one method: `token.matches(presented: Str) -> Bool`, compared in the host in constant time (a presented string of another length is `false` at once, so only whether the lengths differ can be timed). The program cannot read, log, send or hash the value; it is read once at start under `--http-header`'s rules (as `--hmac`'s key: missing, empty, not a regular file, inside a granted `--dir`, the `--audit` or a `--log` file, or with other hard links is refused; a file's one trailing newline is dropped; at most 8 KB) and never reaches the program, the audit log, `--log`, `--json`, an error or stderr. The audit log records each call as `"method":"matches"` with `"result":"true"` or `"false"` and the presented length as `bytes`, not the presented string. The report shows the grant as `token: Secret (matches)`; `kio test` needs it named in the grants file, as `Hmac`.
+
+```
+fn main(req: Incoming, res: Outgoing, token: Secret) -> Result<(), WebErr> {
+  let presented = header(req, "authorization").strip_prefix("Bearer ").unwrap_or("");   // header: your own lookup
+  if token.matches(presented) { res.send(200, [], [], "ok".to_bytes()) } else { res.send(401, [], [], "no".to_bytes()) }
+}
+```
+
+The alternative without a grant: keep the token's `sha256().to_hex()` in a file in a `:ro` dir and compare it to `presented.to_bytes().sha256().to_hex().to_bytes()` with `ct_eq`; a reviewer then reads the hash file, and the program still holds no secret.
 
 ### Db
 
@@ -318,7 +334,7 @@ $ kio run spin.kio --fuel 1000 --json
 
 ## Tests
 
-`kio test prog.kio [--grants file] [--filter substr] [--cases n] [--seed s] [--json] [limits]` runs every `#[test]` function ([language.md](language.md#tests)) whose name contains `--filter`, sorted by name (`util::t` for one in `util.kio`). The program needs no `main`. Each test is compiled as the entry and runs in a fresh instance with the default limits (or the limit flags given). Each parameter gets the grants file's grant of its name and type (`--kv k=..` is for `k: Kv`, `--hmac k=..` for `k: Hmac`); the file's other grants are ignored for that test, and a test is held to its own authority as `kio run` holds `main` (`:ro`, `:verify`, the source and grants-file checks). A parameter the file does not name gets, by type:
+`kio test prog.kio [--grants file] [--filter substr] [--cases n] [--seed s] [--json] [limits]` runs every `#[test]` function ([language.md](language.md#tests)) whose name contains `--filter`, sorted by name (`util::t` for one in `util.kio`). The program needs no `main`. Each test is compiled as the entry and runs in a fresh instance with the default limits (or the limit flags given). Each parameter gets the grants file's grant of its name and type (`--kv k=..` is for `k: Kv`, `--hmac k=..` for `k: Hmac`, `--secret k=..` for `k: Secret`); the file's other grants are ignored for that test, and a test is held to its own authority as `kio run` holds `main` (`:ro`, `:verify`, the source and grants-file checks). A parameter the file does not name gets, by type:
 
 | Type | Default |
 |---|---|
@@ -327,7 +343,7 @@ $ kio run spin.kio --fuel 1000 --json
 | `Clock` | fixed at 2026-01-01T00:00:00Z |
 | `Rng` | `seed:1` |
 | `Log` | a buffer, printed when the test fails |
-| `Http`, `Hmac` | none: the test fails with "test `t` needs `api: Http`", hint "name it in a --grants file" |
+| `Http`, `Hmac`, `Secret` | none: the test fails with "test `t` needs `api: Http`", hint "name it in a --grants file" |
 
 A test fails on a failed `assert` or `assert_eq`, an `Err` return (shown as `Err("..")`), a runtime error, a limit or a refused grant. Exit 0 when every test passes (a file with no tests prints `0 passed, 0 failed`), 1 when any fails, 2 for a check error or a usage error: a bad limit, or a `--filter` no test name contains ("no test matches `x`"). A failure's message and hint are printed with control characters escaped as `Log` lines are (`\n`, `\u{1b}`); `--json` carries them as they are. `--audit`, `--listen`, `--ws-origin` and `--host` are refused, and grants go in the file, not on the command line.
 

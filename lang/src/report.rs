@@ -258,6 +258,7 @@ pub const COVERS: &[(&str, &str, &[&str])] = &[
     ("Dir", "write", &[]),
     ("Dir", "remove", &[]),
     ("Dir", "exists", &["read"]),
+    ("Dir", "append", &["write"]),
     ("Http", "get", &["send", "send_all"]),
     ("Http", "send", &["send_all"]),
     ("Http", "send_all", &["send"]),
@@ -291,6 +292,7 @@ pub const COVERS: &[(&str, &str, &[&str])] = &[
     ("Db", "transaction", &["exec"]),
     ("Hmac", "sign", &[]),
     ("Hmac", "verify", &["sign"]),
+    ("Secret", "matches", &[]),
 ];
 
 /// Of `gains` on a capability of type `ty` (`None`: nothing is covered), whether any is

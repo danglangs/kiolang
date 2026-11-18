@@ -13,6 +13,7 @@ use crate::kio::caps::kv::{HostKv, KvEntry, KvErr};
 use crate::kio::caps::log::{HostLog, LogErr};
 use crate::kio::caps::net::{HostHttp, HttpErr, HttpRequest, HttpResponse};
 use crate::kio::caps::rng::HostRng;
+use crate::kio::caps::secret::HostSecret;
 use crate::kio::caps::web::{HostIncoming, HostOutgoing, WebErr};
 use crate::kio::caps::ws::{HostWsMessage, HostWsSend, WsErr};
 use crate::ws::{WsEvent, WsFrame};
@@ -323,6 +324,10 @@ impl lang::Caps for Native<'_> {
                 let r = HostDir::write(s, own(rep), p.to_string(), b.to_vec()).map_err(stop)?;
                 result(r.map(unit).map_err(io_err))
             }
+            ("Dir", "append", [Value::Str(p), Value::Bytes(b)]) => {
+                let r = HostDir::append(s, own(rep), p.to_string(), b.to_vec()).map_err(stop)?;
+                result(r.map(unit).map_err(io_err))
+            }
             ("Dir", "remove", [Value::Str(p)]) => result(
                 HostDir::remove(s, own(rep), p.to_string())
                     .map_err(stop)?
@@ -485,6 +490,9 @@ impl lang::Caps for Native<'_> {
             ),
             ("Hmac", "verify", [Value::Bytes(m), Value::Bytes(mac)]) => {
                 Value::Bool(HostHmac::verify(s, own(rep), m.to_vec(), mac.to_vec()).map_err(stop)?)
+            }
+            ("Secret", "matches", [Value::Str(p)]) => {
+                Value::Bool(HostSecret::matches(s, own(rep), p.to_string()).map_err(stop)?)
             }
             _ => {
                 return Err(format!(

@@ -285,6 +285,7 @@ fn instantiate(
                 "Log" => Grant::Log(Resource::new_own(rep)),
                 "Db" => Grant::Db(Resource::new_own(rep)),
                 "Hmac" => Grant::Hmac(Resource::new_own(rep)),
+                "Secret" => Grant::Secret(Resource::new_own(rep)),
                 _ => Grant::WsSend(Resource::new_own(rep)),
             }
         })
@@ -1005,6 +1006,7 @@ impl Server {
         grants.extend(src.logs.iter().map(|(n, l)| (n.clone(), "Log", Some(l.label.clone()))));
         grants.extend(src.dbs.iter().map(|(n, d)| (n.clone(), "Db", Some(d.label()))));
         grants.extend(src.hmacs.iter().map(|(n, k)| (n.clone(), "Hmac", Some(k.label()))));
+        grants.extend(src.secrets.iter().map(|(n, v)| (n.clone(), "Secret", Some(v.label()))));
         grants
     }
 

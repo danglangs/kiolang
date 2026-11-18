@@ -30,7 +30,11 @@ const BLIND_SPOTS: [(&str, &[&str], &str); 8] = [
         &["send", "get", "send_all"],
         "the paths, headers and bodies sent",
     ),
-    ("Dir", &["write", "create", "remove"], "what is written or removed"),
+    (
+        "Dir",
+        &["write", "create", "append", "remove"],
+        "what is written or removed",
+    ),
     ("Kv", &["set", "swap", "delete", "add"], "the values"),
     ("Outgoing", &["send"], "what the client receives"),
     ("WsSend", &["text", "binary", "close"], "what the client receives"),
@@ -52,6 +56,7 @@ const NO_BLIND_SPOT: &[(&str, &[&str])] = &[
     ("Rng", &["bytes", "int"]),
     ("Clock", &["now_ms"]),
     ("Hmac", &["verify"]),
+    ("Secret", &["matches"]),
 ];
 
 const SAME_AUTHOR: &str = "tests and properties were written by the same author as the code unless stated";
@@ -1012,15 +1017,16 @@ impl Changes {
     }
 }
 
-/// The first `--hmac` or `--http-header` secret the tests' grants `flags` name that cannot be
-/// read, as `kio run` refuses it. Granted dirs are not known here: a key file inside one is
-/// refused per test, as before.
+/// The first `--hmac`, `--secret` or `--http-header` secret the tests' grants `flags` name that
+/// cannot be read, as `kio run` refuses it. Granted dirs are not known here: a key file inside
+/// one is refused per test, as before.
 fn unreadable_secret(flags: &[&str]) -> Option<String> {
     let (flags, _) = with_grants(flags).ok()?;
     for pair in flags.chunks(2) {
         let (flag, spec) = (pair[0].as_str(), pair[1].as_str());
         let e = match flag {
             "--hmac" => hmac(spec, &[], &[], false).err(),
+            "--secret" => secret_grant(spec, &[], &[], false).err(),
             "--http-header" => {
                 let Some((_, source)) = spec.split_once('=').and_then(|(_, r)| r.split_once(':')) else {
                     continue;
@@ -1032,7 +1038,7 @@ fn unreadable_secret(flags: &[&str]) -> Option<String> {
         };
         if let Some(e) = e {
             let label = match flag {
-                "--hmac" => spec.split_once('=').map_or("", |(n, _)| n),
+                "--hmac" | "--secret" => spec.split_once('=').map_or("", |(n, _)| n),
                 _ => header_label(spec),
             };
             return Some(flag_error(flag, label, &e));

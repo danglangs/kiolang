@@ -147,6 +147,10 @@ fn world(params: &[(String, String)]) -> World {
                 .sources
                 .hmacs
                 .push((name.clone(), kio_host::HmacKey::new("key".into(), false).unwrap())),
+            "Secret" => w
+                .sources
+                .secrets
+                .push((name.clone(), kio_host::SecretValue::new("value".into()).unwrap())),
             _ => {}
         }
     }

@@ -23,6 +23,7 @@ use crate::entry::kio::caps::kv::{Kv, KvEntry, KvErr};
 use crate::entry::kio::caps::log::{Log, LogErr};
 use crate::entry::kio::caps::net::{Http, HttpErr, HttpRequest, HttpResponse};
 use crate::entry::kio::caps::rng::Rng;
+use crate::entry::kio::caps::secret::Secret;
 use crate::entry::kio::caps::web::Incoming;
 use crate::entry::kio::caps::ws::{WsErr, WsMessage, WsSend};
 use crate::obj::{self, to_slot, Header};
@@ -233,6 +234,13 @@ pub unsafe extern "C" fn rt_cap_dir_write(ret: u32, h: u32, path: u32, data: u32
     // SAFETY: the contract above.
     let (d, path, data) = unsafe { (handle(h, Dir::from_handle), text(path), bytes(data)) };
     result(ret, in_place(|| d.write(path, data)), unit, io_err)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_cap_dir_append(ret: u32, h: u32, path: u32, data: u32) -> u32 {
+    // SAFETY: the contract above.
+    let (d, path, data) = unsafe { (handle(h, Dir::from_handle), text(path), bytes(data)) };
+    result(ret, in_place(|| d.append(path, data)), unit, io_err)
 }
 
 #[no_mangle]
@@ -710,6 +718,13 @@ pub unsafe extern "C" fn rt_cap_hmac_verify(_: u32, h: u32, msg: u32, mac: u32) 
     // SAFETY: the contract above.
     let (k, msg, mac) = unsafe { (handle(h, Hmac::from_handle), bytes(msg), bytes(mac)) };
     u32::from(k.verify(msg, mac))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_cap_secret_matches(_: u32, h: u32, presented: u32) -> u32 {
+    // SAFETY: the contract above.
+    let (s, presented) = unsafe { (handle(h, Secret::from_handle), text(presented)) };
+    u32::from(s.matches(presented))
 }
 
 fn database(h: u32) -> ManuallyDrop<Db> {

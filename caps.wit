@@ -15,6 +15,7 @@ interface fs {
     write:  func(path: string, data: list<u8>) -> result<_, io-err>;     // create or replace, atomically
     remove: func(path: string) -> result<_, io-err>;                     // one regular file
     exists: func(path: string) -> result<bool, io-err>;
+    append: func(path: string, data: list<u8>) -> result<_, io-err>;     // create or append, one write per call
   }
 }
 
@@ -151,6 +152,14 @@ interface hmac {
   variant hmac-err { denied }                                  // `sign` under `:verify`
 }
 
+interface secret {
+  // A value the host read at start (`--secret name=env:VAR|file:PATH`) that the program can
+  // compare but never read, log, send or hash.
+  resource secret {
+    matches: func(presented: string) -> bool;   // constant time over the bytes; another length is false
+  }
+}
+
 // Compiled kio (docs/codegen.md): the runtime with the program appended, one core module.
 world compiled {
   import fs;
@@ -163,6 +172,7 @@ world compiled {
   import log;
   import db;
   import hmac;
+  import secret;
   use fs.{dir};
   use net.{http};
   use web.{incoming, outgoing};
@@ -173,11 +183,12 @@ world compiled {
   use log.{log};
   use db.{db};
   use hmac.{hmac};
+  use secret.{secret};
 
   // One handle per capability parameter of `main`, in parameter order.
   variant grant {
     dir(dir), http(http), incoming(incoming), outgoing(outgoing), kv(kv), ws-message(ws-message), ws-send(ws-send),
-    rng(rng), clock(clock), log(log), db(db), hmac(hmac),
+    rng(rng), clock(clock), log(log), db(db), hmac(hmac), secret(secret),
   }
   // main's value printed, and whether main returned `Err`.
   record outcome { value: string, failed: bool }

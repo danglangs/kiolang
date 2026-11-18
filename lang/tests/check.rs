@@ -1125,7 +1125,7 @@ fn capability_methods_are_typed() {
         (msg.as_str(), hint.as_str()),
         (
             "no method `delete` on Dir",
-            "Dir has: read, create, list, write, remove, exists"
+            "Dir has: read, create, list, write, remove, exists, append"
         )
     );
     let (msg, hint, _) = reject_cap("fn main(d: Dir) { d.read(); }");
