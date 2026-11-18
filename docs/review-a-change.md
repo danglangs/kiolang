@@ -163,21 +163,31 @@ Tests
   tested       added: tests::failure_retries_with_doubling_backoff_then_dies
   tested       added: tests::pending_claim_done
   tested       added: tests::stale_completion_changes_nothing
+  not checked  changed: tests::any_signed_bytes_get_an_answer (reaches changed flow::init, flow::store)
+  not checked  changed: tests::bad_signature_beats_bad_json (reaches changed flow::init, flow::store)
+  not checked  changed: tests::bad_signature_is_401_and_never_inserts (reaches changed flow::init, flow::store)
+  not checked  changed: tests::bad_signature_never_inserts (reaches changed flow::init, flow::store)
+  not checked  changed: tests::malformed_json_is_400 (reaches changed flow::init, flow::store)
+  not checked  changed: tests::missing_signature_is_401 (reaches changed flow::init, flow::store)
+  not checked  changed: tests::new_event_is_202_and_a_pending_row (reaches changed flow::init, flow::store)
+  not checked  changed: tests::repeated_id_is_200_and_changes_nothing (reaches changed flow::init, flow::store)
+  not checked  changed: tests::replay_equals_each_distinct_event_once (reaches changed flow::init, flow::store)
+  not checked  changed: tests::signed_non_utf8_body_is_400 (reaches changed flow::init, flow::store)
   tested       tests::any_signed_bytes_get_an_answer: 100 cases compiled; seed 1
   tested       tests::bad_signature_never_inserts: 100 cases compiled; seed 1; 5 discarded
   tested       tests::db_equals_model_and_nothing_is_stranded: 100 cases compiled; seed 1
   tested       tests::replay_equals_each_distinct_event_once: 100 cases compiled; seed 1
   tested       tests::stale_completion_changes_nothing: 100 cases compiled; seed 1
 Resources
-  measured     tests::any_signed_bytes_get_an_answer: fuel 3587375 -> 3858475 (+7.56%), peak memory 2112 KB -> 2112 KB (+0.00%)
-  measured     tests::bad_signature_beats_bad_json: fuel 25762 -> 28473 (+10.53%), peak memory 1920 KB -> 1920 KB (+0.00%)
+  measured     tests::any_signed_bytes_get_an_answer: fuel 3583775 -> 3854875 (+7.57%), peak memory 2112 KB -> 2112 KB (+0.00%)
+  measured     tests::bad_signature_beats_bad_json: fuel 25665 -> 28376 (+10.57%), peak memory 1920 KB -> 1920 KB (+0.00%)
   ...
-  measured     total over 10 tests on both sides: fuel 71107433 -> 72494821 (+1.96%), largest peak memory 2112 KB -> 2112 KB (+0.00%)
+  measured     total over 10 tests on both sides: fuel 70186182 -> 71573570 (+1.98%), largest peak memory 2112 KB -> 2112 KB (+0.00%)
 Not checked
   not checked  res: Outgoing send: what the client receives
   not checked  db: Db exec: the SQL text and what it changes (changed: flow::init, flow::store)
-  not checked  worker.kio: db: Db exec, query: the SQL text and what it changes (changed: flow::claim, flow::finish, flow::init, flow::try_claim)
-  not checked  worker.kio: dest: Http send POST: the paths, headers and bodies sent (changed: deliver)
+  not checked  worker.kio: db: Db exec, query: the SQL text and what it changes (changed: flow::backoff_ms, flow::claim, flow::finish, flow::init, flow::int_of, flow::text_of, flow::try_claim)
+  not checked  worker.kio: dest: Http send POST: the paths, headers and bodies sent (changed: deliver, flow::headers)
   not checked  tests and properties were written by the same author as the code unless stated
 Identity
   kio 0.1.3 (<commit>)
@@ -193,7 +203,7 @@ Reading it:
 - **Authority**: grants unchanged (`main` already had `db exec`); exit 3 is `init`, new and reached from `main`. It is the `CREATE TABLE`, moved out of `store`. Expected.
 - **Authority, `worker.kio`**: a new program, so every grant is `+`: the database (`exec query`, to claim and finish jobs), the clock, and `POST` to one destination, whose key the host adds (`worker.grants`: `--http-header dest=Authorization:env:DEST_AUTH`). That is what the F1.2 requirement describes. The `derived` lines under each grant name the functions that make each call: `deliver` posts, `flow::claim` and `flow::try_claim` query.
 - **Tests**: 10 to 18, nothing removed; the 8 added are the worker's transitions and two properties against a model. The F1.1 properties still run 100 cases.
-- **Resources**: +3% to +10% fuel on the ingest tests, +1.96% in total, memory flat. Every ingest now runs `init`, a longer `CREATE TABLE` and a wider `INSERT`; acceptable.
+- **Resources**: +3% to +10% fuel on the ingest tests, +1.98% in total, memory flat. Every ingest now runs `init`, a longer `CREATE TABLE` and a wider `INSERT`; acceptable.
 - **Not checked**: `db exec: the SQL text`. The table gains three columns, and the requirement diff says "An F1.1 database made before F1.2 has no migration": `CREATE TABLE IF NOT EXISTS` leaves an old table as it is, and the new `INSERT` names `next_ms`. The worker's lines add its SQL and the bodies it posts: the tests cover the claims and completions against a model, and `every_attempt_carries_the_event_id_as_the_key` the delivery key.
 
 **Decision: accept**, if no F1.1 database is deployed; the missing migration is a known, stated gap. If one is deployed, **ask for evidence**: a migration and a test that runs it on an F1.1 table.
@@ -260,12 +270,12 @@ Tests
   tested       added: counts_rows
   not checked  removed: main_writes_the_total
 Resources
-  measured     skips_bad_rows: fuel 16606 -> 17656 (+6.33%), peak memory 1600 KB -> 1600 KB (+0.00%)
-  measured     sums_the_cents_column: fuel 15345 -> 16395 (+6.85%), peak memory 1600 KB -> 1600 KB (+0.00%)
-  measured     total over 2 tests on both sides: fuel 31951 -> 34051 (+6.58%), largest peak memory 1600 KB -> 1600 KB (+0.00%)
+  measured     skips_bad_rows: fuel 16475 -> 17525 (+6.38%), peak memory 1600 KB -> 1600 KB (+0.00%)
+  measured     sums_the_cents_column: fuel 15228 -> 16278 (+6.90%), peak memory 1600 KB -> 1600 KB (+0.00%)
+  measured     total over 2 tests on both sides: fuel 31703 -> 33803 (+6.63%), largest peak memory 1600 KB -> 1600 KB (+0.00%)
 Not checked
-  not checked  out: Dir write: what is written or removed (changed: main)
-  not checked  stats: Http send POST: the paths, headers and bodies sent (changed: main)
+  not checked  out: Dir write: what is written or removed (changed: main, rows)
+  not checked  stats: Http send POST: the paths, headers and bodies sent (changed: main, rows)
   not checked  tests and properties were written by the same author as the code unless stated
 ...
 $ echo $?
@@ -313,18 +323,21 @@ Tests
   tested       grants: defaults (temporary Dir, :memory: stores, fixed clock)
   tested       old: 3 passed, 0 failed
   tested       new: 3 passed, 0 failed
+  not checked  changed: main_writes_the_total (reaches changed cents, total)
+  not checked  changed: skips_bad_rows (reaches changed cents, total)
+  not checked  changed: sums_the_cents_column (reaches changed cents, total)
 Resources
   measured     no test changed by more than 2%
-  measured     total over 3 tests on both sides: fuel 56186 -> 56288 (+0.19%), largest peak memory 1728 KB -> 1728 KB (+0.00%)
+  measured     total over 3 tests on both sides: fuel 55651 -> 55753 (+0.19%), largest peak memory 1728 KB -> 1728 KB (+0.00%)
 Not checked
-  not checked  out: Dir write: what is written or removed
+  not checked  out: Dir write: what is written or removed (changed: cents, total)
   not checked  tests and properties were written by the same author as the code unless stated
 ...
 $ echo $?
 0
 ```
 
-Exit 0 and a clean page, but `if c > 0` now drops refunds (negative cents) from the total. kio cannot see that: the authority is the same, and no test has a negative row. The page does tell you where to look: the one effect is `out: Dir write: what is written`, and no test covers a refund. It carries no `(changed: ..)` mark: `cents` changed, but `main` writes, and the mark follows which functions call a method, not where the data comes from.
+Exit 0 and a clean page, but `if c > 0` now drops refunds (negative cents) from the total. kio cannot see that: the authority is the same, and no test has a negative row. The page does tell you where to look: the one effect is `out: Dir write: what is written`, marked `(changed: cents, total)`, and the three tests are listed as `changed` because they reach `cents`, passing but not checked against the change; none has a refund.
 
 **Decision: ask for evidence.** Either read `cents` (6 lines), or ask for a test of the requirement's edge: a row with a negative and a zero amount. Here the author adds it, and the next review answers:
 
