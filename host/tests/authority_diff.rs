@@ -260,3 +260,15 @@ fn main(out: Dir) {}
         (0, want.into(), "".into())
     );
 }
+
+/// `--base` with a grants file names `kio review` instead of falling through to `kio run`'s usage.
+#[test]
+fn base_with_grants_names_review() {
+    let (code, out, err) = diff_with(&[("app.kio", OLD)], &[("app.kio", OLD)], &["--grants", "g"]);
+    assert_eq!((code, out.as_str()), (2, ""), "{err}");
+    assert!(
+        err.contains("`kio check --base` compares authority without a grants file"),
+        "{err}"
+    );
+    assert!(err.contains("hint: `kio review NEW --base OLD --grants G`"), "{err}");
+}

@@ -1139,6 +1139,16 @@ fn open_regular(dir: &RealDir, path: &str, opts: &mut OpenOptions) -> io::Result
     }
 }
 
+/// Whether `presented` is the secret, in time that depends on `presented`'s length only, so the
+/// secret's length does not show (H33 review). The secret is never empty.
+fn secret_eq(secret: &[u8], presented: &[u8]) -> bool {
+    let mut diff = u8::from(secret.len() != presented.len());
+    for (i, p) in presented.iter().enumerate() {
+        diff |= core::hint::black_box(secret[i % secret.len()] ^ p);
+    }
+    diff == 0
+}
+
 /// Map a cap-std error. cap-std reports an escape as a custom `PermissionDenied`; a real OS
 /// permission error has no inner error. Anything unexpected is `denied`.
 fn io_err(e: &io::Error) -> IoErr {
@@ -1694,6 +1704,11 @@ impl State {
                 }
             }
             let mut file = file.map_err(|e| io_err(&e))?;
+            // `write` replaces a file by rename, but `append` changes it in place: a hard link
+            // would reach a file outside the grant (#207). Checked on the open file.
+            if rustix::fs::fstat(&file).map_or(true, |st| st.st_nlink > 1) {
+                return Err(IoErr::Denied);
+            }
             match file.write(&data) {
                 Ok(n) if n == data.len() => Ok(()),
                 Ok(_) => Err(IoErr::Denied),
@@ -2632,7 +2647,7 @@ impl kio::caps::secret::HostSecret for State {
             |s| {
                 s.spend_io(presented.len())?;
                 let v = s.table.get(&Resource::<SecretValue>::new_borrow(h.rep()))?;
-                Ok(lang::digest::ct_eq(v.0 .0.as_bytes(), presented.as_bytes()))
+                Ok(secret_eq(v.0 .0.as_bytes(), presented.as_bytes()))
             },
             |v| v.to_string(),
         )

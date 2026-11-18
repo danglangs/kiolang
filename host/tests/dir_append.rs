@@ -298,3 +298,47 @@ fn concurrent_appends_under_listen_are_each_intact() {
     }
     assert!(seen.iter().all(|&s| s), "{seen:?}");
 }
+
+/// A hard link inside the grant to a file outside it: `append` would change that file in place
+/// (`write` replaces by rename), so it is `denied` on both paths and the file is unchanged.
+#[test]
+fn a_hard_link_is_denied() {
+    for compiled in [false, true] {
+        let t = tempfile::tempdir().unwrap();
+        let (inside, outside) = (t.path().join("in"), t.path().join("outside.txt"));
+        std::fs::create_dir(&inside).unwrap();
+        std::fs::write(&outside, "kept\n").unwrap();
+        std::fs::hard_link(&outside, inside.join("link")).unwrap();
+        let src = r#"fn main(d: Dir) -> Result<(), IoErr> { d.append("link", "FORGED\n".to_bytes()) }"#;
+        let (value, audit) = run(src, &inside, false, compiled, Limits::default());
+        assert_eq!(value, "IoErr::Denied", "compiled {compiled}: {audit}");
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "kept\n");
+    }
+}
+
+/// `--audit` or `--log` on a file with another hard link is refused at startup: through the
+/// other name a granted directory could append to it.
+#[test]
+fn a_hard_linked_log_is_refused() {
+    let t = tempfile::tempdir().unwrap();
+    let d = t.path().join("d");
+    std::fs::create_dir(&d).unwrap();
+    let audit = t.path().join("audit.log");
+    std::fs::write(&audit, "").unwrap();
+    std::fs::hard_link(&audit, d.join("link")).unwrap();
+    let prog = t.path().join("app.kio");
+    std::fs::write(&prog, "fn main(d: Dir) -> Int { 0 }\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_kio"))
+        .arg("run")
+        .arg(&prog)
+        .arg("--dir")
+        .arg(format!("d={}", d.display()))
+        .arg("--audit")
+        .arg(&audit)
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("has another hard link"), "{err}");
+    assert!(err.contains("hint: give the audit log a file with one name"), "{err}");
+}

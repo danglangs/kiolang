@@ -108,6 +108,9 @@ fn command(args: &[String]) -> i32 {
         ["check", path, "--all"] => check(path, true),
         ["check", path, "--base", base] => check_base(path, base, false),
         ["check", path, "--base", base, "--detail"] => check_base(path, base, true),
+        ["check", _, "--base", _, ..] => fail(
+            "`kio check --base` compares authority without a grants file\n  hint: `kio review NEW --base OLD --grants G` compares and binds G".into(),
+        ),
         ["check", path, ref flags @ ..] if flags.contains(&"--grants") => run(path, flags, true),
         ["mcp"] if json_out() => {
             fail("`--json` reports one run or check; `kio mcp` serves many\n  hint: drop --json".into())
@@ -2062,6 +2065,11 @@ fn file_refusal(
                 "`{flag} {path}` is the same file as `{other}`\n  hint: give each log its own file"
             ));
         }
+    }
+    if std::fs::metadata(path).is_ok_and(|m| std::os::unix::fs::MetadataExt::nlink(&m) > 1) {
+        return Some(format!(
+            "`{flag} {path}` has another hard link\n  hint: give {what} a file with one name; through the other, a granted directory could append to it"
+        ));
     }
     for (d, _, id) in dirs {
         if holds(*id, path) {
