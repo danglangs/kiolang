@@ -317,7 +317,7 @@ impl Db {
             )));
         }
         if sqls.len() > STATEMENTS_MAX {
-            return Err(Fail::Db(DbErr::TooLarge));
+            return Err(Fail::TooLarge("statements"));
         }
         trusted("BEGIN")?;
         let run = || -> std::result::Result<i64, Fail> {
@@ -361,9 +361,10 @@ struct Out {
 }
 
 /// A refused or failed statement: the error to give the program, or SQLite's, classified later
-/// (an interrupt is the run's deadline, which stops the run).
+/// (an interrupt is the run's deadline, which stops the run). `TooLarge` names the host's limit.
 enum Fail {
     Db(DbErr),
+    TooLarge(&'static str),
     Sqlite(rusqlite::Error),
 }
 
@@ -443,7 +444,7 @@ fn statement(conn: &Connection, sql: &str, params: &[SqlValue], want_rows: bool)
     let mut rows = stmt.raw_query();
     while let Some(row) = rows.next()? {
         if out.rows.len() == ROWS_MAX {
-            return Err(Fail::Db(DbErr::TooLarge));
+            return Err(Fail::TooLarge("rows"));
         }
         let mut r = Vec::with_capacity(cols);
         for i in 0..cols {
@@ -459,7 +460,7 @@ fn statement(conn: &Connection, sql: &str, params: &[SqlValue], want_rows: bool)
             r.push(v);
         }
         if out.bytes > BYTES_MAX {
-            return Err(Fail::Db(DbErr::TooLarge));
+            return Err(Fail::TooLarge("bytes"));
         }
         out.rows.push(r);
     }
@@ -495,10 +496,12 @@ fn message(e: &rusqlite::Error) -> String {
 /// The run's deadline passed while a statement ran.
 struct Interrupted;
 
-/// `e` as the program sees it, or `Interrupted`.
-fn classify(e: Fail) -> std::result::Result<DbErr, Interrupted> {
+/// `e` as the program sees it, with the limit a `TooLarge` hit for the audit line, or
+/// `Interrupted`.
+fn classify(e: Fail) -> std::result::Result<(DbErr, Option<&'static str>), Interrupted> {
     let e = match e {
-        Fail::Db(e) => return Ok(e),
+        Fail::Db(e) => return Ok((e, None)),
+        Fail::TooLarge(limit) => return Ok((DbErr::TooLarge, Some(limit))),
         Fail::Sqlite(e) => e,
     };
     let code = match &e {
@@ -506,17 +509,25 @@ fn classify(e: Fail) -> std::result::Result<DbErr, Interrupted> {
         rusqlite::Error::SqlInputError { error, .. } => Some(error.code),
         _ => None,
     };
-    Ok(match code {
-        Some(ErrorCode::OperationInterrupted) => return Err(Interrupted),
-        Some(ErrorCode::ConstraintViolation) => DbErr::Constraint(message(&e)),
-        Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => DbErr::Busy,
-        Some(ErrorCode::AuthorizationForStatementDenied | ErrorCode::ReadOnly) => DbErr::Denied,
-        // `DiskFull` is `max_page_count` (`--db-mb`) as well as a full disk.
-        Some(ErrorCode::TooBig | ErrorCode::OutOfMemory | ErrorCode::DiskFull) => DbErr::TooLarge,
-        // A function the authorizer refused is a plain error, "not authorized to use function".
-        _ if message(&e).starts_with("not authorized") => DbErr::Denied,
-        _ => DbErr::Invalid(message(&e)),
-    })
+    let too_large = |limit| Ok((DbErr::TooLarge, Some(limit)));
+    Ok((
+        match code {
+            Some(ErrorCode::OperationInterrupted) => return Err(Interrupted),
+            Some(ErrorCode::ConstraintViolation) => DbErr::Constraint(message(&e)),
+            Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => DbErr::Busy,
+            Some(ErrorCode::AuthorizationForStatementDenied | ErrorCode::ReadOnly) => DbErr::Denied,
+            // SQLite's `SQL_MAX` refusal is "statement too long"; `BYTES_MAX` gives others.
+            Some(ErrorCode::TooBig) if message(&e) == "statement too long" => return too_large("sql"),
+            Some(ErrorCode::TooBig) => return too_large("value"),
+            Some(ErrorCode::OutOfMemory) => return too_large("memory"),
+            // `max_page_count` (`--db-mb`) as well as a full disk.
+            Some(ErrorCode::DiskFull) => return too_large("db-mb"),
+            // A function the authorizer refused is a plain error, "not authorized to use function".
+            _ if message(&e).starts_with("not authorized") => DbErr::Denied,
+            _ => DbErr::Invalid(message(&e)),
+        },
+        None,
+    ))
 }
 
 /// `ok`, or the error's name: never its message, which could be long.
@@ -612,7 +623,8 @@ impl State {
 
     /// Run `sqls` with `params` on the database behind `h`, on a worker within the run's
     /// deadline (H5): parameter bytes are charged to `--io` first, result bytes after; the
-    /// parameter count and the rows or rows changed go in the audit line. A statement the
+    /// parameter count, the rows or rows changed, and the limit a `TooLarge` hit (`rows`,
+    /// `bytes`, `value`, `sql`, `statements`, `memory`, `db-mb`) go in the audit line. A statement the
     /// deadline interrupts stops the run as a timeout.
     fn db_run(
         &mut self,
@@ -637,7 +649,12 @@ impl State {
                 Ok(Ok(out))
             }
             Err(e) => match classify(e) {
-                Ok(e) => Ok(Err(e)),
+                Ok((e, limit)) => {
+                    if let Some(limit) = limit {
+                        self.audit_extra += &format!(r#","limit":"{limit}""#);
+                    }
+                    Ok(Err(e))
+                }
                 Err(Interrupted) => {
                     self.timed_out = true;
                     Err(wasmtime::Error::msg("host call timed out"))

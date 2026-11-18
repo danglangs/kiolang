@@ -1342,7 +1342,7 @@ fn result_lines(tests: &Tests, r: &TestResult) -> Vec<String> {
         let shown: Vec<String> = input.iter().map(|(n, v)| format!("{n} = {v}")).collect();
         let label = if *shrunk { "minimal input" } else { "input" };
         let line = lang::eval::clip(&shown.join(", ")).into_owned();
-        out.push(format!("  {label}: {}", kio_host::escape_line(&line)));
+        out.push(format!("  {label}: {}", kio_host::escape_shown(&line)));
         if *shrunk {
             let n = r.prop.as_ref().map_or(0, |p| p.shrinks);
             let stopped = if n == MAX_SHRINK_RUNS {
@@ -1374,16 +1374,16 @@ fn result_lines(tests: &Tests, r: &TestResult) -> Vec<String> {
 }
 
 /// An error as `--json` shows one, as text: `file:line:col: message`, then its hint. The program
-/// writes the message: escaped as a log line is, it is one line and no terminal escape, so it
+/// writes the message: escaped (`escape_shown`), it is one line and no terminal escape, so it
 /// cannot print a forged `ok` or count.
 fn error_lines(e: &serde_json::Value) -> Vec<String> {
-    let message = kio_host::escape_line(e["message"].as_str().unwrap_or_default());
+    let message = kio_host::escape_shown(e["message"].as_str().unwrap_or_default());
     let mut out = vec![match (e["file"].as_str(), e["line"].as_u64(), e["col"].as_u64()) {
         (Some(f), Some(l), Some(c)) => format!("{f}:{l}:{c}: {message}"),
         _ => message,
     }];
     if let Some(h) = e["hint"].as_str() {
-        out.push(format!("hint: {}", kio_host::escape_line(h)));
+        out.push(format!("hint: {}", kio_host::escape_shown(h)));
     }
     out
 }
@@ -2012,19 +2012,20 @@ fn locate(files: &[(String, String)], diags: &[Diag]) -> Vec<(usize, usize)> {
 fn print_diags(prog: &Program, diags: Vec<Diag>, kind: &str) -> i32 {
     let files = &prog.files;
     for (d, (file, line)) in diags.iter().zip(locate(files, &diags)) {
+        let col = lang::line_col(&files[file].1, d.start as usize).1;
         if json_out() {
-            let at = (
-                json_path(prog, file),
-                line,
-                lang::line_col(&files[file].1, d.start as usize).1,
+            push_error(
+                kind,
+                &d.message,
+                d.hint.as_deref(),
+                Some((json_path(prog, file), line, col)),
             );
-            push_error(kind, &d.message, d.hint.as_deref(), Some(at));
             continue;
         }
         // A run-time message is the program's text (an assert message), and a parse message may
         // quote a source character: escaped to one line with no terminal escape (H30).
-        let message = kio_host::escape_line(&d.message);
-        eprintln!("{}:{line}: error: {message}", prog.shown(file));
+        let message = kio_host::escape_shown(&d.message);
+        eprintln!("{}:{line}:{col}: error: {message}", prog.shown(file));
         if let Some(h) = &d.hint {
             eprintln!("  hint: {h}");
         }

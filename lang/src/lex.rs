@@ -41,6 +41,19 @@ const SYMBOLS: &[&str] = &[
 
 const HINT_STR: &str = "add a closing `\"`";
 
+/// The error for `^`, `~`, `<<`, `>>`, and `&` or `|` between operands.
+pub(crate) const BITWISE: &str = "kio has no bitwise operators";
+
+/// The hint for bitwise operator `op`: the logical operator it may have meant, else arithmetic.
+pub(crate) fn bitwise_hint(op: &str) -> &'static str {
+    match op {
+        "&" => "for logical and, use `&&`; for bits, use arithmetic (`*`, `/`, `%` by powers of 2) or `Bytes`",
+        "|" => "for logical or, use `||`; for bits, use arithmetic (`*`, `/`, `%` by powers of 2) or `Bytes`",
+        "<<" | ">>" => "multiply or divide by a power of 2, or use `Bytes`",
+        _ => "use arithmetic (`*`, `/`, `%` by powers of 2) or `Bytes`",
+    }
+}
+
 fn err(start: usize, end: usize, msg: &str, hint: Option<&str>) -> Diag {
     Diag {
         span: Span { start, end, file: 0 },
@@ -112,6 +125,12 @@ pub fn lex_all(src: &str, errs: &mut Vec<Diag>) -> Result<Vec<Token>, Diag> {
             b'/' if bytes.get(i + 1) == Some(&b'*') => {
                 step_over(errs, err(i, i + 2, "kio has no block comments", Some("use `//`")))?;
                 i = src[i + 2..].find("*/").map_or(src.len(), |j| i + 2 + j + 2);
+                continue;
+            }
+            // After an operand, `a & b` is a bitwise and, not a reference.
+            b'&' if bytes.get(i + 1) != Some(&b'&') && tokens.last().is_some_and(ends_operand) => {
+                step_over(errs, err(i, i + 1, BITWISE, Some(bitwise_hint("&"))))?;
+                i += 1;
                 continue;
             }
             b'&' if bytes.get(i + 1) != Some(&b'&') => {
@@ -273,6 +292,9 @@ pub fn lex_all(src: &str, errs: &mut Vec<Diag>) -> Result<Vec<Token>, Diag> {
                     // An attribute `#[..]` or `#![..]` is one token, to its matching `]`.
                     let inner = bytes.get(i + 1) == Some(&b'!');
                     let open = i + 1 + usize::from(inner);
+                    if ch == '^' || ch == '~' {
+                        return Err(err(i, i + 1, BITWISE, Some(bitwise_hint("^"))));
+                    }
                     if ch != '#' || bytes.get(open) != Some(&b'[') {
                         let msg = format!("unexpected character `{ch}`");
                         return Err(err(

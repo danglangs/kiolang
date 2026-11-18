@@ -62,7 +62,10 @@ fn type_mismatch() {
     let (msg, at) = reject("fn main() { let x: Int = \"a\"; }");
     assert_eq!((msg.as_str(), at.as_str()), ("expected Int, found Str", "\"a\""));
     let (msg, at) = reject("fn f(a: Int) {} fn main() { f(true); }");
-    assert_eq!((msg.as_str(), at.as_str()), ("expected Int, found Bool", "true"));
+    assert_eq!(
+        (msg.as_str(), at.as_str()),
+        ("expected Int, found Bool in argument 1 of `f`", "true")
+    );
     let (msg, _) = reject("fn main() -> Int { 1 + \"a\" }");
     assert_eq!(msg, "`+` cannot be applied to Int and Str");
     let (msg, _) = reject("fn main() -> Bool { 1 == true }");
@@ -333,7 +336,7 @@ fn struct_equality_is_accepted() {
 #[test]
 fn struct_type_mismatch() {
     let (msg, _) = reject_p("fn f(p: P) {} fn main() { f(Q { c: 1 }); }");
-    assert_eq!(msg, "expected P, found Q");
+    assert_eq!(msg, "expected P, found Q in argument 1 of `f`");
 }
 
 const S: &str = "enum S { Done, Due(Int), Pair(Int, Str) } ";
@@ -391,7 +394,7 @@ fn variant_expression_errors() {
     let (msg, at) = reject_s("fn main() { S::Due(\"a\"); }");
     assert_eq!((msg.as_str(), at.as_str()), ("expected Int, found Str", "\"a\""));
     let (msg, _) = reject_s("fn f(s: S) {} fn main() { f(1); }");
-    assert_eq!(msg, "expected S, found Int");
+    assert_eq!(msg, "expected S, found Int in argument 1 of `f`");
 }
 
 #[test]
@@ -1079,8 +1082,8 @@ fn rule1_adversarial() {
     // Passing a capability to the wrong parameter type.
     assert_rejected(
         "fn f(h: Http) {} fn main(d: Dir) { f(d); }",
-        "expected Http, found Dir",
-        "",
+        "expected Http, found Dir in argument 1 of `f`",
+        "`f` is declared as `fn f(h: Http)`",
         "d",
     );
 }
@@ -2266,5 +2269,77 @@ fn l25_open_branch_typed_from_the_other() {
     }
     // A settled branch that is no Option.
     let (msg, at) = reject("fn main() { let a = if true { None } else { 1 }; }");
+    assert_eq!((msg.as_str(), at.as_str()), ("expected Int, found an Option", "None"));
+}
+
+/// Checks `src` with the capability table: the single diagnostic's message, hint and the
+/// source it points at.
+fn reject_hint(files: &[(&str, &str)]) -> (String, String, String) {
+    let diags = lang::check_files(files, &caps()).expect_err("should be rejected");
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    let d = &diags[0];
+    let src = files[d.span.file as usize].1;
+    let hint = d.hint.clone().unwrap_or_default();
+    (d.msg.clone(), hint, src[d.span.start..d.span.end].to_string())
+}
+
+/// L28 2: a mismatched argument names its position and the function as the call writes it.
+#[test]
+fn l28_a_mismatched_argument_names_the_argument_and_function() {
+    let inv = "pub fn handle(n: Int, d: Dir) -> Int { n }";
+    let main = "mod inv;\nfn main(d: Dir) -> Int { inv::handle(1, \"x\") }";
+    assert_eq!(
+        reject_hint(&[("main", main), ("inv.kio", inv)]),
+        (
+            "expected Dir, found Str in argument 2 of `inv::handle`".into(),
+            "`inv::handle` is declared as `fn handle(n: Int, d: Dir)`".into(),
+            "\"x\"".into()
+        )
+    );
+    let src = "fn twice(f: fn(Int) -> Int, n: Int) -> Int { f(f(n)) } fn main() { twice(|x| x, true); }";
+    assert_eq!(
+        reject_hint(&[("main", src)]),
+        (
+            "expected Int, found Bool in argument 2 of `twice`".into(),
+            "`twice` is declared as `fn twice(f: fn(Int) -> Int, n: Int)`".into(),
+            "true".into()
+        )
+    );
+    // A generic function, once its type parameters are fixed.
+    let src = "fn id<T>(x: T) -> T { x } fn main() { id::<Str>(1); }";
+    assert_eq!(
+        reject_hint(&[("main", src)]),
+        (
+            "expected Str, found Int in argument 1 of `id`".into(),
+            "`id` is declared as `fn id<T>(x: T)`".into(),
+            "1".into()
+        )
+    );
+    // A hint of its own is kept: the stray `;`.
+    let src = "fn f(n: Int) {} fn main() { f({ 1; }); }";
+    let (msg, hint, _) = reject_hint(&[("main", src)]);
+    assert_eq!(msg, "expected Int, found () in argument 1 of `f`");
+    assert_eq!(hint, "remove the trailing `;` to return the value");
+}
+
+/// L28 4: a `None` before the element that gives a list its type takes that type.
+#[test]
+fn l28_none_in_a_list_takes_a_later_elements_type() {
+    ok("fn main() -> Int { let xs = [None, Some(\"\"), Some(\"Bearer\")]; xs.len() }");
+    ok("fn main() -> Int { let xs = [None, None, Some(1), None]; xs.len() }");
+    ok("fn f(xs: List<Option<Str>>) -> Int { xs.len() } fn main() -> Int { f([None, Some(\"a\")]) }");
+    // No element gives the type: the hint names the list's type, not a lone `Option<Int>`.
+    let (msg, hint, at) = reject_hint(&[("main", "fn main() { let xs = [None, None]; }")]);
+    assert_eq!((msg.as_str(), at.as_str()), ("cannot tell the type of `None`", "None"));
+    assert_eq!(hint, "add the list's type: `let xs: List<Option<Int>> = [None];`");
+    // A later element that is no `Option`: the hint names the list's element type.
+    let (msg, hint, at) = reject_hint(&[("main", "fn main() { let xs = [None, 5]; }")]);
+    assert_eq!((msg.as_str(), at.as_str()), ("expected Int, found an Option", "None"));
+    assert_eq!(
+        hint,
+        "the list's elements are Int, from its first element that is not `None`"
+    );
+    // An expected type still comes first.
+    let (msg, at) = reject("fn main() { let xs: List<Int> = [None, Some(1)]; }");
     assert_eq!((msg.as_str(), at.as_str()), ("expected Int, found an Option", "None"));
 }

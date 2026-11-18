@@ -408,12 +408,12 @@ fn same_names_in_different_modules_are_different_types() {
         ("app", &format!("{root} fn main() {{ take(web::origin()); }}")),
         ("web", web),
     ]);
-    assert_eq!(d.msg, "expected Point, found web::Point");
+    assert_eq!(d.msg, "expected Point, found web::Point in argument 1 of `take`");
     let d = diag(&[
         ("app", &format!("{root} fn main() {{ web::name(Kind::A); }}")),
         ("web", web),
     ]);
-    assert_eq!(d.msg, "expected web::Kind, found Kind");
+    assert_eq!(d.msg, "expected web::Kind, found Kind in argument 1 of `web::name`");
     let main = format!(
         "{root} fn main() -> Bool {{
            let k = match web::kind() {{ web::Kind::A => 1, web::Kind::B => 2 }};

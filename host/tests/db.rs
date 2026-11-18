@@ -560,6 +560,49 @@ fn audit_lines_carry_sql_and_counts_never_values() {
     );
 }
 
+/// L28 6: a `too-large` audit line names the limit hit.
+#[test]
+fn too_large_names_the_limit_in_the_audit() {
+    let main = r#"fn main(db: Db) -> Str {
+      let count = |r: Result<List<List<SqlValue>>, DbErr>| match r { Ok(rs) => rs.len().to_str(), Err(e) => err(e) };
+      let a = count(db.query("WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 10001) SELECT x FROM c", []));
+      let b = count(db.query("SELECT zeroblob(4194304) UNION ALL SELECT zeroblob(4194304) UNION ALL SELECT zeroblob(1)", []));
+      let c = count(db.query("SELECT zeroblob(8388609)", []));
+      let mut sql = "SELECT 1 -- ";
+      for i in 0..20 { sql = sql + sql; }
+      let d = count(db.query(sql, []));
+      let mut stmts: List<Str> = [];
+      let mut lists: List<List<SqlValue>> = [];
+      for i in 0..1001 { stmts.push("SELECT 1 WHERE 0"); lists.push([]); }
+      let e = show(db.transaction(stmts, lists));
+      a + " " + b + " " + c + " " + d + " " + e
+    }"#;
+    let log = Log(Arc::default());
+    let limits = Limits {
+        io: 1 << 30,
+        ..Limits::default()
+    };
+    let mut kio = Kio::new(limits).unwrap();
+    kio.audit(Log(log.0.clone()), vec![]);
+    kio.grant_sources(memory());
+    let out = kio.run(&format!("{SHOW}{main}"), vec![]).unwrap().unwrap();
+    assert_eq!(out.value, "too-large too-large too-large too-large too-large");
+    let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    let limits: Vec<&str> = text
+        .lines()
+        .filter_map(|l| l.split_once(r#""result":"too-large""#))
+        .map(|(_, rest)| rest.split(',').find(|f| f.starts_with(r#""limit":"#)).unwrap_or("none"))
+        .collect();
+    let want = [
+        r#""limit":"rows""#,
+        r#""limit":"bytes""#,
+        r#""limit":"value""#,
+        r#""limit":"sql""#,
+        r#""limit":"statements""#,
+    ];
+    assert_eq!(limits, want, "{text}");
+}
+
 /// Each refusal of a read-only grant at startup, exit 2 with a hint, as `--kv`'s (H12); and a
 /// `query` that writes a read-only database is `denied` at the call.
 #[test]

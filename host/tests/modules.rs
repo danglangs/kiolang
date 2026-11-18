@@ -63,7 +63,7 @@ fn cli_prints_module_diags_with_the_module_name() {
     let app = d.path().join("app.kio");
     let (code, _, err) = kio(&["check", app.to_str().unwrap()]);
     assert_eq!(code, 1);
-    assert!(err.starts_with("web.kio:2: error: "), "{err}");
+    assert!(err.starts_with("web.kio:2:5: error: "), "{err}");
 }
 
 #[test]

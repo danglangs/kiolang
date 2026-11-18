@@ -837,7 +837,7 @@ fn listen_reports_a_parse_error_first() {
     let (code, err) = run_src(src, &["--listen", "127.0.0.1:0"]);
     assert_eq!(code, Some(1));
     assert!(
-        err.contains("app.kio:3: error: expected `)`\n  hint: a `(` is not closed"),
+        err.contains("app.kio:3:1: error: expected `)`\n  hint: a `(` is not closed"),
         "{err}"
     );
     assert!(!err.contains("--listen needs"), "{err}");

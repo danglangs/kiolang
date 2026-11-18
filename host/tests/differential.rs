@@ -372,6 +372,7 @@ fn asserts_agree() {
         r#"fn main() { let mut xs: List<Int> = []; for i in 0..3000 { xs.push(i); } let ys = xs; xs.push(1); assert_eq(xs, ys); }"#,
         r#"fn main() { let xs = [1]; assert(true, xs[2].to_str()); }"#,
         r#"fn main() -> Int { let assert = |n: Int| n + 1; assert(1) }"#,
+        r#"fn main() { let xs = [None, Some("a\\b"), None]; assert_eq(xs.len(), 3); assert_eq(xs, [None, None, Some("x\"y")]); }"#,
     ];
     let caps = CapTable::v0();
     for src in programs {

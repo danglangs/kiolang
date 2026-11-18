@@ -1838,3 +1838,15 @@ fn l25_open_branch_typed_from_the_other() {
     // pick(3): 3 -2 +30 +3 -5 +100 +3 -6 +0 +1 = 127
     assert_eq!(int(src), Value::Int(23 * 1000000 - 3 * 10000 + 16 * 100 + 127));
 }
+
+/// L28 4: `[None, Some(..)]` runs as if annotated.
+#[test]
+fn l28_none_first_in_a_list() {
+    let src = "fn main() -> Int {
+                   let xs = [None, None, Some(\"ab\"), None];
+                   let mut n = 0;
+                   for x in xs { n = n * 10 + x.map(|s| s.len()).unwrap_or(1); }
+                   n
+               }";
+    assert_eq!(int(src), Value::Int(1121));
+}

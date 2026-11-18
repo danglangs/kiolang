@@ -49,7 +49,7 @@ fn a_capability_never_reaches_a_type_parameter() {
         ("fn f<T>(d: Dir, x: T) -> T { let c = |y: T| y; c(d) } fn main(input: Dir) -> Int { f(input, 1) }", "expected T, found Dir", "d"),
         ("fn f<T>(d: Dir, x: T, b: Bool) -> T { if b { x } else { d } } fn main(input: Dir) -> Int { f(input, 1, true) }", "capability used as a value", "d"),
         // A `T` value where a capability is expected.
-        ("fn keep(d: Dir) {} fn g<T>(x: T) { keep(x); } fn main() { g(5) }", "expected Dir, found T", "x"),
+        ("fn keep(d: Dir) {} fn g<T>(x: T) { keep(x); } fn main() { g(5) }", "expected Dir, found T in argument 1 of `keep`", "x"),
         ("fn g<T>(d: T) -> Int { d.read(\"a\"); 1 } fn main(input: Dir) -> Int { g(1) }", "no method `read` on T", "d.read(\"a\")"),
         // Generic functions with capability parameters are not values.
         (
