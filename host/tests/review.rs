@@ -112,18 +112,21 @@ fn a_change_on_one_page() {
             "  tested       added: fresh",
             "  not checked  removed: gone",
             "  not checked  changed: counts",
+            "  not checked  changed, reached by no test: main",
             "  tested       small: 100 cases compiled; seed 1",
         ]
     );
-    // Only `counts` changed; the total is over the three tests on both sides.
+    // Only `counts` changed; `fresh` is added; the total is over the three tests on both sides.
     let resources = Sides::section(&out, "Resources");
-    assert_eq!(resources.len(), 2, "{out}");
+    assert_eq!(resources.len(), 3, "{out}");
+    assert!(resources[1].starts_with("  measured     added: fresh: fuel "), "{out}");
+    assert!(resources[1].ends_with(" KB"), "{out}");
     assert!(resources[0].starts_with("  measured     counts: fuel "), "{out}");
     // Fuel is deterministic, but its exact count depends on the runtime build.
     assert!(resources[0].contains("%), peak memory "), "{out}");
     assert!(resources[0].contains(" fuel ") && resources[0].contains("(+"), "{out}");
     assert!(
-        resources[1].starts_with("  measured     total over 3 tests on both sides: fuel "),
+        resources[2].starts_with("  measured     total over 3 tests on both sides: fuel "),
         "{out}"
     );
     assert_eq!(
@@ -363,7 +366,7 @@ fn grants_bind_to_new_main() {
         [
             "  enforced     no change in authority".to_string(),
             format!("  not checked  {g}: outside the program's directory; not compared with the base"),
-            format!("  enforced     --grants {g} binds {}'s main", s.new),
+            format!("  enforced     --grants {g} binds {}'s main: d=.", s.new),
         ]
     );
     assert!(out.contains(&format!("  tested       grants: {t}\n")), "{out}");
@@ -472,11 +475,16 @@ fn a_base_without_tests() {
     assert_eq!(tests[1], "  tested       old: 0 tests");
     assert_eq!(tests[2], "  tested       new: 4 passed, 0 failed");
     assert_eq!(tests[3], "  tested       added: counts");
-    // No test on both sides: no total.
-    assert_eq!(
-        Sides::section(&out, "Resources"),
-        ["  measured     no test ran on both sides"]
-    );
+    // No test on both sides: each added one's numbers, no total.
+    let resources = Sides::section(&out, "Resources");
+    assert_eq!(resources.len(), 5, "{out}");
+    for (line, name) in resources.iter().zip(["counts", "fresh", "kept", "small"]) {
+        assert!(
+            line.starts_with(&format!("  measured     added: {name}: fuel ")),
+            "{out}"
+        );
+    }
+    assert_eq!(resources[4], "  measured     no test ran on both sides");
 }
 
 /// R1a2: a function line is the checker's attribution (`derived`); exit 3 with no grant added
@@ -589,7 +597,7 @@ fn an_added_entry() {
             "  enforced     worker.kio: + d: Dir (read)".into(),
             "  derived      worker.kio:   read in lib::touch".into(),
             format!("  not checked  worker.kio: {w}: outside the program's directory; not compared with the base"),
-            format!("  enforced     worker.kio: --entry-grants {w} binds {dir}/new/worker.kio's main"),
+            format!("  enforced     worker.kio: --entry-grants {w} binds {dir}/new/worker.kio's main: d=.:ro"),
         ]
     );
     // Tests stay the root's.
@@ -802,7 +810,7 @@ fn the_grants_file_is_part_of_the_change() {
         [
             "  enforced     app.grants: + --dir r=rejects".to_string(),
             "  enforced     app.grants: - --dir r=.:ro".into(),
-            format!("  enforced     --grants {g} binds {}'s main", s.new),
+            format!("  enforced     --grants {g} binds {}'s main: d=., r=rejects", s.new),
         ],
         "{out}"
     );
@@ -1058,4 +1066,160 @@ fn an_error_path_is_escaped() {
     assert_eq!(code, 1, "{out}{err}");
     assert!(!out.contains('\u{202e}'), "{out}");
     assert!(out.contains("n\\u{202e}ew/app.kio:1:"), "{out}");
+}
+
+/// R1a5: a changed function no test of the root's reaches is named, per program. An entry's
+/// function counts as reached when the root's tests reach one of its key with the same tokens.
+#[test]
+fn a_changed_function_no_test_reaches() {
+    let touches = format!("{NEW}\nmod lib;\n\n#[test]\nfn touches(d: Dir) {{ let _ = lib::touch(d); }}\n");
+    let s = Sides::new(&touches, &touches);
+    let root = s.dir.path();
+    for side in ["old", "new"] {
+        write(root, &format!("{side}/lib.kio"), LIB);
+    }
+    write(root, "new/worker.kio", WORKER);
+    std::fs::create_dir(root.join("new/sub")).unwrap();
+    write(root, "new/sub/worker.kio", WORKER);
+    write(root, "new/sub/lib.kio", &LIB.replace("\"a\"", "\"b\""));
+    let entries = ["--entry", "worker.kio", "--entry", "sub/worker.kio"];
+    let (code, out, err) = s.review(&entries);
+    assert_eq!(code, 3, "{out}{err}");
+    let tests = Sides::section(&out, "Tests");
+    let unreached: Vec<&String> = tests.iter().filter(|l| l.contains("reached by no test")).collect();
+    assert_eq!(
+        unreached,
+        [
+            "  not checked  changed, reached by no test: worker.kio: main",
+            "  not checked  changed, reached by no test: sub/worker.kio: lib::touch, main",
+        ],
+        "{out}"
+    );
+    let (_, out, _) = s.review(&[&entries[..], &["--json"]].concat());
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        v["tests"]["unreached_changed"],
+        serde_json::json!([
+            {"entry": "worker.kio", "function": "main"},
+            {"entry": "sub/worker.kio", "function": "lib::touch"},
+            {"entry": "sub/worker.kio", "function": "main"},
+        ])
+    );
+    // The root's changed `main` (no test calls it): no prefix.
+    let s = Sides::new(OLD, NEW);
+    let (_, out, _) = s.review(&["--json"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        v["tests"]["unreached_changed"],
+        serde_json::json!([{"entry": null, "function": "main"}])
+    );
+}
+
+/// R1a5: a dependency added or changed exits 3, its code not being on the page (#280); one
+/// removed does not.
+#[test]
+fn a_changed_dependency_exits_3() {
+    let app = "mod web;\n\nfn main(d: Dir) -> Result<Int, IoErr> { web::look(d) }\n";
+    let v1 = "pub fn look(d: Dir) -> Result<Int, IoErr> { Ok(d.list(\"\")?.len()) }\n";
+    let v2 = "pub fn look(d: Dir) -> Result<Int, IoErr> { Ok(d.list(\"\")?.len() + 1) }\n";
+    let s = Sides::new(app, app);
+    let root = s.dir.path();
+    let sha = |t: &str| lang::digest::to_hex(&lang::digest::sha256(t.as_bytes()));
+    let pin = |lib: &str| format!("web lib/web.kio sha256:{}\n", sha(lib));
+    for (side, lib) in [("old", v1), ("new", v2)] {
+        std::fs::create_dir(root.join(side).join("lib")).unwrap();
+        write(root, &format!("{side}/lib/web.kio"), lib);
+        write(root, &format!("{side}/kio.deps"), &pin(lib));
+    }
+    let (code, out, err) = s.review(&[]);
+    assert_eq!(code, 3, "{out}{err}");
+    assert_eq!(
+        Sides::section(&out, "Authority"),
+        ["  enforced     no change in authority"]
+    );
+    let line = format!(
+        "  not checked  dependency web changed (sha256:{}.. -> sha256:{}..): its code is not shown; its authority is above",
+        &sha(v1)[..12],
+        &sha(v2)[..12]
+    );
+    assert!(Sides::section(&out, "Not checked").contains(&line), "{out}");
+    // Added: OLD has the same file as a module of its own.
+    std::fs::remove_file(root.join("old/kio.deps")).unwrap();
+    write(root, "old/web.kio", v2);
+    let (code, out, err) = s.review(&[]);
+    assert_eq!(code, 3, "{out}{err}");
+    assert!(
+        out.contains(&format!("dependency web added (sha256:{}..)", &sha(v2)[..12])),
+        "{out}"
+    );
+    // Removed: NEW has it as a module of its own, OLD as a dependency.
+    std::fs::remove_file(root.join("new/kio.deps")).unwrap();
+    write(root, "new/web.kio", v2);
+    std::fs::remove_file(root.join("old/web.kio")).unwrap();
+    write(root, "old/lib/web.kio", v2);
+    write(root, "old/kio.deps", &pin(v2));
+    let (code, out, err) = s.review(&[]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("  not checked  dependency web removed ("), "{out}");
+}
+
+/// R1a5: the binds line lists what the grants file bound, each part escaped and, when it holds a
+/// separator, quoted; a secret by its source only.
+#[test]
+fn the_binds_line_lists_what_it_bound() {
+    let app = r#"fn main(db: Db, hook: Http, key: Hmac, tok: Secret, d: Dir, r: Dir) -> Result<(), Str> {
+  let _ = hook.send("POST", "/", [], "x".to_bytes(), 1000);
+  let _ = db.query("SELECT 1", []);
+  let _ = key.verify("x".to_bytes(), "y".to_bytes());
+  let _ = tok.matches("x");
+  let _ = d.read("a");
+  let _ = r.read("a");
+  Ok(())
+}
+"#;
+    let s = Sides::new(app, app);
+    let grants = "--db db=var/inv.db:ro\n--http hook=http://127.0.0.1:9099\n--http-methods hook=POST\n\
+        --http-header hook=Authorization:env:HOOK_AUTH\n--hmac key=file:keys/k:verify\n\
+        --secret tok=env:R1A5_TOKEN\n--dir d=we ird,x\n--dir r=a\u{202e}b\n--fuel 1000000\n";
+    let g = write(s.dir.path(), "new/app.grants", grants);
+    let out = Command::new(env!("CARGO_BIN_EXE_kio"))
+        .args(["review", &s.new, "--base", &s.old, "--grants", &g])
+        .env("TMPDIR", s.dir.path().join("tmp"))
+        .env("R1A5_TOKEN", "hunter2-value")
+        .env("HOOK_AUTH", "Bearer hunter3-value")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{text}{err}");
+    let binds = format!(
+        "  enforced     --grants {g} binds {}'s main: db=var/inv.db:ro, hook=http://127.0.0.1:9099 \
+         (POST; Authorization:env:HOOK_AUTH), key=file:keys/k:verify, tok=env:R1A5_TOKEN, \"d=we ird,x\", \
+         r=a\\u{{202e}}b",
+        s.new
+    );
+    assert!(Sides::section(&text, "Authority").contains(&binds), "{text}");
+    assert!(!text.contains("hunter") && !text.contains('\u{202e}'), "{text}");
+}
+
+/// R1a5: a test only in NEW has its fuel and peak memory under Resources, no old value.
+#[test]
+fn an_added_tests_resources() {
+    let old = "fn main() {}\n\n#[test]\nfn one() { assert_eq(1, 1); }\n";
+    let new = format!("{old}\n#[test]\nfn two() {{ assert_eq(2, 2); }}\n");
+    let s = Sides::new(old, &new);
+    let (code, out, err) = s.review(&["--json"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let added = &v["resources"]["added"];
+    assert_eq!(added.as_array().unwrap().len(), 1, "{out}");
+    assert_eq!(added[0]["name"], "two");
+    let fuel = added[0]["fuel"].as_u64().unwrap();
+    let peak = added[0]["peak_memory"].as_u64().unwrap();
+    let (_, out, _) = s.review(&[]);
+    assert_eq!(
+        Sides::section(&out, "Resources")[1],
+        format!("  measured     added: two: fuel {fuel}, peak memory {} KB", peak >> 10),
+        "{out}"
+    );
 }

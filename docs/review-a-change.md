@@ -61,7 +61,7 @@ Review every entry the change touches: an entry left out is authority nobody rev
 
 For kio-web's flow: `--grants app.grants --test-grants test.grants --requirements README.md --entry worker.kio --entry-grants worker.grants`, with `FLOW_KEY` set (test.grants reads the key from it). Forget `FLOW_KEY` and the Tests section is one `error`, `--hmac key: `FLOW_KEY` is not set`, and no test runs.
 
-Exit codes: 0 nothing added; 3 authority added or a test removed; 1 an `error` line; 2 usage.
+Exit codes: 0 nothing added; 3 authority added, a dependency added or changed (its code is not on the page), or a test removed; 1 an `error` line; 2 usage.
 
 ## 4. Read it, section by section
 
@@ -76,7 +76,7 @@ Every line carries a label; a line under a labelled one shares it. The label say
 | `not checked` | nothing | nothing | look at it, or accept it knowingly |
 | `error` | a failure | nothing | stop: fix it, or reject |
 
-The sections, in order: **Requirements** (the requirement file's diff), **Authority** (`kio check --base`'s lines, and whether `--grants` binds), **Tests** (both sides' counts, tests added and removed, each property's cases, each NEW failure), **Resources** (per-test fuel and peak memory changes over 2%, then totals), **Not checked** (what the host never looks at for each method `main` reaches), **Identity** (sha256 of every file that went into the page).
+The sections, in order: **Requirements** (the requirement file's diff), **Authority** (`kio check --base`'s lines, and whether `--grants` binds and what it binds: `db=var/inv.db:ro, hook=http://127.0.0.1:9099 (POST)`, a secret by its source, `env:NAME`), **Tests** (both sides' counts, tests added and removed, changed functions no test reaches, each property's cases, each NEW failure), **Resources** (per-test fuel and peak memory changes over 2%, each added test's, then totals), **Not checked** (what the host never looks at for each method `main` reaches), **Identity** (sha256 of every file that went into the page).
 
 ## 5. Decide
 
@@ -95,7 +95,7 @@ Checklist:
 1. Any `error`? Reject, or ask for a fix.
 2. Authority: for each `+` or `~` line, does the requirement diff ask for it? A `~` method on an existing grant is authority added like a `+` grant: the requirement must ask for it. If not, reject. The `derived` line under it names where to read. Do the same for each grants-file line (`app.grants: + --dir ..`).
 3. Tests: is any test `removed:`, or a property running fewer cases? Find out why before accepting.
-4. Do the added tests cover what the requirement diff claims? A `changed:` test (its own code or a function it reaches changed) is read like an added one: it tests something else now. Name tests are a claim too: read the one or two that matter.
+4. Do the added tests cover what the requirement diff claims? A `changed:` test (its own code or a function it reaches changed) is read like an added one: it tests something else now. Name tests are a claim too: read the one or two that matter. A `changed, reached by no test:` function ran in no test: read it, or ask for a test that calls it.
 5. Resources: any change you would not accept in production?
 6. Not checked: for each line, is it covered by a test you trust, or by a function you read? Otherwise ask.
 7. Identity: is this the commit you meant to review?
@@ -141,7 +141,7 @@ Authority
   derived      grants unchanged; new functions reach: flow::init
   derived      + flow::init: db exec
   enforced     app.grants: unchanged
-  enforced     --grants app.grants binds app.kio's main
+  enforced     --grants app.grants binds app.kio's main: key=env:FLOW_KEY:verify, now, db=flow.db, --listen 127.0.0.1:8080
   enforced     worker.kio: + db: Db (exec query)
   derived      worker.kio:   exec in flow::claim, flow::finish, flow::init, flow::try_claim
   derived      worker.kio:   query in flow::claim, flow::try_claim
@@ -150,7 +150,7 @@ Authority
   enforced     worker.kio: + dest: Http (send POST)
   derived      worker.kio:   send POST in deliver
   enforced     worker.kio: worker.grants: new file
-  enforced     worker.kio: --entry-grants worker.grants binds worker.kio's main
+  enforced     worker.kio: --entry-grants worker.grants binds worker.kio's main: db=flow.db, now, dest=https://dest.example (POST; Authorization:env:DEST_AUTH)
 Tests
   tested       grants: test.grants
   tested       old: 10 passed, 0 failed
@@ -173,6 +173,7 @@ Tests
   not checked  changed: tests::repeated_id_is_200_and_changes_nothing (reaches changed flow::init, flow::store)
   not checked  changed: tests::replay_equals_each_distinct_event_once (reaches changed flow::init, flow::store)
   not checked  changed: tests::signed_non_utf8_body_is_400 (reaches changed flow::init, flow::store)
+  not checked  changed, reached by no test: worker.kio: deliver, main
   tested       tests::any_signed_bytes_get_an_answer: 100 cases compiled; seed 1
   tested       tests::bad_signature_never_inserts: 100 cases compiled; seed 1; 5 discarded
   tested       tests::db_equals_model_and_nothing_is_stranded: 100 cases compiled; seed 1
@@ -182,7 +183,10 @@ Resources
   measured     tests::any_signed_bytes_get_an_answer: fuel 3583775 -> 3854875 (+7.57%), peak memory 2112 KB -> 2112 KB (+0.00%)
   measured     tests::bad_signature_beats_bad_json: fuel 25665 -> 28376 (+10.57%), peak memory 1920 KB -> 1920 KB (+0.00%)
   ...
-  measured     total over 10 tests on both sides: fuel 70186182 -> 71573570 (+1.98%), largest peak memory 2112 KB -> 2112 KB (+0.00%)
+  measured     added: tests::db_equals_model_and_nothing_is_stranded: fuel 158162112, peak memory 2496 KB
+  ...
+  measured     added: tests::stale_completion_changes_nothing: fuel 8760567, peak memory 1920 KB
+  measured     total over 10 tests on both sides: fuel 70183276 -> 71570664 (+1.98%), largest peak memory 2112 KB -> 2112 KB (+0.00%)
 Not checked
   not checked  res: Outgoing send: what the client receives
   not checked  db: Db exec: the SQL text and what it changes (changed: flow::init, flow::store)
@@ -201,12 +205,12 @@ $ echo $?
 Reading it:
 
 - **Authority**: grants unchanged (`main` already had `db exec`); exit 3 is `init`, new and reached from `main`. It is the `CREATE TABLE`, moved out of `store`. Expected.
-- **Authority, `worker.kio`**: a new program, so every grant is `+`: the database (`exec query`, to claim and finish jobs), the clock, and `POST` to one destination, whose key the host adds (`worker.grants`: `--http-header dest=Authorization:env:DEST_AUTH`). That is what the F1.2 requirement describes. The `derived` lines under each grant name the functions that make each call: `deliver` posts, `flow::claim` and `flow::try_claim` query.
-- **Tests**: 10 to 18, nothing removed; the 8 added are the worker's transitions and two properties against a model. The F1.1 properties still run 100 cases.
-- **Resources**: +3% to +10% fuel on the ingest tests, +1.98% in total, memory flat. Every ingest now runs `init`, a longer `CREATE TABLE` and a wider `INSERT`; acceptable.
+- **Authority, `worker.kio`**: a new program, so every grant is `+`: the database (`exec query`, to claim and finish jobs), the clock, and `POST` to one destination, whose key the host adds (the binds line: `dest=https://dest.example (POST; Authorization:env:DEST_AUTH)`, the key named by its source, never its value). That is what the F1.2 requirement describes. The `derived` lines under each grant name the functions that make each call: `deliver` posts, `flow::claim` and `flow::try_claim` query.
+- **Tests**: 10 to 18, nothing removed; the 8 added are the worker's transitions and two properties against a model. The F1.1 properties still run 100 cases. But `changed, reached by no test: worker.kio: deliver, main`: the tests call the worker's `flow::` steps, never its loop or its delivery, so those two ran in no test.
+- **Resources**: +3% to +10% fuel on the ingest tests, +1.98% in total, memory flat. Every ingest now runs `init`, a longer `CREATE TABLE` and a wider `INSERT`; acceptable. The added model property costs 158M fuel, the rest under 9M.
 - **Not checked**: `db exec: the SQL text`. The table gains three columns, and the requirement diff says "An F1.1 database made before F1.2 has no migration": `CREATE TABLE IF NOT EXISTS` leaves an old table as it is, and the new `INSERT` names `next_ms`. The worker's lines add its SQL and the bodies it posts: the tests cover the claims and completions against a model, and `every_attempt_carries_the_event_id_as_the_key` the delivery key.
 
-**Decision: accept**, if no F1.1 database is deployed; the missing migration is a known, stated gap. If one is deployed, **ask for evidence**: a migration and a test that runs it on an F1.1 table.
+**Decision: accept**, after reading `deliver` and the worker's `main` (what no test ran), if no F1.1 database is deployed; the missing migration is a known, stated gap. If one is deployed, **ask for evidence**: a migration and a test that runs it on an F1.1 table.
 
 ### b. A change that adds authority nobody asked for
 
@@ -269,9 +273,11 @@ Tests
   tested       new: 3 passed, 0 failed
   tested       added: counts_rows
   not checked  removed: main_writes_the_total
+  not checked  changed, reached by no test: main
 Resources
   measured     skips_bad_rows: fuel 16475 -> 17525 (+6.38%), peak memory 1600 KB -> 1600 KB (+0.00%)
   measured     sums_the_cents_column: fuel 15228 -> 16278 (+6.90%), peak memory 1600 KB -> 1600 KB (+0.00%)
+  measured     added: counts_rows: fuel 12367, peak memory 1600 KB
   measured     total over 2 tests on both sides: fuel 31703 -> 33803 (+6.63%), largest peak memory 1600 KB -> 1600 KB (+0.00%)
 Not checked
   not checked  out: Dir write: what is written or removed (changed: main, rows)
@@ -282,7 +288,7 @@ $ echo $?
 1
 ```
 
-**Decision: reject.** `+ stats: Http (send POST)` is a new grant the requirement does not mention, carrying the whole CSV; the grants file does not give it (`error`); and the only test of `main` was removed. You decided this from the Authority and Tests sections, without reading the diff. (Without `--grants` the page is the same minus the grants lines and the `error`, and exits 3.) Resources moved +6% on tests that never call `main`: each run first sets up every type the program uses, and `stats.send` brings `HttpResponse` and `HttpErr` (about 1,000 fuel a run; [guide, Resources](guide.md#reviewing-a-change)).
+**Decision: reject.** `+ stats: Http (send POST)` is a new grant the requirement does not mention, carrying the whole CSV; the grants file does not give it (`error`); and the only test of `main` was removed, so the changed `main` is `reached by no test`. You decided this from the Authority and Tests sections, without reading the diff. (Without `--grants` the page is the same minus the grants lines and the `error`, and exits 3.) Resources moved +6% on tests that never call `main`: each run first sets up every type the program uses, and `stats.send` brings `HttpResponse` and `HttpErr` (about 1,000 fuel a run; [guide, Resources](guide.md#reviewing-a-change)).
 
 ### c. A change that stays inside its authority and is wrong
 
@@ -318,7 +324,7 @@ Requirements
 Authority
   enforced     no change in authority
   enforced     tally.grants: unchanged
-  enforced     --grants c/tally.grants binds c/tally.kio's main
+  enforced     --grants c/tally.grants binds c/tally.kio's main: orders=orders:ro, out=out
 Tests
   tested       grants: defaults (temporary Dir, :memory: stores, fixed clock)
   tested       old: 3 passed, 0 failed
