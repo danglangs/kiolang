@@ -2236,3 +2236,54 @@ fn a_written_entry_main_does_not_reach_is_refused() {
         "{out}"
     );
 }
+
+#[test]
+fn test_grants_over_new_sources_are_refused() {
+    let s = Sides::new(WRITES, WRITES);
+    let root = s.dir.path();
+    let new = root.join("new");
+    std::os::unix::fs::symlink(&new, root.join("link")).unwrap();
+    std::fs::create_dir(new.join("testdata")).unwrap();
+    let refused = |dir: &Path, file: &str| {
+        let t = write(root, "t.grants", &format!("--dir src={}:ro\n", dir.display()));
+        let (code, out, err) = s.review(&["--test-grants", &t]);
+        assert_eq!((code, out.as_str()), (2, ""), "{}: {err}", dir.display());
+        assert_eq!(
+            err,
+            format!(
+                "kio: --test-grants {t}: `--dir src={}:ro` holds NEW's source `{file}`; a test could read the code under review instead of running it\n  hint: grant a directory that holds no program file, e.g. `--dir data=testdata:ro` beside the program\n",
+                dir.display()
+            )
+        );
+    };
+    // NEW's directory, an ancestor of it, and a symlink to it.
+    refused(&new, &s.new);
+    refused(root, &s.new);
+    refused(&root.join("link"), &s.new);
+    // A directory beside or inside NEW's that holds no source is granted.
+    for dir in [root.join("old"), new.join("testdata")] {
+        let t = write(root, "t.grants", &format!("--dir d={}:ro\n", dir.display()));
+        let (code, out, err) = s.review(&["--test-grants", &t]);
+        assert_ne!(code, 2, "{}: {out}{err}", dir.display());
+    }
+    // NEW's file is a symlink into another directory: that directory holds the source too.
+    let real = root.join("real");
+    std::fs::create_dir(&real).unwrap();
+    std::fs::rename(&s.new, real.join("app.kio")).unwrap();
+    std::os::unix::fs::symlink(real.join("app.kio"), &s.new).unwrap();
+    refused(&real, &s.new);
+    // A second hard link to NEW's source could sit in any granted directory.
+    std::fs::hard_link(real.join("app.kio"), new.join("testdata/copy.kio")).unwrap();
+    let old = root.join("old");
+    let t = write(root, "t.grants", &format!("--dir d={}:ro\n", old.display()));
+    let (code, out, err) = s.review(&["--test-grants", &t]);
+    assert_eq!((code, out.as_str()), (2, ""), "{err}");
+    assert_eq!(
+        err,
+        format!(
+            "kio: --test-grants {t}: NEW's source `{}` has other hard links; one could be inside `--dir d={}:ro`\n  hint: give the source file one link (copy it), or leave the `--dir` out\n",
+            s.new,
+            old.display()
+        )
+    );
+}

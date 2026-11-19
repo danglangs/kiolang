@@ -397,6 +397,10 @@ fn inputs(path: &str, flags: &[&str]) -> Result<Inputs, i32> {
         }
         read_entries.push(e);
     }
+    if let Some((t, _)) = &test_grants {
+        let progs = std::iter::once(&new.1).chain(read_entries.iter().map(|e| &e.new.1));
+        source_dirs(t, &progs.flat_map(|p| p.paths.iter()).collect::<Vec<_>>())?;
+    }
     Ok(Inputs {
         old,
         new,
@@ -470,6 +474,40 @@ fn shared_state(t: &str) -> Result<(), i32> {
                 "--test-grants {t}: `{} {name}={target}` would carry OLD's test writes into NEW's\n  hint: grant it `:ro`, use `:memory:` for a store, or leave it out for a fresh one per test",
                 pair[0]
             )));
+        }
+    }
+    Ok(())
+}
+
+/// Refuses a tests' grants file whose `--dir`, `:ro` or not, holds one of NEW's source files
+/// (`sources`: its programs' files and `kio.deps`): a test could read the code under review
+/// instead of running it (R1b3). Inside is decided by identity, as H28 decides it, so a symlink
+/// to the directory or a symlinked directory on the way to a file counts. A source file with
+/// other hard links is refused while any `--dir` is granted: one could be inside it.
+fn source_dirs(t: &str, sources: &[&std::path::PathBuf]) -> Result<(), i32> {
+    let (flags, _) = with_grants(&["--grants", t])?;
+    let at = format!("--test-grants {}", kio_host::escape_line(t));
+    for pair in flags.chunks(2).filter(|p| p[0] == "--dir") {
+        let Some((name, spec)) = pair[1].split_once('=') else {
+            continue;
+        };
+        let grant = kio_host::escape_line(&format!("--dir {name}={spec}"));
+        let (target, _) = kio_host::kv::split_spec(spec);
+        let Ok(id) = kio_host::path_id(target.as_ref()) else {
+            continue;
+        };
+        for file in sources {
+            let shown = kio_host::escape_line(&file.display().to_string());
+            if kio_host::within(file, id) {
+                return Err(fail(format!(
+                    "{at}: `{grant}` holds NEW's source `{shown}`; a test could read the code under review instead of running it\n  hint: grant a directory that holds no program file, e.g. `--dir data=testdata:ro` beside the program"
+                )));
+            }
+            if std::fs::metadata(file).is_ok_and(|m| std::os::unix::fs::MetadataExt::nlink(&m) > 1) {
+                return Err(fail(format!(
+                    "{at}: NEW's source `{shown}` has other hard links; one could be inside `{grant}`\n  hint: give the source file one link (copy it), or leave the `--dir` out"
+                )));
+            }
         }
     }
     Ok(())

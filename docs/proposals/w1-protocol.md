@@ -31,7 +31,7 @@ The changes and the key are kept outside both repositories until every reviewer 
 
 ## What is recorded, per change
 
-Decision; correct or not against the key; for an ask, what was asked for; implementation lines read (the reviewer notes each file and line range opened); minutes from start to decision; anything confusing on the page.
+Decision; correct or not against the key; for an ask, what was asked for; implementation lines read (the reviewer notes each file and line range opened); minutes from start to decision; anything confusing on the page; whether the mutant lines (R1b) were used: a survivor read, a `killed by:` test opened, a `--mutations` file written to ask for evidence.
 
 ## Arms
 

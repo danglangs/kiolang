@@ -2,11 +2,11 @@
 
 An agent hands you a change to a kio program. This walkthrough gets the two versions side by side, runs `kio review` on them, reads the page it prints, and ends in one of three decisions. Every flag and line format is in the reference, [guide.md, Reviewing a change](guide.md#reviewing-a-change); this page is the workflow.
 
-All output below is from real runs of kio 0.1.4; the commit in each `Identity` is elided.
+All output below is from real runs of kio 0.1.4, the mutant lines from the next version (R1b, unreleased); the commit in each `Identity` is elided.
 
 ## 1. What you need
 
-- kio 0.1.4 or later (`kio --version`). No Rust: download a release as in [first-job.md](first-job.md#1-download), e.g. `https://github.com/danglangs/kiolang/releases/latest/download/kio-aarch64-apple-darwin.tar.gz`.
+- kio 0.1.4 or later (`kio --version`); the mutant lines need a build of `main` until the next release. No Rust: download a release as in [first-job.md](first-job.md#1-download), e.g. `https://github.com/danglangs/kiolang/releases/latest/download/kio-aarch64-apple-darwin.tar.gz`.
 - For the worked example in section 7a, a checkout of [kio-web](https://github.com/danglangs/kio-web).
 
 ## 2. Get the change as two directories
@@ -52,7 +52,7 @@ kio review NEW --base OLD [--grants G] [--test-grants T] [--requirements FILE] [
 | Flag | Give it | Why |
 |---|---|---|
 | `--grants G` | the operator's grants file for `main` (`app.grants`) | shows an `error` if NEW's `main` needs a grant G does not give |
-| `--test-grants T` | the tests' grants file, if tests need one (an `Http`, an `Hmac`, a `Secret`) | without it a test that needs one fails |
+| `--test-grants T` | the tests' grants file, if tests need one (an `Http`, an `Hmac`, a `Secret`) | without it a test that needs one fails. It may not grant a writable `--dir` or store, nor any `--dir` that holds NEW's files (a test could read the code instead of running it) |
 | `--requirements FILE` | the file that says what the program should do (`README.md`), a path relative to each side's entry | its diff is what the change claims |
 | `--entry FILE` | each other program the change touches (`worker.kio`), a path relative to NEW's entry, the same on OLD's side | its authority and blind spots, prefixed `worker.kio:`; an entry OLD lacks is all new authority |
 | `--entry-grants G2` | right after its `--entry`: that program's grants file (`worker.grants`) | as `--grants`, for that entry |
@@ -74,7 +74,7 @@ Every line carries a label; a line under a labelled one shares it. The label say
 |---|---|---|---|
 | `enforced` | the checker derives it from the code; the host refuses any call outside the grants | reading the code to learn what it can reach | whether that authority fits the requirement; what is done with it |
 | `derived` | the checker's attribution of authority to a function (`+ flow::init: db exec`, `  query in flow::claim` under a grant line); the host enforces per grant, not per function | tracing which function makes each call | as for `enforced` |
-| `tested` | these tests passed, compiled, in this run (properties: on the generated cases shown) | rerunning the tests | whether the tests check the right thing |
+| `tested` | these tests passed, compiled, in this run (properties: on the generated cases shown); for mutants, a test failed on the edited code | rerunning the tests | whether the tests check the right thing |
 | `measured` | fuel and peak memory, deterministic, on the tests | profiling the tests | production load, wall time |
 | `not checked` | nothing | nothing | look at it, or accept it knowingly |
 | `error` | a failure | nothing | stop: fix it, or reject |
@@ -120,7 +120,7 @@ Checklist:
 
 - **Whether the requirement is right.** The Requirements diff is the change's claim, not a check.
 - **What is inside an effect.** The SQL text, the body sent, what is written: `Not checked` lists each one the program can reach.
-- **Whether the tests are good.** `tested` means they passed, not that they prove the claim. They are usually written by the same author as the code (the page says so). Killed mutants show the tests notice edits to the changed code, not that they check the requirement: a test comparing a function with a copy of itself kills every mutant in it.
+- **Whether the tests are good.** `tested` means they passed, not that they prove the claim. They are usually written by the same author as the code (the page says so). Killed mutants show the tests notice edits to the changed code, not that they check the requirement: a test comparing a function with a copy of itself kills every mutant in it. Read the test the `killed by:` line names most. (A test cannot read its own source instead: review refuses a test grants `--dir` that holds NEW's files.)
 - **Production cost.** Resources are measured on the tests only, not on runs of `main`.
 - **Bugs in kio.** Authority is derived and enforced within kio's model ([threat model](../README.md#threat-model)); an implementation bug in the checker or host would break it.
 
@@ -296,6 +296,10 @@ Tests
   tested       added: counts_rows
   not checked  removed: main_writes_the_total
   not checked  changed, reached by no test: main
+  tested       mutants: 2 of 4 killed (generated at seed 1: 4 drawn of 4 sites, 0 did not check)
+  tested       killed by: counts_rows 2
+  not checked  survived: generated: rows: `0` -> `1` in `if n == 0 { 0 } else { n - 1 }`
+  not checked  survived: generated: rows: `0` -> `1` in `if n == 0 { 0 } else { n - 1 }`
 Resources
   measured     skips_bad_rows: fuel 16475 -> 17525 (+6.38%), peak memory 1600 KB -> 1600 KB (+0.00%)
   measured     sums_the_cents_column: fuel 15228 -> 16278 (+6.90%), peak memory 1600 KB -> 1600 KB (+0.00%)
@@ -310,7 +314,7 @@ $ echo $?
 1
 ```
 
-**Decision: reject.** `+ stats: Http (send POST)` is a new grant the requirement does not mention, carrying the whole CSV; the grants file does not give it (`error`); and the only test of `main` was removed, so the changed `main` is `reached by no test`. You decided this from the Authority and Tests sections, without reading the diff. (Without `--grants` the page is the same minus the grants lines and the `error`, and exits 3.) Resources moved +6% on tests that never call `main`: each run first sets up every type the program uses, and `stats.send` brings `HttpResponse` and `HttpErr` (about 1,000 fuel a run; [guide, Resources](guide.md#reviewing-a-change)).
+**Decision: reject.** `+ stats: Http (send POST)` is a new grant the requirement does not mention, carrying the whole CSV; the grants file does not give it (`error`); and the only test of `main` was removed, so the changed `main` is `reached by no test` (and gets no mutants). You decided this from the Authority and Tests sections, without reading the diff. (Without `--grants` the page is the same minus the grants lines and the `error`, and exits 3.) Resources moved +6% on tests that never call `main`: each run first sets up every type the program uses, and `stats.send` brings `HttpResponse` and `HttpErr` (about 1,000 fuel a run; [guide, Resources](guide.md#reviewing-a-change)).
 
 ### c. A change that stays inside its authority and is wrong
 
@@ -354,6 +358,10 @@ Tests
   not checked  changed: main_writes_the_total (reaches changed cents, total)
   not checked  changed: skips_bad_rows (reaches changed cents, total)
   not checked  changed: sums_the_cents_column (reaches changed cents, total)
+  tested       mutants: 8 of 10 killed (generated at seed 1: 11 drawn of 11 sites, 1 did not check)
+  tested       killed by: main_writes_the_total 8
+  not checked  survived: generated: cents: `>` -> `>=` in `if c > 0 { Some(c) } else { No...`
+  not checked  survived: generated: cents: `0` -> `1` in `if c > 0 { Some(c) } else { None...`
 Resources
   measured     no test changed by more than 2%
   measured     total over 3 tests on both sides: fuel 55651 -> 55753 (+0.19%), largest peak memory 1728 KB -> 1728 KB (+0.00%)
@@ -365,7 +373,7 @@ $ echo $?
 0
 ```
 
-Exit 0 and a clean page, but `if c > 0` now drops refunds (negative cents) from the total. kio cannot see that: the authority is the same, and no test has a negative row. The page does tell you where to look: the one effect is `out: Dir write: what is written`, marked `(changed: cents, total)`, and the three tests are listed as `changed` because they reach `cents`, passing but not checked against the change; none has a refund.
+Exit 0 and a clean page, but `if c > 0` now drops refunds (negative cents) from the total. kio cannot see that: the authority is the same, and no test has a negative row. The page does tell you where to look: the one effect is `out: Dir write: what is written`, marked `(changed: cents, total)`, and the three tests are listed as `changed` because they reach `cents`, passing but not checked against the change; none has a refund. And both survivors sit on the line: `c > 0` can become `c >= 0` or `c > 1` and no test notices, so no test pins which amounts count.
 
 **Decision: ask for evidence.** Either read `cents` (6 lines), or ask for a test of the requirement's edge: a row with a negative and a zero amount. Here the author adds it, and the next review answers:
 
@@ -377,9 +385,13 @@ Tests
   tested       old: 3 passed, 0 failed
   tested       new: 3 passed, 1 failed
   error        added: refunds_count_against_the_total
+  not checked  changed: main_writes_the_total (reaches changed cents, total)
+  not checked  changed: skips_bad_rows (reaches changed cents, total)
+  not checked  changed: sums_the_cents_column (reaches changed cents, total)
   error        FAIL refunds_count_against_the_total
                  c2/tally.kio:47:3: assert_eq failed: left `100`, right `70`
-...
+  tested       mutants: 8 of 10 killed (generated at seed 1: 11 drawn of 11 sites, 1 did not check)
+  ...
 $ echo $?
 1
 ```
