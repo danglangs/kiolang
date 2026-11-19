@@ -586,9 +586,10 @@ fn a_fake_answers_from_its_file() {
         serde_json::json!(["hook: 2 requests, 1 unmatched: POST /v1/evnts"])
     );
     assert!(t[1]["unmatched"].is_null() && t[2]["unmatched"].is_null(), "{j}");
-    // `timeout` answers at once: under 100 ms more than `handled`, which also sends one request.
+    // `timeout` answers at once, not after the real 10 s timeout: within 2 s of `handled`, which
+    // also sends one request (a busy CI runner varies by hundreds of ms).
     let ms = |i: usize| t[i]["ms"].as_f64().unwrap();
-    assert!(ms(3) < ms(1) + 100.0, "{j}");
+    assert!(ms(3) < ms(1) + 2000.0, "{j}");
 }
 
 /// A test grants file's fake is refused everywhere else, by name.
