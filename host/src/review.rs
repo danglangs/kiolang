@@ -70,6 +70,10 @@ struct Inputs {
     /// The grants file beside OLD's program at G's path relative to NEW's (R1a4).
     old_grants: Beside,
     test_grants: Option<(String, Vec<u8>)>,
+    /// Each `--http name=fake:FILE` of the test grants file, as `(name, FILE)`.
+    fakes: Vec<(String, String)>,
+    /// Each FILE of `fakes` read once, for both sides' tests and Identity.
+    fake_files: Vec<(String, Result<Vec<u8>, String>)>,
     requirements: Option<[(String, Option<String>); 2]>,
     entries: Vec<Entry>,
 }
@@ -221,7 +225,11 @@ pub(crate) fn review(path: &str, flags: &[&str], json: bool) -> i32 {
     println!("Identity");
     page.identity.iter().for_each(|l| println!("  {l}"));
     for p in &page.changed {
-        println!("  {:<12} {p} changed while the review ran", "error");
+        println!(
+            "  {:<12} {} changed while the review ran",
+            "error",
+            kio_host::escape_line(p)
+        );
     }
     code
 }
@@ -318,6 +326,16 @@ fn inputs(path: &str, flags: &[&str]) -> Result<Inputs, i32> {
     if let Some(t) = &test_grants {
         shared_state(&t.0)?;
     }
+    let fakes = match &test_grants {
+        Some((t, _)) => test_fakes(t)?,
+        None => Vec::new(),
+    };
+    let mut fake_files: Vec<(String, Result<Vec<u8>, String>)> = Vec::new();
+    for (_, f) in &fakes {
+        if !fake_files.iter().any(|(p, _)| p == f) {
+            fake_files.push((f.clone(), read_fake(f)));
+        }
+    }
     let requirements = match requirements {
         Some(file) if Path::new(file).is_absolute() => {
             return Err(fail(format!(
@@ -352,6 +370,8 @@ fn inputs(path: &str, flags: &[&str]) -> Result<Inputs, i32> {
         grants,
         old_grants,
         test_grants,
+        fakes,
+        fake_files,
         requirements,
         entries: read_entries,
     })
@@ -416,6 +436,16 @@ fn shared_state(t: &str) -> Result<(), i32> {
         }
     }
     Ok(())
+}
+
+/// Each `--http name=fake:FILE` of the test grants file `t`, as `(name, FILE)`.
+fn test_fakes(t: &str) -> Result<Vec<(String, String)>, i32> {
+    let (flags, _) = with_grants(&["--grants", t])?;
+    let fake = |p: &[String]| match p[1].split_once('=') {
+        Some((name, o)) if p[0] == "--http" => Some((name.to_string(), o.strip_prefix("fake:")?.to_string())),
+        _ => None,
+    };
+    Ok(flags.chunks(2).filter_map(fake).collect())
 }
 
 /// The requirements file `file` beside the program `program`: its path and text, `None` when it
@@ -888,9 +918,22 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
         resources(&[], &[], page);
         return (json!({"grants": shown, "setup_error": e}), false, true);
     }
-    page.tests.push(("tested", format!("grants: {shown}")));
+    let answered: Vec<String> = (inputs.fakes.iter())
+        .map(|(n, f)| {
+            format!(
+                "{} answered from {}",
+                kio_host::escape_line(n),
+                kio_host::escape_line(f)
+            )
+        })
+        .collect();
+    let line = match answered.is_empty() {
+        true => format!("grants: {shown}"),
+        false => format!("grants: {shown} ({})", answered.join(", ")),
+    };
+    page.tests.push(("tested", line));
     let side = |path: &str| {
-        let (tests, out) = captured(true, || test_setup(path, &flags));
+        let (tests, out) = captured(true, || test_setup(path, &flags, &inputs.fake_files));
         tests.map(|t| (run_tests(&t), t)).map_err(|_| out.errors)
     };
     let (old, new) = (side(&inputs.old.0), side(&inputs.new.0));
@@ -1030,7 +1073,7 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
     resources(old_r, new_r, page);
     let failed = new.is_err() || old.is_err() || !failures.is_empty();
     let value = json!({
-        "grants": inputs.test_grants.as_ref().map(|(t, _)| t),
+        "grants": inputs.test_grants.as_ref().map(|(t, _)| t), "fakes": fakes_json(inputs),
         "old": sides["old"], "new": sides["new"], "added": added, "removed": removed, "changed": changed,
         "unreached_changed": unreached, "fewer_cases": fewer, "properties": properties, "failures": failures, "old_failed": old_failed,
         "setup_error": null,
@@ -1331,8 +1374,24 @@ fn not_checked(inputs: &Inputs, page: &mut Page) {
             seen.push(change);
         }
     }
+    for (n, f) in &inputs.fakes {
+        let (n, f) = (kio_host::escape_line(n), kio_host::escape_line(f));
+        page.not_checked.push(format!(
+            "{n}: Http: tests ran against {f}, not a server; the real endpoint's answers are untested"
+        ));
+    }
     page.not_checked.push(SAME_AUTHOR.into());
-    page.not_checked_json = json!({"methods": rows, "deps": dep_rows, "author": SAME_AUTHOR});
+    page.not_checked_json =
+        json!({"methods": rows, "deps": dep_rows, "fakes": fakes_json(inputs), "author": SAME_AUTHOR});
+}
+
+/// Each fake of the test grants file, for `--json`.
+fn fakes_json(inputs: &Inputs) -> serde_json::Value {
+    json!(inputs
+        .fakes
+        .iter()
+        .map(|(n, f)| json!({"grant": n, "path": f}))
+        .collect::<Vec<_>>())
 }
 
 /// Each program one side loads: its root, then each `--entry` it has.
@@ -1405,6 +1464,10 @@ fn identity(inputs: &Inputs, page: &mut Page) -> serde_json::Value {
     let grants = file("grants", &inputs.grants);
     let old_grants = file("old grants", &old_of(&inputs.old_grants));
     let test_grants = file("test grants", &inputs.test_grants);
+    // A FILE that could not be read was not: its error is the tests' on both sides.
+    let test_fakes: Vec<_> = (inputs.fake_files.iter())
+        .filter_map(|(p, r)| file("test fake", &r.as_ref().ok().map(|b| (p.clone(), b.clone()))))
+        .collect();
     let entry_grants: Vec<_> = (inputs.entries.iter())
         .filter_map(|e| file(&format!("{}: entry grants", e.name), &e.grants))
         .collect();
@@ -1429,7 +1492,7 @@ fn identity(inputs: &Inputs, page: &mut Page) -> serde_json::Value {
     page.changed = changed(&shown);
     json!({
         "kio": version, "commit": commit, "old": sides["old"], "new": sides["new"], "deps": deps,
-        "grants": grants, "test_grants": test_grants, "entry_grants": entry_grants, "old_grants": old_grants, "old_entry_grants": old_entry_grants, "requirements": requirements, "seed": DEFAULT_SEED,
+        "grants": grants, "test_grants": test_grants, "test_fakes": test_fakes, "entry_grants": entry_grants, "old_grants": old_grants, "old_entry_grants": old_entry_grants, "requirements": requirements, "seed": DEFAULT_SEED,
         "changed": page.changed,
     })
 }

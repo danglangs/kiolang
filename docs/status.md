@@ -104,6 +104,7 @@ Compiled-only kio covers the whole language and every capability. Built and revi
 | T3 | `kio test --json` gives each test's `fuel` and `peak_memory`; `--verbose` prints them; an example test over `--listen`'s 10,000,000 per-request fuel gets a `note:` line (#291-#293) |
 | T4a | `--http hook=fake:hook.http` in a test grants file answers `hook: Http` from a file behind the host's own checks; unmatched requests listed under a `FAIL`; refused by `kio run`, `--listen`, `check --grants`, `review --grants` (#294-#300). T4c (review page) next |
 | T4b | `--http-record hook=sent` in a test grants file writes each request on fake `hook` as `hook-1`, `hook-2`, .. into the test's temporary `sent: Dir` (request line, headers with `<injected>`, blank line, body, byte-exact); refused for a non-fake, a granted `--dir sent`, and outside `kio test`'s grants file (#301-#304). T4c next |
+| T4c | `kio review --test-grants` reads each fake FILE once for both sides: Identity `test fake hook.http sha256:..` (changed during the review: `error`), grants line `(hook answered from hook.http)`, a Not checked line per fake; text and `--json` (#305-#306). T4 done; kio-web's flow tests can drop `dest.py` |
 | D6 | A2's docs: server capabilities in the test-defaults table; which characters a generated `Str` holds; property cost measured per program size (31-52 ms a case, M3 Max); the schema statement runs per request; `chars()` against a byte scan (77 vs 29 fuel a character) |
 
 ## Next

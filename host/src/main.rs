@@ -1398,7 +1398,7 @@ fn captured<T>(capture: bool, f: impl FnOnce() -> T) -> (T, JsonOut) {
 /// any fails, 2 for a check error or usage. `verbose` adds each test's fuel and peak memory to
 /// the text (T3).
 fn test(path: &str, flags: &[&str], json: bool, verbose: bool) -> i32 {
-    let (tests, out) = captured(json, || test_setup(path, flags));
+    let (tests, out) = captured(json, || test_setup(path, flags, &[]));
     let tests = match tests {
         Ok(t) => t,
         Err(_) => {
@@ -1556,8 +1556,8 @@ fn error_lines(e: &serde_json::Value) -> Vec<String> {
 }
 
 /// The flags, program and filter of `kio test path flags`, or the exit code once the error is
-/// reported.
-fn test_setup(path: &str, flags: &[&str]) -> Result<Tests, i32> {
+/// reported. A fake FILE in `read` is not read again (`kio review` reads each once for both sides).
+fn test_setup(path: &str, flags: &[&str], read: &FakeReads) -> Result<Tests, i32> {
     let usage = || fail(format!("usage: kio test <prog.kio> {TEST_USAGE}"));
     if !flags.len().is_multiple_of(2) {
         return Err(usage());
@@ -1606,7 +1606,7 @@ fn test_setup(path: &str, flags: &[&str]) -> Result<Tests, i32> {
             return Err(fail(format!("--stack {n}: at most {} KB", kio_host::MAX_STACK >> 10)));
         }
     }
-    let fakes = take_fakes(&mut flags)?;
+    let fakes = take_fakes(&mut flags, read)?;
     let records = take_records(&mut flags, &fakes).map_err(fail)?;
     let prog = read_program(path)?;
     let pairs: Vec<(&str, &str)> = prog.files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
@@ -1647,13 +1647,16 @@ fn test_setup(path: &str, flags: &[&str]) -> Result<Tests, i32> {
     })
 }
 
+/// Each fake FILE already read, by path as the grants file names it: its bytes, or why not.
+type FakeReads = [(String, Result<Vec<u8>, String>)];
+
 /// Take each `--http name=fake:FILE` out of `flags`, with FILE read once (`fake_file`).
-fn take_fakes(flags: &mut Vec<String>) -> Result<Vec<(String, Arc<FakeFile>)>, i32> {
+fn take_fakes(flags: &mut Vec<String>, read: &FakeReads) -> Result<Vec<(String, Arc<FakeFile>)>, i32> {
     let (mut fakes, mut rest) = (Vec::new(), Vec::new());
     for pair in flags.chunks(2) {
         let spec = pair[1].split_once('=').filter(|_| pair[0] == "--http");
         match spec.and_then(|(name, o)| Some(name).zip(o.strip_prefix("fake:"))) {
-            Some((name, path)) => fakes.push((name.to_string(), fake_file(name, path, flags).map_err(fail)?)),
+            Some((name, path)) => fakes.push((name.to_string(), fake_file(name, path, flags, read).map_err(fail)?)),
             None => rest.extend(pair.iter().cloned()),
         }
     }
@@ -1705,8 +1708,8 @@ fn take_records(flags: &mut Vec<String>, fakes: &[(String, Arc<FakeFile>)]) -> R
 /// FILE of `--http name=fake:FILE`, under the grants file's rules: a regular file of at most
 /// 1 MiB, with no other hard links, not inside a writable `--dir` nor the file of a `--log`,
 /// `--kv` or `--db` of `flags` (the program could rewrite its next run's answers); then parsed,
-/// and each entry's method one the grant allows.
-fn fake_file(name: &str, path: &str, flags: &[String]) -> Result<Arc<FakeFile>, String> {
+/// and each entry's method one the grant allows. FILE's bytes come from `read` when it has them.
+fn fake_file(name: &str, path: &str, flags: &[String], read: &FakeReads) -> Result<Arc<FakeFile>, String> {
     let at = format!("--http {name}=fake:{path}");
     let own = "\n  hint: give kio a fake file of its own";
     let changes = "the program could rewrite its next run's answers";
@@ -1743,15 +1746,12 @@ fn fake_file(name: &str, path: &str, flags: &[String]) -> Result<Arc<FakeFile>, 
         };
         return Err(format!("{at}: `{path}` {why}; {changes}{own}"));
     }
-    let text = match read_regular(path.as_ref(), GRANTS_MAX, false) {
-        Ok(bytes) => String::from_utf8(bytes).map_err(|_| format!("{at}: not UTF-8"))?,
-        Err(Unread::TooLarge) => {
-            return Err(format!(
-                "{at}: over 1 MiB\n  hint: a fake file holds a few answers; write each body small"
-            ))
-        }
-        Err(e) => return Err(format!("{at}: {e}")),
+    let bytes = match read.iter().find(|(p, _)| p == path) {
+        Some((_, bytes)) => bytes.clone(),
+        None => read_fake(path),
     };
+    let bytes = bytes.map_err(|e| format!("{at}: {e}"))?;
+    let text = String::from_utf8(bytes).map_err(|_| format!("{at}: not UTF-8"))?;
     let file = Arc::new(kio_host::fake::parse(path, &text)?);
     let mut origin = Origin::fake(file.clone(), None);
     let list = flags.chunks(2).find_map(|p| match p[1].split_once('=') {
@@ -1773,6 +1773,17 @@ fn fake_file(name: &str, path: &str, flags: &[String]) -> Result<Arc<FakeFile>, 
         ));
     }
     Ok(file)
+}
+
+/// The bytes of a fake FILE, or why they cannot be read (after `--http name=fake:FILE: `).
+fn read_fake(path: &str) -> Result<Vec<u8>, String> {
+    match read_regular(path.as_ref(), GRANTS_MAX, false) {
+        Ok(bytes) => Ok(bytes),
+        Err(Unread::TooLarge) => {
+            Err("over 1 MiB\n  hint: a fake file holds a few answers; write each body small".into())
+        }
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// Runs test `t` of `tests`: an example test once, a property on its cases (`run_property`).

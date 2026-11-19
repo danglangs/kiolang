@@ -78,6 +78,19 @@ Every line carries a label; a line under a labelled one shares it. The label say
 
 The sections, in order: **Requirements** (the requirement file's diff), **Authority** (`kio check --base`'s lines, and whether `--grants` binds and what it binds: `db=var/inv.db:ro, hook=http://127.0.0.1:9099 (POST)`, a secret by its source, `env:NAME`), **Tests** (both sides' counts, tests added and removed, changed functions no test reaches, each property's cases, each NEW failure), **Resources** (per-test fuel and peak memory changes over 2%, each added test's, then totals), **Not checked** (what the host never looks at for each method `main` reaches), **Identity** (sha256 of every file that went into the page).
 
+A test grants file may answer an `Http` grant from a file instead of a server (`--http hook=fake:hook.http`, a [fake host](guide.md#a-fake-host)). The page then says so three times:
+
+```
+Tests
+  tested       grants: test.grants (hook answered from hook.http)
+Not checked
+  not checked  hook: Http: tests ran against hook.http, not a server; the real endpoint's answers are untested
+Identity
+  test fake hook.http sha256:..
+```
+
+`tested` still means the tests passed, against the answers written in `hook.http`: read that file as part of the change (does a real endpoint answer like this, a 503 then a 200?). kio reads it once, so both sides' tests got the same answers; a change to it during the review is an `error` in Identity.
+
 ## 5. Decide
 
 kio gives no verdict. You choose one of three:

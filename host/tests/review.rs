@@ -1310,3 +1310,138 @@ fn the_binds_line_cannot_be_mistaken() {
     );
     assert!(Sides::section(&out, "Authority").contains(&binds), "{out}");
 }
+
+/// T4c: a program that posts to `hook`, and a test that retries against a fake.
+const HOOKED: &str = r#"fn post(hook: Http) -> Result<Int, HttpErr> { Ok(hook.send("POST", "/v1/events", [], "x".to_bytes(), 0)?.status) }
+
+fn main(hook: Http) -> Result<Int, HttpErr> { post(hook) }
+
+#[test]
+fn retries(hook: Http) -> Result<(), HttpErr> { assert_eq(post(hook)?, 503); assert_eq(post(hook)?, 200); Ok(()) }
+"#;
+
+const HOOK: &str = "POST /v1/events\n503\n---\nPOST /v1/events\n200\n";
+
+fn sha(b: &[u8]) -> String {
+    lang::digest::to_hex(&lang::digest::sha256(b))
+}
+
+/// Each fake of the test grants file is hashed in Identity, named on the grants line and has a
+/// Not checked line; its file name escaped, as it comes from the change's author.
+#[test]
+fn fakes_on_the_page() {
+    let s = Sides::new(HOOKED, HOOKED);
+    let hook = write(s.dir.path(), "hook.http", HOOK);
+    let odd = write(s.dir.path(), "api\u{1b}[31m.http", "GET /up\n200\n");
+    let shown = odd.replace('\u{1b}', "\\u{1b}");
+    let t = write(
+        s.dir.path(),
+        "t.grants",
+        &format!("--http hook=fake:{hook}\n--http-methods hook=POST\n--http api=fake:{odd}\n"),
+    );
+    let (code, out, err) = s.review(&["--test-grants", &t]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(!out.contains('\u{1b}'), "{out}");
+    let tests = Sides::section(&out, "Tests");
+    assert_eq!(
+        tests[..3],
+        [
+            format!("  tested       grants: {t} (hook answered from {hook}, api answered from {shown})"),
+            "  tested       old: 1 passed, 0 failed".to_string(),
+            "  tested       new: 1 passed, 0 failed".to_string(),
+        ],
+        "{out}"
+    );
+    let not_checked = Sides::section(&out, "Not checked");
+    let untested = |n: &str, f: &str| {
+        format!(
+            "  not checked  {n}: Http: tests ran against {f}, not a server; the real endpoint's answers are untested"
+        )
+    };
+    assert!(not_checked.contains(&untested("hook", &hook)), "{out}");
+    assert!(not_checked.contains(&untested("api", &shown)), "{out}");
+    let identity = Sides::section(&out, "Identity");
+    let (h, a) = (sha(HOOK.as_bytes()), sha(b"GET /up\n200\n"));
+    assert!(identity.contains(&format!("  test fake {hook} sha256:{h}")), "{out}");
+    assert!(identity.contains(&format!("  test fake {shown} sha256:{a}")), "{out}");
+
+    let (code, out, err) = s.review(&["--test-grants", &t, "--json"]);
+    assert_eq!(code, 0, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let fakes = serde_json::json!([{"grant": "hook", "path": hook}, {"grant": "api", "path": odd}]);
+    assert_eq!(v["tests"]["fakes"], fakes);
+    assert_eq!(v["not_checked"]["fakes"], fakes);
+    assert_eq!(
+        v["identity"]["test_fakes"],
+        serde_json::json!([{"path": hook, "sha256": h}, {"path": odd, "sha256": a}])
+    );
+}
+
+/// A file `name` below `dir`, `depth` levels down at most.
+fn find(dir: &Path, name: &str, depth: u32) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        let p = e.path();
+        p.file_name().is_some_and(|n| n == name) || (depth > 0 && p.is_dir() && find(&p, name, depth - 1))
+    })
+}
+
+/// FILE is read once: rewritten while OLD's tests run, NEW's still pass on the bytes read, and
+/// Identity reports the change as an `error`, the name escaped.
+#[test]
+fn a_fake_changed_during_the_review() {
+    let waits = "\n#[test]\nfn waits(d: Dir, watch: Dir) -> Result<(), IoErr> {\n    d.write(\"started\", \"\".to_bytes())?;\n    let mut i = 0;\n    while i < 100000 && !watch.exists(\"go\")? { i += 1; }\n    Ok(())\n}\n";
+    let app = format!("{HOOKED}{waits}");
+    let s = Sides::new(&app, &app);
+    let hook = write(s.dir.path(), "hook\u{1b}.http", HOOK);
+    let shown = hook.replace('\u{1b}', "\\u{1b}");
+    let watch = s.dir.path().join("watch");
+    std::fs::create_dir(&watch).unwrap();
+    let t = write(
+        s.dir.path(),
+        "t.grants",
+        &format!(
+            "--http hook=fake:{hook}\n--http-methods hook=POST\n--dir watch={}:ro\n--calls 200000\n",
+            watch.display()
+        ),
+    );
+    let tmp = s.dir.path().join("tmp");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_kio"))
+        .args(["review", &s.new, "--base", &s.old, "--test-grants", &t])
+        .env("TMPDIR", &tmp)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let start = std::time::Instant::now();
+    while !find(&tmp, "started", 2) {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "the review ended before a test started"
+        );
+        assert!(start.elapsed().as_secs() < 60, "no test started");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    std::fs::write(&hook, "not a fake\n").unwrap();
+    std::fs::write(watch.join("go"), "").unwrap();
+    let r = child.wait_with_output().unwrap();
+    let (out, err) = (String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
+    assert_eq!(r.status.code(), Some(1), "{out}{err}");
+    assert!(!out.contains('\u{1b}'), "{out}");
+    let tests = Sides::section(&out, "Tests");
+    assert!(
+        tests.contains(&"  tested       new: 2 passed, 0 failed".to_string()),
+        "{out}"
+    );
+    let identity = Sides::section(&out, "Identity");
+    assert!(
+        identity.contains(&format!("  test fake {shown} sha256:{}", sha(HOOK.as_bytes()))),
+        "{out}"
+    );
+    assert!(
+        identity.contains(&format!("  error        {shown} changed while the review ran")),
+        "{out}"
+    );
+}
