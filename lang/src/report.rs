@@ -342,6 +342,7 @@ pub const COVERS: &[(&str, &str, &[&str])] = &[
     ("Rng", "bytes", &[]),
     ("Rng", "int", &[]),
     ("Clock", "now_ms", &[]),
+    ("Clock", "sleep_ms", &[]),
     ("Log", "write", &[]),
     ("Db", "query", &[]),
     ("Db", "exec", &["transaction"]),

@@ -453,6 +453,10 @@ impl lang::Caps for Native<'_> {
                 Value::Int(HostRng::int(s, own(rep), *lo, *hi).map_err(stop)?)
             }
             ("Clock", "now_ms", []) => Value::Int(HostClock::now_ms(s, own(rep)).map_err(stop)?),
+            ("Clock", "sleep_ms", [Value::Int(ms)]) => {
+                HostClock::sleep_ms(s, own(rep), *ms).map_err(stop)?;
+                Value::Unit
+            }
             ("Log", "write", [Value::Str(line)]) => result(
                 HostLog::write(s, own(rep), line.to_string())
                     .map_err(stop)?

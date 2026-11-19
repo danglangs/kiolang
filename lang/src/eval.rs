@@ -122,6 +122,8 @@ fn out_of_bounds(span: Span, i: i64, len: usize) -> Box<Stop> {
 
 /// The most bytes one `Rng.bytes` gives.
 pub const RNG_BYTES_MAX: i64 = 65_536;
+/// The longest `Clock.sleep_ms`, in milliseconds.
+pub const SLEEP_MS_MAX: i64 = 60_000;
 
 /// A capability argument refused before the host is called: `Rng.bytes(n)` with `n` outside 0
 /// to 65,536, `Rng.int(lo, hi)` with `lo >= hi`. A runtime error at the call, as an index out of
@@ -135,6 +137,9 @@ pub fn cap_arg_error(cap: &str, method: &str, args: &[Value]) -> Option<String> 
         ("Rng", "int", [Value::Int(lo), Value::Int(hi)]) if lo >= hi => {
             Some(format!("Rng.int({lo}, {hi}): lo must be less than hi"))
         }
+        ("Clock", "sleep_ms", [Value::Int(ms)]) if !(0..=SLEEP_MS_MAX).contains(ms) => Some(format!(
+            "Clock.sleep_ms({ms}): the duration must be 0 to {SLEEP_MS_MAX}"
+        )),
         _ => None,
     }
 }

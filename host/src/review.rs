@@ -56,7 +56,7 @@ const NO_BLIND_SPOT: &[(&str, &[&str])] = &[
     ("Kv", &["get", "keys", "scan"]),
     ("WsMessage", &["kind", "conn", "data", "target", "header"]),
     ("Rng", &["bytes", "int"]),
-    ("Clock", &["now_ms"]),
+    ("Clock", &["now_ms", "sleep_ms"]),
     ("Hmac", &["verify"]),
     ("Secret", &["matches"]),
     ("Value", &["get"]),

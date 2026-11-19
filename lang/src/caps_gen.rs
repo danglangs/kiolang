@@ -213,7 +213,10 @@ pub fn v0() -> CapTable {
             },
             CapType {
                 name: "Clock".into(),
-                methods: vec![method("now_ms", vec![], Ty::Int)],
+                methods: vec![
+                    method("now_ms", vec![], Ty::Int),
+                    method("sleep_ms", vec![Ty::Int], Ty::Unit),
+                ],
             },
             CapType {
                 name: "Log".into(),

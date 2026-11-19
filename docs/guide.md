@@ -55,7 +55,7 @@ Errors (exit 2): a malformed line (`kio.deps:3: ... is not a dependency line`: a
 | `Kv` | `--kv name=path`, `name=path:ro`, `name=:memory:` | a key-value store |
 | `Db` | `--db name=path`, `name=path:ro`, `name=:memory:` | a SQLite database: `query`, `exec`, `transaction` |
 | `Rng` | `--rng name`, `--rng name=seed:N` | random values from the OS, or a fixed stream |
-| `Clock` | `--clock name`, `--clock name=fixed:T` | the system clock, or one fixed time |
+| `Clock` | `--clock name`, `--clock name=fixed:T` | the system clock, or one fixed time: `now_ms`, `sleep_ms` |
 | `Log` | `--log name=path`, `--log name=-` | an append-only log file, or stderr |
 | `Hmac` | `--hmac name=env:VAR`, `name=file:PATH`, either with `:verify` | HMAC-SHA256 under a key the program never holds: `sign`, `verify` |
 | `Secret` | `--secret name=env:VAR`, `name=file:PATH` | a value the program can compare (`matches`), never read |
@@ -148,8 +148,8 @@ kio: `totals` is granted read-only but `main` can call `totals add`
 |---|---|
 | `--rng r` | OS randomness: `r.bytes(n)`, `r.int(lo, hi)` |
 | `--rng r=seed:1` | a stream the same every run (under `--listen`, keyed by the request number too). Anyone who knows the seed predicts every value: tests and replay only, never a server facing clients |
-| `--clock now` | the system clock: `now.now_ms()` |
-| `--clock now=fixed:2026-11-09T12:00:00Z` | always that time (also `fixed:<ms>`) |
+| `--clock now` | the system clock: `now.now_ms()`; `now.sleep_ms(ms)` waits `ms` (0 to 60,000, else a runtime error at the call), never past the run's `--timeout`: a sleep that would pass it ends the run at the deadline, as a timeout (under `--listen`, the request's) |
+| `--clock now=fixed:2026-11-09T12:00:00Z` | always that time (also `fixed:<ms>`), until `sleep_ms(ms)` moves it forward by `ms` without waiting, so a retry after a backoff is tested with one clock and no wall time; each run (each request) starts at the fixed time again |
 | `--log events=app.log` | one appended line per `write`: control characters escaped, 64 KB a line, 1 MB a run, `req N: ` first under `--listen` |
 | `--log events=-` | the same lines on stderr |
 

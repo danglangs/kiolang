@@ -2769,6 +2769,8 @@ impl Randomness {
 
 /// The most bytes one `Rng.bytes` gives (`lang::eval::RNG_BYTES_MAX`).
 const RNG_BYTES_MAX: u32 = 65_536;
+/// The longest `Clock.sleep_ms` (`lang::eval::SLEEP_MS_MAX`).
+const SLEEP_MS_MAX: i64 = 60_000;
 
 impl kio::caps::rng::Host for State {}
 impl kio::caps::clock::Host for State {}
@@ -2941,8 +2943,38 @@ impl kio::caps::clock::HostClock for State {
         )
     }
 
+    fn sleep_ms(&mut self, c: Resource<kio::caps::clock::Clock>, ms: i64) -> Result<()> {
+        self.call(c.rep(), "sleep_ms", "sleep_ms", |s| s.sleep(&c, ms), ok)
+    }
+
     fn drop(&mut self, c: Resource<kio::caps::clock::Clock>) -> Result<()> {
         let _ = self.table.delete(Resource::<ClockSpec>::new_own(c.rep()));
+        Ok(())
+    }
+}
+
+impl State {
+    /// The guest checks `ms` before calling (lang/src/eval.rs `cap_arg_error`); one outside the
+    /// range here came from code that skipped its check, and stops the run. A fixed clock does
+    /// not wait: its time (this run's handle's) moves forward by `ms`. A wait that would pass
+    /// the run's deadline waits until the deadline and stops the run as a timeout, so no sleep
+    /// outlives the run (under `--listen`, the request).
+    fn sleep(&mut self, c: &Resource<kio::caps::clock::Clock>, ms: i64) -> Result<()> {
+        self.audit_extra = format!(r#","sleep_ms":{ms}"#);
+        if !(0..=SLEEP_MS_MAX).contains(&ms) {
+            wasmtime::bail!("Clock.sleep_ms({ms}): the duration must be 0 to {SLEEP_MS_MAX}");
+        }
+        if let ClockSpec::Fixed(t) = self.table.get_mut(&Resource::<ClockSpec>::new_borrow(c.rep()))? {
+            *t = t.saturating_add(ms);
+            return Ok(());
+        }
+        let wait = Duration::from_millis(ms as u64);
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        if wait >= left {
+            std::thread::sleep(left);
+            return Err(self.stop_timed_out());
+        }
+        std::thread::sleep(wait);
         Ok(())
     }
 }

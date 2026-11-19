@@ -699,6 +699,15 @@ pub extern "C" fn rt_cap_clock_now_ms(_: u32, h: u32) -> i64 {
     c.now_ms()
 }
 
+/// Codegen has trapped on an `ms` outside 0 to 60,000 (`arg_check`); the host refuses one that
+/// still arrives.
+#[no_mangle]
+pub extern "C" fn rt_cap_clock_sleep_ms(_: u32, h: u32, ms: i64) {
+    // SAFETY: see `handle`.
+    let c = unsafe { handle(h, Clock::from_handle) };
+    c.sleep_ms(ms)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rt_cap_log_write(ret: u32, h: u32, line: u32) -> u32 {
     // SAFETY: the contract above.

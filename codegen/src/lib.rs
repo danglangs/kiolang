@@ -994,9 +994,10 @@ const DIV_ZERO: &str = "division by zero";
 const OUT_OF_BOUNDS: &str = "index {a} out of bounds for length {b}";
 /// `{c}` is the length, which the runtime passes through its `EXTRA` site.
 const SLICE_BOUNDS: &str = "slice {a}..{b} out of bounds for length {c}";
-/// `Rng`'s argument checks (`rng_check`); the texts are `lang::eval::cap_arg_error`'s.
+/// `Rng`'s and `Clock`'s argument checks (`arg_check`); the texts are `lang::eval::cap_arg_error`'s.
 const RNG_BYTES: &str = "Rng.bytes({a}): the count must be 0 to 65536";
 const RNG_INT: &str = "Rng.int({a}, {b}): lo must be less than hi";
+const CLOCK_SLEEP: &str = "Clock.sleep_ms({a}): the duration must be 0 to 60000";
 /// L29's errors; the texts are `lang::eval::builtin`'s.
 const POW_NEGATIVE: &str = "Int.pow({a}): the exponent must be 0 or more";
 const SHL_COUNT: &str = "Int.shl({a}): the count must be 0 to 63";
@@ -3164,7 +3165,7 @@ impl<'m> FuncGen<'_, 'm> {
         };
         let def = &self.m.caps[c.0 as usize];
         let name = format!("rt_cap_{}_{}", snake(&def.name), def.methods[method as usize].0);
-        let rng = (def.name == "Rng").then(|| def.methods[method as usize].0.clone());
+        let checked = (def.name.clone(), def.methods[method as usize].0.clone());
         let desc = self.statics.desc(ty);
         let Val::One(h) = self.local(cap) else {
             unreachable!("a capability has a value")
@@ -3172,9 +3173,7 @@ impl<'m> FuncGen<'_, 'm> {
         let xs: Vec<&ir::Expr> = args.iter().collect();
         // An enum argument (`Option<Str>`) is boxed for the wrapper; an enum result comes boxed.
         self.borrowing(&xs, |g, temps, borrowed| {
-            if let Some(m) = &rng {
-                g.rng_check(span, m, temps);
-            }
+            g.arg_check(span, &checked.0, &checked.1, temps);
             g.sink().i32_const(desc as i32).local_get(h);
             let mut boxes = Vec::new();
             for (i, (x, t)) in xs.iter().zip(temps).enumerate() {
@@ -3194,30 +3193,34 @@ impl<'m> FuncGen<'_, 'm> {
         }
     }
 
-    /// `Rng.bytes(n)` needs `n` in 0 to 65,536 and `Rng.int(lo, hi)` needs `lo < hi`: a runtime
-    /// error at the call with the interpreter's message (lang/src/eval.rs `cap_arg_error`); the
-    /// host checks again and stops a run whose code skipped this. An argument of type `!` has
-    /// no local, and the call after it is unreachable.
-    fn rng_check(&mut self, span: Span, method: &str, temps: &[Val]) {
-        match (method, temps) {
-            ("bytes", [Val::One(n)]) => {
-                let n = *n;
-                self.sink()
-                    .local_get(n)
-                    .i64_const(0)
-                    .i64_lt_s()
-                    .local_get(n)
-                    .i64_const(lang::eval::RNG_BYTES_MAX)
-                    .i64_gt_s()
-                    .i32_or();
-                self.trap_if(span, RNG_BYTES, n, n);
-            }
-            ("int", [Val::One(lo), Val::One(hi)]) => {
+    /// `Rng.bytes(n)` needs `n` in 0 to 65,536, `Rng.int(lo, hi)` needs `lo < hi` and
+    /// `Clock.sleep_ms(ms)` needs `ms` in 0 to 60,000: a runtime error at the call with the
+    /// interpreter's message (lang/src/eval.rs `cap_arg_error`); the host checks again and stops
+    /// a run whose code skipped this. An argument of type `!` has no local, and the call after it
+    /// is unreachable.
+    fn arg_check(&mut self, span: Span, cap: &str, method: &str, temps: &[Val]) {
+        match (cap, method, temps) {
+            ("Rng", "bytes", [Val::One(n)]) => self.range_check(span, *n, lang::eval::RNG_BYTES_MAX, RNG_BYTES),
+            ("Rng", "int", [Val::One(lo), Val::One(hi)]) => {
                 self.sink().local_get(*lo).local_get(*hi).i64_ge_s();
                 self.trap_if(span, RNG_INT, *lo, *hi);
             }
+            ("Clock", "sleep_ms", [Val::One(ms)]) => self.range_check(span, *ms, lang::eval::SLEEP_MS_MAX, CLOCK_SLEEP),
             _ => {}
         }
+    }
+
+    /// Traps with `template` unless local `n` is in 0 to `max`.
+    fn range_check(&mut self, span: Span, n: u32, max: i64, template: &'static str) {
+        self.sink()
+            .local_get(n)
+            .i64_const(0)
+            .i64_lt_s()
+            .local_get(n)
+            .i64_const(max)
+            .i64_gt_s()
+            .i32_or();
+        self.trap_if(span, template, n, n);
     }
 
     /// A new struct (`first` 8) or enum variant (`first` 16) of descriptor `desc`: the object
