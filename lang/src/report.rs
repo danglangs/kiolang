@@ -163,6 +163,62 @@ pub fn reachable<'a>(p: &Program, roots: impl IntoIterator<Item = &'a str>) -> B
     seen
 }
 
+/// The constants, structs and enums the functions `funcs` name, by key: each constant one reads,
+/// each struct or enum in its signature or the type of an expression in its body, and those a
+/// struct's fields or an enum's payloads hold, in turn.
+pub fn items_used<'a>(p: &Program, funcs: impl IntoIterator<Item = &'a String>) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut tys: Vec<Ty> = Vec::new();
+    for k in funcs {
+        let Some(f) = p.funcs.get(k) else { continue };
+        let s = f.span;
+        let inside = |t: &crate::Span| t.file == s.file && t.start >= s.start && t.end <= s.end;
+        let consts = (p.item_uses.iter()).filter(|(t, item)| inside(t) && p.consts.contains_key(*item));
+        out.extend(consts.map(|(_, item)| item.clone()));
+        tys.extend(p.types.iter().filter(|(t, _)| inside(t)).map(|(_, ty)| ty.clone()));
+        if let Some(sig) = p.sigs.get(k) {
+            tys.extend(sig.params.iter().cloned());
+            tys.push(sig.ret.clone());
+        }
+    }
+    while let Some(t) = tys.pop() {
+        match t {
+            Ty::Struct(k, args) | Ty::Enum(k, args) => {
+                tys.extend(args);
+                if out.insert(k.clone()) {
+                    tys.extend(p.fields.get(&k).into_iter().flatten().map(|(_, t)| t.clone()));
+                    tys.extend(p.variants.get(&k).into_iter().flatten().flat_map(|(_, ts)| ts.clone()));
+                }
+            }
+            Ty::Option(a) | Ty::List(a) => tys.push(*a),
+            Ty::Result(a, b) | Ty::Map(a, b) | Ty::HashMap(a, b) => tys.extend([*a, *b]),
+            Ty::Fn(ps, r) => {
+                tys.extend(ps);
+                tys.push(*r);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Each comparison and logical operator in function `key`'s body (`<`, `<=`, `>`, `>=`, `==`,
+/// `!=`, `&&`, `||`): the span of its left operand, of its right, and the operator.
+pub fn operators(p: &Program, key: &str) -> Vec<(crate::Span, crate::Span, &'static str)> {
+    let mut out = Vec::new();
+    let Some(f) = p.funcs.get(key) else { return out };
+    walk_block(&f.body, &mut |n| {
+        if let Node::Expr(Expr {
+            kind: ExprKind::Binary(op @ ("<" | "<=" | ">" | ">=" | "==" | "!=" | "&&" | "||"), l, r),
+            ..
+        }) = n
+        {
+            out.push((l.span, r.span, *op));
+        }
+    });
+    out
+}
+
 /// `hook send POST PUT, log write`: an `Http` method's verbs follow it once.
 fn uses_str(params: &[(String, BTreeSet<String>)]) -> String {
     let parts: Vec<String> = params

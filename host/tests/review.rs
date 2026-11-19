@@ -1571,14 +1571,16 @@ fn mutants_killed_and_survived() {
     m.as_object_mut().unwrap().remove("rows");
     assert_eq!(
         m,
-        serde_json::json!({"seed": 1, "requested": 20, "sites": 4, "drawn": 4, "made": 4, "did_not_check": 0, "error": null})
+        serde_json::json!({"seed": 1, "requested": 20, "sites": 4, "drawn": 4, "made": 4, "did_not_check": 0, "error": null,
+            "skipped": [], "constants": []})
     );
     let row = |func: &str, from: &str, to: &str, around: &str, killed: Option<&str>| {
         let line = if func == "small" { 1 } else { 3 };
         serde_json::json!({
             "source": "generated", "function": func, "file": s.new, "line": line,
             "from": from, "to": to, "description": format!("`{from}` -> `{to}` in `{around}`"),
-            "killed_by": killed, "how": killed.map(|_| "failed"), "tests_run": 1,
+            "killed_by": killed, "stopped_by": null, "discarded_by": null, "how": killed.map(|_| "failed"),
+            "tests_run": 1,
         })
     };
     assert_eq!(
@@ -1744,4 +1746,164 @@ fn mutants_never_run_under_mains_grants() {
         matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
         "a mutant reached main's host"
     );
+}
+
+/// The Tests lines from the first mutant line on.
+fn mutant_lines(out: &str) -> Vec<String> {
+    let tests = Sides::section(out, "Tests");
+    let first = |l: &String| {
+        ["mutants", "no mutant", "constants"]
+            .iter()
+            .any(|p| l[15..].starts_with(p))
+    };
+    tests.into_iter().skip_while(|l| !first(l)).collect()
+}
+
+/// A long function cannot take every draw: each function with sites gets one before any gets a
+/// second, and one that gets none is named.
+#[test]
+fn padding_does_not_dilute_the_draw() {
+    let pad = "x += 1; ".repeat(40);
+    let new = format!(
+        "fn pad(n: Int) -> Int {{ let mut x = n; {pad}x }}\n\nfn sensitive(n: Int) -> Bool {{ n > 5 }}\n\nfn main() -> Int {{ if sensitive(pad(0)) {{ 1 }} else {{ 0 }} }}\n\n#[test]\nfn pads() {{ assert_eq(pad(0), 40); }}\n\n#[test]\nfn touches() {{ assert(sensitive(100), \"big\"); }}\n"
+    );
+    let s = Sides::new(BARE, &new);
+    let (code, out, err) = s.review(&["--mutants", "4"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert_eq!(
+        mutant_lines(&out),
+        [
+            "  tested       mutants: 2 of 4 killed (generated at seed 1: 4 drawn of 82 sites, 0 did not check)",
+            "  tested       killed by: pads 2",
+            "  not checked  survived: generated: sensitive: `>` -> `>=` in `...ive(n: Int) -> Bool { n > 5 }`",
+            "  not checked  survived: generated: sensitive: `5` -> `6` in `...e(n: Int) -> Bool { n > 5 }`",
+        ],
+        "{out}"
+    );
+    let (_, out, _) = s.review(&["--mutants", "1"]);
+    let lines = mutant_lines(&out);
+    assert_eq!(lines.len(), 3, "{out}");
+    assert!(
+        lines[2] == "  not checked  no mutant drawn: pad (80 sites)"
+            || lines[2] == "  not checked  no mutant drawn: sensitive (2 sites)",
+        "{out}"
+    );
+}
+
+/// A test holding a real host in T runs no mutant: the host could answer each run differently.
+#[test]
+fn tests_holding_a_real_host_run_no_mutant() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let s = Sides::new(BARE, NOTIFIES);
+    let t = write(
+        s.dir.path(),
+        "t.grants",
+        &format!("--http h=http://127.0.0.1:{port}\n--http-methods h=POST\n"),
+    );
+    let (code, out, err) = s.review(&["--test-grants", &t]);
+    assert_eq!(code, 3, "{out}{err}");
+    let tests = Sides::section(&out, "Tests");
+    assert_eq!(
+        tests[4..],
+        [
+            "  not checked  changed, reached by no test: main",
+            "  not checked  mutants skipped zero_sends_nothing: it holds a real host (h), which can tell runs apart; use --http h=fake:FILE",
+        ],
+        "{out}"
+    );
+    assert!(
+        matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        "a mutant reached the test's host"
+    );
+    let (_, out, _) = s.review(&["--test-grants", &t, "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        v["tests"]["mutants"]["skipped"],
+        serde_json::json!([{"test": "zero_sends_nothing", "grant": "h", "holds": "a real host"}])
+    );
+}
+
+/// T's `--fuel` at exactly what the test used: a mutant that costs more stops at T's limit, which
+/// is not a kill.
+#[test]
+fn a_stop_at_ts_own_fuel_is_not_a_kill() {
+    let s = Sides::new(BARE, COUNTED);
+    let (_, out, _) = s.review(&["--json", "--mutants", "0"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let fuel = v["resources"]["added"][0]["fuel"].as_u64().unwrap();
+    let t = write(s.dir.path(), "t.grants", &format!("--fuel {fuel}\n"));
+    let (code, out, err) = s.review(&["--test-grants", &t]);
+    assert_eq!(code, 0, "{out}{err}");
+    let shown = |l: &str| l.replace("{fuel}", &fuel.to_string());
+    assert_eq!(
+        mutant_lines(&out),
+        [
+            "  tested       mutants: 4 of 6 killed, 1 stopped by T's limits (generated at seed 1: 6 drawn of 6 sites, 0 did not check)",
+            "  tested       killed by: counts 4",
+            "  not checked  survived: generated: count: `0` -> `1` in `...t) -> Int { let mut i = 0; let mut s = 0; while i...`",
+            &shown("  not checked  stopped by T's --fuel {fuel} in counts: generated: count: `i += 1;` dropped in `...; while i < n { s += i; i += 1; } s }`"),
+        ],
+        "{out}"
+    );
+}
+
+/// `LIMIT > n` is a comparison (the parser says so, not the case of a name), and the constant's
+/// own literal is named as not mutated.
+#[test]
+fn a_comparison_after_a_constant_is_flipped() {
+    let new = "const LIMIT: Int = 10;\n\nfn over(n: Int) -> Bool { LIMIT > n }\n\nfn main() -> Int { if over(3) { 1 } else { 0 } }\n\n#[test]\nfn three() { assert(over(3), \"3\"); }\n";
+    let s = Sides::new(BARE, new);
+    let (code, out, err) = s.review(&[]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert_eq!(
+        mutant_lines(&out),
+        [
+            "  tested       mutants: 0 of 1 killed (generated at seed 1: 1 drawn of 1 sites, 0 did not check)",
+            "  not checked  survived: generated: over: `>` -> `>=` in `...n: Int) -> Bool { LIMIT > n }`",
+            "  not checked  constants are not mutated: LIMIT used by over",
+        ],
+        "{out}"
+    );
+}
+
+/// A mutant under which a property discards every case is not killed: it survives, discarded.
+#[test]
+fn a_property_that_discards_every_case_kills_nothing() {
+    let new = "fn keep(n: Int) -> Bool { true }\n\nfn main() -> Int { if keep(1) { 1 } else { 0 } }\n\n#[test]\nfn kept(n: Int) { assume(keep(n)); assert(n == n, \"same\"); }\n";
+    let s = Sides::new(BARE, new);
+    let (code, out, err) = s.review(&[]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert_eq!(
+        mutant_lines(&out),
+        [
+            "  tested       mutants: 0 of 1 killed (generated at seed 1: 1 drawn of 1 sites, 0 did not check)",
+            "  not checked  survived: generated: keep: `true` -> `false` in `...keep(n: Int) -> Bool { true }` (kept discarded every case)",
+        ],
+        "{out}"
+    );
+}
+
+/// An entry's function with the root's tokens but another value of a constant it reads does not
+/// run as the root's: no test of the root's reaches it, and it gets no mutant.
+#[test]
+fn an_entry_constant_that_differs_from_the_roots() {
+    let over = "fn over(n: Int) -> Bool { n > LIMIT }\n";
+    let root = format!("const LIMIT: Int = 10;\n\n{over}\nfn main() -> Int {{ 0 }}\n\n#[test]\nfn eleven() {{ assert(over(11), \"11\"); }}\n");
+    let s = Sides::new(BARE, &root);
+    let worker =
+        format!("const LIMIT: Int = 1000;\n\n{over}\nfn main() -> Int {{ if over(5) {{ 1 }} else {{ 0 }} }}\n");
+    write(s.dir.path(), "new/worker.kio", &worker);
+    let (code, out, err) = s.review(&["--entry", "worker.kio"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let tests = Sides::section(&out, "Tests");
+    assert_eq!(
+        tests[4..],
+        ["  not checked  changed, reached by no test: worker.kio: main, over"],
+        "{out}"
+    );
+    let (_, out, _) = s.review(&["--entry", "worker.kio", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["tests"]["mutants"]["sites"], 0);
 }

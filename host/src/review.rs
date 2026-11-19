@@ -930,17 +930,22 @@ fn bound(g: &str, bytes: &[u8]) -> Vec<String> {
 /// `s` as the page shows a part of a grant: ASCII only, `\` doubled, so no character can pass for
 /// another (`о` for `o`, `，` for `,`), and quoted when it holds a character that separates parts.
 fn ascii(s: &str) -> String {
-    let s: String = (s.chars())
+    let s = ascii_chars(s);
+    match s.contains([',', ';', '(', ')', '"', ' ']) {
+        true => format!("\"{}\"", s.replace('"', "\\\"")),
+        false => s,
+    }
+}
+
+/// `s` ASCII only, `\` doubled and every other character escaped: `ascii` without the quotes.
+fn ascii_chars(s: &str) -> String {
+    (s.chars())
         .map(|c| match c {
             '\\' => "\\\\".to_string(),
             ' '..='~' => c.to_string(),
             c => format!("\\u{{{:02x}}}", c as u32),
         })
-        .collect();
-    match s.contains([',', ';', '(', ')', '"', ' ']) {
-        true => format!("\"{}\"", s.replace('"', "\\\"")),
-        false => s,
-    }
+        .collect()
 }
 
 /// `kio check path --grants g`'s binding, its errors in `--json`'s object; dry, so a server's
@@ -1156,13 +1161,13 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
     (value, !removed.is_empty() || !fewer.is_empty(), failed)
 }
 
-/// Each function's tokens by key (tests included), as text: whitespace and comments aside,
-/// string literals exact. None if `prog` does not check.
+/// Each function's, constant's and type's tokens by key (tests included), as text: whitespace
+/// and comments aside, string literals exact. None if `prog` does not check.
 fn fn_texts(prog: &Program) -> BTreeMap<String, String> {
     let Ok(p) = kio_host::check_program(&prog.files) else {
         return BTreeMap::new();
     };
-    (p.fn_spans().into_iter())
+    (p.fn_spans().into_iter().chain(p.item_spans()))
         .filter_map(|(k, s)| {
             let text = prog.files.get(s.file as usize)?.1.get(s.start..s.end)?;
             let tokens = match lang::lex::lex(text) {
@@ -1181,6 +1186,15 @@ struct Changes {
     changed: BTreeSet<String>,
     /// NEW's `fn_texts`.
     texts: BTreeMap<String, String>,
+}
+
+/// Whether function `k` of the program `c` holds runs as the root's (`root`) of its key: every
+/// function it may run, and every constant and type those name, has the same tokens in both.
+fn same_as_root(root: &Changes, c: &Changes, k: &str) -> bool {
+    let Some(p) = &c.new else { return false };
+    let fs = lang::reachable(p, [k]);
+    let same = |k: &String| root.texts.get(k) == c.texts.get(k);
+    fs.iter().all(same) && lang::items_used(p, &fs).iter().all(same)
 }
 
 impl Changes {
@@ -1209,17 +1223,15 @@ impl Changes {
 /// Per program, the root (`changes` is its) then each `--entry`, its changed functions `main`
 /// reaches that no test of the root's reaches (`lang::reachable` from every test, as the report's
 /// `reached only from tests:`), in key order; a program with none is left out. An entry's
-/// function counts as reached when the root's tests reach one of its key and every function it
-/// may run in the entry has the same tokens as the root's of that key (#290).
+/// function counts as reached when the root's tests reach one of its key and it runs as the
+/// root's (`same_as_root`, #290, #312).
 fn unreached_changed<'a>(inputs: &'a Inputs, changes: &Changes) -> Vec<(Option<&'a str>, Vec<String>)> {
     let Some(root) = &changes.new else { return vec![] };
     let tests: Vec<String> = root.tests().into_iter().map(|t| t.name).collect();
     let reach = lang::reachable(root, tests.iter().map(String::as_str));
     let unreached = |c: &Changes| -> Vec<String> {
-        let Some(p) = &c.new else { return vec![] };
-        let same = |k: &String| changes.texts.get(k) == c.texts.get(k);
         (c.reached(&["main"]).into_iter())
-            .filter(|k| !reach.contains(k) || !lang::reachable(p, [k.as_str()]).iter().all(same))
+            .filter(|k| !reach.contains(k) || !same_as_root(changes, c, k))
             .collect()
     };
     let mut out = vec![(None, unreached(changes))];

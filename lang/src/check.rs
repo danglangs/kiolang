@@ -129,6 +129,21 @@ impl Program {
         self.funcs.iter().map(|(k, f)| (k.clone(), f.span)).collect()
     }
 
+    /// The span of every constant, struct and enum, by key.
+    pub fn item_spans(&self) -> Vec<(String, crate::Span)> {
+        let consts = self.consts.iter().map(|(k, c)| (k.clone(), c.span));
+        let structs = self.structs.iter().map(|(k, s)| (k.clone(), s.span));
+        consts
+            .chain(structs)
+            .chain(self.enums.iter().map(|(k, e)| (k.clone(), e.span)))
+            .collect()
+    }
+
+    /// Whether `key` names a constant.
+    pub fn is_const(&self, key: &str) -> bool {
+        self.consts.contains_key(key)
+    }
+
     /// `main`'s return type, which `kio run --json` reads its value by.
     pub fn main_ret(&self) -> Option<&Ty> {
         self.sigs.get("main").map(|s| &s.ret)
