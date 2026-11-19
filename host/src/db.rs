@@ -388,9 +388,12 @@ struct Out {
 }
 
 /// A refused or failed statement: the error to give the program, or SQLite's, classified later
-/// (an interrupt is the run's deadline, which stops the run). `TooLarge` names the host's limit.
+/// (an interrupt is the run's deadline, which stops the run). `TooLarge` names the host's limit;
+/// `QueryWrites` is `denied` with a hint in the audit line (the authorizer's denials have none:
+/// `exec` refuses those too).
 enum Fail {
     Db(DbErr),
+    QueryWrites,
     TooLarge(&'static str),
     Sqlite(rusqlite::Error),
 }
@@ -456,7 +459,7 @@ fn statement(conn: &Connection, sql: &str, params: &[SqlValue], rows: Rows) -> s
     // Before anything runs, so an `INSERT .. RETURNING` under `exec` or `query` inserts nothing.
     match rows {
         Rows::Refused(why) if cols > 0 => return Err(invalid(why.into())),
-        Rows::ReadOnly if !stmt.readonly() => return Err(Fail::Db(DbErr::Denied)),
+        Rows::ReadOnly if !stmt.readonly() => return Err(Fail::QueryWrites),
         _ => {}
     }
     for (i, p) in params.iter().enumerate() {
@@ -530,6 +533,7 @@ struct Interrupted;
 fn classify(e: Fail) -> std::result::Result<(DbErr, Option<&'static str>), Interrupted> {
     let e = match e {
         Fail::Db(e) => return Ok((e, None)),
+        Fail::QueryWrites => return Ok((DbErr::Denied, None)),
         Fail::TooLarge(limit) => return Ok((DbErr::TooLarge, Some(limit))),
         Fail::Sqlite(e) => e,
     };
@@ -720,21 +724,23 @@ impl State {
                 };
                 Ok(Ok(out))
             }
-            Err(e) => match classify(e) {
-                Ok((e, limit)) => {
-                    if let Some(limit) = limit {
-                        self.audit_extra += &format!(r#","limit":"{limit}""#);
-                    }
-                    if mode == Mode::Query && matches!(e, DbErr::Denied) {
-                        self.audit_extra += r#","hint":"`query` only reads: use `exec` or `exec_rows`""#;
-                    }
-                    Ok(Err(e))
+            Err(e) => {
+                if matches!(e, Fail::QueryWrites) {
+                    self.audit_extra += r#","hint":"`query` only reads: use `exec` or `exec_rows`""#;
                 }
-                Err(Interrupted) => {
-                    self.timed_out = true;
-                    Err(wasmtime::Error::msg("host call timed out"))
+                match classify(e) {
+                    Ok((e, limit)) => {
+                        if let Some(limit) = limit {
+                            self.audit_extra += &format!(r#","limit":"{limit}""#);
+                        }
+                        Ok(Err(e))
+                    }
+                    Err(Interrupted) => {
+                        self.timed_out = true;
+                        Err(wasmtime::Error::msg("host call timed out"))
+                    }
                 }
-            },
+            }
         }
     }
 }

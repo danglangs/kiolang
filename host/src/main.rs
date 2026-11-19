@@ -2467,7 +2467,10 @@ fn internal(msg: String) -> i32 {
 /// `msg` (its hint after `\n  hint: `) without a span, of `kind` for `--json`; exit 2.
 fn error(kind: &str, msg: &str) -> i32 {
     if !json_out() {
-        eprintln!("kio: {msg}");
+        // A flag's value is echoed as given, and a grants file can hold a control character:
+        // each line escaped (`\` kept, as a message quotes kio literals), so the terminal gets none.
+        let lines: Vec<String> = msg.lines().map(kio_host::escape_shown).collect();
+        eprintln!("kio: {}", lines.join("\n"));
         return 2;
     }
     let (message, hint) = match msg.split_once("\n  hint: ") {

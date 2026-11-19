@@ -282,14 +282,15 @@ fn query_refuses_writes() {
       let b = show(db.exec("INSERT INTO t VALUES ('v1')", []));
       let w = [rows(db.query("INSERT INTO t VALUES ('v2')", [])), rows(db.query("INSERT INTO t VALUES ('v2') RETURNING n", [])),
         rows(db.query("UPDATE t SET n = 'x'", [])), rows(db.query("DELETE FROM t", [])), rows(db.query("CREATE TABLE u (x)", [])),
-        rows(db.query("WITH c AS (SELECT 1) INSERT INTO t SELECT * FROM c", [])), rows(db.query("DROP TABLE t", []))];
+        rows(db.query("WITH c AS (SELECT 1) INSERT INTO t SELECT * FROM c", [])), rows(db.query("DROP TABLE t", [])),
+        rows(db.query("ATTACH 'x' AS x", [])), rows(db.query("SAVEPOINT s", [])), rows(db.query("PRAGMA journal_mode = DELETE", []))];
       let r = [rows(db.query("SELECT n FROM t", [])), rows(db.query("PRAGMA table_info(t)", [])),
         rows(db.query("WITH c(x) AS (SELECT 2) SELECT x FROM c", [])), rows(db.query("SELECT count(*) FROM pragma_table_info('t')", []))];
       a + " " + b + " [" + w.join("|") + "] [" + r.join("|") + "]"
     }"#;
     assert_eq!(
         both(main),
-        "0 1 [denied|denied|denied|denied|denied|denied|denied] ['v1'|0,'n','TEXT',0,null,0|2|1]"
+        "0 1 [denied|denied|denied|denied|denied|denied|denied|denied|denied|denied] ['v1'|0,'n','TEXT',0,null,0|2|1]"
     );
     let log = Log(Arc::default());
     let mut kio = Kio::new(Limits::default()).unwrap();
@@ -303,7 +304,17 @@ fn query_refuses_writes() {
         ),
         "{text}"
     );
+    // The hint is for a write the read-only check refused, not for the authorizer's denials
+    // (ATTACH, SAVEPOINT, a PRAGMA write), which `exec` refuses too.
     assert_eq!(text.matches(r#""hint":"#).count(), 7, "{text}");
+    assert_eq!(text.matches(r#""result":"denied""#).count(), 10, "{text}");
+    for sql in ["ATTACH 'x' AS x", "SAVEPOINT s", "PRAGMA journal_mode = DELETE"] {
+        let line = text.lines().find(|l| l.contains(&format!(r#""arg":"{sql}""#))).unwrap();
+        assert!(
+            line.contains(r#""result":"denied""#) && !line.contains("hint"),
+            "{line}"
+        );
+    }
 }
 
 /// H37: `exec_rows`' rows are capped as `query`'s (10,000 rows, 8 MB), and a write whose rows

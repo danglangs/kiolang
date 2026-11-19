@@ -165,7 +165,7 @@ fn bad_values_are_refused_at_start() {
     let t = tempfile::tempdir().unwrap();
     let prog = write(t.path(), "hours.kio", HOURS);
     let huge = format!("hours={}", "9".repeat(4097));
-    let cases: [(&str, &str); 3] = [
+    let cases: [(&str, &str); 4] = [
         (
             &huge,
             "kio: --value hours: the value is over 4096 bytes\n  hint: `--value` takes at most 4 KB; put a longer value in a file under a `--dir`\n",
@@ -175,6 +175,8 @@ fn bad_values_are_refused_at_start() {
             "kio: --value hours: the value holds a control character (U+0009)\n  hint: `--value` takes one line of plain text; put more in a file under a `--dir`\n",
         ),
         ("hours", "kio: --value hours: expected name=TEXT\n"),
+        // A usage error echoes the spec escaped: no control character reaches the terminal.
+        ("hours\u{1b}[31m", "kio: --value hours\\u{1b}[31m: expected name=TEXT\n"),
     ];
     for (spec, want) in cases {
         let out = kio(&["run", &prog, "--value", spec]);
@@ -182,6 +184,17 @@ fn bad_values_are_refused_at_start() {
         assert_eq!((out.status.code(), err.as_str()), (Some(2), want), "{spec:?}");
         assert!(out.stdout.is_empty());
     }
+    // The same from a grants file, and for another flag's usage error.
+    let g = write(t.path(), "esc.grants", "--value hours\u{1b}[31m\n");
+    let out = kio(&["run", &prog, "--grants", &g]);
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(err, "kio: --value hours\\u{1b}[31m: expected name=TEXT\n");
+    let out = kio(&["run", &prog, "--db", "\u{1b}]0;x\u{7}"]);
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(
+        err,
+        "kio: --db \\u{1b}]0;x\\u{07}: expected name=path, name=path:ro or name=:memory:\n"
+    );
 }
 
 #[test]

@@ -661,6 +661,35 @@ fn is_public(ip: IpAddr) -> bool {
     }
 }
 
+/// `Pinned::resolve`'s error when the granted name has no public address: the one connection
+/// failure that is `denied` (the host's rule), not `unreachable`.
+#[derive(Debug)]
+struct NoPublicAddress;
+
+impl std::fmt::Display for NoPublicAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("no public address")
+    }
+}
+
+impl std::error::Error for NoPublicAddress {}
+
+/// The error a request that got no response gives the program (H38): the request's own
+/// timeout is `timeout`; a malformed request `invalid`; `Pinned`'s `NoPublicAddress` is `denied`;
+/// everything else (a refused or reset connection, a name that does not resolve, TLS, and
+/// connect(2)'s own EACCES or EPERM from a firewall or sandbox) is `unreachable`: the grant
+/// allowed the request, and nothing answered it.
+fn connect_error(e: ureq::Error) -> kio::caps::net::HttpErr {
+    use kio::caps::net::HttpErr;
+    match e {
+        ureq::Error::Timeout(_) => HttpErr::Timeout,
+        ureq::Error::Io(e) if e.kind() == io::ErrorKind::TimedOut => HttpErr::Timeout,
+        ureq::Error::Io(e) if e.get_ref().is_some_and(|i| i.is::<NoPublicAddress>()) => HttpErr::Denied,
+        ureq::Error::Http(_) => HttpErr::Invalid,
+        _ => HttpErr::Unreachable,
+    }
+}
+
 /// Resolves only the grant's host, once per run: later requests and hops reuse the first answer,
 /// so DNS rebinding cannot change where the run connects. Non-public addresses are dropped.
 #[derive(Debug)]
@@ -690,13 +719,13 @@ impl ureq::unversioned::resolver::Resolver for Pinned {
             *pinned = Some(kept);
             found?;
         }
-        // A name with no public address is the host's refusal, `denied` (not `unreachable`:
-        // `perform` tells it by this kind).
+        // A name with no public address is the host's refusal, `denied`: `connect_error` tells it
+        // by this payload (not by the kind: connect(2) itself can fail with EACCES).
         let addrs = pinned.as_deref().unwrap_or_default();
         if addrs.is_empty() {
             return Err(ureq::Error::Io(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "no public address",
+                NoPublicAddress,
             )));
         }
         let mut out = self.empty();
@@ -849,17 +878,9 @@ fn perform(origin: &Origin, req: &Outbound, deadline: Instant, budget: &AtomicI6
                 .and_then(|r| agent.run(r)),
             false => b.body(()).map_err(ureq::Error::from).and_then(|r| agent.run(r)),
         };
-        // A name with no public address is refused by `Pinned` (`denied`: the host's rule, not
-        // the network). Anything else that keeps a response from arriving (a refused or reset
-        // connection, a name that does not resolve, a TLS failure) is `unreachable`: the grant
-        // allowed the request, and nothing answered it (H38).
         let resp = match sent {
             Ok(r) => r,
-            Err(ureq::Error::Timeout(_)) => break Err(HttpErr::Timeout),
-            Err(ureq::Error::Io(e)) if timed_out(&e) => break Err(HttpErr::Timeout),
-            Err(ureq::Error::Io(e)) if e.kind() == io::ErrorKind::PermissionDenied => break Err(HttpErr::Denied),
-            Err(ureq::Error::Http(_)) => break Err(HttpErr::Invalid),
-            Err(_) => break Err(HttpErr::Unreachable),
+            Err(e) => break Err(connect_error(e)),
         };
         let status = resp.status().as_u16();
         if matches!(status, 301 | 302 | 303 | 307 | 308) {
@@ -3530,6 +3551,23 @@ mod tests {
         assert!(HmacKey::new(String::new(), false).is_err());
         assert!(HmacKey::new("k".repeat(HEADER_MAX + 1), false).is_err());
         assert!(HmacKey::new("k".repeat(HEADER_MAX), false).is_ok());
+    }
+
+    /// H38 review: `denied` only for `Pinned`'s own payload; connect(2)'s EACCES is `unreachable`.
+    #[test]
+    fn connect_errors_map_by_payload_not_kind() {
+        use kio::caps::net::HttpErr;
+        let io = |e: io::Error| connect_error(ureq::Error::Io(e));
+        let pinned = io::Error::new(io::ErrorKind::PermissionDenied, NoPublicAddress);
+        assert!(matches!(io(pinned), HttpErr::Denied));
+        let eacces = io::Error::new(io::ErrorKind::PermissionDenied, "connect: permission denied");
+        assert!(matches!(io(eacces), HttpErr::Unreachable));
+        assert!(matches!(io(io::Error::from(io::ErrorKind::TimedOut)), HttpErr::Timeout));
+        assert!(matches!(
+            io(io::Error::from(io::ErrorKind::ConnectionRefused)),
+            HttpErr::Unreachable
+        ));
+        assert!(matches!(connect_error(ureq::Error::HostNotFound), HttpErr::Unreachable));
     }
 
     #[test]
