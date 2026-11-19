@@ -1,0 +1,2 @@
+# Tests only: the key may sign, so tests can make valid signatures. FLOW_KEY=test-key kio test app.kio --grants test.grants
+--hmac key=env:FLOW_KEY

@@ -1,0 +1,35 @@
+// flow F1.2, Worker: one pass over the due jobs. Each is claimed with a lease, POSTed to the
+// destination, then marked done, or retried with backoff, or dead after MAX_ATTEMPTS.
+// Delivery is at least once: a crash after the POST and before `done` means the next attempt
+// POSTs again, so every attempt carries `Idempotency-Key: <event id>` and the destination dedups.
+// Grants: `--db db=flow.db --clock now --http dest=.. --http-methods dest=POST --http-header dest=..`.
+mod web;
+mod api;
+mod flow;
+mod tests;
+
+const LEASE_MS: Int = 3000;
+const MAX_ATTEMPTS: Int = 5;
+const POST_TIMEOUT_MS: Int = 2000;
+
+fn deliver(dest: Http, job: flow::Job) -> Bool {
+    let r = dest.send("POST", "/events", flow::headers(job), job.body.to_bytes(), POST_TIMEOUT_MS);
+    match r {
+        Ok(resp) => resp.status >= 200 && resp.status < 300,
+        Err(_) => false,
+    }
+}
+
+// Returns how many jobs this pass attempted. There is no sleep: run it again to poll.
+fn main(db: Db, now: Clock, dest: Http) -> Result<Int, Str> {
+    if !flow::init(db) { return Err("database error"); }
+    let mut n = 0;
+    loop {
+        let Some(job) = flow::claim(db, now.now_ms(), LEASE_MS, MAX_ATTEMPTS) else { break; };
+        let ok = deliver(dest, job);
+        let _applied = flow::finish(db, job, ok, now.now_ms(), MAX_ATTEMPTS);
+        n += 1;
+        if n >= 500 { break; }
+    }
+    Ok(n)
+}

@@ -1572,7 +1572,7 @@ fn mutants_killed_and_survived() {
     assert_eq!(
         m,
         serde_json::json!({"seed": 1, "requested": 20, "sites": 4, "drawn": 4, "made": 4, "did_not_check": 0, "error": null,
-            "skipped": [], "constants": []})
+            "skipped": [], "constants": [], "mutations": null})
     );
     let row = |func: &str, from: &str, to: &str, around: &str, killed: Option<&str>| {
         let line = if func == "small" { 1 } else { 3 };
@@ -1906,4 +1906,183 @@ fn an_entry_constant_that_differs_from_the_roots() {
     let (_, out, _) = s.review(&["--entry", "worker.kio", "--json"]);
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["tests"]["mutants"]["sites"], 0);
+}
+
+// R1b2: a mutations file (`--mutations FILE`): written mutants, each a function, a description
+// and one `-`/`+` pair.
+
+/// kio-web's flow at F1.2 (`examples/flow`, `web.kio` and `api.kio` two levels up, as its
+/// `kio.deps` pins them): its four mutation checks, `flow.mutants`, are all killed.
+#[test]
+fn flows_four_written_mutants_are_killed() {
+    let flow = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/flow/examples/flow");
+    let tmp = tempfile::tempdir().unwrap();
+    let old = write(tmp.path(), "old.kio", BARE);
+    let r = Command::new(env!("CARGO_BIN_EXE_kio"))
+        .args(["review", "app.kio", "--base", &old, "--test-grants", "test.grants"])
+        .args(["--mutations", "flow.mutants", "--mutants", "0"])
+        .current_dir(&flow)
+        .env("TMPDIR", tmp.path())
+        .env("FLOW_KEY", "test-key")
+        .output()
+        .unwrap();
+    let (out, err) = (String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
+    // OLD holds none of NEW's grants: authority added, exit 3; no mutant survived.
+    assert_eq!(r.status.code(), Some(3), "{out}{err}");
+    assert_eq!(
+        mutant_lines(&out),
+        [
+            "  tested       mutants: 4 of 4 killed (flow.mutants (inside NEW's tree) 4 of 4)",
+            "  tested       killed by: tests::a_claim_needs_the_job_still_due_and_unchanged 1, tests::every_attempt_carries_the_event_id_as_the_key 1, tests::expired_lease_is_reclaimed_and_the_old_worker_changes_nothing 1, tests::failure_retries_with_doubling_backoff_then_dies 1",
+        ],
+        "{out}{err}"
+    );
+    let file = std::fs::read(flow.join("flow.mutants")).unwrap();
+    let identity = Sides::section(&out, "Identity");
+    let line = format!("  mutations flow.mutants sha256:{} (inside NEW's tree)", sha(&file));
+    assert!(identity.contains(&line), "{out}");
+}
+
+/// `big` is touched by a test that does not pin its boundary.
+const WRITTEN_SURVIVES: &str = "big: the boundary moves\n- n >= 100\n+ n > 100\n";
+
+/// A written mutant no test kills is exit 3, its edit and the tests it ran shown. Generated
+/// mutants run too, apart in the headline.
+#[test]
+fn a_written_survivor_is_exit_3() {
+    let s = Sides::new(BARE, PINNED);
+    let m = write(s.dir.path(), "m.mutants", WRITTEN_SURVIVES);
+    let (code, out, err) = s.review(&["--mutants", "0", "--mutations", &m]);
+    assert_eq!(code, 3, "{out}{err}");
+    assert_eq!(
+        mutant_lines(&out),
+        [
+            format!("  tested       mutants: 0 of 1 killed ({m} 0 of 1)"),
+            format!("  not checked  survived: {m}:1: big: the boundary moves (`n >= 100` -> `n > 100`); ran 1 test"),
+        ],
+        "{out}"
+    );
+    let (code, out, _) = s.review(&["--mutations", &m]);
+    assert_eq!(code, 3, "{out}");
+    assert_eq!(
+        mutant_lines(&out)[0],
+        format!("  tested       mutants: 2 of 5 killed (generated 2 of 4 at seed 1: 4 drawn of 4 sites, 0 did not check; {m} 0 of 1)")
+    );
+}
+
+/// Each entry that cannot run is an `error` with its hint, exit 1; the others still run. A file
+/// that does not parse, or is not a regular file by its own name, is refused before any run.
+#[test]
+fn a_written_entry_that_cannot_run_is_an_error() {
+    let s = Sides::new(BARE, PINNED);
+    let entries = [
+        "small: twice\n- n\n+ m\n",
+        "small: gone\n- n > 10\n+ n < 10\n",
+        "smal: unknown\n- n < 10\n+ n <= 10\n",
+        "small: does not check\n- n < 10\n+ n < \"ten\"\n",
+        "worker.kio: deliver: not an entry\n- 200\n+ 201\n",
+        "small: killed\n- n < 10\n+ n <= 10\n",
+    ];
+    let m = write(s.dir.path(), "m.mutants", &entries.join("---\n"));
+    let (code, out, err) = s.review(&["--mutants", "0", "--mutations", &m]);
+    assert_eq!(code, 1, "{out}{err}");
+    let hint = |h: &str| format!("                 hint: {h}");
+    assert_eq!(
+        mutant_lines(&out),
+        [
+            format!("  tested       mutants: 1 of 1 killed ({m} 1 of 1)"),
+            "  tested       killed by: pins_small 1".to_string(),
+            format!("  error        mutants: {m}:1: the `-` text occurs 4 times in small"),
+            hint("lengthen it until it occurs once; an entry names a function and a snippet, never a line"),
+            format!("  error        mutants: {m}:5: the `-` text is not in small"),
+            hint("the code it pinned has changed: copy the text from small in NEW again, or drop the entry"),
+            format!("  error        mutants: {m}:9: NEW has no function smal"),
+            hint("name it as the page does, `flow::finish`; an --entry's own function as `worker.kio: deliver`"),
+            format!("  error        mutants: {m}:13: the mutant does not check: `<` cannot be applied to Int and Str"),
+            hint("change the `+` text so the program still checks; no test can run a program the checker refuses"),
+            format!("  error        mutants: {m}:17: worker.kio is not an --entry of this review"),
+            hint("add `--entry worker.kio`, or name a function of the root without a program"),
+        ],
+        "{out}"
+    );
+    // Refused before any run: a usage error, the format in the hint.
+    let refused = |name: &str, text: &str| {
+        let f = write(s.dir.path(), name, text);
+        let (code, _, err) = s.review(&["--mutations", &f]);
+        assert_eq!(code, 2, "{err}");
+        (f, err)
+    };
+    let (f, err) = refused("bad.mutants", "small: no edit\n+ n\n");
+    let want = format!(
+        "{f}:2: expected `- text`, the text the mutant replaces\n  hint: an entry is `function: what it breaks`"
+    );
+    assert!(err.contains(&want), "{err}");
+    let (f, err) = refused("same.mutants", "small: nothing\n- n < 10\n+ n < 10\n");
+    let want = format!("{f}:3: the `+` text is the `-` text, so the mutant changes nothing\n  hint: write the wrong behaviour a test should catch");
+    assert!(err.contains(&want), "{err}");
+    let (f, err) = refused("big.mutants", &"#\n".repeat(40 << 10));
+    assert!(
+        err.contains(&format!("--mutations {f}: over 64 KiB\n  hint: an entry is")),
+        "{err}"
+    );
+    let linked = s.dir.path().join("linked.mutants");
+    std::fs::hard_link(&m, &linked).unwrap();
+    let (code, _, err) = s.review(&["--mutations", linked.to_str().unwrap()]);
+    assert_eq!(code, 2);
+    let want = "a symlink, a hard link or not a regular file\n  hint: give the file itself; kio reads a mutations file only by its own name";
+    assert!(err.contains(want), "{err}");
+}
+
+/// FILE is read once: rewritten while OLD's tests run, its mutants still come from the bytes
+/// read, and Identity reports the change as an `error`, exit 1.
+#[test]
+fn a_mutations_file_changed_during_the_review() {
+    let waits = "\n#[test]\nfn waits(d: Dir, watch: Dir) -> Result<(), IoErr> {\n    d.write(\"started\", \"\".to_bytes())?;\n    let mut i = 0;\n    while i < 100000 && !watch.exists(\"go\")? { i += 1; }\n    Ok(())\n}\n";
+    let app = format!("{PINNED}{waits}");
+    let s = Sides::new(&app, &app);
+    let entry = "small: killed\n- n < 10\n+ n <= 10\n";
+    let m = write(s.dir.path(), "new/m.mutants", entry);
+    let watch = s.dir.path().join("watch");
+    std::fs::create_dir(&watch).unwrap();
+    let t = write(
+        s.dir.path(),
+        "t.grants",
+        &format!("--dir watch={}:ro\n--calls 200000\n", watch.display()),
+    );
+    let tmp = s.dir.path().join("tmp");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_kio"))
+        .args(["review", &s.new, "--base", &s.old, "--test-grants", &t])
+        .args(["--mutants", "0", "--mutations", &m])
+        .env("TMPDIR", &tmp)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let start = std::time::Instant::now();
+    while !find(&tmp, "started", 2) {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "the review ended before a test started"
+        );
+        assert!(start.elapsed().as_secs() < 60, "no test started");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    std::fs::write(&m, "small: other\n- n < 10\n+ n > 10\n").unwrap();
+    std::fs::write(watch.join("go"), "").unwrap();
+    let r = child.wait_with_output().unwrap();
+    let (out, err) = (String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
+    assert_eq!(r.status.code(), Some(1), "{out}{err}");
+    assert_eq!(
+        mutant_lines(&out),
+        [
+            format!("  tested       mutants: 1 of 1 killed ({m} (inside NEW's tree) 1 of 1)"),
+            "  tested       killed by: pins_small 1".to_string(),
+        ],
+        "{out}"
+    );
+    let identity = Sides::section(&out, "Identity");
+    let line = format!("  mutations {m} sha256:{} (inside NEW's tree)", sha(entry.as_bytes()));
+    assert!(identity.contains(&line), "{out}");
+    let changed = format!("  error        {m} changed while the review ran");
+    assert!(identity.contains(&changed), "{out}");
 }

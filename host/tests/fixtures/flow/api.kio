@@ -1,0 +1,92 @@
+// JSON API helpers over web.kio. The app declares `mod web; mod api;`.
+
+// Respond with `j` encoded as application/json.
+pub fn json(status: Int, j: Json) -> web::Response {
+    web::json(status, j.to_json())
+}
+
+// Respond with `{"error": msg}`.
+pub fn error(status: Int, msg: Str) -> web::Response {
+    let mut o: Map<Str, Json> = Map::new();
+    o.insert("error", Json::Str(msg));
+    json(status, Json::Obj(o))
+}
+
+// The request body as JSON, or a 400 response carrying the parse message.
+pub fn body(r: web::Request) -> Result<Json, web::Response> {
+    match r.body.to_str().parse_json() {
+        Ok(j) => Ok(j),
+        Err(e) => Err(error(400, e)),
+    }
+}
+
+pub fn str_field(j: Json, key: Str) -> Option<Str> {
+    j.get(key)?.as_str()
+}
+
+pub fn int_field(j: Json, key: Str) -> Option<Int> {
+    j.get(key)?.as_int()
+}
+
+// The string fields `keys` of the request body, in that order, or a 400 response naming the
+// first problem: bad JSON, or a field that is missing or not a string.
+pub fn str_fields(r: web::Request, keys: List<Str>) -> Result<List<Str>, web::Response> {
+    let j = body(r)?;
+    let mut out: List<Str> = [];
+    for k in keys {
+        match str_field(j, k) {
+            Some(s) => out.push(s),
+            None => return Err(error(400, "missing string field \"" + k + "\"")),
+        }
+    }
+    Ok(out)
+}
+
+// A path parameter as an integer, or a 400 saying `what` must be one.
+pub fn int_param(s: Str, what: Str) -> Result<Int, web::Response> {
+    match s.parse_int() {
+        Some(n) => Ok(n),
+        None => Err(error(400, what + " must be an integer")),
+    }
+}
+
+// The first element, if any.
+pub fn first<T>(xs: List<T>) -> Option<T> {
+    if xs.len() == 0 { None } else { Some(xs[0]) }
+}
+
+// The values present in `xs`, in order.
+pub fn flatten<T>(xs: List<Option<T>>) -> List<T> {
+    let mut out: List<T> = [];
+    for x in xs {
+        if let Some(v) = x { out.push(v); }
+    }
+    out
+}
+
+// One page of a listing: `items` are elements offset.. of `total`, at most `limit` of them.
+pub struct Page<T> { items: List<T>, total: Int, offset: Int, limit: Int }
+
+// The page of `xs` that the query parameters `offset` (default 0) and `limit` (default 50, at
+// most 500) ask for, or a 400 naming a value that is not a non-negative integer (or a limit over 500).
+pub fn page<T>(xs: List<T>, r: web::Request) -> Result<Page<T>, web::Response> {
+    let q = web::query(r);
+    let offset = count(q, "offset", 0, 1000000000)?;
+    let limit = count(q, "limit", 50, 500)?;
+    let items = xs.slice(offset.min(xs.len()), (offset + limit).min(xs.len()));
+    Ok(Page { items: items, total: xs.len(), offset: offset, limit: limit })
+}
+
+fn count(q: Map<Str, Str>, name: Str, default: Int, max: Int) -> Result<Int, web::Response> {
+    let s = match q.get(name) {
+        Some(s) => s,
+        None => return Ok(default),
+    };
+    match s.parse_int() {
+        Some(n) => {
+            if n < 0 || n > max { return Err(error(400, name + " must be 0 to " + max.to_str())); }
+            Ok(n)
+        }
+        None => Err(error(400, name + " must be an integer")),
+    }
+}

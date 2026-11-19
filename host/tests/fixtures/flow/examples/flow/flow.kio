@@ -1,0 +1,118 @@
+// The ingest logic: plain values and the capabilities it needs, so tests call it directly.
+pub fn ingest(key: Hmac, db: Db, now_ms: Int, sig: Option<Str>, body: Bytes) -> web::Response {
+    let Some(hex) = sig else { return api::error(401, "missing X-Signature header"); };
+    let Some(mac) = hex.trim().from_hex() else { return api::error(401, "bad signature"); };
+    if !key.verify(body, mac) { return api::error(401, "bad signature"); }
+    let Some(text) = body.try_to_str() else { return api::error(400, "body is not UTF-8"); };
+    let j = match text.parse_json() {
+        Ok(j) => j,
+        Err(e) => return api::error(400, e),
+    };
+    let Some(id) = api::str_field(j, "id") else { return api::error(400, "missing string field \"id\""); };
+    match store(db, id, text, now_ms) {
+        Ok(true) => accepted("accepted"),
+        Ok(false) => accepted("duplicate"),
+        Err(why) => api::error(500, why),
+    }
+}
+
+fn accepted(what: Str) -> web::Response {
+    let mut o: Map<Str, Json> = Map::new();
+    o.insert(what, Json::Bool(true));
+    api::json(if what == "accepted" { 202 } else { 200 }, Json::Obj(o))
+}
+
+// Add the job: Ok(true) when new, Ok(false) when the id exists.
+// The insert is one autocommitted statement, so it is durable before this returns.
+pub fn store(db: Db, id: Str, body: Str, now_ms: Int) -> Result<Bool, Str> {
+    if !init(db) { return Err("database error"); }
+    let added = db.exec("INSERT OR IGNORE INTO jobs (id, body, state, attempts, received_ms, next_ms) VALUES (?, ?, 'pending', 0, ?, ?)",
+        [SqlValue::Text(id), SqlValue::Text(body), SqlValue::Int(now_ms), SqlValue::Int(now_ms)]);
+    match added {
+        Ok(n) => Ok(n == 1),
+        Err(_) => Err("database error"),
+    }
+}
+
+// The job rows as text lines, in arrival order. Empty before the table exists.
+pub fn rows(db: Db) -> List<Str> {
+    let found = db.query("SELECT id, body, state, attempts, received_ms FROM jobs ORDER BY rowid", []);
+    let Ok(rs) = found else { return []; };
+    rs.map(|r| text_of(r[0]) + "|" + text_of(r[1]) + "|" + text_of(r[2]) + "|" + int_of(r[3]).to_str() + "|" + int_of(r[4]).to_str())
+}
+
+fn text_of(v: SqlValue) -> Str {
+    match v { SqlValue::Text(s) => s, _ => "" }
+}
+
+fn int_of(v: SqlValue) -> Int {
+    match v { SqlValue::Int(n) => n, _ => 0 }
+}
+
+// ---- F1.2, the worker. Job states: pending | claimed | retry | done | dead.
+// lease = the attempt number that holds the job; lease_until = when that claim expires;
+// next_ms = when a pending or retry job is due. Every change after a claim names the lease.
+
+pub fn init(db: Db) -> Bool {
+    db.exec("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, body TEXT NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL, received_ms INTEGER NOT NULL, lease INTEGER NOT NULL DEFAULT 0, lease_until INTEGER NOT NULL DEFAULT 0, next_ms INTEGER NOT NULL DEFAULT 0)", []).is_ok()
+}
+
+pub struct Job { id: Str, body: Str, attempts: Int }
+
+pub fn backoff_ms(attempts: Int) -> Int {
+    let mut d = 1000;
+    for _i in 1..attempts { d = d * 2; }
+    d
+}
+
+// The request for one attempt: the key is the event id on every attempt.
+pub fn headers(job: Job) -> List<Str> {
+    ["Content-Type: application/json", "Idempotency-Key: " + job.id]
+}
+
+// A claim is one conditional UPDATE: it takes the job only if it is still due and still at the
+// attempt count the caller saw, so of two workers one gets 1 row changed and the other 0.
+pub fn try_claim(db: Db, id: Str, seen: Int, now: Int, lease_ms: Int, limit: Int) -> Option<Job> {
+    let took = db.exec("UPDATE jobs SET state = 'claimed', attempts = attempts + 1, lease = attempts + 1, lease_until = ? WHERE id = ? AND attempts = ? AND attempts < ? AND ((state IN ('pending', 'retry') AND next_ms <= ?) OR (state = 'claimed' AND lease_until <= ?))",
+        [SqlValue::Int(now + lease_ms), SqlValue::Text(id), SqlValue::Int(seen), SqlValue::Int(limit), SqlValue::Int(now), SqlValue::Int(now)]);
+    let Ok(1) = took else { return None; };
+    let got = db.query("SELECT body FROM jobs WHERE id = ?", [SqlValue::Text(id)]);
+    let Ok(rs) = got else { return None; };
+    if rs.len() != 1 { return None; }
+    Some(Job { id: id, body: text_of(rs[0][0]), attempts: seen + 1 })
+}
+
+// The next due job, claimed. A claimed job whose lease expired at the limit is dead first.
+pub fn claim(db: Db, now: Int, lease_ms: Int, limit: Int) -> Option<Job> {
+    let _reaped = db.exec("UPDATE jobs SET state = 'dead' WHERE state = 'claimed' AND lease_until <= ? AND attempts >= ?",
+        [SqlValue::Int(now), SqlValue::Int(limit)]);
+    let found = db.query("SELECT id, attempts FROM jobs WHERE attempts < ? AND ((state IN ('pending', 'retry') AND next_ms <= ?) OR (state = 'claimed' AND lease_until <= ?)) ORDER BY next_ms, rowid LIMIT 5",
+        [SqlValue::Int(limit), SqlValue::Int(now), SqlValue::Int(now)]);
+    let Ok(rs) = found else { return None; };
+    for r in rs {
+        let got = try_claim(db, text_of(r[0]), int_of(r[1]), now, lease_ms, limit);
+        if got.is_some() { return got; }
+    }
+    None
+}
+
+// Record an attempt's result under the job's lease: done, or retry after a backoff, or dead at the
+// limit. False (and nothing changed) when the lease is no longer the job's.
+pub fn finish(db: Db, job: Job, ok: Bool, now: Int, limit: Int) -> Bool {
+    let r = if ok {
+        db.exec("UPDATE jobs SET state = 'done' WHERE id = ? AND lease = ? AND state = 'claimed'",
+            [SqlValue::Text(job.id), SqlValue::Int(job.attempts)])
+    } else {
+        let state = if job.attempts >= limit { "dead" } else { "retry" };
+        db.exec("UPDATE jobs SET state = ?, next_ms = ? WHERE id = ? AND lease = ? AND state = 'claimed'",
+            [SqlValue::Text(state), SqlValue::Int(now + backoff_ms(job.attempts)), SqlValue::Text(job.id), SqlValue::Int(job.attempts)])
+    };
+    match r { Ok(1) => true, _ => false }
+}
+
+// Every job as `id|state|attempts|lease|lease_until|next_ms`, in arrival order.
+pub fn jobs(db: Db) -> List<Str> {
+    let found = db.query("SELECT id, state, attempts, lease, lease_until, next_ms FROM jobs ORDER BY rowid", []);
+    let Ok(rs) = found else { return []; };
+    rs.map(|r| text_of(r[0]) + "|" + text_of(r[1]) + "|" + int_of(r[2]).to_str() + "|" + int_of(r[3]).to_str() + "|" + int_of(r[4]).to_str() + "|" + int_of(r[5]).to_str())
+}

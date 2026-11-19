@@ -142,7 +142,7 @@ fn command(args: &[String]) -> i32 {
 }
 
 /// The commands, `{USAGE}` standing for `kio run`'s flags.
-const HELP: &str = "kio --version\n       kio deps pin [<prog.kio>]\n       kio check <prog.kio> [--all | --base <old.kio> [--detail]]\n       kio check <prog.kio> --grants <file> [flags]\n       kio mcp\n       kio review <new.kio> --base <old.kio> [--grants file] [--test-grants file] [--requirements file] [--entry file [--entry-grants file]].. [--seed s] [--mutants n] [--json]\n       kio run <prog.kio> {USAGE}\n       kio test <prog.kio> {TEST_USAGE}";
+const HELP: &str = "kio --version\n       kio deps pin [<prog.kio>]\n       kio check <prog.kio> [--all | --base <old.kio> [--detail]]\n       kio check <prog.kio> --grants <file> [flags]\n       kio mcp\n       kio review <new.kio> --base <old.kio> [--grants file] [--test-grants file] [--requirements file] [--entry file [--entry-grants file]].. [--seed s] [--mutants n] [--mutations file] [--json]\n       kio run <prog.kio> {USAGE}\n       kio test <prog.kio> {TEST_USAGE}";
 
 /// A program as read: its `(name, source)` files, root first, named as `lang` takes them
 /// (`web.kio` for `mod web;`); the path each was read from and its identity, then `kio.deps`'s

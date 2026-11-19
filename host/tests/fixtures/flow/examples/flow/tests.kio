@@ -1,0 +1,339 @@
+// Run: FLOW_KEY=test-key kio test app.kio --grants test.grants (test.grants lets `key` sign).
+
+fn sig_of(key: Hmac, body: Bytes) -> Option<Str> {
+    match key.sign(body) { Ok(m) => Some(m.to_hex()), Err(_) => None }
+}
+
+fn signed(key: Hmac, db: Db, body: Str) -> web::Response {
+    flow::ingest(key, db, 1000, sig_of(key, body.to_bytes()), body.to_bytes())
+}
+
+fn body_of(r: web::Response) -> Str { r.body.to_str() }
+
+#[test]
+fn new_event_is_202_and_a_pending_row(key: Hmac, db: Db) {
+    let r = signed(key, db, "{\"id\":\"e1\",\"kind\":\"x\"}");
+    assert_eq(r.status, 202);
+    assert_eq(body_of(r), "{\"accepted\":true}");
+    assert_eq(flow::rows(db), ["e1|{\"id\":\"e1\",\"kind\":\"x\"}|pending|0|1000"]);
+}
+
+#[test]
+fn repeated_id_is_200_and_changes_nothing(key: Hmac, db: Db) {
+    let _first = signed(key, db, "{\"id\":\"e1\",\"n\":1}");
+    let before = flow::rows(db);
+    let r = signed(key, db, "{\"id\":\"e1\",\"n\":2}");
+    assert_eq(r.status, 200);
+    assert_eq(body_of(r), "{\"duplicate\":true}");
+    assert_eq(flow::rows(db), before);
+}
+
+#[test]
+fn bad_signature_is_401_and_never_inserts(key: Hmac, db: Db) {
+    let body = "{\"id\":\"e1\"}".to_bytes();
+    let good = sig_of(key, body).unwrap_or("");
+    let wrong = good.replace("a", "b") + "00";
+    assert_eq(flow::ingest(key, db, 1, Some(wrong), body).status, 401);
+    assert_eq(flow::ingest(key, db, 1, Some("zz" + good), body).status, 401);
+    assert_eq(flow::ingest(key, db, 1, Some(good.slice(0, 62)), body).status, 401);
+    assert_eq(flow::ingest(key, db, 1, Some(good), "{\"id\":\"e2\"}".to_bytes()).status, 401);
+    assert_eq(flow::rows(db).len(), 0);
+}
+
+#[test]
+fn missing_signature_is_401(key: Hmac, db: Db) {
+    let r = flow::ingest(key, db, 1, None, "{\"id\":\"e1\"}".to_bytes());
+    assert_eq(r.status, 401);
+    assert_eq(flow::rows(db).len(), 0);
+}
+
+#[test]
+fn malformed_json_is_400(key: Hmac, db: Db) {
+    assert_eq(signed(key, db, "{\"id\":").status, 400);
+    assert_eq(signed(key, db, "not json").status, 400);
+    assert_eq(signed(key, db, "{\"id\":5}").status, 400);
+    assert_eq(signed(key, db, "[\"id\"]").status, 400);
+    assert_eq(flow::rows(db).len(), 0);
+}
+
+#[test]
+fn bad_signature_beats_bad_json(key: Hmac, db: Db) {
+    let r = flow::ingest(key, db, 1, Some("00"), "{\"id\":".to_bytes());
+    assert_eq(r.status, 401);
+}
+
+struct Gen { slot: Int, note: Str }
+
+fn gen_body(g: Gen) -> Str {
+    let mut o: Map<Str, Json> = Map::new();
+    o.insert("id", Json::Str("evt_" + (((g.slot % 4) + 4) % 4).to_str()));
+    o.insert("note", Json::Str(g.note));
+    Json::Obj(o).to_json()
+}
+
+// (a) Replaying any sequence, repeats included, leaves the rows of applying each distinct id once.
+#[test]
+fn replay_equals_each_distinct_event_once(key: Hmac, db: Db, once: Db, events: List<Gen>) {
+    let mut seen: List<Str> = [];
+    for g in events {
+        let body = gen_body(g);
+        let id = (body.parse_json().unwrap_or(Json::Null)).get("id").and_then(|j| j.as_str()).unwrap_or("");
+        let fresh = !seen.contains(id);
+        let r = signed(key, db, body);
+        assert_eq(r.status, if fresh { 202 } else { 200 });
+        if fresh {
+            seen.push(id);
+            assert_eq(signed(key, once, body).status, 202);
+        }
+    }
+    assert_eq(flow::rows(db), flow::rows(once));
+}
+
+// (b) A signature that is not the body's HMAC never inserts: a tampered signature, a signature
+// of another body, or any text.
+#[test]
+fn bad_signature_never_inserts(key: Hmac, db: Db, g: Gen, junk: Str, flip: Int, extra: Str) {
+    let body = gen_body(g);
+    let good = sig_of(key, body.to_bytes()).unwrap_or("");
+    let i = ((flip % 64) + 64) % 64;
+    let c = good.slice(i, i + 1);
+    let tampered = good.slice(0, i) + (if c == "0" { "1" } else { "0" }) + good.slice(i + 1, 64);
+    assert_eq(flow::ingest(key, db, 1, Some(tampered), body.to_bytes()).status, 401);
+    assert_eq(flow::ingest(key, db, 1, Some(junk), body.to_bytes()).status, 401);
+    assume(extra != "");
+    assert_eq(flow::ingest(key, db, 1, Some(good), (body + extra).to_bytes()).status, 401);
+    assert_eq(flow::rows(db).len(), 0);
+}
+
+#[test]
+fn signed_non_utf8_body_is_400(key: Hmac, db: Db) {
+    let mut body = "{\"id\":\"".to_bytes();
+    body.push(255);
+    body.extend("\"}".to_bytes());
+    assert_eq(flow::ingest(key, db, 1, sig_of(key, body), body).status, 400);
+    assert_eq(flow::rows(db).len(), 0);
+    let ok = "{\"id\":\"café € 😀\"}";
+    assert_eq(signed(key, db, ok).status, 202);
+}
+
+// Whatever signed bytes arrive, the handler answers; it never stops the run.
+#[test]
+fn any_signed_bytes_get_an_answer(key: Hmac, db: Db, raw: Bytes) {
+    let r = flow::ingest(key, db, 1, sig_of(key, raw), raw);
+    assert(r.status == 400 || r.status == 202, "400 or 202");
+}
+
+// ---- F1.2: the worker. Run: kio test worker.kio --grants test.grants
+
+const LEASE: Int = 1000;
+
+fn job_line(db: Db, id: Str) -> Str {
+    for l in flow::jobs(db) { if l.starts_with(id + "|") { return l; } }
+    ""
+}
+
+fn add(db: Db, id: Str, now: Int) {
+    assert_eq(flow::store(db, id, "{\"id\":\"" + id + "\"}", now), Ok(true));
+}
+
+fn claimed(db: Db, now: Int, limit: Int) -> flow::Job {
+    let Some(j) = flow::claim(db, now, LEASE, limit) else { assert(false, "nothing to claim"); return flow::Job { id: "", body: "", attempts: 0 }; };
+    j
+}
+
+#[test]
+fn pending_claim_done(db: Db) {
+    add(db, "a", 10);
+    assert_eq(job_line(db, "a"), "a|pending|0|0|0|10");
+    let j = claimed(db, 20, 3);
+    assert_eq(job_line(db, "a"), "a|claimed|1|1|1020|10");
+    assert_eq(flow::claim(db, 21, LEASE, 3), None);
+    assert(flow::finish(db, j, true, 30, 3), "finish applies");
+    assert_eq(job_line(db, "a"), "a|done|1|1|1020|10");
+    assert_eq(flow::claim(db, 99999, LEASE, 3), None);
+}
+
+#[test]
+fn failure_retries_with_doubling_backoff_then_dies(db: Db) {
+    assert_eq([flow::backoff_ms(1), flow::backoff_ms(2), flow::backoff_ms(3)], [1000, 2000, 4000]);
+    add(db, "a", 0);
+    let j1 = claimed(db, 0, 3);
+    assert(flow::finish(db, j1, false, 100, 3), "fail 1");
+    assert_eq(job_line(db, "a"), "a|retry|1|1|1000|1100");
+    assert_eq(flow::claim(db, 1099, LEASE, 3), None);
+    let j2 = claimed(db, 1100, 3);
+    assert_eq(j2.attempts, 2);
+    assert(flow::finish(db, j2, false, 1200, 3), "fail 2");
+    assert_eq(job_line(db, "a"), "a|retry|2|2|2100|3200");
+    let j3 = claimed(db, 3200, 3);
+    assert(flow::finish(db, j3, false, 3300, 3), "fail 3");
+    assert_eq(job_line(db, "a"), "a|dead|3|3|4200|7300");
+    assert_eq(flow::claim(db, 999999, LEASE, 3), None);
+}
+
+#[test]
+fn expired_lease_is_reclaimed_and_the_old_worker_changes_nothing(db: Db) {
+    add(db, "a", 0);
+    let old = claimed(db, 0, 3);
+    assert_eq(flow::claim(db, 999, LEASE, 3), None);
+    let fresh = claimed(db, 1000, 3);
+    assert_eq(fresh.attempts, 2);
+    let before = flow::jobs(db);
+    assert(!flow::finish(db, old, true, 1001, 3), "stale done");
+    assert(!flow::finish(db, old, false, 1001, 3), "stale fail");
+    assert_eq(flow::jobs(db), before);
+    assert(flow::finish(db, fresh, true, 1002, 3), "current done");
+}
+
+#[test]
+fn expired_lease_at_the_limit_is_dead_not_stranded(db: Db) {
+    add(db, "a", 0);
+    let _j = claimed(db, 0, 1);
+    assert_eq(flow::claim(db, 1000, LEASE, 1), None);
+    assert_eq(job_line(db, "a"), "a|dead|1|1|1000|0");
+}
+
+#[test]
+fn a_claim_needs_the_job_still_due_and_unchanged(db: Db) {
+    add(db, "a", 0);
+    let _held = claimed(db, 0, 3);
+    let before = flow::jobs(db);
+    assert_eq(flow::try_claim(db, "a", 0, 500, LEASE, 3), None);
+    assert_eq(flow::try_claim(db, "a", 1, 500, LEASE, 3), None);
+    assert_eq(flow::try_claim(db, "a", 1, 1000, LEASE, 1), None);
+    assert_eq(flow::jobs(db), before);
+    assert(flow::try_claim(db, "a", 1, 1000, LEASE, 3).is_some(), "expired and seen");
+}
+
+#[test]
+fn every_attempt_carries_the_event_id_as_the_key(db: Db) {
+    add(db, "evt_9", 0);
+    let j1 = claimed(db, 0, 3);
+    let _x = flow::finish(db, j1, false, 0, 3);
+    let j2 = claimed(db, 5000, 3);
+    assert_eq(flow::headers(j1), flow::headers(j2));
+    assert(flow::headers(j2).contains("Idempotency-Key: evt_9"), "key is the id");
+}
+
+enum Crash { Never, BeforePost, AfterPost }
+enum Op { Ingest(Int), Claim, Poach(Int, Int), Work(Int, Bool, Crash), Advance(Int) }
+
+// The reference: one record per job, in arrival order.
+struct M { id: Str, state: Str, attempts: Int, lease: Int, until: Int, next: Int }
+struct World { ms: List<M>, held: List<flow::Job>, posted: List<Str>, now: Int }
+
+fn mline(m: M) -> Str {
+    m.id + "|" + m.state + "|" + m.attempts.to_str() + "|" + m.lease.to_str() + "|" + m.until.to_str() + "|" + m.next.to_str()
+}
+
+fn find(ms: List<M>, id: Str) -> Int {
+    for i in 0..ms.len() { if ms[i].id == id { return i; } }
+    -1
+}
+
+fn due(m: M, now: Int, limit: Int) -> Bool {
+    m.attempts < limit && (((m.state == "pending" || m.state == "retry") && m.next <= now) || (m.state == "claimed" && m.until <= now))
+}
+
+fn take(m: M, now: Int) -> M {
+    M { state: "claimed", attempts: m.attempts + 1, lease: m.attempts + 1, until: now + LEASE, ..m }
+}
+
+// The key a worker would send for this job, read from the real request headers.
+fn key_of(job: flow::Job) -> Str {
+    for h in flow::headers(job) {
+        if let Some(v) = h.strip_prefix("Idempotency-Key: ") { return v; }
+    }
+    ""
+}
+
+fn clamp(n: Int, m: Int) -> Int { ((n % m) + m) % m }
+
+fn step(db: Db, w: World, op: Op, limit: Int) -> World {
+    let mut ms = w.ms;
+    let mut held = w.held;
+    let mut posted = w.posted;
+    let mut now = w.now;
+    match op {
+        Op::Ingest(n) => {
+            let id = "j" + clamp(n, 3).to_str();
+            assert_eq(flow::store(db, id, "{\"id\":\"" + id + "\"}", now), Ok(find(ms, id) < 0));
+            if find(ms, id) < 0 { ms.push(M { id: id, state: "pending", attempts: 0, lease: 0, until: 0, next: now }); }
+        }
+        Op::Advance(n) => { now = now + clamp(n, 3000); }
+        Op::Claim => {
+            let got = flow::claim(db, now, LEASE, limit);
+            ms = ms.map(|m| if m.state == "claimed" && m.until <= now && m.attempts >= limit { M { state: "dead", ..m } } else { m });
+            match got {
+                Some(job) => {
+                    let i = find(ms, job.id);
+                    assert(i >= 0 && due(ms[i], now, limit), "claimed a job that is not due");
+                    ms[i] = take(ms[i], now);
+                    assert_eq(job.attempts, ms[i].attempts);
+                    held.push(job);
+                }
+                None => { for m in ms { assert(!due(m, now, limit), "a due job was not claimed"); } }
+            }
+        }
+        Op::Poach(n, seen) => {
+            let id = "j" + clamp(n, 3).to_str();
+            let i = find(ms, id);
+            let got = flow::try_claim(db, id, clamp(seen, 6), now, LEASE, limit);
+            let ok = i >= 0 && ms[i].attempts == clamp(seen, 6) && due(ms[i], now, limit);
+            assert_eq(got.is_some(), ok);
+            if ok { ms[i] = take(ms[i], now); held.push(got.unwrap_or(flow::Job { id: "", body: "", attempts: 0 })); }
+        }
+        Op::Work(n, ok, crash) => {
+            if held.len() > 0 {
+                let job = held[clamp(n, held.len())];
+                if crash != Crash::BeforePost { posted.push(key_of(job)); }
+                if crash == Crash::Never {
+                    let i = find(ms, job.id);
+                    let mine = ms[i].state == "claimed" && ms[i].lease == job.attempts;
+                    assert_eq(flow::finish(db, job, ok, now, limit), mine);
+                    if mine {
+                        let to = if job.attempts >= limit { "dead" } else { "retry" };
+                        ms[i] = if ok { M { state: "done", ..ms[i] } } else { M { state: to, next: now + flow::backoff_ms(job.attempts), ..ms[i] } };
+                    }
+                }
+            }
+        }
+    }
+    let after = World { ms: ms, held: held, posted: posted, now: now };
+    assert_eq(flow::jobs(db), after.ms.map(|m| mline(m)));
+    for m in after.ms {
+        assert(m.attempts <= limit, "attempts past the limit");
+        assert(m.state != "done" || after.posted.contains(m.id), "done without a post carrying its id");
+    }
+    after
+}
+
+// (c) The Db equals the model after every operation, whatever the faults: a crash before or after
+// the POST, a clock that passes leases, a stale worker finishing late, a claim of a taken job.
+// Afterwards, with the clock past every lease and backoff, claiming and succeeding until nothing is
+// due leaves only done and dead jobs: none is stranded.
+#[test]
+fn db_equals_model_and_nothing_is_stranded(db: Db, ops: List<Op>, lim: Int) {
+    let limit = clamp(lim, 4) + 1;
+    let mut w = World { ms: [], held: [], posted: [], now: 0 };
+    for op in ops { w = step(db, w, op, limit); }
+    w = step(db, w, Op::Advance(2999), limit);
+    w = World { now: w.now + 100000, ..w };
+    for _i in 0..20 {
+        w = step(db, w, Op::Claim, limit);
+        w = step(db, w, Op::Work(w.held.len() - 1, true, Crash::Never), limit);
+    }
+    for m in w.ms { assert(m.state == "done" || m.state == "dead", "stranded: " + mline(m)); }
+}
+
+// (d) A completion under an old lease changes nothing, whatever it says.
+#[test]
+fn stale_completion_changes_nothing(db: Db, ok: Bool, gap: Int, late: Int) {
+    add(db, "a", 0);
+    let old = claimed(db, 0, 5);
+    let fresh = claimed(db, LEASE + clamp(gap, 5000), 5);
+    let before = flow::jobs(db);
+    assert(!flow::finish(db, old, ok, LEASE + clamp(gap, 5000) + clamp(late, 5000), 5), "stale finish applied");
+    assert_eq(flow::jobs(db), before);
+    assert(flow::finish(db, fresh, true, 0, 5), "current finish");
+}

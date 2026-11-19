@@ -1,0 +1,19 @@
+# F1.2's four mutation checks (README, "Mutation checks"), each a wrong behaviour a test must catch.
+# FLOW_KEY=test-key kio review app.kio --base app.kio --test-grants test.grants --mutations flow.mutants --mutants 0
+# An entry: `function: what it breaks`, then `-` text that occurs once in that function, `+` its
+# replacement. A `?` stays bound (`OR 1` drops a condition), so the mutant fails on behaviour, not SQL.
+flow::finish: a done update ignores the lease, so a stale worker completes a job it lost
+- SET state = 'done' WHERE id = ? AND lease = ?
++ SET state = 'done' WHERE id = ? AND (lease = ? OR 1)
+---
+flow::headers: no Idempotency-Key header, so the destination cannot dedup a retried POST
+- ["Content-Type: application/json", "Idempotency-Key: " + job.id]
++ ["Content-Type: application/json"]
+---
+flow::try_claim: the claim UPDATE drops its conditions, so two workers can take one job
+- WHERE id = ? AND attempts = ? AND attempts < ? AND ((state IN ('pending', 'retry') AND next_ms <= ?) OR (state = 'claimed' AND lease_until <= ?))
++ WHERE id = ? AND (1 OR (attempts = ? AND attempts < ? AND ((state IN ('pending', 'retry') AND next_ms <= ?) OR (state = 'claimed' AND lease_until <= ?))))
+---
+flow::finish: off by one on the limit, so a job gets one attempt too many
+- job.attempts >= limit
++ job.attempts > limit

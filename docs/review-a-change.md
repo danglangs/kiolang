@@ -46,7 +46,7 @@ $ git worktree remove ../../../base        # when done
 ## 3. Run `kio review`
 
 ```
-kio review NEW --base OLD [--grants G] [--test-grants T] [--requirements FILE] [--entry FILE [--entry-grants G2]].. [--seed S] [--mutants N]
+kio review NEW --base OLD [--grants G] [--test-grants T] [--requirements FILE] [--entry FILE [--entry-grants G2]].. [--seed S] [--mutants N] [--mutations FILE]
 ```
 
 | Flag | Give it | Why |
@@ -58,6 +58,7 @@ kio review NEW --base OLD [--grants G] [--test-grants T] [--requirements FILE] [
 | `--entry-grants G2` | right after its `--entry`: that program's grants file (`worker.grants`) | as `--grants`, for that entry |
 | `--mutants N` | how many generated mutants to run (default 20, `0` for none) | more mutants, more of the changed code checked against the tests, more time |
 | `--seed S` | the tests' seed (default 1), which also draws the mutants | another sample; the same seed gives the same page |
+| `--mutations FILE` | mutants you ask for: per entry a function, what it breaks, a `- ` line (text found once in that function) and a `+ ` line (guide, Written mutants; kio-web's `examples/flow/flow.mutants`) | each names a wrong behaviour that a test must catch; one that survives is exit 3. Keep FILE outside NEW's tree: the page notes `(inside NEW's tree)`, since the author could have written it |
 
 Review every entry the change touches: an entry left out is authority nobody reviewed. Tests are the first entry's (the one before `--base`).
 
@@ -110,7 +111,7 @@ Checklist:
 1. Any `error`? Reject, or ask for a fix.
 2. Authority: for each `+` or `~` line, does the requirement diff ask for it? A `~` method on an existing grant is authority added like a `+` grant: the requirement must ask for it. If not, reject. The `derived` line under it names where to read. Do the same for each grants-file line (`app.grants: + --dir ..`).
 3. Tests: is any test `removed:`, or a property running fewer cases? Find out why before accepting.
-4. Do the added tests cover what the requirement diff claims? A `changed:` test (its own code or a function it reaches changed) is read like an added one: it tests something else now. Name tests are a claim too: read the one or two that matter. A `changed, reached by no test:` function ran in no test: read it, or ask for a test that calls it. The converse is weaker: reach is static, so a function named on a test's call path counts as reached even if that path never runs (`if false { risky(d) }`). Mutants: each `survived:` line is an edit to changed code that no test noticed. Read the snippet: if the edit changes behaviour the requirement cares about, ask for a test that fails on it; if it changes nothing (an equivalent mutant), move on. One test doing all the killing (`killed by:`) is the test to read. `no mutant drawn: F` and `mutants skipped T` say where the sample did not look: raise `--mutants`, or give T a fake host.
+4. Do the added tests cover what the requirement diff claims? A `changed:` test (its own code or a function it reaches changed) is read like an added one: it tests something else now. Name tests are a claim too: read the one or two that matter. A `changed, reached by no test:` function ran in no test: read it, or ask for a test that calls it. The converse is weaker: reach is static, so a function named on a test's call path counts as reached even if that path never runs (`if false { risky(d) }`). Mutants: each `survived:` line is an edit to changed code that no test noticed. Read the snippet: if the edit changes behaviour the requirement cares about, ask for a test that fails on it; if it changes nothing (an equivalent mutant), move on. One test doing all the killing (`killed by:`) is the test to read. `no mutant drawn: F` and `mutants skipped T` say where the sample did not look: raise `--mutants`, or give T a fake host. To ask for evidence of one behaviour, write it as a mutant in a `--mutations` file: the next review kills it (a test now catches it) or shows it `survived:` with exit 3.
 5. Resources: any change you would not accept in production?
 6. Not checked: for each line, is it covered by a test you trust, or by a function you read? Otherwise ask.
 7. Identity: is this the commit you meant to review?

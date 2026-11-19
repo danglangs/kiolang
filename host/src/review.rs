@@ -7,7 +7,7 @@ use std::path::Path;
 mod mutants;
 
 const USAGE: &str =
-    "usage: kio review <new.kio> --base <old.kio> [--grants file] [--test-grants file] [--requirements file] [--entry file [--entry-grants file]].. [--seed s] [--mutants n] [--json]";
+    "usage: kio review <new.kio> --base <old.kio> [--grants file] [--test-grants file] [--requirements file] [--entry file [--entry-grants file]].. [--seed s] [--mutants n] [--mutations file] [--json]";
 
 /// The largest requirements file diffed, and the most line pairs the diff compares.
 const REQUIREMENTS_MAX: u64 = 1 << 20;
@@ -84,6 +84,8 @@ struct Inputs {
     seed: u64,
     /// How many generated mutants to run (`--mutants`).
     mutants: usize,
+    /// The mutations file (`--mutations`), read once and parsed (R1b2).
+    mutations: Option<mutants::File>,
 }
 
 /// Another entry of the change (`--entry`): the path as given, escaped; OLD's program (`None`:
@@ -175,8 +177,9 @@ fn beside_old(old: &str, new: &str, g: &str) -> Beside {
 }
 
 /// `kio review`: exit 1 if a side or entry does not check, a grants file does not bind, a NEW test
-/// fails, or the mutant runs do not finish; else 3 if authority was added, a dependency
-/// added or changed, or a test removed; else 0. 2 for usage.
+/// fails, the mutant runs do not finish or an entry of the mutations file cannot run; else 3 if
+/// authority was added, a dependency added or changed, a test removed, or a mutant of the
+/// mutations file survived; else 0. 2 for usage.
 pub(crate) fn review(path: &str, flags: &[&str], json: bool) -> i32 {
     let (inputs, out) = captured(json, || inputs(path, flags));
     let inputs = match inputs {
@@ -234,7 +237,8 @@ pub(crate) fn review(path: &str, flags: &[&str], json: bool) -> i32 {
     page.identity.iter().for_each(|l| println!("  {l}"));
     for p in &page.changed {
         // A fake's name as its Identity line shows it.
-        let p = match inputs.fakes_ok.contains(p) {
+        let mutations = inputs.mutations.as_ref().is_some_and(|m| m.path == *p);
+        let p = match inputs.fakes_ok.contains(p) || mutations {
             true => ascii(p),
             false => kio_host::escape_line(p),
         };
@@ -275,7 +279,7 @@ fn labelled(label: &'static str, lines: &[String]) -> Vec<Row> {
 /// The flags parsed and every file they name read, or the exit code once the error is reported.
 fn inputs(path: &str, flags: &[&str]) -> Result<Inputs, i32> {
     let (mut base, mut grants, mut test_grants, mut requirements) = (None, None, None, None);
-    let (mut seed, mut mutants) = (None, None);
+    let (mut seed, mut mutants, mut mutations) = (None, None, None);
     // Each `--entry` and the `--entry-grants` that follows it.
     let mut entries: Vec<(&str, Option<&str>)> = Vec::new();
     if !flags.len().is_multiple_of(2) {
@@ -305,6 +309,7 @@ fn inputs(path: &str, flags: &[&str]) -> Result<Inputs, i32> {
             "--requirements" => &mut requirements,
             "--seed" => &mut seed,
             "--mutants" => &mut mutants,
+            "--mutations" => &mut mutations,
             _ => return Err(fail(USAGE.into())),
         };
         if slot.replace(pair[1]).is_some() {
@@ -339,6 +344,7 @@ fn inputs(path: &str, flags: &[&str]) -> Result<Inputs, i32> {
     };
     let old = (base.to_string(), read_program(base)?);
     let new = (path.to_string(), read_program(path)?);
+    let mutations = mutations.map(|m| mutants::read(m, path)).transpose()?;
     let read = |flag: &str, g: Option<&str>| match g {
         Some(g) => match read_regular(g.as_ref(), GRANTS_MAX, false) {
             Ok(bytes) => Ok(Some((g.to_string(), bytes))),
@@ -404,6 +410,7 @@ fn inputs(path: &str, flags: &[&str]) -> Result<Inputs, i32> {
         entries: read_entries,
         seed,
         mutants,
+        mutations,
     })
 }
 
@@ -973,8 +980,8 @@ fn push_errors(rows: &mut Vec<Row>, errors: &[serde_json::Value]) {
 const DEFAULT_TEST_GRANTS: &str = "defaults (temporary Dir, :memory: stores, fixed clock)";
 
 /// The Tests section, and the Resources section from the same runs: `--json`'s value, whether a
-/// test was removed or tests less, and whether a side's tests do not run or a NEW test failed.
-/// The tests run with `--test-grants` only, else the defaults: never `main`'s grants.
+/// test was removed, tests less or a mutant of the mutations file survived, and whether a side's
+/// tests do not run, a NEW test failed or the mutants did not all run. The tests run with `--test-grants` only, else the defaults: never `main`'s grants.
 fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
     let (flags, shown): (Vec<&str>, &str) = match &inputs.test_grants {
         Some((t, _)) => (vec!["--grants", t], t),
@@ -1145,10 +1152,10 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
             .iter()
             .map(|n| ("not checked", format!("failed in old: {n}"))),
     );
-    // Mutants of NEW only, once its tests ran (R1b1).
-    let (mutants, unfinished) = match &new {
+    // Mutants of NEW only, once its tests ran (R1b1, R1b2).
+    let (mutants, unfinished, survived) = match &new {
         Ok((results, t)) => mutants::run(inputs, &changes, t, results, &mut page.tests),
-        Err(_) => (json!(null), false),
+        Err(_) => (json!(null), false, false),
     };
     resources(old_r, new_r, page);
     let failed = new.is_err() || old.is_err() || !failures.is_empty() || unfinished;
@@ -1158,7 +1165,7 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
         "unreached_changed": unreached, "fewer_cases": fewer, "properties": properties, "failures": failures, "old_failed": old_failed,
         "setup_error": null, "mutants": mutants,
     });
-    (value, !removed.is_empty() || !fewer.is_empty(), failed)
+    (value, !removed.is_empty() || !fewer.is_empty() || survived, failed)
 }
 
 /// Each function's, constant's and type's tokens by key (tests included), as text: whitespace
@@ -1582,12 +1589,20 @@ fn identity(inputs: &Inputs, page: &mut Page) -> serde_json::Value {
             .collect();
         rows
     });
+    let mutations = inputs.mutations.as_ref().map(|m| {
+        let h = hash(&m.bytes);
+        let inside = if m.inside { " (inside NEW's tree)" } else { "" };
+        page.identity
+            .push(format!("mutations {} sha256:{h}{inside}", ascii(&m.path)));
+        shown.push((m.path.clone(), Some(h.clone())));
+        json!({"path": m.path, "sha256": h, "inside_new": m.inside})
+    });
     page.identity.push(format!("test seed {}", inputs.seed));
     shown.extend(files);
     page.changed = changed(&shown);
     json!({
         "kio": version, "commit": commit, "old": sides["old"], "new": sides["new"], "deps": deps,
-        "grants": grants, "test_grants": test_grants, "test_fakes": test_fakes, "entry_grants": entry_grants, "old_grants": old_grants, "old_entry_grants": old_entry_grants, "requirements": requirements, "seed": inputs.seed,
+        "grants": grants, "test_grants": test_grants, "test_fakes": test_fakes, "entry_grants": entry_grants, "old_grants": old_grants, "old_entry_grants": old_entry_grants, "requirements": requirements, "mutations": mutations, "seed": inputs.seed,
         "changed": page.changed,
     })
 }

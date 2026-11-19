@@ -1,0 +1,23 @@
+// flow F1.1, Ingest: POST /events takes a signed JSON event and stores it as a job.
+//   POST /events  header X-Signature: hex HMAC-SHA256 of the raw body; body {"id": Str, ..}
+//     202 {"accepted":true}   the job row is committed (state pending, attempts 0) before this is sent
+//     200 {"duplicate":true}  the id is already stored; nothing changes (the first body stays)
+//     401 {"error":..}        signature missing, not hex or wrong; nothing is parsed or stored
+//     400 {"error":..}        signed, but the body is not JSON or has no string "id"
+//     500 {"error":..}        database failure; the sender may retry
+// Grants: `--hmac key=env:FLOW_KEY:verify --clock now --db db=flow.db`.
+mod web;
+mod api;
+mod flow;
+mod tests;
+
+enum Act { Ingest }
+
+fn main(req: Incoming, res: Outgoing, key: Hmac, now: Clock, db: Db) -> Result<(), WebErr> {
+    let r = web::request(req);
+    let out = match web::dispatch([web::post("/events", Act::Ingest)], r) {
+        Some(_) => flow::ingest(key, db, now.now_ms(), web::header(r, "x-signature"), r.body),
+        None => web::not_found(),
+    };
+    web::send(res, out)
+}
