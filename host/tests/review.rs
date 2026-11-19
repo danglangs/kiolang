@@ -1577,7 +1577,7 @@ fn mutants_killed_and_survived() {
     let row = |func: &str, from: &str, to: &str, around: &str, killed: Option<&str>| {
         let line = if func == "small" { 1 } else { 3 };
         serde_json::json!({
-            "source": "generated", "function": func, "file": s.new, "line": line,
+            "source": "generated", "written": false, "function": func, "file": s.new, "line": line,
             "from": from, "to": to, "description": format!("`{from}` -> `{to}` in `{around}`"),
             "killed_by": killed, "stopped_by": null, "discarded_by": null, "how": killed.map(|_| "failed"),
             "tests_run": 1,
@@ -1911,7 +1911,7 @@ fn an_entry_constant_that_differs_from_the_roots() {
 // R1b2: a mutations file (`--mutations FILE`): written mutants, each a function, a description
 // and one `-`/`+` pair.
 
-/// kio-web's flow at F1.2 (`examples/flow`, `web.kio` and `api.kio` two levels up, as its
+/// kio-web's flow at F1.2, the worker as NEW (`examples/flow`, `web.kio` and `api.kio` two levels up, as its
 /// `kio.deps` pins them): its four mutation checks, `flow.mutants`, are all killed.
 #[test]
 fn flows_four_written_mutants_are_killed() {
@@ -1919,7 +1919,7 @@ fn flows_four_written_mutants_are_killed() {
     let tmp = tempfile::tempdir().unwrap();
     let old = write(tmp.path(), "old.kio", BARE);
     let r = Command::new(env!("CARGO_BIN_EXE_kio"))
-        .args(["review", "app.kio", "--base", &old, "--test-grants", "test.grants"])
+        .args(["review", "worker.kio", "--base", &old, "--test-grants", "test.grants"])
         .args(["--mutations", "flow.mutants", "--mutants", "0"])
         .current_dir(&flow)
         .env("TMPDIR", tmp.path())
@@ -1958,7 +1958,7 @@ fn a_written_survivor_is_exit_3() {
         mutant_lines(&out),
         [
             format!("  tested       mutants: 0 of 1 killed ({m} 0 of 1)"),
-            format!("  not checked  survived: {m}:1: big: the boundary moves (`n >= 100` -> `n > 100`); ran 1 test"),
+            format!("  not checked  survived: {m}:1: big: `n >= 100` -> `n > 100`, ran 1 test: \"the boundary moves\""),
         ],
         "{out}"
     );
@@ -2085,4 +2085,154 @@ fn a_mutations_file_changed_during_the_review() {
     assert!(identity.contains(&line), "{out}");
     let changed = format!("  error        {m} changed while the review ran");
     assert!(identity.contains(&changed), "{out}");
+}
+
+/// A mutations file named `generated` is still the reviewer's: its survivor is exit 3, and the
+/// rows say `written`, which no path can forge.
+#[test]
+fn a_mutations_file_named_generated_is_still_written() {
+    let s = Sides::new(BARE, PINNED);
+    write(s.dir.path(), "generated", WRITTEN_SURVIVES);
+    let run = |json: bool| {
+        let mut args = vec![
+            "review",
+            &s.new,
+            "--base",
+            &s.old,
+            "--mutants",
+            "0",
+            "--mutations",
+            "generated",
+        ];
+        if json {
+            args.push("--json");
+        }
+        let r = Command::new(env!("CARGO_BIN_EXE_kio"))
+            .args(args)
+            .current_dir(s.dir.path())
+            .env("TMPDIR", s.dir.path().join("tmp"))
+            .output()
+            .unwrap();
+        (r.status.code(), String::from_utf8_lossy(&r.stdout).into_owned())
+    };
+    let (code, out) = run(false);
+    assert_eq!(code, Some(3), "{out}");
+    assert_eq!(
+        mutant_lines(&out),
+        [
+            "  tested       mutants: 0 of 1 killed (generated 0 of 1)",
+            "  not checked  survived: generated:1: big: `n >= 100` -> `n > 100`, ran 1 test: \"the boundary moves\"",
+        ],
+        "{out}"
+    );
+    let (_, out) = run(true);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let row = &v["tests"]["mutants"]["rows"][0];
+    assert_eq!(
+        [&row["source"], &row["written"]],
+        [&serde_json::json!("generated"), &serde_json::json!(true)]
+    );
+}
+
+/// Each `probe` call makes `n` host calls; `<=` for `<` makes one more.
+const PROBES: &str = r#"fn probe(d: Dir, n: Int) -> Int { let mut i = 0; while i < n { let _x = d.exists("a"); i += 1; } i }
+
+fn main(d: Dir) -> Int { probe(d, 3) }
+
+#[test]
+fn probes(d: Dir) { assert(probe(d, 3) >= 0, "ran"); }
+"#;
+
+/// T's `--calls` at what the test used: a mutant that needs one more call stops at T's ceiling.
+/// A generated one is a `not checked` stop; a written one is an `error`, exit 1, since the
+/// reviewer's question went unanswered.
+#[test]
+fn a_stop_at_ts_own_calls_is_not_a_kill() {
+    // OLD probes another name: `probe` changed, no authority added.
+    let s = Sides::new(&PROBES.replace("\"a\"", "\"b\""), PROBES);
+    let t = write(s.dir.path(), "t.grants", "--calls 3\n");
+    let (code, out, err) = s.review(&["--test-grants", &t]);
+    assert_eq!(code, 0, "{out}{err}");
+    let lines = mutant_lines(&out);
+    assert!(lines[0].contains("stopped by T's limits"), "{out}");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("  not checked  stopped by T's --calls 3 in probes: generated: probe: `<` -> `<=`")),
+        "{out}"
+    );
+    assert!(!out.contains("killed by: probes"), "{out}");
+    let m = write(
+        s.dir.path(),
+        "m.mutants",
+        "probe: one call too many\n- i < n\n+ i <= n\n",
+    );
+    let (code, out, err) = s.review(&["--test-grants", &t, "--mutants", "0", "--mutations", &m]);
+    assert_eq!(code, 1, "{out}{err}");
+    assert_eq!(
+        mutant_lines(&out),
+        [
+            format!("  tested       mutants: 0 of 1 killed, 1 stopped by T's limits ({m} 0 of 1)"),
+            format!("  error        mutants: {m}:1: the mutant was stopped by T's --calls 3 in probes, so no test could pass or fail on it"),
+            "                 hint: raise T's --calls 3 (the limit named) so the mutant can finish".to_string(),
+        ],
+        "{out}"
+    );
+}
+
+/// FILE reached through a symlinked directory inside NEW's tree is inside it, though its
+/// canonical path is not.
+#[test]
+fn a_mutations_file_behind_a_symlink_in_new_is_inside() {
+    let s = Sides::new(BARE, PINNED);
+    std::fs::create_dir(s.dir.path().join("outside")).unwrap();
+    write(s.dir.path(), "outside/m.mutants", WRITTEN_SURVIVES);
+    std::os::unix::fs::symlink(s.dir.path().join("outside"), s.dir.path().join("new/checks")).unwrap();
+    let m = s.dir.path().join("new/checks/m.mutants");
+    let m = m.to_str().unwrap();
+    let (code, out, _) = s.review(&["--mutants", "0", "--mutations", m]);
+    assert_eq!(code, 3, "{out}");
+    assert_eq!(
+        mutant_lines(&out)[0],
+        format!("  tested       mutants: 0 of 1 killed ({m} (inside NEW's tree) 0 of 1)")
+    );
+    assert!(
+        out.contains(&format!("  mutations {m} sha256:")) && out.contains("(inside NEW's tree)\n"),
+        "{out}"
+    );
+}
+
+/// A helper only tests call is refused: a kill there pads the count and measures nothing `main`
+/// does. An entry's header matches `--entry ./worker.kio`.
+#[test]
+fn a_written_entry_main_does_not_reach_is_refused() {
+    let app = format!(
+        "{PINNED}\nfn helper(n: Int) -> Int {{ n + 1 }}\n\n#[test]\nfn helps() {{ assert_eq(helper(1), 2); }}\n"
+    );
+    let s = Sides::new(BARE, &app);
+    write(
+        s.dir.path(),
+        "new/worker.kio",
+        "fn deliver(n: Int) -> Bool { n < 300 }\n\nfn main() -> Int { if deliver(1) { 1 } else { 0 } }\n",
+    );
+    let m = write(
+        s.dir.path(),
+        "m.mutants",
+        "helper: off by one\n- n + 1\n+ n + 2\n---\nworker.kio: deliver: any status\n- n < 300\n+ true\n",
+    );
+    let (code, out, err) = s.review(&["--entry", "./worker.kio", "--mutants", "0", "--mutations", &m]);
+    assert_eq!(code, 1, "{out}{err}");
+    assert_eq!(
+        mutant_lines(&out),
+        [
+            format!("  tested       mutants: 0 of 1 killed ({m} 0 of 1)"),
+            format!(
+                "  not checked  survived: {m}:5: worker.kio: deliver: `n < 300` -> `true`, ran 0 tests: \"any status\""
+            ),
+            format!("  error        mutants: {m}:1: helper is not reached from NEW's main"),
+            "                 hint: name a function `main` reaches; a test or a helper only tests call is not one"
+                .to_string(),
+        ],
+        "{out}"
+    );
 }

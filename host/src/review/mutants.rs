@@ -125,7 +125,6 @@ pub(super) fn run(
     let runner = Runner {
         base,
         fuel_t,
-        timeout_t: limit(&base.flags, "--timeout"),
         fuel_max: fuel_t.unwrap_or(Limits::default().fuel),
         start: std::time::Instant::now(),
     };
@@ -143,7 +142,7 @@ pub(super) fn run(
         let entry_checked;
         let (prog, path, checked) = match &w.program {
             None => (new, &inputs.new.0, Some(root)),
-            Some(p) => match inputs.entries.iter().find(|e| e.name == *p) {
+            Some(p) => match inputs.entries.iter().find(|e| plain(&e.name) == plain(p)) {
                 Some(e) => {
                     entry_checked = kio_host::check_program(&e.new.1.files).ok();
                     (&e.new.1, &e.new.0, entry_checked.as_ref())
@@ -160,7 +159,7 @@ pub(super) fn run(
         };
         // An entry that does not check is Authority's error already.
         let Some(checked) = checked else { continue };
-        let site = match place(prog, checked, w) {
+        let site = match place(prog, checked, &lang::reachable(checked, ["main"]), w) {
             Ok(s) => s,
             Err((msg, hint)) => {
                 errors.push((format!("{at}: {msg}"), hint));
@@ -174,6 +173,14 @@ pub(super) fn run(
             )),
             Ok(Ran::Ran(end, tests_run, fuel)) => {
                 ran += 1;
+                // T's ceiling, not a test, ended it: the reviewer's question is unanswered.
+                if let (None, Some((t, how))) = (&end.killed, &end.stopped) {
+                    let limit = how.trim_start_matches("stopped by T's ");
+                    errors.push((
+                        format!("{at}: the mutant was {how} in {t}, so no test could pass or fail on it"),
+                        format!("raise T's {limit} (the limit named) so the mutant can finish"),
+                    ));
+                }
                 let (from, line) = shown_site(&prog.files[site.file].1, &site);
                 let shown = (
                     line.0,
@@ -182,7 +189,7 @@ pub(super) fn run(
                     ascii_chars(&w.description),
                 );
                 let program = w.program.as_ref().map(|p| ascii(p));
-                let source = json!({"source": source, "entry": w.line, "program": program});
+                let source = json!({"source": source, "written": true, "entry": w.line, "program": program});
                 out.push(row(
                     source,
                     &site,
@@ -210,7 +217,7 @@ pub(super) fn run(
                     true => format!("`{from}` dropped in `{}`", line.1),
                     false => format!("`{from}` -> `{to}` in `{}`", line.1),
                 };
-                let source = json!({"source": "generated"});
+                let source = json!({"source": "generated", "written": false});
                 out.push(row(
                     source,
                     s,
@@ -257,8 +264,7 @@ pub(super) fn run(
         }
     }
     // A written mutant no test killed: one the reviewer asked to be caught and none was.
-    let survived =
-        (out.iter()).any(|m| m["source"] != "generated" && m["killed_by"].is_null() && m["stopped_by"].is_null());
+    let survived = (out.iter()).any(|m| m["written"] == true && m["killed_by"].is_null() && m["stopped_by"].is_null());
     let skipped: Vec<_> = (live.iter())
         .map(|(t, g, kind)| json!({"test": t, "grant": g, "holds": kind.0}))
         .collect();
@@ -305,13 +311,19 @@ fn row(
     row
 }
 
-/// Where written entry `w` applies in `prog` (`checked` is it checked): the one place its `-`
-/// text occurs in its function, or the message and hint of why it does not apply.
-fn place(prog: &Program, checked: &lang::Program, w: &Written) -> Result<Site, (String, String)> {
+/// Where written entry `w` applies in `prog` (`checked` is it checked, `mains` what its `main`
+/// may run): the one place its `-` text occurs in its function, or the message and hint of why
+/// it does not apply.
+fn place(
+    prog: &Program,
+    checked: &lang::Program,
+    mains: &BTreeSet<String>,
+    w: &Written,
+) -> Result<Site, (String, String)> {
     let f = ascii(&w.func);
     let spans: BTreeMap<String, lang::Span> = checked.fn_spans().into_iter().collect();
+    let in_prog = w.program.as_ref().map_or("NEW".to_string(), |p| ascii(p));
     let Some(span) = spans.get(&w.func) else {
-        let in_prog = w.program.as_ref().map_or("NEW".to_string(), |p| ascii(p));
         return Err((
             format!("{in_prog} has no function {f}"),
             "name it as the page does, `flow::finish`; an --entry's own function as `worker.kio: deliver`".into(),
@@ -325,10 +337,11 @@ fn place(prog: &Program, checked: &lang::Program, w: &Written) -> Result<Site, (
             "mutate the program's own functions; a dependency is tested where it is written".into(),
         ));
     }
-    if checked.tests().iter().any(|t| t.name == w.func) {
+    // A test, or a helper only tests call: a kill there measures nothing `main` does.
+    if !mains.contains(&w.func) {
         return Err((
-            format!("{f} is a test"),
-            "a mutant measures the tests, so it goes in a function they test".into(),
+            format!("{f} is not reached from {in_prog}'s main"),
+            "name a function `main` reaches; a test or a helper only tests call is not one".into(),
         ));
     }
     let text = prog.files[file].1.get(span.start..span.end).unwrap_or_default();
@@ -357,7 +370,6 @@ fn place(prog: &Program, checked: &lang::Program, w: &Written) -> Result<Site, (
 struct Runner<'a> {
     base: &'a Tests,
     fuel_t: Option<u64>,
-    timeout_t: Option<u64>,
     fuel_max: u64,
     start: std::time::Instant,
 }
@@ -462,7 +474,9 @@ impl Runner<'_> {
                     continue;
                 }
                 "fuel" if self.fuel_t == Some(cap) && cap < ten => Some(format!("--fuel {cap}")),
-                "timeout" => self.timeout_t.map(|n| format!("--timeout {n}")),
+                k @ ("timeout" | "memory" | "stack" | "calls" | "io") => {
+                    limit(&base.flags, &format!("--{k}")).map(|n| format!("--{k} {n}"))
+                }
                 _ => None,
             };
             if let Some(l) = t_limit {
@@ -576,7 +590,7 @@ fn lines(
         0 => String::new(),
         n => format!(", {n} stopped by T's limits"),
     };
-    let is_generated = |m: &&serde_json::Value| m["source"] == "generated";
+    let is_generated = |m: &&serde_json::Value| m["written"] != true;
     // Of the mutants from one source: `K of N`.
     let of = |generated: bool| {
         let (k, n) = (
@@ -634,16 +648,20 @@ fn lines(
         rows.push(("tested", format!("killed by: {}", each.join(", "))));
     }
     let text = |m: &serde_json::Value, k: &str| m[k].as_str().unwrap_or_default().to_string();
-    for m in out.iter().filter(|m| m["killed_by"].is_null()) {
+    // A written mutant stopped by T's limit is an `error` line of its own.
+    let shown = |m: &&serde_json::Value| m["killed_by"].is_null() && (is_generated(m) || m["stopped_by"].is_null());
+    for m in out.iter().filter(shown) {
         let (f, d) = (text(m, "function"), text(m, "description"));
-        // A written mutant: where it is in the file, its program, and its edit after the description.
+        // A written mutant: where it is in the file, its program, its edit, then what it breaks,
+        // quoted so it cannot pass for the edit.
         let (source, f, d) = match is_generated(&m) {
             true => ("generated".to_string(), f, d),
             false => {
                 let f = m["program"].as_str().map_or(f.clone(), |p| format!("{p}: {f}"));
                 let n = m["tests_run"].as_u64().unwrap_or_default();
                 let tests = if n == 1 { "test" } else { "tests" };
-                let d = format!("{d} (`{}` -> `{}`); ran {n} {tests}", text(m, "from"), text(m, "to"));
+                let (from, to, d) = (text(m, "from"), text(m, "to"), d.replace('"', "\\\""));
+                let d = format!("`{from}` -> `{to}`, ran {n} {tests}: \"{d}\"");
                 (format!("{}:{}", text(m, "source"), m["entry"]), f, d)
             }
         };
@@ -703,15 +721,40 @@ pub(super) fn read(path: &str, new: &str) -> Result<File, i32> {
         return Err(fail(format!("{at}: not UTF-8\n  hint: {FORMAT}")));
     };
     let entries = parse(&ascii(path), text).map_err(fail)?;
+    // Inside by either path: a symlinked directory in NEW's tree still leads from it.
     let dir = Path::new(new).parent().filter(|d| !d.as_os_str().is_empty());
-    let dir = dir.unwrap_or(".".as_ref()).canonicalize();
-    let inside = matches!((dir, Path::new(path).canonicalize()), (Ok(d), Ok(f)) if f.starts_with(&d));
+    let dir = dir.unwrap_or(".".as_ref());
+    let canonical = matches!((dir.canonicalize(), Path::new(path).canonicalize()), (Ok(d), Ok(f)) if f.starts_with(&d));
+    let lexical = matches!((lexical(dir), lexical(path.as_ref())), (Some(d), Some(f)) if f.starts_with(&d));
     Ok(File {
         path: path.to_string(),
         bytes,
-        inside,
+        inside: canonical || lexical,
         entries,
     })
+}
+
+/// `p` absolute from the current directory, `.` and `..` resolved by name, no link followed.
+fn lexical(p: &Path) -> Option<std::path::PathBuf> {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for c in std::env::current_dir().ok()?.join(p).components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => _ = out.pop(),
+            c => out.push(c),
+        }
+    }
+    Some(out)
+}
+
+/// An `--entry` name without leading `./`, as a mutations file's header may write it.
+fn plain(name: &str) -> &str {
+    let mut n = name;
+    while let Some(rest) = n.strip_prefix("./") {
+        n = rest;
+    }
+    n
 }
 
 /// The entries of mutations file `at` (its path, shown), whose text is `text`, or the error.

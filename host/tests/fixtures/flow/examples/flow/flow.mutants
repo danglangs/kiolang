@@ -1,5 +1,5 @@
 # F1.2's four mutation checks (README, "Mutation checks"), each a wrong behaviour a test must catch.
-# FLOW_KEY=test-key kio review app.kio --base app.kio --test-grants test.grants --mutations flow.mutants --mutants 0
+# FLOW_KEY=test-key kio review worker.kio --base worker.kio --test-grants test.grants --mutations flow.mutants --mutants 0
 # An entry: `function: what it breaks`, then `-` text that occurs once in that function, `+` its
 # replacement. A `?` stays bound (`OR 1` drops a condition), so the mutant fails on behaviour, not SQL.
 flow::finish: a done update ignores the lease, so a stale worker completes a job it lost
