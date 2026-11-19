@@ -690,9 +690,14 @@ impl ureq::unversioned::resolver::Resolver for Pinned {
             *pinned = Some(kept);
             found?;
         }
+        // A name with no public address is the host's refusal, `denied` (not `unreachable`:
+        // `perform` tells it by this kind).
         let addrs = pinned.as_deref().unwrap_or_default();
         if addrs.is_empty() {
-            return Err(ureq::Error::HostNotFound);
+            return Err(ureq::Error::Io(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "no public address",
+            )));
         }
         let mut out = self.empty();
         addrs.iter().for_each(|a| out.push(*a));
@@ -844,12 +849,17 @@ fn perform(origin: &Origin, req: &Outbound, deadline: Instant, budget: &AtomicI6
                 .and_then(|r| agent.run(r)),
             false => b.body(()).map_err(ureq::Error::from).and_then(|r| agent.run(r)),
         };
+        // A name with no public address is refused by `Pinned` (`denied`: the host's rule, not
+        // the network). Anything else that keeps a response from arriving (a refused or reset
+        // connection, a name that does not resolve, a TLS failure) is `unreachable`: the grant
+        // allowed the request, and nothing answered it (H38).
         let resp = match sent {
             Ok(r) => r,
             Err(ureq::Error::Timeout(_)) => break Err(HttpErr::Timeout),
             Err(ureq::Error::Io(e)) if timed_out(&e) => break Err(HttpErr::Timeout),
+            Err(ureq::Error::Io(e)) if e.kind() == io::ErrorKind::PermissionDenied => break Err(HttpErr::Denied),
             Err(ureq::Error::Http(_)) => break Err(HttpErr::Invalid),
-            Err(_) => break Err(HttpErr::Denied),
+            Err(_) => break Err(HttpErr::Unreachable),
         };
         let status = resp.status().as_u16();
         if matches!(status, 301 | 302 | 303 | 307 | 308) {
@@ -879,11 +889,12 @@ fn perform(origin: &Origin, req: &Outbound, deadline: Instant, budget: &AtomicI6
         let read = read_body(resp.into_body().into_reader(), budget, &mut body);
         done.read = body.len();
         origin.read.fetch_add(body.len() as u64, Relaxed);
+        // A connection that fails while the body is read is `unreachable` too: no complete response.
         break match read {
             Ok(true) => Ok(Inbound { status, headers, body }),
             Ok(false) => Err(HttpErr::TooLarge),
             Err(e) if timed_out(&e) => Err(HttpErr::Timeout),
-            Err(_) => Err(HttpErr::Denied),
+            Err(_) => Err(HttpErr::Unreachable),
         };
     };
     done.ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -906,6 +917,7 @@ fn fake_result(
     match answer {
         fake::Answer::Unmatched => Err(HttpErr::Denied),
         fake::Answer::Timeout => Err(HttpErr::Timeout),
+        fake::Answer::Unreachable => Err(HttpErr::Unreachable),
         fake::Answer::Response(status, _, _) if req.as_get && !(200..300).contains(status) => {
             Err(HttpErr::Status(*status))
         }

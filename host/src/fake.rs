@@ -14,12 +14,13 @@ pub struct Entry {
     answer: Answer,
 }
 
-/// What a request gets: a response as written, `timeout`, or no entry (`denied`).
+/// What a request gets: a response as written, `timeout`, `unreachable`, or no entry (`denied`).
 #[derive(Clone, Debug)]
 pub(crate) enum Answer {
     /// The body is shared: an answer is not copied until `--io` allows it (`fake_result`).
     Response(u16, Vec<String>, Arc<[u8]>),
     Timeout,
+    Unreachable,
     Unmatched,
 }
 
@@ -30,9 +31,9 @@ pub struct FakeFile {
 }
 
 /// Parse FILE's `text`; `name` is how errors name it (`hook.http:7: ..`). Entries are separated by
-/// a line `---`; each is `METHOD /path`, a status 100-599 or `timeout`, `name: value` headers, a
-/// blank line and the body (to the next `---`, its last newline dropped). Blank lines and lines
-/// starting with `#` before the request line are skipped.
+/// a line `---`; each is `METHOD /path`, a status 100-599, `timeout` or `unreachable`, `name: value`
+/// headers, a blank line and the body (to the next `---`, its last newline dropped). Blank lines
+/// and lines starting with `#` before the request line are skipped.
 pub fn parse(name: &str, text: &str) -> Result<FakeFile, String> {
     let mut lines: Vec<&str> = text.split('\n').collect();
     // An empty FILE has no lines, so its error names line 1.
@@ -70,18 +71,30 @@ fn entry(name: &str, lines: &[&str], first: usize) -> Result<Entry, String> {
         ));
     };
     let status = lines.get(i + 1).map(|l| l.trim());
+    let bare = |word: &str, answer: Answer| match lines[i + 2..].iter().position(|l| !l.trim().is_empty()) {
+        None => Ok(answer),
+        Some(j) => Err(format!("{}: expected --- after {word}", at(i + 2 + j))),
+    };
     let answer = match status {
-        Some("timeout") => match lines[i + 2..].iter().position(|l| !l.trim().is_empty()) {
-            None => Answer::Timeout,
-            Some(j) => return Err(format!("{}: expected --- after timeout", at(i + 2 + j))),
-        },
+        Some("timeout") => bare("timeout", Answer::Timeout)?,
+        Some("unreachable") => bare("unreachable", Answer::Unreachable)?,
         Some(s) => match s.parse::<u16>() {
             Ok(n) if (100..=599).contains(&n) && s.bytes().all(|b| b.is_ascii_digit()) => {
                 response(lines, i + 2, n, &at)?
             }
-            _ => return Err(format!("{}: expected a status 100-599 or timeout", at(i + 1))),
+            _ => {
+                return Err(format!(
+                    "{}: expected a status 100-599, timeout or unreachable",
+                    at(i + 1)
+                ))
+            }
         },
-        None => return Err(format!("{}: expected a status 100-599 or timeout", at(i + 1))),
+        None => {
+            return Err(format!(
+                "{}: expected a status 100-599, timeout or unreachable",
+                at(i + 1)
+            ))
+        }
     };
     Ok(Entry {
         line: first + i,

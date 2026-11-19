@@ -521,7 +521,7 @@ fn ungranted(api: Http) {}
 }
 
 /// T4a: what `hook: Http` answers in the fake tests below.
-const HOOK: &str = "# hook.http: one entry per response\nPOST /v1/events\n503\n---\nPOST /v1/events\n200\nContent-Type: application/json\nx-two: b\n\n{\"ok\":true}\n---\nGET /v1/status?full=1\n200\n\nup\n---\nGET /v1/down\n503\n---\nGET /moved\n302\nlocation: /v1/status?full=1\n---\nPOST /v1/slow\ntimeout\n";
+const HOOK: &str = "# hook.http: one entry per response\nPOST /v1/events\n503\n---\nPOST /v1/events\n200\nContent-Type: application/json\nx-two: b\n\n{\"ok\":true}\n---\nGET /v1/status?full=1\n200\n\nup\n---\nGET /v1/down\n503\n---\nGET /moved\n302\nlocation: /v1/status?full=1\n---\nPOST /v1/slow\ntimeout\n---\nGET /v1/dead\nunreachable\n";
 
 const FAKE: &str = r#"fn post(hook: Http, p: Str) -> Result<HttpResponse, HttpErr> { hook.send("POST", p, [], "x".to_bytes(), 0) }
 
@@ -560,6 +560,9 @@ fn put(hook: Http) {
     assert_eq(hook.send(m, "/v1/events", [], "".to_bytes(), 0), Err(HttpErr::Denied));
     assert(false, "after put");
 }
+
+#[test]
+fn dead(hook: Http) { assert_eq(hook.get("/v1/dead"), Err(HttpErr::Unreachable)); }
 "#;
 
 #[test]
@@ -574,22 +577,22 @@ fn a_fake_answers_from_its_file() {
     assert_eq!(code, 1, "{err}");
     let app = &c.app;
     // An unmatched request is `Denied`, and listed when its test fails; a method not granted is
-    // `Denied` before any lookup, so it is not listed.
+    // `Denied` before any lookup, so it is not listed; an `unreachable` entry is `Unreachable` (H38).
     let want = format!(
-        "ok   answers\nok   handled\nFAIL put\n  {app}:36:5: assertion failed: after put\nok   slow\nFAIL typo\n  {app}:25:5: assertion failed: after\n  hook: 2 requests, 1 unmatched: POST /v1/evnts\n3 passed, 2 failed\n"
+        "ok   answers\nok   dead\nok   handled\nFAIL put\n  {app}:36:5: assertion failed: after put\nok   slow\nFAIL typo\n  {app}:25:5: assertion failed: after\n  hook: 2 requests, 1 unmatched: POST /v1/evnts\n4 passed, 2 failed\n"
     );
     assert_eq!(out, want, "{err}");
     let (_, j) = c.json(&["--grants", &g]);
     let t = &j["tests"];
     assert_eq!(
-        t[4]["unmatched"],
+        t[5]["unmatched"],
         serde_json::json!(["hook: 2 requests, 1 unmatched: POST /v1/evnts"])
     );
-    assert!(t[1]["unmatched"].is_null() && t[2]["unmatched"].is_null(), "{j}");
+    assert!(t[2]["unmatched"].is_null() && t[3]["unmatched"].is_null(), "{j}");
     // `timeout` answers at once, not after the real 10 s timeout: within 2 s of `handled`, which
     // also sends one request (a busy CI runner varies by hundreds of ms).
     let ms = |i: usize| t[i]["ms"].as_f64().unwrap();
-    assert!(ms(3) < ms(1) + 2000.0, "{j}");
+    assert!(ms(4) < ms(2) + 2000.0, "{j}");
 }
 
 /// A test grants file's fake is refused everywhere else, by name.
@@ -636,12 +639,25 @@ fn a_fake_file_error_names_its_line() {
         ),
         ("# c\n\nPOST a\n200\n", format!("3: expected METHOD /path ({methods})")),
         ("POST /a\n200\n---\n", format!("4: expected METHOD /path ({methods})")),
-        ("POST /a\n2000\n", "2: expected a status 100-599 or timeout".into()),
-        ("POST /a\n", "2: expected a status 100-599 or timeout".into()),
+        (
+            "POST /a\n2000\n",
+            "2: expected a status 100-599, timeout or unreachable".into(),
+        ),
+        (
+            "POST /a\n",
+            "2: expected a status 100-599, timeout or unreachable".into(),
+        ),
+        (
+            "POST /a\nunreachable\n\nbody\n",
+            "4: expected --- after unreachable".into(),
+        ),
         ("POST /a\n200\nok\n\nbody\n", "3: expected name: value".into()),
         ("POST /a\ntimeout\n\nbody\n", "4: expected --- after timeout".into()),
         ("", format!("1: expected METHOD /path ({methods})")),
-        ("POST /a\n+200\n", "2: expected a status 100-599 or timeout".into()),
+        (
+            "POST /a\n+200\n",
+            "2: expected a status 100-599, timeout or unreachable".into(),
+        ),
         // A path no request could carry would never match.
         ("POST //a\n200\n", format!("1: expected METHOD /path ({methods})")),
         ("POST /a#b\n200\n", format!("1: expected METHOD /path ({methods})")),

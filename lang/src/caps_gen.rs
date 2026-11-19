@@ -323,6 +323,7 @@ pub fn v0() -> CapTable {
                     case("TooLarge", vec![]),
                     case("Status", vec![ty("Int")]),
                     case("Invalid", vec![]),
+                    case("Unreachable", vec![]),
                 ],
                 span: at,
                 public: true,

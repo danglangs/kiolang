@@ -97,6 +97,7 @@ kio: `crm` sends PUT but `--http-methods crm=POST` grants only POST
 ```
 
 - `get(path) -> Result<Bytes, HttpErr>`: a non-2xx status is `Err(Status(n))`.
+- `Err(Unreachable)` is a connection that failed (refused, reset before a response, a name that does not resolve, TLS): the grant allowed the request and nothing answered, so a retry may help. `Err(Denied)` is a request the host refuses (the path, the method, a redirect, a header the host sets, a host name with no public address): a retry never helps.
 - `send(method, path, headers, body, timeout_ms) -> Result<HttpResponse, HttpErr>`: `timeout_ms` 0 is the 10 s limit, less cuts the request off as `Err(Timeout)`, negative is `Invalid`; headers are `"name: value"` strings; any status is `Ok`, read `r.status`, `r.headers`, `r.body`. Framing headers (`host`, `content-length`, `transfer-encoding`, `connection`, ..) and any CR or LF are `Invalid`; a method not granted is `Denied`; a body over 8 MB is `TooLarge`. Redirects are followed only for GET and HEAD.
 - `send_all([HttpRequest { method, path, headers, body, timeout_ms }, ..])`: up to 64 requests at once; results in list order; a request past its timeout is `Err(Timeout)` in its place.
 - The audit log records each request's method, path, status, byte counts and header names, never a header value.
@@ -400,7 +401,7 @@ In the grants file, `--http hook=fake:hook.http` binds `hook: Http` to the answe
 
 ```
 # hook.http: one entry per response, `---` between.
-# METHOD /path, then a status or `timeout`, response headers, a blank line, the body.
+# METHOD /path, then a status, `timeout` or `unreachable`, response headers, a blank line, the body.
 POST /v1/events
 503
 ---
@@ -415,9 +416,9 @@ timeout
 ```
 
 - An entry answers a request with the same method and path (query included). The n-th entry for one `METHOD /path` answers the n-th such request and the last repeats, so `503` then `200` tests a retry; `send_all` counts in list order.
-- `timeout` is `Err(Timeout)` at once. A 3xx is the response (`send`) or `Err(Status(3xx))` (`get`): never followed. `get` turns any non-2xx into `Err(Status(n))`.
+- `timeout` is `Err(Timeout)` at once, and `unreachable` `Err(Unreachable)`, as a peer that is down; neither takes headers or a body. A 3xx is the response (`send`) or `Err(Status(3xx))` (`get`): never followed. `get` turns any non-2xx into `Err(Status(n))`.
 - No entry is `Err(Denied)`, as a real grant refuses a path outside it. A failing test lists the requests that had none: `hook: 3 requests, 1 unmatched: POST /v1/evnts` (`--json`: `unmatched`).
-- The file is read once, before the first test: UTF-8, at most 1 MiB, a regular file with no other hard links, not inside a writable `--dir` nor a file of a `--log`, `--kv` or `--db` of the same grants file (a database's `-wal`, `-journal` and `-shm` included; "give kio a fake file of its own"). Blank lines and `#` lines before an entry's request line are skipped; an entry's path follows a request's rules (one leading `/`, no space, `\`, `#` or control character); header names are lowercased; a body runs to the next `---` line, its last newline dropped; a line's trailing `\r` is dropped, so a CRLF file answers as an LF one. Each error names its line (`hook.http:7: expected METHOD /path (GET, HEAD, POST, PUT, PATCH, DELETE or OPTIONS)`, `expected a status 100-599 or timeout`, `expected name: value`), and an entry for a method the grant lacks is refused (`hook.http:3: PUT /x: --http hook grants only GET, POST`).
+- The file is read once, before the first test: UTF-8, at most 1 MiB, a regular file with no other hard links, not inside a writable `--dir` nor a file of a `--log`, `--kv` or `--db` of the same grants file (a database's `-wal`, `-journal` and `-shm` included; "give kio a fake file of its own"). Blank lines and `#` lines before an entry's request line are skipped; an entry's path follows a request's rules (one leading `/`, no space, `\`, `#` or control character); header names are lowercased; a body runs to the next `---` line, its last newline dropped; a line's trailing `\r` is dropped, so a CRLF file answers as an LF one. Each error names its line (`hook.http:7: expected METHOD /path (GET, HEAD, POST, PUT, PATCH, DELETE or OPTIONS)`, `expected a status 100-599, timeout or unreachable`, `expected name: value`), and an entry for a method the grant lacks is refused (`hook.http:3: PUT /x: --http hook grants only GET, POST`).
 - Each request counts toward `--calls` and `--io`, as a real one.
 
 A test reads back what it sent: `--http-record hook=sent` in the same grants file writes each request on `hook` into the test's default temporary `sent: Dir` before its answer returns, as `hook-1`, `hook-2`, .. (numbered per test from 1; `send_all` in list order). A record is the request as HTTP writes it, byte-exact (a binary body too): `METHOD /path`, the program's headers (names lowercased) then each injected one as `name: <injected>`, never its value, a blank line, the body.

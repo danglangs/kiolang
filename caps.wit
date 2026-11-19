@@ -20,10 +20,12 @@ interface fs {
 }
 
 interface net {
+  // `denied`: outside the grant (the path, method, a redirect, a header the host sets).
+  // `unreachable`: the connection failed (refused, reset before a response, DNS, TLS).
   // `invalid`: a method that is not one of GET, HEAD, POST, PUT, PATCH, DELETE or OPTIONS, a header
   // without `: `, with CR or LF, or naming one the host sets (host, content-length, ..), over 64
   // headers or 8 KB each, or a batch of more than 64 requests. `status(n)` is `get`'s only.
-  variant http-err { denied, timeout, too-large, status(u16), invalid }
+  variant http-err { denied, timeout, too-large, status(u16), invalid, unreachable }
   // Headers are `name: value`, one string each; response names are lowercased, in order.
   record http-response { status: u16, headers: list<string>, body: list<u8> }
   // One request of `send-all`. `timeout-ms` 0 means the grant's timeout; a larger value is capped at it.

@@ -160,8 +160,8 @@ fn dir_values_match_the_interpreter() {
     );
 }
 
-/// `Http` against an origin that refuses connections: `Err(HttpErr::Denied)` both ways, after
-/// the host checked the path.
+/// `Http` against an origin that refuses connections: `Err(HttpErr::Unreachable)` both ways (H38),
+/// and a path outside the grant `Denied` with nothing sent.
 #[test]
 fn http_errors_match_the_interpreter() {
     let src = r#"fn main(h: Http) -> List<Result<Bytes, HttpErr>> { [h.get("/x"), h.get("x")] }"#;
@@ -175,7 +175,7 @@ fn http_errors_match_the_interpreter() {
         .unwrap()
         .value;
     assert_eq!((got.as_str(), c.import_calls()), (want.as_str(), 2));
-    assert_eq!(got, "[Err(HttpErr::Denied), Err(HttpErr::Denied)]");
+    assert_eq!(got, "[Err(HttpErr::Unreachable), Err(HttpErr::Denied)]");
 }
 
 /// H16, H16b: `send` and `send_all` against an origin that refuses connections: the host's
@@ -211,7 +211,8 @@ fn http_send_matches_the_interpreter() {
     assert_eq!(c.import_calls(), 5 + 4 + 1);
     let d = "Err(HttpErr::Denied)";
     let v = "Err(HttpErr::Invalid)";
-    assert_eq!(got, format!("[{d}, {d}, {v}, {v}, {d}, {d}, {d}, {d}, {d}, {v}, {v}]"));
+    let u = "Err(HttpErr::Unreachable)";
+    assert_eq!(got, format!("[{u}, {d}, {v}, {v}, {d}, {u}, {d}, {u}, {d}, {v}, {v}]"));
 }
 
 /// Quotas and the report check stop a compiled run with the interpreter's message.

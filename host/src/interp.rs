@@ -682,6 +682,7 @@ fn http_err(e: HttpErr) -> Value {
         HttpErr::TooLarge => err_value("HttpErr", "TooLarge", vec![]),
         HttpErr::Status(n) => err_value("HttpErr", "Status", vec![Value::Int(n.into())]),
         HttpErr::Invalid => err_value("HttpErr", "Invalid", vec![]),
+        HttpErr::Unreachable => err_value("HttpErr", "Unreachable", vec![]),
     }
 }
 

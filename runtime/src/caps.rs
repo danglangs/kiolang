@@ -266,6 +266,7 @@ fn http_err(t: &Table, ret: u32, e: HttpErr) -> u32 {
         HttpErr::TooLarge => err(t, ret, "TooLarge", None),
         HttpErr::Status(n) => err(t, ret, "Status", Some(n.into())),
         HttpErr::Invalid => err(t, ret, "Invalid", None),
+        HttpErr::Unreachable => err(t, ret, "Unreachable", None),
     }
 }
 
