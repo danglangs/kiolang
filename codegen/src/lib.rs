@@ -496,6 +496,26 @@ fn takes_fn(b: Builtin) -> bool {
     )
 }
 
+/// The function a built-in taking a function value calls (`FuncGen::with_fn`): a value in a
+/// local, called through its table entry; or, for a closure literal or a named function, that
+/// function itself, called directly or inlined, a closure's captures read from the caller's
+/// locals (C19).
+#[derive(Clone, Copy)]
+enum Callee<'e> {
+    Value(u32),
+    Direct(ir::FuncId, &'e [ir::LocalId]),
+}
+
+/// The direct callee of function-value argument `f`, if it is a closure literal or a named
+/// function.
+fn direct(f: &ir::Expr) -> Option<Callee<'_>> {
+    match &f.kind {
+        ExprKind::Closure(g, captured) => Some(Callee::Direct(*g, captured)),
+        ExprKind::FnRef(g) => Some(Callee::Direct(*g, &[])),
+        _ => None,
+    }
+}
+
 /// The payload types of variant `v` of enum type `t` (a user enum, `Option` or `Result`).
 fn payload(m: &Module, t: &Ty, v: u32) -> Vec<Ty> {
     match t {
@@ -2359,6 +2379,14 @@ impl<'m> FuncGen<'_, 'm> {
     /// `push`, `insert`, `remove`, `sort` and `pop` (of type `ty`) on a place: the indexes,
     /// then the arguments, then the place made unique along its path, and the change.
     fn mutate(&mut self, place: &ir::Place, op: Mut, args: &[ir::Expr], ty: &Ty, span: Span) {
+        // `sort_by_key` with a closure literal or named function calls it directly (C19), unless
+        // it captures the list's root, which the walk below may copy.
+        let key_fn = args.first().filter(|_| op == Mut::ListSortByKey);
+        let direct = key_fn.and_then(direct).filter(|c| match c {
+            Callee::Direct(_, captured) => !captured.contains(&place.root),
+            Callee::Value(_) => false,
+        });
+        let args = if direct.is_some() { &args[..0] } else { args };
         let (mut xs, sites) = self.indexes(place);
         let n = xs.len();
         xs.extend(args);
@@ -2385,6 +2413,8 @@ impl<'m> FuncGen<'_, 'm> {
         } else if op == Mut::ListReverse {
             self.sink().local_get(cur);
             self.call_rt("rt_list_reverse");
+        } else if let (Some(c), Some(Ty::Fn(params, ret))) = (direct, key_fn.map(|f| &f.ty)) {
+            self.sort_by_key(cur, c, (params, ret), span);
         } else if let (Mut::ListSortBy | Mut::ListSortByKey, (f, t)) = (op, args[0]) {
             let (Val::One(c), Ty::Fn(params, ret)) = (t, &f.ty) else {
                 // `f` is `!`: nothing after it runs.
@@ -2394,7 +2424,7 @@ impl<'m> FuncGen<'_, 'm> {
             };
             match op {
                 Mut::ListSortBy => self.sort_by(cur, c, (params, ret), span),
-                _ => self.sort_by_key(cur, c, (params, ret), span),
+                _ => self.sort_by_key(cur, Callee::Value(c), (params, ret), span),
             }
             if !borrowed[n] {
                 self.dec(c);
@@ -3075,6 +3105,23 @@ impl<'m> FuncGen<'_, 'm> {
             }
         }
         self.owned.truncate(mark);
+        self.call_direct(f);
+        // Only the call ran since the arguments: it returned (or trapped).
+        for (((x, t), &here), &lent) in args.iter().zip(&temps).zip(&in_place).zip(lent) {
+            match (here, *t) {
+                (true, _) if self.moves_out(x) => {
+                    let os = self.local_owned(root(x));
+                    debug_assert!(!os.is_empty(), "a local holding a reference");
+                    self.dec_and_zero(&os);
+                }
+                (false, t) if lent => self.drop_val(t, &x.ty),
+                _ => {}
+            }
+        }
+    }
+
+    /// Calls `f` on the arguments on the stack, or inlines it (C8c3) within the budget.
+    fn call_direct(&mut self, f: ir::FuncId) {
         let outer = self.exit.is_none();
         let size = match self.inlined[f.0 as usize] {
             inline::Inline::Yes(n) => Some(n),
@@ -3090,18 +3137,6 @@ impl<'m> FuncGen<'_, 'm> {
         } else {
             let index = self.rt.funcs + f.0;
             self.sink().call(index);
-        }
-        // Only the call ran since the arguments: it returned (or trapped).
-        for (((x, t), &here), &lent) in args.iter().zip(&temps).zip(&in_place).zip(lent) {
-            match (here, *t) {
-                (true, _) if self.moves_out(x) => {
-                    let os = self.local_owned(root(x));
-                    debug_assert!(!os.is_empty(), "a local holding a reference");
-                    self.dec_and_zero(&os);
-                }
-                (false, t) if lent => self.drop_val(t, &x.ty),
-                _ => {}
-            }
         }
     }
 
@@ -3368,11 +3403,20 @@ impl<'m> FuncGen<'_, 'm> {
     /// each evaluated once and owned; then the calls, in the interpreter's order, each through
     /// `f` as `call_value` does, with the element or payload passed +1; then the receiver and
     /// `f` are dropped. Between the operands and the drops nothing leaves the function (a call
-    /// returns or traps), so neither needs its place in `owned` past its evaluation.
+    /// returns or traps; an inlined body leaves only its block), so neither needs its place in
+    /// `owned` past its evaluation. A closure literal or named function `f` is not evaluated:
+    /// each call is direct (`Callee`, C19).
     fn with_fn(&mut self, b: Builtin, recv: &ir::Expr, f: &ir::Expr, ty: &Ty, span: Span) {
-        let (mark, temps, borrowed) = self.operands_borrowing(&[recv, f], |_| true);
+        let direct = direct(f);
+        let xs = if direct.is_some() { vec![recv] } else { vec![recv, f] };
+        let (mark, temps, borrowed) = self.operands_borrowing(&xs, |_| true);
         self.owned.truncate(mark);
-        let (r, Val::One(c), Ty::Fn(params, ret)) = (temps[0], temps[1], &f.ty) else {
+        let c = match (direct, temps.get(1)) {
+            (Some(c), _) => Some(c),
+            (None, Some(&Val::One(c))) => Some(Callee::Value(c)),
+            _ => None,
+        };
+        let (r, Some(c), Ty::Fn(params, ret)) = (temps[0], c, &f.ty) else {
             // `f` is `!`: nothing after it runs.
             self.sink().unreachable();
             return;
@@ -3393,7 +3437,49 @@ impl<'m> FuncGen<'_, 'm> {
             (_, Val::Two(tag, pay)) => self.enum_map(b, (tag, pay), c, &recv.ty, sig, ty),
             (b, r) => unreachable!("{b:?} on {r:?}"),
         }
-        self.drop_operands(&[recv, f], &temps, &borrowed);
+        self.drop_operands(&xs, &temps, &borrowed);
+    }
+
+    /// Pushes what comes before `c`'s arguments: the function object, or each capture, +1 or,
+    /// where the function borrows it, in place.
+    fn callee_start(&mut self, c: Callee) {
+        match c {
+            Callee::Value(c) => {
+                self.sink().local_get(c);
+            }
+            Callee::Direct(f, captured) => {
+                let (m, lent) = (self.m, self.lent);
+                for (i, (id, l)) in captured.iter().zip(&m.funcs[f.0 as usize].locals).enumerate() {
+                    let x = self.local(*id);
+                    match lent[f.0 as usize][i] {
+                        true => self.get_val(x),
+                        false => self.copy_val(x, &l.ty),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether `c` takes its argument `i` owned (+1): a call through a value does; a direct
+    /// call as the function's parameter is, borrowed or owned.
+    fn callee_owns(&self, c: Callee, i: usize) -> bool {
+        match c {
+            Callee::Value(_) => true,
+            Callee::Direct(f, captured) => !self.lent[f.0 as usize][captured.len() + i],
+        }
+    }
+
+    /// Calls `c` on what `callee_start` and the arguments pushed.
+    fn callee_call(&mut self, c: Callee, params: &[Ty], ret: &Ty) {
+        match c {
+            Callee::Value(c) => self.call_through(c, params, ret),
+            Callee::Direct(f, _) => {
+                self.call_direct(f);
+                if *ret == Ty::Never {
+                    self.sink().unreachable();
+                }
+            }
+        }
     }
 
     /// `o.unwrap_or(d)` or `r.unwrap_or(d)`: `d` runs first, as the argument it is; then on a
@@ -3508,7 +3594,7 @@ impl<'m> FuncGen<'_, 'm> {
 
     /// `xs.map(f)`: a new list of type `ty`, with `xs`'s length as capacity, which takes each
     /// result.
-    fn list_map(&mut self, r: u32, c: u32, xs: &Ty, (params, ret): (&[Ty], &Ty), ty: &Ty, span: Span) {
+    fn list_map(&mut self, r: u32, c: Callee, xs: &Ty, (params, ret): (&[Ty], &Ty), ty: &Ty, span: Span) {
         let out = self.temp(ValType::I32);
         let desc = self.statics.desc(ty);
         self.sink().i32_const(desc as i32).local_get(r);
@@ -3517,10 +3603,12 @@ impl<'m> FuncGen<'_, 'm> {
         self.call_rt("rt_list_new");
         self.sink().local_set(out);
         let (i, _, top) = self.list_loop(r);
-        self.sink().local_get(out).local_get(c);
+        self.sink().local_get(out);
+        self.callee_start(c);
         self.list_slot(r, i, span);
-        self.slot_out(elem(xs), true);
-        self.call_through(c, params, ret);
+        let own = self.callee_owns(c, 0);
+        self.slot_out(elem(xs), own);
+        self.callee_call(c, params, ret);
         self.slot_in(ret);
         self.call_rt("rt_list_push");
         self.next_pass(i, top);
@@ -3528,8 +3616,8 @@ impl<'m> FuncGen<'_, 'm> {
     }
 
     /// `xs.filter(f)`: a new list of type `ty` holding each element for which `f` returns true,
-    /// +1 again, since the call consumed the reference `rt_list_get` gave.
-    fn list_filter(&mut self, r: u32, c: u32, xs: &Ty, (params, ret): (&[Ty], &Ty), ty: &Ty, span: Span) {
+    /// +1 for the new list (the slot's reference was lent to the call, or +1 for it).
+    fn list_filter(&mut self, r: u32, c: Callee, xs: &Ty, (params, ret): (&[Ty], &Ty), ty: &Ty, span: Span) {
         let t = elem(xs);
         let (out, x) = (self.temp(ValType::I32), self.temp(ValType::I64));
         let desc = self.statics.desc(ty);
@@ -3538,9 +3626,12 @@ impl<'m> FuncGen<'_, 'm> {
         self.sink().local_set(out);
         let (i, _, top) = self.list_loop(r);
         self.list_slot(r, i, span);
-        self.sink().local_set(x).local_get(c).local_get(x);
-        self.slot_out(t, true);
-        self.call_through(c, params, ret);
+        self.sink().local_set(x);
+        self.callee_start(c);
+        self.sink().local_get(x);
+        let own = self.callee_owns(c, 0);
+        self.slot_out(t, own);
+        self.callee_call(c, params, ret);
         self.open(Open::If, BlockType::Empty);
         if slot_ptr(t) {
             self.sink().local_get(x).i32_wrap_i64();
@@ -3554,14 +3645,15 @@ impl<'m> FuncGen<'_, 'm> {
     }
 
     /// `xs.any(f)` (`any`) or `xs.all(f)`: stops at the first call returning `any`, as Rust's.
-    fn list_any(&mut self, any: bool, r: u32, c: u32, xs: &Ty, (params, ret): (&[Ty], &Ty), span: Span) {
+    fn list_any(&mut self, any: bool, r: u32, c: Callee, xs: &Ty, (params, ret): (&[Ty], &Ty), span: Span) {
         let res = self.temp(ValType::I32);
         self.sink().i32_const(!any as i32).local_set(res);
         let (i, brk, top) = self.list_loop(r);
-        self.sink().local_get(c);
+        self.callee_start(c);
         self.list_slot(r, i, span);
-        self.slot_out(elem(xs), true);
-        self.call_through(c, params, ret);
+        let own = self.callee_owns(c, 0);
+        self.slot_out(elem(xs), own);
+        self.callee_call(c, params, ret);
         self.sink().local_tee(res);
         if !any {
             self.sink().i32_eqz();
@@ -3579,7 +3671,7 @@ impl<'m> FuncGen<'_, 'm> {
         &mut self,
         b: Builtin,
         (tag, pay): (u32, u32),
-        c: u32,
+        c: Callee,
         from: &Ty,
         (params, ret): (&[Ty], &Ty),
         ty: &Ty,
@@ -3599,10 +3691,12 @@ impl<'m> FuncGen<'_, 'm> {
         if wrap {
             self.sink().i32_const(called);
         }
-        self.sink().local_get(c);
+        self.callee_start(c);
         let t = &payload(self.m, from, called as u32)[0];
-        self.payload_owned(pay, t);
-        self.call_through(c, params, ret);
+        self.sink().local_get(pay);
+        let own = self.callee_owns(c, 0);
+        self.slot_out(t, own);
+        self.callee_call(c, params, ret);
         if wrap {
             self.slot_in(ret);
         }
@@ -3614,18 +3708,21 @@ impl<'m> FuncGen<'_, 'm> {
     /// `unwrap_or_else` on the unboxed `Option` or `Result` in `(tag, pay)`, of type `from`:
     /// the payload of a `Some` or `Ok` (+1); else the call, on nothing (`None`) or the `Err`'s
     /// payload (+1).
-    fn unwrap_or_else(&mut self, (tag, pay): (u32, u32), c: u32, from: &Ty, (params, ret): (&[Ty], &Ty), ty: &Ty) {
+    fn unwrap_or_else(&mut self, (tag, pay): (u32, u32), c: Callee, from: &Ty, (params, ret): (&[Ty], &Ty), ty: &Ty) {
         // `Some` is variant 1, `Ok` variant 0.
         let ok = matches!(from, Ty::Option(_)) as i32;
         self.sink().local_get(tag).i32_const(ok).i32_eq();
         let bt = self.block_type(ty);
         self.open(Open::If, bt);
         self.payload_owned(pay, ty);
-        self.sink().else_().local_get(c);
+        self.sink().else_();
+        self.callee_start(c);
         if let Ty::Result(_, e) = from {
-            self.payload_owned(pay, e);
+            self.sink().local_get(pay);
+            let own = self.callee_owns(c, 0);
+            self.slot_out(e, own);
         }
-        self.call_through(c, params, ret);
+        self.callee_call(c, params, ret);
         self.close();
     }
 
@@ -3666,7 +3763,7 @@ impl<'m> FuncGen<'_, 'm> {
 
     /// `xs.sort_by_key(f)` on the unique list in `l`, `f` in `c`: the keys, `f` of each
     /// element in order (as `map`), then the runtime's stable sort by them.
-    fn sort_by_key(&mut self, l: u32, c: u32, (params, ret): (&[Ty], &Ty), span: Span) {
+    fn sort_by_key(&mut self, l: u32, c: Callee, (params, ret): (&[Ty], &Ty), span: Span) {
         let keys = self.temp(ValType::I32);
         let xs = Ty::List(Box::new(params[0].clone()));
         let ks = Ty::List(Box::new(ret.clone()));

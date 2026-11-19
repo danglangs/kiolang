@@ -6,6 +6,7 @@
 //! that is inlined again without bound, and every expansion stays under the threshold. One
 //! exception to "not recursive": a small function whose only recursion is a direct call to
 //! itself is inlined into its own body once (`fib`), the copy's calls staying calls.
+//! A named function as a value counts as a call: `map(f)` and the like call it directly (C19).
 //! `FuncGen::call` binds the arguments to fresh locals and generates the callee's IR in place,
 //! so its error sites keep the callee's spans.
 
@@ -152,7 +153,6 @@ impl Facts {
             | ExprKind::Str(_)
             | ExprKind::Unit
             | ExprKind::Local(_)
-            | ExprKind::FnRef(_)
             | ExprKind::MapNew => {}
             ExprKind::Unary(_, x) | ExprKind::Field(x, _) | ExprKind::Try(x) | ExprKind::Assume(x) => self.expr(x),
             ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Assert(a, b) | ExprKind::AssertEq(a, b) => {
@@ -171,6 +171,8 @@ impl Facts {
                 self.calls.push(*f);
                 self.exprs(args);
             }
+            // A named function passed to a built-in is called directly there (C19).
+            ExprKind::FnRef(f) => self.calls.push(*f),
             ExprKind::List(args) | ExprKind::Variant(_, _, args) | ExprKind::CapCall(_, _, args) => self.exprs(args),
             ExprKind::CallValue(callee, args) | ExprKind::Builtin(_, callee, args) => {
                 self.expr(callee);

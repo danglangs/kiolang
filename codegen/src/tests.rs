@@ -91,6 +91,36 @@ fn main() -> Int {
     assert_eq!(wasm.sites.iter().filter(index).count(), 1 + inline::BUDGET / size);
 }
 
+/// C19: a closure literal or named function passed to a built-in is inlined into its loop (its
+/// function keeps its own copy of each site); a closure in a local is called through its value.
+#[test]
+fn closure_arguments_are_inlined() {
+    let src = r#"fn at(b: Bytes, i: Int) -> Int { b[i] }
+fn main() -> Int {
+    let b = "ab".to_bytes();
+    let xs = [0, 1];
+    let f = |i: Int| b[i + 0];
+    xs.map(|i| b[i * 1]).len() + xs.filter(|i| at(b, i) > 0).len() + xs.map(f).len()
+}"#;
+    let wasm = compile(&module(src)).unwrap();
+    wasmparser::Validator::new().validate_all(&wasm.component).unwrap();
+    let count = |needle: &str| {
+        let at = src.find(needle).unwrap();
+        let span = Span {
+            start: at,
+            end: at + needle.len(),
+            file: 0,
+        };
+        wasm.sites
+            .iter()
+            .filter(|s| s.span == span && s.template == OUT_OF_BOUNDS)
+            .count()
+    };
+    assert_eq!(count("b[i * 1]"), 2);
+    assert_eq!(count("b[i]"), 3);
+    assert_eq!(count("b[i + 0]"), 1);
+}
+
 /// Every caps.wit method, called from a program: the runtime has a wrapper for each
 /// (runtime/src/caps.rs), and the component validates, so each wrapper's signature is the one
 /// codegen calls. The grant kinds `rt_grant` numbers are the `CapTable`'s order.
