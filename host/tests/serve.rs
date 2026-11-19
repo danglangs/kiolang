@@ -115,3 +115,140 @@ fn http_dns_is_pinned_per_request() {
         assert_eq!(origin.lookups(), n);
     }
 }
+
+/// C17: `--memory` holds under the pool as before: a request that asks for more fails with a
+/// 500, and the next request, in a reused slot, works.
+#[test]
+fn a_request_over_memory_is_a_500_and_the_next_request_works() {
+    let src = r#"fn main(req: Incoming, res: Outgoing) -> Result<(), WebErr> {
+        let mut s = "ok";
+        if req.target() == "/big" { while s.len() < 16000000 { s = s + s; } }
+        res.send(200, [], [], s.slice(0, 2).to_bytes())
+    }"#;
+    let limits = Limits {
+        memory: 8 << 20,
+        ..Limits::web()
+    };
+    let server = Server::new(vec![("main".into(), src.into())], limits).unwrap().unwrap();
+    for _ in 0..3 {
+        let r = server.handle(get("/big"), vec![]).unwrap();
+        assert_eq!((r.status, r.body.len()), (500, 0));
+        let r = server.handle(get("/"), vec![]).unwrap();
+        assert_eq!((r.status, r.body.as_slice()), (200, &b"ok"[..]));
+    }
+}
+
+/// C17: a fresh instance in a reused pool slot sees nothing an earlier one wrote. Each round,
+/// four instances at once grow their memory and write a marker into every word of it; then four
+/// new instances, in the same slots, read every byte of theirs: each is the data image or zero,
+/// and the memory is back to its initial size. The engine is the one `Server` builds.
+#[test]
+fn a_reused_slot_shows_nothing_an_earlier_instance_wrote() {
+    use wasm_encoder::BlockType::Empty;
+    use wasm_encoder::Instruction as I;
+    use wasm_encoder::{
+        CodeSection, ConstExpr, DataSection, ExportKind, ExportSection, Function, FunctionSection, MemArg,
+        MemorySection, MemoryType, Module as Enc, TypeSection, ValType,
+    };
+    use wasmtime::{Linker, Module, Store};
+    const PAGES: u64 = 20;
+    const DATA: i32 = 1 << 20;
+    let arg = |align| MemArg {
+        offset: 0,
+        align,
+        memory_index: 0,
+    };
+    // fill(marker): grow by 16 pages, then store `marker` at every 8 bytes of memory.
+    #[rustfmt::skip]
+    let fill = [
+        I::I32Const(16), I::MemoryGrow(0), I::Drop,
+        I::Loop(Empty),
+        I::LocalGet(1), I::LocalGet(0), I::I64Store(arg(3)),
+        I::LocalGet(1), I::I32Const(8), I::I32Add, I::LocalTee(1),
+        I::MemorySize(0), I::I32Const(16), I::I32Shl, I::I32LtU, I::BrIf(0),
+        I::End,
+        I::End,
+    ];
+    // scan(): -1 if memory is not its initial size; else 1 + the first byte that is neither the
+    // data image (bytes 1..=16 at DATA) nor zero; 0 if there is none.
+    #[rustfmt::skip]
+    let scan = [
+        I::MemorySize(0), I::I32Const(PAGES as i32), I::I32Ne,
+        I::If(Empty), I::I32Const(-1), I::Return, I::End,
+        I::Loop(Empty),
+        // memory[i] != (if i - DATA < 16 unsigned { i - DATA + 1 } else { 0 })
+        I::LocalGet(0), I::I32Load8U(arg(0)),
+        I::LocalGet(0), I::I32Const(DATA), I::I32Sub, I::I32Const(1), I::I32Add,
+        I::I32Const(0),
+        I::LocalGet(0), I::I32Const(DATA), I::I32Sub, I::I32Const(16), I::I32LtU,
+        I::Select,
+        I::I32Ne,
+        I::If(Empty), I::LocalGet(0), I::I32Const(1), I::I32Add, I::Return, I::End,
+        I::LocalGet(0), I::I32Const(1), I::I32Add, I::LocalTee(0),
+        I::I32Const((PAGES << 16) as i32), I::I32LtU, I::BrIf(0),
+        I::End,
+        I::I32Const(0),
+        I::End,
+    ];
+    let mut m = Enc::new();
+    let mut types = TypeSection::new();
+    types.ty().function([ValType::I64], []);
+    types.ty().function([], [ValType::I32]);
+    m.section(&types);
+    m.section(FunctionSection::new().function(0).function(1));
+    m.section(MemorySection::new().memory(MemoryType {
+        minimum: PAGES,
+        maximum: None,
+        memory64: false,
+        shared: false,
+        page_size_log2: None,
+    }));
+    m.section(
+        ExportSection::new()
+            .export("fill", ExportKind::Func, 0)
+            .export("scan", ExportKind::Func, 1),
+    );
+    let mut code = CodeSection::new();
+    for body in [&fill[..], &scan[..]] {
+        let mut f = Function::new([(1, ValType::I32)]);
+        for i in body {
+            f.instruction(i);
+        }
+        code.function(&f);
+    }
+    m.section(&code);
+    m.section(DataSection::new().active(0, &ConstExpr::i32_const(DATA), 1..=16u8));
+    let wasm = m.finish();
+
+    let engine = Server::pool_engine_for_test(&Limits::web(), (PAGES << 16) as usize).unwrap();
+    let module = Module::new(&engine, &wasm).unwrap();
+    let pre = Linker::<()>::new(&engine).instantiate_pre(&module).unwrap();
+    let start = || {
+        let mut store = Store::new(&engine, ());
+        store.set_fuel(u64::MAX).unwrap();
+        store.set_epoch_deadline(1 << 40);
+        let instance = pre.instantiate(&mut store).unwrap();
+        (store, instance)
+    };
+    for round in 0..3 {
+        let mut written = vec![];
+        for _ in 0..4 {
+            let (mut store, instance) = start();
+            let fill = instance.get_typed_func::<i64, ()>(&mut store, "fill").unwrap();
+            fill.call(&mut store, 0x6b69_6f6b_696f_6b69).unwrap();
+            written.push(store);
+        }
+        drop(written);
+        let mut fresh = vec![];
+        for _ in 0..4 {
+            let (mut store, instance) = start();
+            let scan = instance.get_typed_func::<(), i32>(&mut store, "scan").unwrap();
+            assert_eq!(
+                scan.call(&mut store, ()).unwrap(),
+                0,
+                "round {round}: 1 + the first stale byte"
+            );
+            fresh.push(store);
+        }
+    }
+}

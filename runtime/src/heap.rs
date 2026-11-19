@@ -45,7 +45,10 @@ pub const LISTED: usize = SMALL + BIG_STEP * (ALL - CLASSES);
 pub const HELD: usize = 256 * 1024;
 /// A chunk's alignment, and its size with dlmalloc's 8-byte chunk header: dlmalloc places
 /// chunks allocated one after another `CHUNK` bytes apart, so aligning them wastes nothing.
-pub const CHUNK: usize = 64 * 1024;
+/// Small (C17): a request touching a few classes fits the initial memory's free heap (the
+/// runtime is linked with `--initial-heap`, codegen/build.rs) and never grows memory; 64 KB
+/// chunks grew a hello request from 1.1 to 1.9 MB. More chunks cost under 1% fuel.
+pub const CHUNK: usize = 8 * 1024;
 const CHUNK_BYTES: usize = CHUNK - 8;
 /// The blocks carved at once.
 const BATCH: usize = 32;

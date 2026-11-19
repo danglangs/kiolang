@@ -202,7 +202,7 @@ fn running_out_hands_free_chunks_back_and_retries() {
 fn fresh_blocks_are_carved_from_one_chunk_until_it_is_full() {
     let h = heap(usize::MAX);
     unsafe {
-        // A 64 KB chunk holds a little under 64 KB / 24 blocks of 24 bytes.
+        // A chunk holds a little under `CHUNK` / 24 blocks of 24 bytes.
         let n = CHUNK / 24 - 2;
         let mut ps: std::vec::Vec<*mut u8> = (0..n).map(|_| h.alloc(l(24))).collect();
         assert_eq!(inner_live(&h), 1, "{n} blocks, one chunk");

@@ -31,8 +31,9 @@ fn main() {
         ])
         .arg("--target-dir")
         .arg(&target)
-        // The outer cargo's flags are for the host, not the runtime.
-        .env("CARGO_ENCODED_RUSTFLAGS", "");
+        // The outer cargo's flags are for the host, not the runtime. 128 KB of free heap in the
+        // initial memory, which dlmalloc takes first: a small request never grows memory (C17).
+        .env("CARGO_ENCODED_RUSTFLAGS", "-Clink-arg=--initial-heap=131072");
     if env::var_os("KIO_TEST_HEAP").is_some_and(|v| !v.is_empty() && v != "0") {
         cargo.args(["--features", "test-heap"]);
     }

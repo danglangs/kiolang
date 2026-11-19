@@ -66,6 +66,8 @@ Compute rows: `bench/profile.py` on 20x-scaled programs (a patched copy that als
 | heap init, `cabi_realloc`, Wasmtime bookkeeping | ~6% | |
 | the handler's compiled code | under 2% | 54 k fuel |
 
+C17 (2026-11-19) corrected two readings here: on macOS Wasmtime ignores `linear_memory_keep_resident` (it maps fresh pages over the slot), so the -30% below came from `table_keep_resident`, set alongside; and with the heap change a request no longer grows memory, which took hello to 82 µs and JSON to 84 µs CPU (perf.md).
+
 Per-request cost tracks memory touched, not work: the "ok" handler is 130 µs, hello 160, JSON 315, while their compiled code differs by 2-3 µs. Wasmtime's `linear_memory_keep_resident(4 MB)` (scratch host) cut JSON to 217-222 µs (-30%, req/s +38%) and the "ok" handler to 109-124; `mmap` at drop and `mprotect` for grown pages remain.
 
 Two hypotheses tested and refuted:

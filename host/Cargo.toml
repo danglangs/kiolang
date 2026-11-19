@@ -43,3 +43,5 @@ kiogen = { path = "../tools/kiogen" }
 playground = { path = "../tools/playground" }
 tempfile = "3"
 tokio-tungstenite = { version = "0.30", features = ["connect"] }
+# Builds the core module the pool reset test runs (already in the tree through codegen).
+wasm-encoder = "0.261"

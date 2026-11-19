@@ -900,7 +900,57 @@ fn pool_instances() -> u32 {
     u32::try_from(default_workers()).unwrap_or(u32::MAX).max(64)
 }
 
+/// The engine a `Server` runs requests on: a pooling allocator whose limits are the component's
+/// own counts (`needs`, from `pool_needs`) times the instances the pool holds, each memory at most
+/// `limits.memory`. `initial` is the program's initial memory in bytes.
+///
+/// A request gets a fresh instance in a pool slot an earlier request used, and must see nothing
+/// that request wrote (C17). What Wasmtime 50 documents and does when an instance is dropped:
+/// - Linear memory: on Linux the first `linear_memory_keep_resident` bytes are set back to the
+///   data image (zero elsewhere) with `memset`, the rest is reset with `madvise`, which also
+///   restores it ("By default Wasmtime will use `madvise` to reset the entire contents of linear
+///   memory back to zero ... This option can be used to use `memset` instead"). Other hosts
+///   (macOS) ignore the option and map fresh zero pages over the whole slot (`cow.rs`,
+///   `reset_with_anon_memory`). We keep the initial memory resident: a small request's heap fits
+///   it (runtime `heap::CHUNK`, the runtime's `--initial-heap`).
+/// - Tables: the first `table_keep_resident` bytes are zeroed with `memset` on every host, the
+///   rest decommitted. A table is a few hundred bytes; keeping it saves an `mmap` per request.
+/// - `pagemap_scan` (reset only the pages the kernel reports written) stays off, its default:
+///   Wasmtime fixed a bug in it that left a swapped-out page's old contents to the next instance.
+/// - `memory_protection_keys` stays off, its default, so every slot keeps its guard region.
+/// - `async_stack_zeroing` concerns stacks of `call_async`, which kio does not use: compiled
+///   code runs on the calling thread's stack.
+fn pool_engine(limits: &Limits, needs: (u32, u32, u32), initial: usize) -> Result<Engine> {
+    let (core, memories, tables) = needs;
+    let n = pool_instances();
+    let mut pool = PoolingAllocationConfig::new();
+    pool.total_component_instances(n)
+        .max_core_instances_per_component(core)
+        .total_core_instances(core.saturating_mul(n))
+        .max_memories_per_component(memories)
+        .total_memories(memories.saturating_mul(n))
+        .max_tables_per_component(tables)
+        .total_tables(tables.saturating_mul(n))
+        .max_memory_size(limits.memory)
+        .linear_memory_keep_resident(initial)
+        .table_keep_resident(1 << 20);
+    let mut config = config::compile_config();
+    set_stack(&mut config, limits.stack);
+    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+    // One thread compiles: a parallel compile's peak memory stays resident on macOS while the
+    // server idles (W13d): 28 MB idle RSS against 48 MB, for startup in about 160 ms, not 30.
+    config.parallel_compilation(false);
+    Engine::new(&config)
+}
+
 impl Server {
+    /// Test only: the engine `new` makes for a program of one core instance, memory and table
+    /// whose initial memory is `initial` bytes, so a test can check what a reused slot holds.
+    #[cfg(feature = "test-hooks")]
+    pub fn pool_engine_for_test(limits: &Limits, initial: usize) -> Result<Engine> {
+        pool_engine(limits, (1, 1, 1), initial)
+    }
+
     /// Check and compile `files` (root first) once, or return the diagnostics. Every request
     /// runs under `limits`; the pool reserves address space for `limits.memory` per memory,
     /// but touches only what the program uses.
@@ -909,25 +959,8 @@ impl Server {
             Ok(l) => l,
             Err(diags) => return Ok(Err(diags)),
         };
-        // Every pool limit is the component's own count times the instances the pool holds.
-        let (core, memories, tables) = pool_needs(&lowered.wasm.component)?;
-        let n = pool_instances();
-        let mut pool = PoolingAllocationConfig::new();
-        pool.total_component_instances(n)
-            .max_core_instances_per_component(core)
-            .total_core_instances(core.saturating_mul(n))
-            .max_memories_per_component(memories)
-            .total_memories(memories.saturating_mul(n))
-            .max_tables_per_component(tables)
-            .total_tables(tables.saturating_mul(n))
-            .max_memory_size(limits.memory);
-        let mut config = config::compile_config();
-        set_stack(&mut config, limits.stack);
-        config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
-        // One thread compiles: a parallel compile's peak memory stays resident on macOS while the
-        // server idles (W13d): 28 MB idle RSS against 48 MB, for startup in about 160 ms, not 30.
-        config.parallel_compilation(false);
-        let engine = Engine::new(&config)?;
+        let needs = pool_needs(&lowered.wasm.component)?;
+        let engine = pool_engine(&limits, needs, lowered.wasm.memory)?;
         let program = link(&engine, &files, lowered)?;
         let param = |ty: &str| {
             (program.params.iter())

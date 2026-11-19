@@ -1,75 +1,75 @@
 {
-  "kio": "kio 0.1.4 (35dad3c + P9), macOS arm64, rustc 1.100.0",
+  "kio": "kio 0.1.5 (e0410e4 + C17)",
   "rows": {
     "startup": {
       "value": "0",
-      "fuel": 6868,
-      "peak_memory": 1769472
+      "fuel": 6276,
+      "peak_memory": 1310720
     },
     "fib": {
       "value": "9227465",
-      "fuel": 1060061983,
-      "peak_memory": 1769472
+      "fuel": 1060061391,
+      "peak_memory": 1310720
     },
     "loop": {
       "value": "30993",
-      "fuel": 2100006761,
-      "peak_memory": 1769472
+      "fuel": 2100006169,
+      "peak_memory": 1310720
     },
     "strings": {
       "value": "588890",
-      "fuel": 56109691,
-      "peak_memory": 3801088
+      "fuel": 55508321,
+      "peak_memory": 3473408
     },
     "list": {
       "value": "1577147139",
-      "fuel": 958485014,
-      "peak_memory": 18874368
+      "fuel": 958450543,
+      "peak_memory": 18415616
     },
     "map": {
       "value": "4770177159354",
-      "fuel": 339680045,
-      "peak_memory": 5701632
+      "fuel": 338937252,
+      "peak_memory": 4718592
     },
     "hashmap": {
       "value": "4770177159354",
-      "fuel": 244151033,
-      "peak_memory": 6160384
+      "fuel": 243406404,
+      "peak_memory": 5373952
     },
     "tree": {
       "value": "523822424596",
-      "fuel": 1299529280,
-      "peak_memory": 94175232
+      "fuel": 1307014803,
+      "peak_memory": 93913088
     },
     "closures": {
       "value": "333334000000",
-      "fuel": 213757595,
-      "peak_memory": 27000832
+      "fuel": 213822036,
+      "peak_memory": 26542080
     },
     "mandel": {
       "value": "3968704681311",
-      "fuel": 284564506,
-      "peak_memory": 1572864
+      "fuel": 284564126,
+      "peak_memory": 1310720
     },
     "json": {
       "value": "1048619",
-      "fuel": 619093579,
-      "peak_memory": 15597568
+      "fuel": 615081182,
+      "peak_memory": 15007744
     },
     "json_builtin": {
       "value": "1048619",
-      "fuel": 180196297,
-      "peak_memory": 16711680
+      "fuel": 179073508,
+      "peak_memory": 16252928
     },
     "chars": {
       "value": "10",
-      "fuel": 12128,
-      "peak_memory": 1769472
+      "fuel": 11536,
+      "peak_memory": 1310720
     },
     "map_insert": {
       "value": "1000",
-      "fuel": 2747216,
-      "peak_memory": 1769472
+      "fuel": 2721983,
+      "peak_memory": 1310720
     }
   }
 }

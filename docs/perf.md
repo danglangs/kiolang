@@ -26,6 +26,22 @@ Since C5 `kio run` and `--listen` run compiled code. Measured on an Apple Silico
 - Fuel defaults: 10 billion per `kio run` (a few seconds of compiled compute; fib(35) uses 1.1 billion), 10 million per request: see open_questions #76.
 - `cargo test --release --test serve -- --nocapture` prints the `Server::handle` median; `cargo test --release --test idle_rss -- --nocapture` prints idle RSS.
 
+## `--listen` request cost (C17, 2026-11-19)
+
+Apple M3 Max, release, load 22-36 from other agents' builds. Five interleaved rounds; each runs every build on both workloads: 30,000 `ab -k -c 12` requests after 3,000 to warm up, server CPU time from `ps` (getrusage) over the 30,000. Hello is kio-web's `GET /hello/kio`; JSON is the speed plan's `POST /bookings` (parse, validate four fields, 201 with JSON). Best (mean) of five.
+
+| Build | hello CPU a request | JSON CPU a request | hello req/s | JSON req/s |
+|---|---|---|---|---|
+| before (main, e0410e4) | 120 µs (131) | 139 µs (147) | 45.9 k | 40.9 k |
+| `table_keep_resident` only | 112 (124) | 126 (134) | 50.1 k | 46.7 k |
+| heap change only | 91 (96) | 84 (92) | 56.0 k | 56.8 k |
+| C17 (both) | 82 (90) | 84 (88) | 52.4 k | 49.2 k |
+
+- A request's peak memory: hello 1.9 MB to 1.25 MB, JSON 2.1 to 1.25 MB, the initial memory: neither grows it. 64 KB chunks put a fresh chunk per size class past the initial memory; with 8 KB chunks and 128 KB of free initial heap (`--initial-heap`) both fit.
+- macOS: Wasmtime resets a slot's memory by mapping fresh zero pages over it whatever `linear_memory_keep_resident` says (the option is Linux-only), so the memory option does nothing here; the speed plan's -30% from it was `table_keep_resident`, set in the same scratch build. Less memory touched is what saves the `mmap` at drop and the page faults.
+- Idle RSS of the JSON server (`ps`, 2 s after the last request; two runs each): after one request 39-41 MB before and after; after 20 k requests at `-c 12` 42-45 MB both; then 20 k at `-c 64` 48-51 MB both. On Linux each slot a burst used keeps up to the initial memory resident (1.25 MB; slots used are at most the 2-per-core workers), so up to about 40 MB more on 16 cores: measured with the Linux numbers.
+- Linux (CPU per request, RSS, `pagemap_scan` on and off) is the next step: there memory reset is `memset` of the kept 1.25 MB instead of `madvise` (#322, #323).
+
 ## Regression gate
 
 The baseline is CI's (Linux x86_64, the Rust pinned in rust-toolchain.toml: the runtime is compiled by it, so another Rust changes fuel). Fuel counts the program's work from `run` on, not Wasmtime's memory initialization (free on Linux, a page-padded copy elsewhere; #268), so the same Rust gives the same numbers on every OS.
