@@ -140,8 +140,10 @@ fn a_request_over_memory_is_a_500_and_the_next_request_works() {
 
 /// C17: a fresh instance in a reused pool slot sees nothing an earlier one wrote. Each round,
 /// four instances at once grow their memory and write a marker into every word of it; then four
-/// new instances, in the same slots, read every byte of theirs: each is the data image or zero,
-/// and the memory is back to its initial size. The engine is the one `Server` builds.
+/// new instances, in the same slots (their memories' addresses are the writers'), check the
+/// memory is back to its initial size, grow it as the writers did and read every byte: the data
+/// image or zero. So both the kept initial pages (reset by `memset` on Linux) and the grown ones
+/// (by `madvise`) are read. The engine is the one `Server` builds.
 #[test]
 fn a_reused_slot_shows_nothing_an_earlier_instance_wrote() {
     use wasm_encoder::BlockType::Empty;
@@ -169,12 +171,13 @@ fn a_reused_slot_shows_nothing_an_earlier_instance_wrote() {
         I::End,
         I::End,
     ];
-    // scan(): -1 if memory is not its initial size; else 1 + the first byte that is neither the
-    // data image (bytes 1..=16 at DATA) nor zero; 0 if there is none.
+    // scan(): -1 if memory is not its initial size; else grow by 16 pages and return 1 + the
+    // first byte that is neither the data image (bytes 1..=16 at DATA) nor zero; 0 if none.
     #[rustfmt::skip]
     let scan = [
         I::MemorySize(0), I::I32Const(PAGES as i32), I::I32Ne,
         I::If(Empty), I::I32Const(-1), I::Return, I::End,
+        I::I32Const(16), I::MemoryGrow(0), I::Drop,
         I::Loop(Empty),
         // memory[i] != (if i - DATA < 16 unsigned { i - DATA + 1 } else { 0 })
         I::LocalGet(0), I::I32Load8U(arg(0)),
@@ -185,7 +188,7 @@ fn a_reused_slot_shows_nothing_an_earlier_instance_wrote() {
         I::I32Ne,
         I::If(Empty), I::LocalGet(0), I::I32Const(1), I::I32Add, I::Return, I::End,
         I::LocalGet(0), I::I32Const(1), I::I32Add, I::LocalTee(0),
-        I::I32Const((PAGES << 16) as i32), I::I32LtU, I::BrIf(0),
+        I::MemorySize(0), I::I32Const(16), I::I32Shl, I::I32LtU, I::BrIf(0),
         I::End,
         I::I32Const(0),
         I::End,
@@ -206,7 +209,8 @@ fn a_reused_slot_shows_nothing_an_earlier_instance_wrote() {
     m.section(
         ExportSection::new()
             .export("fill", ExportKind::Func, 0)
-            .export("scan", ExportKind::Func, 1),
+            .export("scan", ExportKind::Func, 1)
+            .export("memory", ExportKind::Memory, 0),
     );
     let mut code = CodeSection::new();
     for body in [&fill[..], &scan[..]] {
@@ -230,18 +234,26 @@ fn a_reused_slot_shows_nothing_an_earlier_instance_wrote() {
         let instance = pre.instantiate(&mut store).unwrap();
         (store, instance)
     };
+    let slot = |store: &mut Store<()>, instance: &wasmtime::Instance| {
+        let memory = instance.get_memory(&mut *store, "memory").unwrap();
+        memory.data_ptr(&*store) as usize
+    };
     for round in 0..3 {
         let mut written = vec![];
+        let mut slots = std::collections::BTreeSet::new();
         for _ in 0..4 {
             let (mut store, instance) = start();
+            slots.insert(slot(&mut store, &instance));
             let fill = instance.get_typed_func::<i64, ()>(&mut store, "fill").unwrap();
             fill.call(&mut store, 0x6b69_6f6b_696f_6b69).unwrap();
             written.push(store);
         }
         drop(written);
         let mut fresh = vec![];
+        let mut reused = std::collections::BTreeSet::new();
         for _ in 0..4 {
             let (mut store, instance) = start();
+            reused.insert(slot(&mut store, &instance));
             let scan = instance.get_typed_func::<(), i32>(&mut store, "scan").unwrap();
             assert_eq!(
                 scan.call(&mut store, ()).unwrap(),
@@ -250,5 +262,6 @@ fn a_reused_slot_shows_nothing_an_earlier_instance_wrote() {
             );
             fresh.push(store);
         }
+        assert_eq!(reused, slots, "round {round}: the scans ran in the writers' slots");
     }
 }

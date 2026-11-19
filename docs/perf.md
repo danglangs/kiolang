@@ -40,6 +40,7 @@ Apple M3 Max, release, load 22-36 from other agents' builds. Five interleaved ro
 - A request's peak memory: hello 1.9 MB to 1.25 MB, JSON 2.1 to 1.25 MB, the initial memory: neither grows it. 64 KB chunks put a fresh chunk per size class past the initial memory; with 8 KB chunks and 128 KB of free initial heap (`--initial-heap`) both fit.
 - macOS: Wasmtime resets a slot's memory by mapping fresh zero pages over it whatever `linear_memory_keep_resident` says (the option is Linux-only), so the memory option does nothing here; the speed plan's -30% from it was `table_keep_resident`, set in the same scratch build. Less memory touched is what saves the `mmap` at drop and the page faults.
 - Idle RSS of the JSON server (`ps`, 2 s after the last request; two runs each): after one request 39-41 MB before and after; after 20 k requests at `-c 12` 42-45 MB both; then 20 k at `-c 64` 48-51 MB both. On Linux each slot a burst used keeps up to the initial memory resident (1.25 MB; slots used are at most the 2-per-core workers), so up to about 40 MB more on 16 cores: measured with the Linux numbers.
+- A handler whose first allocation is over about 150 KB forfeits the donated 128 KB (dlmalloc's `try_donate_preexisting` is one-shot) and grows memory at once, as before C17; no safety impact.
 - Linux (CPU per request, RSS, `pagemap_scan` on and off) is the next step: there memory reset is `memset` of the kept 1.25 MB instead of `madvise` (#322, #323).
 
 ## Regression gate

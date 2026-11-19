@@ -7,6 +7,8 @@ type Run = Result<String, (String, usize, usize)>;
 fn limits() -> Limits {
     Limits {
         fuel: 20_000_000_000,
+        // fib and the loop take seconds unoptimized; more under a test-heap runtime or loaded CI.
+        timeout_secs: 120,
         ..Limits::default()
     }
 }
