@@ -454,10 +454,7 @@ impl Origin {
     /// another authority or smuggle a header: it must start with a single `/` and hold no
     /// backslash, `#`, space or control character.
     fn url(&self, path: &str) -> Option<String> {
-        let ok = path.starts_with('/')
-            && !path.starts_with("//")
-            && path.len() <= PATH_MAX
-            && !path.chars().any(|c| c.is_ascii_control() || " \\#".contains(c));
+        let ok = request_path(path);
         let default = if self.https { 443 } else { 80 };
         let port = if self.port == default {
             String::new()
@@ -472,6 +469,15 @@ impl Origin {
             )
         })
     }
+}
+
+/// Whether `path` is one a request may carry (`Origin::url`): it starts with a single `/`, is at
+/// most `PATH_MAX` bytes and holds no backslash, `#`, space or control character.
+fn request_path(path: &str) -> bool {
+    path.starts_with('/')
+        && !path.starts_with("//")
+        && path.len() <= PATH_MAX
+        && !path.chars().any(|c| c.is_ascii_control() || " \\#".contains(c))
 }
 
 /// Most detached workers for file, store and database calls alive at once, process-wide (only
@@ -857,7 +863,7 @@ fn perform(origin: &Origin, req: &Outbound, deadline: Instant, budget: &AtomicI6
 
 /// A fake's `answer` to `req`, as `perform` treats a server's: no entry is `denied`; `get` turns a
 /// non-2xx (a 3xx too: nothing is followed) into `Status`; a body is charged to `budget` and is
-/// `too-large` past it. `read` gets the body bytes.
+/// `too-large` past it, before it is copied. `read` gets the body bytes.
 fn fake_result(
     origin: &Origin,
     req: &Outbound,
@@ -881,7 +887,7 @@ fn fake_result(
             Ok(Inbound {
                 status: *status,
                 headers: headers.clone(),
-                body: body.clone(),
+                body: body.to_vec(),
             })
         }
     }

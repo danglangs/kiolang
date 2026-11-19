@@ -639,6 +639,16 @@ fn a_fake_file_error_names_its_line() {
         ("POST /a\n", "2: expected a status 100-599 or timeout".into()),
         ("POST /a\n200\nok\n\nbody\n", "3: expected name: value".into()),
         ("POST /a\ntimeout\n\nbody\n", "4: expected --- after timeout".into()),
+        ("", format!("1: expected METHOD /path ({methods})")),
+        ("POST /a\n+200\n", "2: expected a status 100-599 or timeout".into()),
+        // A path no request could carry would never match.
+        ("POST //a\n200\n", format!("1: expected METHOD /path ({methods})")),
+        ("POST /a#b\n200\n", format!("1: expected METHOD /path ({methods})")),
+        // A terminal escape in FILE is named by its line, never printed.
+        (
+            "POST /a\n200\n---\nPOST /x\u{1b}[31m\n200\n",
+            format!("4: expected METHOD /path ({methods})"),
+        ),
     ];
     for (text, want) in cases {
         let hook = c.file("hook.http", text);
@@ -647,10 +657,11 @@ fn a_fake_file_error_names_its_line() {
             &format!("--http hook=fake:{hook}\n--http-methods hook=POST\n"),
         );
         let (code, out, err) = c.kio(&["--grants", &g]);
+        assert!(!err.contains('\u{1b}'), "{err:?}");
         assert_eq!(
             (code, out.as_str(), err),
             (2, "", format!("kio: {hook}:{want}\n")),
-            "{text}"
+            "{text:?}"
         );
     }
     // An entry for a method the grant does not allow.
@@ -704,6 +715,50 @@ fn a_fake_file_follows_the_grants_file_rules() {
     assert!(
         err.starts_with("kio: --http hook=fake:missing.http: cannot read: "),
         "{err}"
+    );
+    let dir = c.dir.path().display().to_string();
+    let g = c.file("t.grants", &format!("--http hook=fake:{dir}\n"));
+    let (code, _, err) = c.kio(&["--grants", &g]);
+    assert_eq!(
+        (code, err),
+        (2, format!("kio: --http hook=fake:{dir}: not a regular file\n"))
+    );
+    // A database's sidecar is its file too.
+    let wal = c.file("app.db-wal", HOOK);
+    let db = c.dir.path().join("app.db").display().to_string();
+    let spec = format!("hook=fake:{wal}");
+    let g = c.file("t.grants", &format!("--http {spec}\n--db db={db}\n"));
+    let (code, _, err) = c.kio(&["--grants", &g]);
+    assert_eq!(
+        (code, err),
+        (2, format!("kio: --http {spec}: `{wal}` is a file of `--db db`; the program could rewrite its next run's answers\n  hint: give kio a fake file of its own\n"))
+    );
+}
+
+/// A CRLF FILE answers as an LF one; a property may not take a fake `Http`.
+#[test]
+fn a_fake_in_crlf_and_in_a_property() {
+    let c = Case::new(
+        r#"#[test]
+fn crlf(hook: Http) -> Result<(), HttpErr> {
+    let r = hook.send("GET", "/c", [], "".to_bytes(), 0)?;
+    assert_eq(r.headers, ["x-a: 1"]);
+    assert_eq(r.body.to_str(), "one\ntwo");
+    Ok(())
+}
+
+#[test]
+fn prop(hook: Http, n: Int) { assert_eq(n, n); }
+"#,
+    );
+    let hook = c.file("hook.http", "GET /c\r\n200\r\nx-a: 1\r\n\r\none\r\ntwo\r\n");
+    let g = c.file("t.grants", &format!("--http hook=fake:{hook}\n"));
+    let (code, j) = c.json(&["--grants", &g]);
+    assert_eq!(code, 1, "{j}");
+    assert!(j["tests"][0]["ok"].as_bool().unwrap(), "{j}");
+    assert_eq!(
+        j["tests"][1]["error"]["message"],
+        "a property may not take `hook: Http` yet; a fake's answers are counted per test, not per case"
     );
 }
 

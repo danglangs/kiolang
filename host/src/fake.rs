@@ -16,7 +16,8 @@ pub struct Entry {
 /// What a request gets: a response as written, `timeout`, or no entry (`denied`).
 #[derive(Clone, Debug)]
 pub(crate) enum Answer {
-    Response(u16, Vec<String>, Vec<u8>),
+    /// The body is shared: an answer is not copied until `--io` allows it (`fake_result`).
+    Response(u16, Vec<String>, Arc<[u8]>),
     Timeout,
     Unmatched,
 }
@@ -33,7 +34,8 @@ pub struct FakeFile {
 /// starting with `#` before the request line are skipped.
 pub fn parse(name: &str, text: &str) -> Result<FakeFile, String> {
     let mut lines: Vec<&str> = text.split('\n').collect();
-    if text.ends_with('\n') {
+    // An empty FILE has no lines, so its error names line 1.
+    if text.ends_with('\n') || text.is_empty() {
         lines.pop();
     }
     let mut entries = Vec::new();
@@ -56,7 +58,8 @@ fn entry(name: &str, lines: &[&str], first: usize) -> Result<Entry, String> {
     let request = lines.get(i).map(|l| l.trim_end_matches('\r'));
     let parsed = request.and_then(|l| l.split_once(' ')).and_then(|(m, p)| {
         let m = lang::HTTP_METHODS.iter().find(|k| **k == m)?;
-        (p.starts_with('/') && !p.contains(' ')).then_some((*m, p))
+        // A path no request could carry would never match: refused here.
+        crate::request_path(p).then_some((*m, p))
     });
     let Some((method, path)) = parsed else {
         return Err(format!(
@@ -72,7 +75,9 @@ fn entry(name: &str, lines: &[&str], first: usize) -> Result<Entry, String> {
             Some(j) => return Err(format!("{}: expected --- after timeout", at(i + 2 + j))),
         },
         Some(s) => match s.parse::<u16>() {
-            Ok(n) if (100..=599).contains(&n) => response(lines, i + 2, n, &at)?,
+            Ok(n) if (100..=599).contains(&n) && s.bytes().all(|b| b.is_ascii_digit()) => {
+                response(lines, i + 2, n, &at)?
+            }
             _ => return Err(format!("{}: expected a status 100-599 or timeout", at(i + 1))),
         },
         None => return Err(format!("{}: expected a status 100-599 or timeout", at(i + 1))),
@@ -100,8 +105,10 @@ fn response(lines: &[&str], from: usize, status: u16, at: &dyn Fn(usize) -> Stri
         headers.push(format!("{}: {}", n.to_ascii_lowercase(), v.trim()));
         i += 1;
     }
-    let body = lines.get(i + 1..).unwrap_or_default().join("\n");
-    Ok(Answer::Response(status, headers, body.into_bytes()))
+    let body: Vec<&str> = (lines.get(i + 1..).unwrap_or_default().iter())
+        .map(|l| l.trim_end_matches('\r'))
+        .collect();
+    Ok(Answer::Response(status, headers, body.join("\n").into_bytes().into()))
 }
 
 /// The most unmatched requests `Fake::unmatched` names.

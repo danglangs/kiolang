@@ -1648,6 +1648,10 @@ fn fake_file(name: &str, path: &str, flags: &[String]) -> Result<Arc<FakeFile>, 
     let at = format!("--http {name}=fake:{path}");
     let own = "\n  hint: give kio a fake file of its own";
     let changes = "the program could rewrite its next run's answers";
+    // A directory has links of its own: say what it is, not that.
+    if std::fs::metadata(path).is_ok_and(|m| !m.is_file()) {
+        return Err(format!("{at}: {}", Unread::NotRegular));
+    }
     if std::fs::metadata(path).is_ok_and(|m| std::os::unix::fs::MetadataExt::nlink(&m) > 1) {
         return Err(format!(
             "{at}: `{path}` has other hard links; {changes} through one{own}"
@@ -1665,7 +1669,14 @@ fn fake_file(name: &str, path: &str, flags: &[String]) -> Result<Arc<FakeFile>, 
             {
                 format!("is inside `--dir {n}={target}`")
             }
-            "--log" | "--kv" | "--db" if same_file(path, target) => format!("is the `{flag} {n}` file"),
+            // A store's files are its own beside it: a compaction's `.tmp`, SQLite's sidecars.
+            "--log" | "--kv" | "--db"
+                if ["", ".tmp", "-wal", "-journal", "-shm"]
+                    .iter()
+                    .any(|s| same_file(path, &format!("{target}{s}"))) =>
+            {
+                format!("is a file of `{flag} {n}`")
+            }
             _ => continue,
         };
         return Err(format!("{at}: `{path}` {why}; {changes}{own}"));
@@ -1694,7 +1705,7 @@ fn fake_file(name: &str, path: &str, flags: &[String]) -> Result<Arc<FakeFile>, 
             "{path}:{}: {} {}: --http {name} grants only {}\n  hint: add {} to --http-methods {name}, or drop the entry",
             e.line,
             e.method,
-            e.path,
+            kio_host::escape_shown(&e.path),
             origin.granted_methods().join(", "),
             e.method
         ));
@@ -1907,7 +1918,12 @@ fn test_error(kind: &str, message: &str, hint: Option<&str>) -> serde_json::Valu
 fn property_effect(tests: &Tests, t: &lang::TestFn) -> Option<(String, String)> {
     for (name, ty) in &t.params {
         if ty == "Http" {
-            let msg = format!("a property runs many times; `{name}: Http` would repeat real requests");
+            let msg = match tests.fakes.iter().any(|(n, _)| n == name) {
+                true => format!(
+                    "a property may not take `{name}: Http` yet; a fake's answers are counted per test, not per case"
+                ),
+                false => format!("a property runs many times; `{name}: Http` would repeat real requests"),
+            };
             return Some((
                 msg,
                 "test the call in an example test, or pass the data as a parameter".into(),
