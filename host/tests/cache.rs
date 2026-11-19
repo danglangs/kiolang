@@ -106,10 +106,16 @@ fn every_run_compiles_and_writes_no_cache() {
 /// the Wasm codegen just produced.
 #[test]
 fn the_host_never_deserializes_native_code() {
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    for entry in std::fs::read_dir(src).unwrap() {
-        let path = entry.unwrap().path();
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(!text.contains("deserialize"), "{}", path.display());
+    let mut dirs = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            assert!(!text.contains("deserialize"), "{}", path.display());
+        }
     }
 }

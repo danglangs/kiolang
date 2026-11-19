@@ -4,8 +4,10 @@ use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+mod mutants;
+
 const USAGE: &str =
-    "usage: kio review <new.kio> --base <old.kio> [--grants file] [--test-grants file] [--requirements file] [--entry file [--entry-grants file]].. [--json]";
+    "usage: kio review <new.kio> --base <old.kio> [--grants file] [--test-grants file] [--requirements file] [--entry file [--entry-grants file]].. [--seed s] [--mutants n] [--json]";
 
 /// The largest requirements file diffed, and the most line pairs the diff compares.
 const REQUIREMENTS_MAX: u64 = 1 << 20;
@@ -78,6 +80,10 @@ struct Inputs {
     fakes_ok: Vec<String>,
     requirements: Option<[(String, Option<String>); 2]>,
     entries: Vec<Entry>,
+    /// The tests' seed (`--seed`), which also draws the mutants.
+    seed: u64,
+    /// How many generated mutants to run (`--mutants`).
+    mutants: usize,
 }
 
 /// Another entry of the change (`--entry`): the path as given, escaped; OLD's program (`None`:
@@ -168,9 +174,9 @@ fn beside_old(old: &str, new: &str, g: &str) -> Beside {
     }
 }
 
-/// `kio review`: exit 1 if a side or entry does not check, a grants file does not bind, or a NEW test
-/// fails; else 3 if authority was added, a dependency added or changed, or a test removed; else
-/// 0. 2 for usage.
+/// `kio review`: exit 1 if a side or entry does not check, a grants file does not bind, a NEW test
+/// fails, or the mutant runs do not finish; else 3 if authority was added, a dependency
+/// added or changed, or a test removed; else 0. 2 for usage.
 pub(crate) fn review(path: &str, flags: &[&str], json: bool) -> i32 {
     let (inputs, out) = captured(json, || inputs(path, flags));
     let inputs = match inputs {
@@ -269,6 +275,7 @@ fn labelled(label: &'static str, lines: &[String]) -> Vec<Row> {
 /// The flags parsed and every file they name read, or the exit code once the error is reported.
 fn inputs(path: &str, flags: &[&str]) -> Result<Inputs, i32> {
     let (mut base, mut grants, mut test_grants, mut requirements) = (None, None, None, None);
+    let (mut seed, mut mutants) = (None, None);
     // Each `--entry` and the `--entry-grants` that follows it.
     let mut entries: Vec<(&str, Option<&str>)> = Vec::new();
     if !flags.len().is_multiple_of(2) {
@@ -296,6 +303,8 @@ fn inputs(path: &str, flags: &[&str]) -> Result<Inputs, i32> {
             "--grants" => &mut grants,
             "--test-grants" => &mut test_grants,
             "--requirements" => &mut requirements,
+            "--seed" => &mut seed,
+            "--mutants" => &mut mutants,
             _ => return Err(fail(USAGE.into())),
         };
         if slot.replace(pair[1]).is_some() {
@@ -306,6 +315,27 @@ fn inputs(path: &str, flags: &[&str]) -> Result<Inputs, i32> {
         return Err(fail(
             "kio review needs the old program\n  hint: add `--base old.kio`; for a git revision, `git show REV:app.kio > old/app.kio` (guide, Reviewing a change)".into(),
         ));
+    };
+    let seed = match seed.map(str::parse::<u64>) {
+        None => DEFAULT_SEED,
+        Some(Ok(s)) => s,
+        Some(Err(_)) => {
+            return Err(fail(format!(
+                "--seed {}: expected a non-negative integer\n  hint: `--seed 1`, the default",
+                kio_host::escape_line(seed.unwrap_or_default())
+            )))
+        }
+    };
+    let max = mutants::MAX;
+    let mutants = match mutants.map(str::parse::<usize>) {
+        None => mutants::DEFAULT,
+        Some(Ok(n)) if n <= max => n,
+        Some(_) => {
+            return Err(fail(format!(
+                "--mutants {}: expected 0 to {max}\n  hint: `--mutants 0` runs none",
+                kio_host::escape_line(mutants.unwrap_or_default())
+            )))
+        }
     };
     let old = (base.to_string(), read_program(base)?);
     let new = (path.to_string(), read_program(path)?);
@@ -372,6 +402,8 @@ fn inputs(path: &str, flags: &[&str]) -> Result<Inputs, i32> {
         fakes_ok,
         requirements,
         entries: read_entries,
+        seed,
+        mutants,
     })
 }
 
@@ -955,7 +987,7 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
         );
         resources(&[], &[], page);
         return (
-            json!({"grants": shown, "fakes": fakes_json(inputs), "setup_error": e}),
+            json!({"grants": shown, "fakes": fakes_json(inputs), "setup_error": e, "mutants": null}),
             false,
             true,
         );
@@ -968,8 +1000,10 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
         false => format!("grants: {shown} ({})", answered.join(", ")),
     };
     page.tests.push(("tested", line));
+    let seed = inputs.seed.to_string();
+    let setup: Vec<&str> = flags.iter().copied().chain(["--seed", &seed]).collect();
     let side = |path: &str| {
-        let (tests, out) = captured(true, || test_setup(path, &flags, &inputs.fake_files));
+        let (tests, out) = captured(true, || test_setup(path, &setup, &inputs.fake_files));
         tests.map(|t| (run_tests(&t), t)).map_err(|_| out.errors)
     };
     let (old, new) = (side(&inputs.old.0), side(&inputs.new.0));
@@ -1106,13 +1140,18 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
             .iter()
             .map(|n| ("not checked", format!("failed in old: {n}"))),
     );
+    // Mutants of NEW only, once its tests ran (R1b1).
+    let (mutants, unfinished) = match &new {
+        Ok((results, t)) => mutants::run(inputs, &changes, t, results, &mut page.tests),
+        Err(_) => (json!(null), false),
+    };
     resources(old_r, new_r, page);
-    let failed = new.is_err() || old.is_err() || !failures.is_empty();
+    let failed = new.is_err() || old.is_err() || !failures.is_empty() || unfinished;
     let value = json!({
         "grants": inputs.test_grants.as_ref().map(|(t, _)| t), "fakes": fakes_json(inputs),
         "old": sides["old"], "new": sides["new"], "added": added, "removed": removed, "changed": changed,
         "unreached_changed": unreached, "fewer_cases": fewer, "properties": properties, "failures": failures, "old_failed": old_failed,
-        "setup_error": null,
+        "setup_error": null, "mutants": mutants,
     });
     (value, !removed.is_empty() || !fewer.is_empty(), failed)
 }
@@ -1531,12 +1570,12 @@ fn identity(inputs: &Inputs, page: &mut Page) -> serde_json::Value {
             .collect();
         rows
     });
-    page.identity.push(format!("test seed {DEFAULT_SEED}"));
+    page.identity.push(format!("test seed {}", inputs.seed));
     shown.extend(files);
     page.changed = changed(&shown);
     json!({
         "kio": version, "commit": commit, "old": sides["old"], "new": sides["new"], "deps": deps,
-        "grants": grants, "test_grants": test_grants, "test_fakes": test_fakes, "entry_grants": entry_grants, "old_grants": old_grants, "old_entry_grants": old_entry_grants, "requirements": requirements, "seed": DEFAULT_SEED,
+        "grants": grants, "test_grants": test_grants, "test_fakes": test_fakes, "entry_grants": entry_grants, "old_grants": old_grants, "old_entry_grants": old_entry_grants, "requirements": requirements, "seed": inputs.seed,
         "changed": page.changed,
     })
 }

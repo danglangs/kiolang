@@ -719,7 +719,7 @@ fn usage() {
     let (code, _, err) = s.review(&["--base", &s.old]);
     assert_eq!(code, 2);
     assert!(err.contains("`--base` is given twice"), "{err}");
-    let (code, _, err) = s.review(&["--seed", "2"]);
+    let (code, _, err) = s.review(&["--cases", "2"]);
     assert_eq!(code, 2);
     assert!(err.contains("usage: kio review"), "{err}");
 }
@@ -1512,5 +1512,236 @@ fn a_fake_changed_during_the_review() {
     assert!(
         identity.contains(&format!("  error        {shown} changed while the review ran")),
         "{out}"
+    );
+}
+
+// R1b1: generated mutants of NEW's changed functions that `main` and a test reach.
+
+const BARE: &str = "fn main() -> Int { 0 }\n";
+
+/// `small` is pinned by a test, `big` only touched by one; `main` changed and no test reaches it.
+const PINNED: &str = r#"fn small(n: Int) -> Bool { n < 10 }
+
+fn big(n: Int) -> Bool { n >= 100 }
+
+fn main() -> Int { if small(3) && big(200) { 1 } else { 0 } }
+
+#[test]
+fn pins_small() { assert(small(9), "9"); assert(!small(10), "10"); }
+
+#[test]
+fn touches_big() { assert(big(500) == true, "500"); }
+"#;
+
+/// `v`'s mutant rows without their fuel, which moves with the compiler.
+fn mutant_rows(v: &serde_json::Value) -> Vec<serde_json::Value> {
+    let rows = v["tests"]["mutants"]["rows"].as_array().unwrap().clone();
+    rows.into_iter()
+        .map(|mut r| {
+            r.as_object_mut().unwrap().remove("fuel");
+            r
+        })
+        .collect()
+}
+
+/// A comparison the tests pin is killed, the killer named; one they do not survives with its
+/// snippet, and the exit code stays 0. No mutant is made in `main` (no test reaches it) or in a
+/// test.
+#[test]
+fn mutants_killed_and_survived() {
+    let s = Sides::new(BARE, PINNED);
+    let (code, out, err) = s.review(&[]);
+    assert_eq!(code, 0, "{out}{err}");
+    let tests = Sides::section(&out, "Tests");
+    assert_eq!(
+        tests[5..],
+        [
+            "  not checked  changed, reached by no test: main",
+            "  tested       mutants: 2 of 4 killed (generated at seed 1: 4 drawn of 4 sites, 0 did not check)",
+            "  tested       killed by: pins_small 2",
+            "  not checked  survived: generated: big: `>=` -> `>` in `...big(n: Int) -> Bool { n >= 100 }`",
+            "  not checked  survived: generated: big: `100` -> `101` in `...(n: Int) -> Bool { n >= 100 }`",
+        ],
+        "{out}"
+    );
+    let (code, out, _) = s.review(&["--json"]);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let mut m = v["tests"]["mutants"].clone();
+    m.as_object_mut().unwrap().remove("rows");
+    assert_eq!(
+        m,
+        serde_json::json!({"seed": 1, "requested": 20, "sites": 4, "drawn": 4, "made": 4, "did_not_check": 0, "error": null})
+    );
+    let row = |func: &str, from: &str, to: &str, around: &str, killed: Option<&str>| {
+        let line = if func == "small" { 1 } else { 3 };
+        serde_json::json!({
+            "source": "generated", "function": func, "file": s.new, "line": line,
+            "from": from, "to": to, "description": format!("`{from}` -> `{to}` in `{around}`"),
+            "killed_by": killed, "how": killed.map(|_| "failed"), "tests_run": 1,
+        })
+    };
+    assert_eq!(
+        mutant_rows(&v),
+        [
+            row(
+                "small",
+                "<",
+                "<=",
+                "...all(n: Int) -> Bool { n < 10 }",
+                Some("pins_small")
+            ),
+            row(
+                "small",
+                "10",
+                "11",
+                "...l(n: Int) -> Bool { n < 10 }",
+                Some("pins_small")
+            ),
+            row("big", ">=", ">", "...big(n: Int) -> Bool { n >= 100 }", None),
+            row("big", "100", "101", "...(n: Int) -> Bool { n >= 100 }", None),
+        ]
+    );
+}
+
+/// The mutant that drops `i += 1;` loops.
+const COUNTED: &str = r#"fn count(n: Int) -> Int { let mut i = 0; let mut s = 0; while i < n { s += i; i += 1; } s }
+
+fn main() -> Int { count(3) }
+
+#[test]
+fn counts() { assert_eq(count(100), 4950); }
+"#;
+
+/// A mutant that loops is killed out of fuel, at ten times what the test used on NEW.
+#[test]
+fn a_mutant_that_loops_runs_out_of_fuel() {
+    let s = Sides::new(BARE, COUNTED);
+    let (code, out, err) = s.review(&[]);
+    assert_eq!(code, 0, "{out}{err}");
+    let tests = Sides::section(&out, "Tests");
+    assert_eq!(
+        tests[5..],
+        [
+            "  tested       mutants: 5 of 6 killed (generated at seed 1: 6 drawn of 6 sites, 0 did not check)",
+            "  tested       killed by: counts 5 (1 out of fuel)",
+            "  not checked  survived: generated: count: `0` -> `1` in `...t) -> Int { let mut i = 0; let mut s = 0; while i...`",
+        ],
+        "{out}"
+    );
+    let (_, out, _) = s.review(&["--json"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let rows = v["tests"]["mutants"]["rows"].as_array().unwrap();
+    let looped = rows.iter().find(|r| r["from"] == "i += 1;").unwrap();
+    assert_eq!(
+        looped["description"],
+        "`i += 1;` dropped in `...; while i < n { s += i; i += 1; } s }`"
+    );
+    assert_eq!([&looped["killed_by"], &looped["how"]], ["counts", "out of fuel"]);
+    let fuel = v["resources"]["added"][0]["fuel"].as_u64().unwrap();
+    assert_eq!(looped["fuel"].as_u64(), Some(10 * fuel), "{looped}");
+}
+
+/// One seed gives one page; another draws other mutants, and Identity names it.
+#[test]
+fn mutants_are_drawn_by_the_seed() {
+    let s = Sides::new(BARE, COUNTED);
+    let (_, one, _) = s.review(&["--mutants", "2"]);
+    let (_, again, _) = s.review(&["--mutants", "2"]);
+    assert_eq!(one, again);
+    let (_, two, _) = s.review(&["--mutants", "2", "--seed", "2"]);
+    let mutants = |out: &str| -> Vec<String> {
+        let tests = Sides::section(out, "Tests");
+        tests.into_iter().skip_while(|l| !l.contains("mutants:")).collect()
+    };
+    assert_eq!(
+        mutants(&one),
+        [
+            "  tested       mutants: 1 of 2 killed (generated at seed 1: 2 drawn of 6 sites, 0 did not check)",
+            "  tested       killed by: counts 1",
+            "  not checked  survived: generated: count: `0` -> `1` in `...t) -> Int { let mut i = 0; let mut s = 0; while i...`",
+        ],
+        "{one}"
+    );
+    assert_ne!(mutants(&one)[1..], mutants(&two)[1..], "{two}");
+    assert!(mutants(&two)[0].contains("at seed 2: 2 drawn of 6 sites"), "{two}");
+    assert!(
+        Sides::section(&two, "Identity").contains(&"  test seed 2".to_string()),
+        "{two}"
+    );
+}
+
+/// `--mutants 0` runs none and prints nothing; a bad `--mutants` or `--seed` is a usage error.
+#[test]
+fn mutants_off_and_usage() {
+    let s = Sides::new(BARE, PINNED);
+    let (code, out, _) = s.review(&["--mutants", "0"]);
+    assert_eq!(code, 0);
+    assert!(!out.contains("mutants:") && !out.contains("survived:"), "{out}");
+    let (_, out, _) = s.review(&["--mutants", "0", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["tests"]["mutants"], serde_json::Value::Null);
+    let (code, _, err) = s.review(&["--mutants", "501"]);
+    assert_eq!(code, 2);
+    assert!(
+        err.contains("--mutants 501: expected 0 to 500\n  hint: `--mutants 0` runs none"),
+        "{err}"
+    );
+    let (code, _, err) = s.review(&["--seed", "-1"]);
+    assert_eq!(code, 2);
+    assert!(
+        err.contains("--seed -1: expected a non-negative integer\n  hint: `--seed 1`, the default"),
+        "{err}"
+    );
+}
+
+/// A function that reaches `main`'s `Http`. `Ok` made an `Err` does not check.
+const NOTIFIES: &str = r#"fn notify(h: Http, n: Int) -> Int {
+    if n > 0 {
+        match h.send("POST", "/n", [], "x".to_bytes(), 0) { Ok(r) => r.status, Err(_e) => 7 }
+    } else { 0 }
+}
+
+fn main(h: Http) -> Int { notify(h, 1) }
+
+#[test]
+fn zero_sends_nothing(h: Http) { assert_eq(notify(h, 0), 0); }
+"#;
+
+/// Mutants run under the test grants' fake, never `--grants G`: G's host hears nothing.
+#[test]
+fn mutants_never_run_under_mains_grants() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let s = Sides::new(BARE, NOTIFIES);
+    let hook = write(s.dir.path(), "new/hook.http", "POST /n\n200\n");
+    let g = write(
+        s.dir.path(),
+        "new/app.grants",
+        &format!("--http h=http://127.0.0.1:{port}\n--http-methods h=POST\n"),
+    );
+    let t = write(
+        s.dir.path(),
+        "t.grants",
+        &format!("--http h=fake:{hook}\n--http-methods h=POST\n"),
+    );
+    let (code, out, err) = s.review(&["--grants", &g, "--test-grants", &t, "--mutants", "500"]);
+    assert_eq!(code, 3, "{out}{err}");
+    let tests = Sides::section(&out, "Tests");
+    let mutants: Vec<&String> = (tests.iter())
+        .filter(|l| l.contains("mutants:") || l.contains("killed by:"))
+        .collect();
+    assert_eq!(
+        mutants,
+        [
+            "  tested       mutants: 2 of 8 killed (generated at seed 1: 9 drawn of 9 sites, 1 did not check)",
+            "  tested       killed by: zero_sends_nothing 2",
+        ],
+        "{out}"
+    );
+    assert!(
+        matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        "a mutant reached main's host"
     );
 }

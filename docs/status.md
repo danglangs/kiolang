@@ -106,6 +106,7 @@ Compiled-only kio covers the whole language and every capability. Built and revi
 | T4b | `--http-record hook=sent` in a test grants file writes each request on fake `hook` as `hook-1`, `hook-2`, .. into the test's temporary `sent: Dir` (request line, headers with `<injected>`, blank line, body, byte-exact); refused for a non-fake, a granted `--dir sent`, and outside `kio test`'s grants file (#301-#304). T4c next |
 | T4c | `kio review --test-grants` reads each fake FILE once for both sides: Identity `test fake hook.http sha256:..` (changed during the review: `error`), grants line `(hook answered from hook.http)`, a Not checked line per fake; text and `--json` (#305-#307). T4 done; kio-web's flow tests can drop `dest.py` |
 | D6 | A2's docs: server capabilities in the test-defaults table; which characters a generated `Str` holds; property cost measured per program size (31-52 ms a case, M3 Max); the schema statement runs per request; `chars()` against a byte scan (77 vs 29 fuel a character) |
+| R1b1 | `kio review` makes generated mutants in NEW's changed functions a `main` and a test reach (`--mutants N`, default 20 of all sites, drawn by `--seed`), each checked then run on the tests that reach it under T only, 10x fuel, first failure stops: `mutants: 14 of 15 killed (..)`, `killed by: T 7, ..`, `not checked  survived: ..`; a survivor leaves the exit code alone, an exhausted 300 s budget is `error` (#309-#311). Flow F1.1 -> F1.2: 43 sites, 20 drawn, 5 did not check, 14 of 15 killed, +26 s |
 
 ## Next
 

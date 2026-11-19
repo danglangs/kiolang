@@ -46,7 +46,7 @@ $ git worktree remove ../../../base        # when done
 ## 3. Run `kio review`
 
 ```
-kio review NEW --base OLD [--grants G] [--test-grants T] [--requirements FILE] [--entry FILE [--entry-grants G2]]..
+kio review NEW --base OLD [--grants G] [--test-grants T] [--requirements FILE] [--entry FILE [--entry-grants G2]].. [--seed S] [--mutants N]
 ```
 
 | Flag | Give it | Why |
@@ -56,6 +56,8 @@ kio review NEW --base OLD [--grants G] [--test-grants T] [--requirements FILE] [
 | `--requirements FILE` | the file that says what the program should do (`README.md`), a path relative to each side's entry | its diff is what the change claims |
 | `--entry FILE` | each other program the change touches (`worker.kio`), a path relative to NEW's entry, the same on OLD's side | its authority and blind spots, prefixed `worker.kio:`; an entry OLD lacks is all new authority |
 | `--entry-grants G2` | right after its `--entry`: that program's grants file (`worker.grants`) | as `--grants`, for that entry |
+| `--mutants N` | how many generated mutants to run (default 20, `0` for none) | more mutants, more of the changed code checked against the tests, more time |
+| `--seed S` | the tests' seed (default 1), which also draws the mutants | another sample; the same seed gives the same page |
 
 Review every entry the change touches: an entry left out is authority nobody reviewed. Tests are the first entry's (the one before `--base`).
 
@@ -76,7 +78,7 @@ Every line carries a label; a line under a labelled one shares it. The label say
 | `not checked` | nothing | nothing | look at it, or accept it knowingly |
 | `error` | a failure | nothing | stop: fix it, or reject |
 
-The sections, in order: **Requirements** (the requirement file's diff), **Authority** (`kio check --base`'s lines, and whether `--grants` binds and what it binds: `db=var/inv.db:ro, hook=http://127.0.0.1:9099 (POST)`, a secret by its source, `env:NAME`), **Tests** (both sides' counts, tests added and removed, changed functions no test reaches, each property's cases, each NEW failure), **Resources** (per-test fuel and peak memory changes over 2%, each added test's, then totals), **Not checked** (what the host never looks at for each method `main` reaches), **Identity** (sha256 of every file that went into the page).
+The sections, in order: **Requirements** (the requirement file's diff), **Authority** (`kio check --base`'s lines, and whether `--grants` binds and what it binds: `db=var/inv.db:ro, hook=http://127.0.0.1:9099 (POST)`, a secret by its source, `env:NAME`), **Tests** (both sides' counts, tests added and removed, changed functions no test reaches, each property's cases, each NEW failure, then the mutants: how many the tests killed, which test killed them, and each survivor), **Resources** (per-test fuel and peak memory changes over 2%, each added test's, then totals), **Not checked** (what the host never looks at for each method `main` reaches), **Identity** (sha256 of every file that went into the page).
 
 A test grants file may answer an `Http` grant from a file instead of a server (`--http hook=fake:hook.http`, a [fake host](guide.md#a-fake-host)). The page then says so three times:
 
@@ -108,7 +110,7 @@ Checklist:
 1. Any `error`? Reject, or ask for a fix.
 2. Authority: for each `+` or `~` line, does the requirement diff ask for it? A `~` method on an existing grant is authority added like a `+` grant: the requirement must ask for it. If not, reject. The `derived` line under it names where to read. Do the same for each grants-file line (`app.grants: + --dir ..`).
 3. Tests: is any test `removed:`, or a property running fewer cases? Find out why before accepting.
-4. Do the added tests cover what the requirement diff claims? A `changed:` test (its own code or a function it reaches changed) is read like an added one: it tests something else now. Name tests are a claim too: read the one or two that matter. A `changed, reached by no test:` function ran in no test: read it, or ask for a test that calls it. The converse is weaker: reach is static, so a function named on a test's call path counts as reached even if that path never runs (`if false { risky(d) }`).
+4. Do the added tests cover what the requirement diff claims? A `changed:` test (its own code or a function it reaches changed) is read like an added one: it tests something else now. Name tests are a claim too: read the one or two that matter. A `changed, reached by no test:` function ran in no test: read it, or ask for a test that calls it. The converse is weaker: reach is static, so a function named on a test's call path counts as reached even if that path never runs (`if false { risky(d) }`). Mutants: each `survived:` line is an edit to changed code that no test noticed. Read the snippet: if the edit changes behaviour the requirement cares about, ask for a test that fails on it; if it changes nothing (an equivalent mutant), move on. One test doing all the killing (`killed by:`) is the test to read.
 5. Resources: any change you would not accept in production?
 6. Not checked: for each line, is it covered by a test you trust, or by a function you read? Otherwise ask.
 7. Identity: is this the commit you meant to review?
@@ -117,7 +119,7 @@ Checklist:
 
 - **Whether the requirement is right.** The Requirements diff is the change's claim, not a check.
 - **What is inside an effect.** The SQL text, the body sent, what is written: `Not checked` lists each one the program can reach.
-- **Whether the tests are good.** `tested` means they passed, not that they prove the claim. They are usually written by the same author as the code (the page says so).
+- **Whether the tests are good.** `tested` means they passed, not that they prove the claim. They are usually written by the same author as the code (the page says so). Killed mutants show the tests notice edits to the changed code, not that they check the requirement: a test comparing a function with a copy of itself kills every mutant in it.
 - **Production cost.** Resources are measured on the tests only, not on runs of `main`.
 - **Bugs in kio.** Authority is derived and enforced within kio's model ([threat model](../README.md#threat-model)); an implementation bug in the checker or host would break it.
 
@@ -192,6 +194,9 @@ Tests
   tested       tests::db_equals_model_and_nothing_is_stranded: 100 cases compiled; seed 1
   tested       tests::replay_equals_each_distinct_event_once: 100 cases compiled; seed 1
   tested       tests::stale_completion_changes_nothing: 100 cases compiled; seed 1
+  tested       mutants: 14 of 15 killed (generated at seed 1: 20 drawn of 43 sites, 5 did not check)
+  tested       killed by: tests::a_claim_needs_the_job_still_due_and_unchanged 7, tests::failure_retries_with_doubling_backoff_then_dies 4, tests::expired_lease_is_reclaimed_and_the_old_worker_changes_nothing 2, tests::expired_lease_at_the_limit_is_dead_not_stranded 1
+  not checked  survived: generated: flow::store: `"database error"` -> `""` in `Err(_) => Err("database error"),`
 Resources
   measured     tests::any_signed_bytes_get_an_answer: fuel 3583775 -> 3854875 (+7.57%), peak memory 2112 KB -> 2112 KB (+0.00%)
   measured     tests::bad_signature_beats_bad_json: fuel 25665 -> 28376 (+10.57%), peak memory 1920 KB -> 1920 KB (+0.00%)
@@ -220,6 +225,7 @@ Reading it:
 - **Authority**: grants unchanged (`main` already had `db exec`); exit 3 is `init`, new and reached from `main`. It is the `CREATE TABLE`, moved out of `store`. Expected.
 - **Authority, `worker.kio`**: a new program, so every grant is `+`: the database (`exec query`, to claim and finish jobs), the clock, and `POST` to one destination, whose key the host adds (the binds line: `dest=https://dest.example (POST; Authorization:env:DEST_AUTH)`, the key named by its source, never its value). That is what the F1.2 requirement describes. The `derived` lines under each grant name the functions that make each call: `deliver` posts, `flow::claim` and `flow::try_claim` query.
 - **Tests**: 10 to 18, nothing removed; the 8 added are the worker's transitions and two properties against a model. The F1.1 properties still run 100 cases. But `changed, reached by no test: worker.kio: deliver, main`: the tests call the worker's `flow::` steps, never its loop or its delivery, so those two ran in no test.
+- **Mutants**: 20 of the 43 edits kio can make in the changed functions the tests reach (the worker's `flow::` steps among them); 5 did not check, 14 of the other 15 failed a test. The survivor empties `store`'s error message, which no test reads: harmless. No mutant touches `deliver` or the worker's `main`: no test reaches them (the line above).
 - **Resources**: +3% to +10% fuel on the ingest tests, +1.98% in total, memory flat. Every ingest now runs `init`, a longer `CREATE TABLE` and a wider `INSERT`; acceptable. The added model property costs 158M fuel, the rest under 9M.
 - **Not checked**: `db exec: the SQL text`. The table gains three columns, and the requirement diff says "An F1.1 database made before F1.2 has no migration": `CREATE TABLE IF NOT EXISTS` leaves an old table as it is, and the new `INSERT` names `next_ms`. The worker's lines add its SQL and the bodies it posts: the tests cover the claims and completions against a model, and `every_attempt_carries_the_event_id_as_the_key` the delivery key.
 

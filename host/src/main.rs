@@ -142,7 +142,7 @@ fn command(args: &[String]) -> i32 {
 }
 
 /// The commands, `{USAGE}` standing for `kio run`'s flags.
-const HELP: &str = "kio --version\n       kio deps pin [<prog.kio>]\n       kio check <prog.kio> [--all | --base <old.kio> [--detail]]\n       kio check <prog.kio> --grants <file> [flags]\n       kio mcp\n       kio review <new.kio> --base <old.kio> [--grants file] [--test-grants file] [--requirements file] [--entry file [--entry-grants file]].. [--json]\n       kio run <prog.kio> {USAGE}\n       kio test <prog.kio> {TEST_USAGE}";
+const HELP: &str = "kio --version\n       kio deps pin [<prog.kio>]\n       kio check <prog.kio> [--all | --base <old.kio> [--detail]]\n       kio check <prog.kio> --grants <file> [flags]\n       kio mcp\n       kio review <new.kio> --base <old.kio> [--grants file] [--test-grants file] [--requirements file] [--entry file [--entry-grants file]].. [--seed s] [--mutants n] [--json]\n       kio run <prog.kio> {USAGE}\n       kio test <prog.kio> {TEST_USAGE}";
 
 /// A program as read: its `(name, source)` files, root first, named as `lang` takes them
 /// (`web.kio` for `mod web;`); the path each was read from and its identity, then `kio.deps`'s
@@ -1339,6 +1339,9 @@ struct Tests {
     fakes: Vec<(String, Arc<FakeFile>)>,
     /// Each `--http-record grant=dir` of the grants file, as `(grant, dir)`; not in `flags`.
     records: Vec<(String, String)>,
+    /// A mutant run (`kio review`, R1b1): a property stops at its first failing case, unshrunk,
+    /// and the interpreter does not run it as the oracle.
+    mutant: bool,
 }
 
 /// One test's result: its error as `--json` shows one, the time it took and its `Log` lines;
@@ -1645,6 +1648,7 @@ fn test_setup(path: &str, flags: &[&str], read: &FakeReads) -> Result<Tests, i32
         seed,
         fakes,
         records,
+        mutant: false,
     })
 }
 
@@ -2143,7 +2147,7 @@ fn run_property(tests: &Tests, t: &lang::TestFn) -> (Option<serde_json::Value>, 
             }
             Verdict::Fail(e) => e,
         };
-        if Verdict::Fail(error.clone()).unchecked() || error["kind"] == "internal" {
+        if Verdict::Fail(error.clone()).unchecked() || error["kind"] == "internal" || tests.mutant {
             info.input = Some((shown(&values), false));
             return (Some(error), log, info);
         }
@@ -2183,7 +2187,11 @@ fn run_case(tests: &Tests, t: &lang::TestFn, values: &[lang::Value]) -> (Verdict
     let compiled = run_once(tests, t, Some((case.clone(), false)));
     let verdict = Verdict::of(&compiled);
     #[cfg(feature = "test-hooks")]
-    let verdict = oracle(tests, t, case, verdict);
+    let verdict = if tests.mutant {
+        verdict
+    } else {
+        oracle(tests, t, case, verdict)
+    };
     #[cfg(not(feature = "test-hooks"))]
     drop(case);
     (verdict, compiled.log, compiled.used)
