@@ -1,0 +1,27 @@
+// Built-in JSON, then walk the records with accessors: sum, filter, group by a nested field.
+fn main(data: Dir) -> Int {
+    let text = match data.read("data.json") {
+        Ok(b) => b.to_str(),
+        Err(_) => return -1,
+    };
+    let Ok(doc) = text.parse_json() else { return -2; };
+    let recs = doc.as_list().unwrap_or([]);
+    let mut active = 0;
+    let mut score = 0.0;
+    let mut tags = 0;
+    let mut zones: Map<Str, Int> = Map::new();
+    for r in recs {
+        if r.get("active").and_then(|j| j.as_bool()).unwrap_or(false) { active += 1; }
+        score = score + r.get("score").and_then(|j| j.as_float()).unwrap_or(0.0);
+        tags += r.get("tags").and_then(|j| j.as_list()).unwrap_or([]).len();
+        match r.get("meta") {
+            Some(m) => {
+                let z = m.get("zone").and_then(|j| j.as_str()).unwrap_or("");
+                let rank = m.get("rank").and_then(|j| j.as_int()).unwrap_or(0);
+                if rank > 100 { zones.insert(z, zones.get(z).unwrap_or(0) + 1); }
+            }
+            None => {}
+        }
+    }
+    active * 1000000000 + tags * 100000 + zones.len() + score.to_int().unwrap_or(0) % 1000
+}

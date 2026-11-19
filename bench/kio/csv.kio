@@ -1,0 +1,47 @@
+// CSV import into structs, then a group-by: what an agent writes for "load orders, total per city".
+struct Order { id: Int, name: Str, email: Str, city: Str, cents: Int, qty: Int }
+struct Agg { orders: Int, cents: Int, units: Int, biggest: Int }
+
+fn valid_email(e: Str) -> Bool {
+    let parts = e.split("@");
+    parts.len() == 2 && parts[0] != "" && parts[1].contains(".")
+}
+
+fn parse(line: Str) -> Option<Order> {
+    let f = line.split(",");
+    if f.len() != 6 { return None; }
+    let id = f[0].parse_int()?;
+    let cents = f[4].parse_int()?;
+    let qty = f[5].parse_int()?;
+    if !valid_email(f[2]) || qty <= 0 { return None; }
+    Some(Order { id: id, name: f[1].trim(), email: f[2].to_lowercase(), city: f[3], cents: cents, qty: qty })
+}
+
+fn main(data: Dir) -> Int {
+    let text = match data.read("orders.csv") {
+        Ok(b) => b.to_str(),
+        Err(_) => return -1,
+    };
+    let mut orders: List<Order> = [];
+    let mut bad = 0;
+    let mut first = true;
+    for line in text.lines() {
+        if first { first = false; continue; }
+        match parse(line) {
+            Some(o) => orders.push(o),
+            None => bad += 1,
+        }
+    }
+    let mut by_city: Map<Str, Agg> = Map::new();
+    for o in orders {
+        let a = by_city.get(o.city).unwrap_or(Agg { orders: 0, cents: 0, units: 0, biggest: 0 });
+        let big = if o.cents > a.biggest { o.cents } else { a.biggest };
+        by_city.insert(o.city, Agg { orders: a.orders + 1, cents: a.cents + o.cents * o.qty, units: a.units + o.qty, biggest: big });
+    }
+    let mut check = 0;
+    for k in by_city.keys() {
+        let a = by_city.get(k).unwrap_or(Agg { orders: 0, cents: 0, units: 0, biggest: 0 });
+        check = (check * 31 + a.cents % 1000003 + a.orders + a.units + a.biggest) % 1000000007;
+    }
+    check * 1000 + bad
+}

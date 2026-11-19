@@ -24,7 +24,8 @@ KIO = os.environ.get("KIO", os.path.join(ROOT, "target/release/kio"))
 INTERP = os.path.join(ROOT, "bench/target/release/kio-interp")
 TARGET = os.environ.get("CARGO_TARGET_DIR", os.path.join(ROOT, "target"))
 # codegen/build.rs leaves the runtime it embedded in its OUT_DIR; the newest is the release kio's.
-RUNTIME = max(glob.glob(os.path.join(TARGET, "release/build/codegen-*/out/runtime.wasm")),
+RUNTIME = max(glob.glob(os.path.join(TARGET, "release/build/codegen-*/out/runtime.wasm"))
+              + glob.glob(os.path.join(TARGET, "release/build/codegen/*/out/runtime.wasm")),
               key=os.path.getmtime, default=None)
 
 

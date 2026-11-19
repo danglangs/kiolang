@@ -163,16 +163,43 @@ pub unsafe fn append(t: &Table, a: *mut Header, b: *mut Header) -> *mut Header {
             } else {
                 obj::regrow(a, grown(needed, cap))
             };
-            core::ptr::copy_nonoverlapping(add.as_ptr(), obj::field(a, obj::BYTES_DATA + len), add.len());
+            copy_bytes(add, obj::field(a, obj::BYTES_DATA + len));
             *obj::field::<u32>(a, 8) = len32;
             a
         } else {
             // `a` is dropped after `b`'s bytes are copied: it may be `b` (C8b2).
             let q = obj::new_bytes_cap(desc::STR, obj::bytes(a), grown(needed, len));
-            core::ptr::copy_nonoverlapping(add.as_ptr(), obj::field(q, obj::BYTES_DATA + len), add.len());
+            copy_bytes(add, obj::field(q, obj::BYTES_DATA + len));
             *obj::field::<u32>(q, 8) = len32;
             obj::dec(t, a);
             q
+        }
+    }
+}
+
+/// Copies `src` to `dst`. Up to 8 bytes as at most two loads and stores of a fixed size
+/// (overlapping when the length is between), so no `memory.copy`, which Wasmtime makes a call
+/// out of the module: slow for the one character `s = s + c` appends (C20); a longer copy is
+/// `copy_nonoverlapping`.
+///
+/// # Safety
+/// `dst` is valid for `src.len()` bytes and does not overlap `src`.
+unsafe fn copy_bytes(src: &[u8], dst: *mut u8) {
+    let (n, p) = (src.len(), src.as_ptr());
+    // SAFETY: the caller's guarantee; each copy is within the first `n` bytes of both.
+    unsafe {
+        match n {
+            0 => {}
+            1 => *dst = *p,
+            2..=3 => {
+                core::ptr::copy_nonoverlapping(p, dst, 2);
+                core::ptr::copy_nonoverlapping(p.add(n - 2), dst.add(n - 2), 2);
+            }
+            4..=8 => {
+                core::ptr::copy_nonoverlapping(p, dst, 4);
+                core::ptr::copy_nonoverlapping(p.add(n - 4), dst.add(n - 4), 4);
+            }
+            _ => core::ptr::copy_nonoverlapping(p, dst, n),
         }
     }
 }
@@ -366,6 +393,7 @@ pub unsafe fn split(list: u32, s: *mut Header, sep: *mut Header) -> Result<*mut 
         let s = str_of(s);
         Ok(match *sep.as_bytes() {
             [c] => split_byte(list, s.as_bytes(), c),
+            _ if sep.len() <= SHORT => split_short(list, s.as_bytes(), sep.as_bytes()),
             _ => strs(list, s.split(sep)),
         })
     }
@@ -387,16 +415,67 @@ fn split_byte(list: u32, s: &[u8], c: u8) -> *mut Header {
     obj::new_list(list, parts)
 }
 
+/// `split` at a separator of 2 to `SHORT` bytes (C20): each match found by `find_short`, so no
+/// searcher is built. A match of a UTF-8 separator in UTF-8 text starts and ends at character
+/// boundaries, so the parts are `str::split`'s, each UTF-8.
+fn split_short(list: u32, s: &[u8], sep: &[u8]) -> *mut Header {
+    let mut parts = List::new();
+    let mut start = 0;
+    while let Some(k) = find_short(&s[start..], sep) {
+        parts.push(to_slot(obj::new_bytes(desc::STR, &s[start..start + k])));
+        start += k + sep.len();
+    }
+    parts.push(to_slot(obj::new_bytes(desc::STR, &s[start..])));
+    obj::new_list(list, parts)
+}
+
+/// The longest needle `find_short` takes: `contains`, `find` and `split` with a needle of at
+/// most this many bytes scan for it directly instead of building core's two-way searcher,
+/// whose setup costs more than the scan on short strings (C20).
+const SHORT: usize = 8;
+
+/// The offset of the first match of `n` (1 to `SHORT` bytes) in `h`: each byte equal to `n`'s
+/// first, found as `next_byte` finds it, then the rest compared.
+fn find_short(h: &[u8], n: &[u8]) -> Option<usize> {
+    let starts = &h[..(h.len() + 1).checked_sub(n.len())?];
+    let mut i = 0;
+    while let Some(k) = next_byte(starts, n[0], i) {
+        if h[k + 1..k + n.len()] == n[1..] {
+            return Some(k);
+        }
+        i = k + 1;
+    }
+    None
+}
+
+const LOW7: u64 = 0x7f7f_7f7f_7f7f_7f7f;
+
+/// A mask with the high bit set in each byte of `w` equal to `c`, exactly: `(x & LOW7) + LOW7`
+/// sets it in each byte of `x` whose low 7 bits are not all 0, without carrying into the next.
+fn bytes_equal(w: u64, c: u8) -> u64 {
+    let x = w ^ (u64::from(c) * 0x0101_0101_0101_0101);
+    !(((x & LOW7) + LOW7) | x | LOW7)
+}
+
+/// The offset of the first byte of `s` equal to `c` at or after `i`: 8 bytes at a time while 8
+/// are left, then one at a time.
+fn next_byte(s: &[u8], c: u8, mut i: usize) -> Option<usize> {
+    while i + 8 <= s.len() {
+        let m = bytes_equal(word(s, i), c);
+        if m != 0 {
+            return Some(i + (m.trailing_zeros() / 8) as usize);
+        }
+        i += 8;
+    }
+    s.get(i..)?.iter().position(|&b| b == c).map(|k| i + k)
+}
+
 /// Calls `f` with the offset of each byte of `s` equal to `c`, in order: 8 bytes at a time
 /// while 8 are left, then one at a time.
 fn each_byte(s: &[u8], c: u8, mut f: impl FnMut(usize)) {
-    const LOW7: u64 = 0x7f7f_7f7f_7f7f_7f7f;
     let mut i = 0;
     while i + 8 <= s.len() {
-        // The high bit of each byte that is 0 in `x`, exactly: `(x & LOW7) + LOW7` sets it in
-        // each byte whose low 7 bits are not all 0, without carrying into the next byte.
-        let x = word(s, i) ^ (u64::from(c) * 0x0101_0101_0101_0101);
-        let mut m = !(((x & LOW7) + LOW7) | x | LOW7);
+        let mut m = bytes_equal(word(s, i), c);
         while m != 0 {
             f(i + (m.trailing_zeros() / 8) as usize);
             m &= m - 1;
@@ -501,7 +580,7 @@ pub unsafe fn trim(s: *mut Header) -> *mut Header {
 /// The module's contract.
 pub unsafe fn contains(s: *mut Header, sub: *mut Header) -> bool {
     // SAFETY: the caller's guarantee.
-    unsafe { str_of(s).contains(str_of(sub)) }
+    unsafe { search(s, sub).is_some() }
 }
 
 /// `Str.starts_with(prefix)`.
@@ -593,7 +672,21 @@ pub unsafe fn find(t: &Table, opt: u32, none: *mut Header, s: *mut Header, sub: 
 /// The module's contract.
 pub unsafe fn find_opt(s: *mut Header, sub: *mut Header) -> Option<u64> {
     // SAFETY: the caller's guarantee.
-    unsafe { str_of(s).find(str_of(sub)).map(|i| i as u64) }
+    unsafe { search(s, sub).map(|i| i as u64) }
+}
+
+/// The offset of the first match of `sub` in `s`, as `str::find`: `find_short` for a needle of
+/// 1 to `SHORT` bytes.
+///
+/// # Safety
+/// The module's contract.
+unsafe fn search(s: *mut Header, sub: *mut Header) -> Option<usize> {
+    // SAFETY: the caller's guarantee.
+    let (s, sub) = unsafe { (str_of(s), str_of(sub)) };
+    match sub.len() {
+        1..=SHORT => find_short(s.as_bytes(), sub.as_bytes()),
+        _ => s.find(sub),
+    }
 }
 
 /// `Str.replace(from, to)`: every non-overlapping match, left to right; an empty `from`

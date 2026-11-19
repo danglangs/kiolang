@@ -15,7 +15,7 @@ Needs Rust, Python 3, `ab` (ApacheBench, on macOS by default) and a kio-web chec
 | `rust/` | the Rust versions, one binary each (a cargo project outside the workspace) |
 | `py/` | the Python versions |
 | `interp/` | `kio-interp`: the native interpreter (`kio_host::Interp`, the test oracle, not shipped) as a command |
-| `gen_data.py` | writes `data/words.txt` and `data/data.json` (1 MB each, deterministic) |
+| `gen_data.py` | writes `data/words.txt`, `data/data.json`, `data/orders.csv` and `data/access.log` (1 MB each, deterministic) |
 | `run.py` | times everything and prints the table |
 | `profile.py` | a `sample` profile of one compiled run, naming compiled frames |
 | `gate.py`, `baseline.json` | the CI regression gate: fuel and peak memory per program against the baseline ([perf.md](../docs/perf.md#regression-gate)) |

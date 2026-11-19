@@ -1,0 +1,59 @@
+// Scan access-log lines character by character (`key=value` pairs), count statuses and sum
+// durations per route: a hand-written parser of the kind agents write with `chars()`.
+fn route(path: Str) -> Str {
+    // "/api/v1/items/123" -> "/api/v1/items": numeric segments dropped
+    let mut out = "";
+    let mut seg = "";
+    for c in path.chars() {
+        if c == "/" {
+            if seg != "" && seg.parse_int().is_none() { out = out + "/" + seg; }
+            seg = "";
+        } else {
+            seg = seg + c;
+        }
+    }
+    if seg != "" && seg.parse_int().is_none() { out = out + "/" + seg; }
+    out
+}
+
+fn main(data: Dir) -> Int {
+    let text = match data.read("access.log") {
+        Ok(b) => b.to_str(),
+        Err(_) => return -1,
+    };
+    let mut statuses: Map<Str, Int> = Map::new();
+    let mut dur: Map<Str, Int> = Map::new();
+    let mut errors = 0;
+    for line in text.lines() {
+        let mut key = "";
+        let mut val = "";
+        let mut in_val = false;
+        let mut path = "";
+        let mut status = "";
+        let mut ms = 0;
+        for c in (line + " ").chars() {
+            if c == " " {
+                if key == "path" { path = val; }
+                else if key == "status" { status = val; }
+                else if key == "dur_ms" { ms = val.parse_int().unwrap_or(0); }
+                else if key == "level" && val == "error" { errors += 1; }
+                key = "";
+                val = "";
+                in_val = false;
+            } else if c == "=" && !in_val {
+                in_val = true;
+            } else if in_val {
+                val = val + c;
+            } else {
+                key = key + c;
+            }
+        }
+        statuses.insert(status, statuses.get(status).unwrap_or(0) + 1);
+        let r = route(path);
+        dur.insert(r, dur.get(r).unwrap_or(0) + ms);
+    }
+    let mut check = errors;
+    for k in statuses.keys() { check = (check * 31 + statuses.get(k).unwrap_or(0)) % 1000000007; }
+    for k in dur.keys() { check = (check * 31 + dur.get(k).unwrap_or(0) + k.len()) % 1000000007; }
+    check
+}

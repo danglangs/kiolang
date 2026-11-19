@@ -120,6 +120,7 @@ Compiled-only kio covers the whole language and every capability; speed work res
 | C16 | Miscompile fixed: `"b" == "bc"` compiled to `true` (P9's one-byte-literal `==` compared the literal with its own byte when both sides were literals). Corpus has 12 shapes and the found program; kiogen generates L29's methods. Harness 592 both ways, 589 agreed, 0 leaked; 2,000 generated programs agree both ways (1,602 values, 398 runtime errors), also under `KIO_TEST_HEAP=1` |
 | C17 | `--listen` request cost (speed plan 1-2): 8 KB heap chunks and 128 KB of free initial heap, so hello and the JSON handler never grow memory (peak 1.9/2.1 to 1.25 MB); the pool keeps tables resident and, on Linux, the initial memory (`memset`, not `madvise`). macOS CPU a request: hello 120 to 82 µs, JSON 139 to 84; idle RSS unchanged. A test reads every byte of reused slots for a previous instance's marker; `--memory` still stops a request. Linux numbers next (#322-#324) |
 | C19 | Closure literals and named functions passed to `map`/`filter`/`any`/`all`/`sort_by_key` and the `Option`/`Result` built-ins are called directly or inlined, no function object: closures row 13.6 to 8.0 ms (fuel -6.5%). Harness and 2,000 generated programs agree, also on the test heap |
+| C20 | Short `Str` appends inline in generated code, short copies without `memory.copy`, needles of at most 8 bytes scanned directly: logscan 19.3-20.6 to 15.1-16.2 ms (predicted ~11), csv unchanged within noise (predicted -15%). bench/ gains `csv`, `logscan`, `records` with Rust and Python twins |
 
 ## Next
 

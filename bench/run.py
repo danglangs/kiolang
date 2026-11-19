@@ -39,6 +39,9 @@ BENCHES = [
     ("mandel", "Mandelbrot 400x400, 100 iterations", None),
     ("json", "JSON parse + encode, 1 MB (json.kio)", "data.json"),
     ("json_builtin", "JSON parse + encode, 1 MB (built-in)", "data.json"),
+    ("csv", "CSV import into structs, totals per city, 1 MB", "orders.csv"),
+    ("logscan", "access log parsed with `chars()`, totals per route, 1 MB", "access.log"),
+    ("records", "`Json` accessors over data.json's records", "data.json"),
 ]
 
 
@@ -67,6 +70,8 @@ def best(cmd, env=None, runs=RUNS):
 
 # Benchmarks timed against another's Rust and Python versions.
 SHARED = {"json_builtin": "json", "hashmap": "map"}
+# Python files not named for their row (a `csv.py` would shadow the standard library's).
+PY = {"json": "json_bench", "csv": "csv_bench"}
 
 
 def commands(name, data):
@@ -74,7 +79,7 @@ def commands(name, data):
     kio_args = ["--dir", "data=" + DATA] if data else []
     other = SHARED.get(name, name)
     rust = [os.path.join(RUST, other)] + ([os.path.join(DATA, data)] if data else [])
-    py = [sys.executable, os.path.join(BENCH, "py", ("json_bench" if other == "json" else other) + ".py")]
+    py = [sys.executable, os.path.join(BENCH, "py", PY.get(other, other) + ".py")]
     py += [os.path.join(DATA, data)] if data else []
     return (
         [KIO, "run", kio_file] + kio_args + LIMITS,

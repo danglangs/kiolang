@@ -1146,6 +1146,60 @@ impl<'m> FuncGen<'_, 'm> {
         s.else_().local_get(l).local_get(v).i32_const(site as i32).call(f).end();
     }
 
+    /// `rt_str_append` of the `Str` on the stack under the top one, inline when the first holds
+    /// its only reference, the second is at most 8 bytes and they fit the first's capacity (C20):
+    /// the bytes copied one at a time after the last (disjoint even if both are one object) and
+    /// `len` grown. Otherwise the runtime appends. Leaves the object to store.
+    fn str_append(&mut self) {
+        let [a, n, _] = self.list_scratch();
+        let [b, len] = self.rc_scratch();
+        let f = self.rt.export("rt_str_append");
+        let mut s = self.sink();
+        s.local_set(b).local_set(a);
+        s.local_get(a).i32_load(RC).i32_const(1).i32_eq();
+        s.local_get(b)
+            .i32_load(BYTES_LEN)
+            .local_tee(n)
+            .i32_const(8)
+            .i32_le_u()
+            .i32_and();
+        s.local_get(a)
+            .i32_load(BYTES_LEN)
+            .local_tee(len)
+            .local_get(n)
+            .i32_add()
+            .local_get(a)
+            .i32_load(BYTES_CAP)
+            .i32_le_u()
+            .i32_and();
+        s.if_(BlockType::Result(ValType::I32));
+        s.local_get(a)
+            .local_get(len)
+            .local_get(n)
+            .i32_add()
+            .i32_store(BYTES_LEN);
+        // Byte `n - 1` down to byte 0.
+        s.block(BlockType::Empty).loop_(BlockType::Empty);
+        s.local_get(n).i32_eqz().br_if(1);
+        s.local_get(a)
+            .local_get(len)
+            .i32_add()
+            .local_get(n)
+            .i32_const(1)
+            .i32_sub()
+            .local_tee(n)
+            .i32_add()
+            .local_get(b)
+            .local_get(n)
+            .i32_add()
+            .i32_load8_u(BYTES_DATA)
+            .i32_store8(BYTES_DATA)
+            .br(0);
+        s.end().end();
+        s.local_get(a);
+        s.else_().local_get(a).local_get(b).call(f).end();
+    }
+
     /// Three locals for the inline list operations: a list (`i32`), a length (`i32`) and a
     /// slot (`i64`). As `rc_scratch`, they hold no kio code.
     fn list_scratch(&mut self) -> [u32; 3] {
@@ -2008,7 +2062,7 @@ impl<'m> FuncGen<'_, 'm> {
                             self.sink().local_set(v);
                         }
                         self.sink().local_get(l).local_get(v);
-                        self.call_rt("rt_str_append");
+                        self.str_append();
                         if y.is_none() {
                             self.dec(v);
                         }
@@ -2111,7 +2165,7 @@ impl<'m> FuncGen<'_, 'm> {
         self.get(parts[0], temps[0]);
         for (x, t) in parts.iter().zip(&temps).skip(1) {
             self.get(x, *t);
-            self.call_rt("rt_str_append");
+            self.str_append();
         }
         self.drop_operands(&parts[1..], &temps[1..], &borrowed[1..]);
         self.owned.truncate(mark);
@@ -2316,7 +2370,7 @@ impl<'m> FuncGen<'_, 'm> {
                     // `old + v`: `rt_str_append` takes the slot's reference to `old` (growing
                     // it in place if that was the only one) and borrows `v`, then dropped.
                     self.sink().i32_wrap_i64().local_get(v);
-                    self.call_rt("rt_str_append");
+                    self.str_append();
                     self.sink().i64_extend_i32_u().i64_store(SLOT);
                     self.dec(v);
                 } else if matches!(op, BinOp::FAdd | BinOp::FSub) {
@@ -2355,7 +2409,7 @@ impl<'m> FuncGen<'_, 'm> {
                 let v = self.temp(ValType::I32);
                 self.expr(value);
                 self.sink().local_set(v).local_get(l).local_get(v);
-                self.call_rt("rt_str_append");
+                self.str_append();
                 self.sink().local_set(l);
                 self.dec(v);
             }

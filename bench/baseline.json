@@ -18,7 +18,7 @@
     },
     "strings": {
       "value": "588890",
-      "fuel": 55508321,
+      "fuel": 59530828,
       "peak_memory": 3473408
     },
     "list": {
@@ -53,13 +53,28 @@
     },
     "json": {
       "value": "1048619",
-      "fuel": 615081182,
+      "fuel": 621472400,
       "peak_memory": 15007744
     },
     "json_builtin": {
       "value": "1048619",
       "fuel": 179073508,
       "peak_memory": 16252928
+    },
+    "csv": {
+      "value": "657846262417",
+      "fuel": 184641515,
+      "peak_memory": 8388608
+    },
+    "logscan": {
+      "value": "476232435",
+      "fuel": 253582273,
+      "peak_memory": 3932160
+    },
+    "records": {
+      "value": "4374326005253",
+      "fuel": 198677872,
+      "peak_memory": 12189696
     },
     "chars": {
       "value": "10",

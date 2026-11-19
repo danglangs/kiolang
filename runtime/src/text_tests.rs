@@ -162,6 +162,95 @@ fn split_one_byte_matches_str_split() {
     assert_eq!(obj::live(), base);
 }
 
+/// The short-needle paths (C20) against `str`'s: `contains`, `find` and `split` with needles of
+/// 1 to 9 bytes (9 takes the searcher), at every offset of random haystacks over an alphabet
+/// whose letters share prefixes, with non-ASCII bytes and needles longer than the haystack.
+#[test]
+fn short_needles_match_str() {
+    let _g = lock();
+    let base = obj::live();
+    let alphabet = ["a", "b", "ab", "é", "日", ".", "\0"];
+    let needles = [
+        "a",
+        "b",
+        ".",
+        "ab",
+        "aab",
+        "é",
+        "日",
+        "aé",
+        "abab",
+        "ababab",
+        "aaaaaaab",
+        "aaaaaaaab",
+        "日日日",
+    ];
+    let mut x = 11u64;
+    let n = if cfg!(miri) { 20 } else { 1500 };
+    for len in 0..n {
+        let mut h = String::new();
+        for _ in 0..len % 30 {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            h.push_str(alphabet[(x >> 33) as usize % alphabet.len()]);
+        }
+        for sep in needles {
+            let want: Vec<String> = h.split(sep).map(String::from).collect();
+            assert_eq!(split(&h, sep), Ok(want), "{h:?} at {sep:?}");
+            let (a, b) = (s(&h), s(sep));
+            // SAFETY: live `Str`s.
+            let (c, f) = unsafe { (text::contains(a, b), text::find_opt(a, b)) };
+            assert_eq!(c, h.contains(sep), "{h:?} contains {sep:?}");
+            assert_eq!(f, h.find(sep).map(|i| i as u64), "{h:?} find {sep:?}");
+            dec(a);
+            dec(b);
+        }
+    }
+    assert_eq!(obj::live(), base);
+}
+
+/// `append` of 0 to 9 bytes (the short copies, C20) in place and onto a shared `Str`.
+#[test]
+fn short_appends_copy_every_byte() {
+    let _g = lock();
+    let base = obj::live();
+    let parts = [
+        "",
+        "a",
+        "bc",
+        "def",
+        "ghij",
+        "klmno",
+        "pqrstu",
+        "vwxyz12",
+        "34567890",
+        "日本語!",
+    ];
+    let mut want = String::new();
+    let mut a = s("");
+    for (i, p) in parts.iter().cycle().take(50).enumerate() {
+        want.push_str(p);
+        let x = s(p);
+        // SAFETY: live `Str`s; `append` takes `a` and borrows `x`. Every third pass a second
+        // reference to `a` (`shared`) makes it copy, and the old `a` must keep its bytes.
+        unsafe {
+            if i % 3 == 0 {
+                obj::inc(a);
+                let shared = a;
+                let before = String::from_utf8(obj::bytes(shared).to_vec()).unwrap();
+                a = text::append(&T, a, x);
+                assert_eq!(obj::bytes(shared), before.as_bytes());
+                dec(shared);
+            } else {
+                a = text::append(&T, a, x);
+            }
+            assert_eq!(obj::bytes(a), want.as_bytes());
+        }
+        dec(x);
+    }
+    dec(a);
+    assert_eq!(obj::live(), base);
+}
+
 /// P9: an ASCII character from `chars()` is a shared pinned `Str`, never freed; any other is
 /// its own, freed with the list.
 #[test]
