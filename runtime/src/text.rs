@@ -231,6 +231,22 @@ pub unsafe fn try_to_str_opt(b: *mut Header) -> Option<u64> {
     unsafe { to_str(b) }.ok().map(to_slot)
 }
 
+/// `Str.url_decode()`'s payload (`form_decode()`'s when `form`), a new `Str` (conv.rs), when
+/// the decoded bytes are UTF-8.
+///
+/// # Safety
+/// The module's contract.
+pub unsafe fn url_decode_opt(s: *mut Header, form: bool) -> Option<u64> {
+    let decode = if form {
+        crate::conv::form_decode
+    } else {
+        crate::conv::url_decode
+    };
+    // SAFETY: the caller's guarantee.
+    let b = decode(unsafe { obj::bytes(s) })?;
+    core::str::from_utf8(&b).ok().map(|s| to_slot(new_str(s)))
+}
+
 /// `Bytes.to_str()` taking `b`'s reference (C8c4): the bytes are checked as `to_str`'s; if the
 /// reference is the only one, `b` becomes the `Str`, otherwise the result is a copy and `b` is
 /// dropped. On `InvalidUtf8` the reference stays the caller's (which traps).

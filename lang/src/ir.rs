@@ -350,6 +350,26 @@ pub enum Builtin {
     StrFromHex,
     BytesCtEq,
     StrCtEq,
+    /// L29 (lang/src/conv.rs). `unwrap` and `expect` are checked to be in tests only.
+    IntCheckedAdd,
+    IntCheckedSub,
+    IntCheckedMul,
+    IntPow,
+    IntAbs,
+    IntBitAnd,
+    IntBitOr,
+    IntBitXor,
+    IntShl,
+    IntShr,
+    StrUrlDecode,
+    StrFormDecode,
+    StrUrlEncode,
+    IntIsoUtc,
+    StrParseIsoUtc,
+    OptionUnwrap,
+    OptionExpect,
+    ResultUnwrap,
+    ResultExpect,
 }
 
 /// Every built-in method that changes its receiver.

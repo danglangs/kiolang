@@ -4,7 +4,14 @@ use std::{env, path::PathBuf, process::Command};
 /// The runtime is built under `OUT_DIR`, so builds with different target directories never
 /// share (or race on) it. `KIO_TEST_HEAP=1` builds it with the `test-heap` feature.
 fn main() {
-    for p in ["../runtime", "../lang/src/hmap.rs", "../caps.wit", "build.rs"] {
+    // lang's files the runtime includes by `#[path]` too.
+    let shared = [
+        "../lang/src/hmap.rs",
+        "../lang/src/digest.rs",
+        "../lang/src/sort.rs",
+        "../lang/src/conv.rs",
+    ];
+    for p in ["../runtime", "../caps.wit", "build.rs"].into_iter().chain(shared) {
         println!("cargo:rerun-if-changed={p}");
     }
     println!("cargo:rerun-if-env-changed=KIO_TEST_HEAP");

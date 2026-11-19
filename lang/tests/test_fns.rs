@@ -363,3 +363,49 @@ fn pure() { assert_eq(1, 1); }"#;
     assert_eq!(lang::report_diff(&p(base), &p(&with)), lang::AuthorityDiff::default());
     assert_eq!(lang::report_diff(&p(&with), &p(base)), lang::AuthorityDiff::default());
 }
+
+/// L29: `unwrap` and `expect` in a test (a property and its closures too) give the payload, or
+/// stop at the call with the message; an `Err` is shown after it.
+const UNWRAPS: &str = r#"
+enum E { Bad(Int) }
+#[test]
+fn some() { let r: Result<Int, Str> = Ok(4); assert_eq(Some(3).unwrap() + r.expect("four"), 7); }
+#[test]
+fn none() { let o: Option<Int> = None; let _ = o.unwrap(); }
+#[test]
+fn none_expect() { let o: Option<Int> = None; let _ = o.expect("needs a value"); }
+#[test]
+fn err() { let r: Result<Int, Str> = Err("no \"x\""); let _ = r.unwrap(); }
+#[test]
+fn err_expect() { let r: Result<(), E> = Err(E::Bad(2)); r.expect("parsed"); }
+#[test]
+fn prop(n: Int) { assume(n < 9223372036854775807); let f = |m: Int| m.checked_add(1).unwrap(); assert_eq(f(n), n + 1); }
+fn main() {}
+"#;
+
+#[test]
+fn unwrap_and_expect_in_tests() {
+    assert_eq!(exec(UNWRAPS, "some"), Ok(Value::Unit));
+    fails(UNWRAPS, "none", "called `unwrap` on `None`", "o.unwrap()");
+    fails(UNWRAPS, "none_expect", "needs a value", "o.expect(\"needs a value\")");
+    fails(
+        UNWRAPS,
+        "err",
+        "called `unwrap` on an `Err` value: \"no \\\"x\\\"\"",
+        "r.unwrap()",
+    );
+    fails(UNWRAPS, "err_expect", "parsed: E::Bad(2)", "r.expect(\"parsed\")");
+    // A helper in `mod tests` may unwrap; the same helper elsewhere may not.
+    let helper = "pub fn num(s: Str) -> Int { s.parse_int().unwrap() }";
+    let files = [("app", "mod tests;\nfn main() {}"), ("tests", helper)];
+    check_files(&files, &common::caps()).unwrap_or_else(|d| panic!("{d:?}"));
+    let files = [("app", "mod util;\nfn main() {}"), ("util", helper)];
+    let d = check_files(&files, &common::caps()).expect_err("outside tests");
+    assert_eq!(
+        (d[0].msg.as_str(), d[0].hint.as_deref()),
+        (
+            "`unwrap` is for tests; a stopped run is a 500",
+            Some("use `?`, `match`, or `unwrap_or`")
+        )
+    );
+}

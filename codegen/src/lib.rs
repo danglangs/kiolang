@@ -997,6 +997,11 @@ const SLICE_BOUNDS: &str = "slice {a}..{b} out of bounds for length {c}";
 /// `Rng`'s argument checks (`rng_check`); the texts are `lang::eval::cap_arg_error`'s.
 const RNG_BYTES: &str = "Rng.bytes({a}): the count must be 0 to 65536";
 const RNG_INT: &str = "Rng.int({a}, {b}): lo must be less than hi";
+/// L29's errors; the texts are `lang::eval::builtin`'s.
+const POW_NEGATIVE: &str = "Int.pow({a}): the exponent must be 0 or more";
+const SHL_COUNT: &str = "Int.shl({a}): the count must be 0 to 63";
+const SHR_COUNT: &str = "Int.shr({a}): the count must be 0 to 63";
+const ISO_RANGE: &str = "iso_utc of {a}: outside years 0000 to 9999";
 
 impl<'m> FuncGen<'_, 'm> {
     fn sink(&mut self) -> InstructionSink<'_> {
@@ -2714,6 +2719,25 @@ impl<'m> FuncGen<'_, 'm> {
                 self.expr(&args[0]);
                 self.min_max(*b);
             }
+            ExprKind::Builtin(
+                b @ (Builtin::IntBitAnd
+                | Builtin::IntBitOr
+                | Builtin::IntBitXor
+                | Builtin::IntShl
+                | Builtin::IntShr
+                | Builtin::IntAbs),
+                recv,
+                args,
+            ) => {
+                self.expr(recv);
+                args.iter().for_each(|x| self.expr(x));
+                self.int_method(*b, e.span);
+            }
+            ExprKind::Builtin(
+                b @ (Builtin::OptionUnwrap | Builtin::OptionExpect | Builtin::ResultUnwrap | Builtin::ResultExpect),
+                recv,
+                args,
+            ) => self.unwrap(*b, recv, args, &e.ty, e.span),
             ExprKind::Builtin(b, recv, _) if inline_builtin(*b) => {
                 self.expr(recv);
                 self.scalar_builtin(*b);
@@ -2815,8 +2839,26 @@ impl<'m> FuncGen<'_, 'm> {
                     Builtin::BytesToHex => ("rt_bytes_to_hex", Nothing, None),
                     Builtin::StrFromHex => ("rt_str_from_hex_u", Nothing, None),
                     Builtin::StrCtEq | Builtin::BytesCtEq => ("rt_ct_eq", Nothing, None),
+                    Builtin::IntCheckedAdd => ("rt_int_checked_add_u", Nothing, None),
+                    Builtin::IntCheckedSub => ("rt_int_checked_sub_u", Nothing, None),
+                    Builtin::IntCheckedMul => ("rt_int_checked_mul_u", Nothing, None),
+                    Builtin::IntPow => ("rt_int_pow", Nothing, Some(POW_NEGATIVE)),
+                    Builtin::IntIsoUtc => ("rt_int_iso_utc", Nothing, Some(ISO_RANGE)),
+                    Builtin::StrUrlDecode => ("rt_str_url_decode_u", Nothing, None),
+                    Builtin::StrFormDecode => ("rt_str_form_decode_u", Nothing, None),
+                    Builtin::StrUrlEncode => ("rt_str_url_encode", Nothing, None),
+                    Builtin::StrParseIsoUtc => ("rt_str_parse_iso_utc_u", Nothing, None),
                     Builtin::IntMin | Builtin::IntMax | Builtin::FloatMin | Builtin::FloatMax => {
                         unreachable!("min_max")
+                    }
+                    Builtin::IntBitAnd
+                    | Builtin::IntBitOr
+                    | Builtin::IntBitXor
+                    | Builtin::IntShl
+                    | Builtin::IntShr
+                    | Builtin::IntAbs => unreachable!("int_method"),
+                    Builtin::OptionUnwrap | Builtin::OptionExpect | Builtin::ResultUnwrap | Builtin::ResultExpect => {
+                        unreachable!("unwrap")
                     }
                     Builtin::OptionMap
                     | Builtin::OptionAndThen
@@ -2834,6 +2876,9 @@ impl<'m> FuncGen<'_, 'm> {
                 let mut sites: Vec<u32> = error.map(|t| self.site(e.span, t)).into_iter().collect();
                 if *b == Builtin::StrSlice {
                     sites.push(self.site(e.span, "slice {a}..{b} is not on a character boundary"));
+                }
+                if *b == Builtin::IntPow {
+                    sites.push(self.site(e.span, OVERFLOW));
                 }
                 let xs: Vec<&ir::Expr> = std::iter::once(&**recv).chain(args).collect();
                 // These take their argument as a slot.
@@ -3645,6 +3690,101 @@ impl<'m> FuncGen<'_, 'm> {
         // NaN only when one is: `y` if `x` is NaN, then `x` if `y` is.
         s.local_get(y).local_get(x).local_get(x).f64_eq().select();
         s.local_get(x).local_get(y).local_get(y).f64_eq().select();
+    }
+
+    /// L29's `Int` methods of a Wasm instruction or a few, on the operands on the stack: the
+    /// bitwise ones, a shift after its count is checked to be 0 to 63, `abs` after its check for
+    /// `Int::MIN`.
+    fn int_method(&mut self, b: Builtin, span: Span) {
+        let [x, n, _] = self.scratch();
+        match b {
+            Builtin::IntBitAnd => {
+                self.sink().i64_and();
+            }
+            Builtin::IntBitOr => {
+                self.sink().i64_or();
+            }
+            Builtin::IntBitXor => {
+                self.sink().i64_xor();
+            }
+            Builtin::IntShl | Builtin::IntShr => {
+                self.sink().local_set(n).local_set(x);
+                self.sink().local_get(n).i64_const(63).i64_gt_u();
+                self.trap_if(span, if b == Builtin::IntShl { SHL_COUNT } else { SHR_COUNT }, n, n);
+                let mut s = self.sink();
+                s.local_get(x).local_get(n);
+                match b {
+                    Builtin::IntShl => s.i64_shl(),
+                    _ => s.i64_shr_s(),
+                };
+            }
+            _ => {
+                // `abs`: `-x` when `x < 0`.
+                self.sink().local_tee(x).i64_const(i64::MIN).i64_eq();
+                self.trap_if(span, OVERFLOW, x, x);
+                let mut s = self.sink();
+                s.i64_const(0).local_get(x).i64_sub().local_get(x);
+                s.local_get(x).i64_const(0).i64_lt_s().select();
+            }
+        }
+    }
+
+    /// `unwrap` or `expect` (L29): the payload (+1) on `Some` or `Ok`; otherwise the run stops
+    /// with `lang::eval::unwrap_error`'s text.
+    fn unwrap(&mut self, b: Builtin, recv: &ir::Expr, args: &[ir::Expr], ty: &Ty, span: Span) {
+        let xs: Vec<&ir::Expr> = std::iter::once(recv).chain(args).collect();
+        let (mark, temps, borrowed) = self.operands_borrowing(&xs, |i| i == 0);
+        let Val::Two(tag, pay) = temps[0] else {
+            self.sink().unreachable();
+            self.owned.truncate(mark);
+            return;
+        };
+        let success = matches!(recv.ty, Ty::Option(_)) as i32;
+        self.sink().local_get(tag).i32_const(success).i32_eq();
+        let bt = self.block_type(ty);
+        self.open(Open::If, bt);
+        self.payload_owned(pay, ty);
+        if let Some(m) = args.first() {
+            self.drop_val(temps[1], &m.ty);
+        }
+        self.sink().else_();
+        match (b, &recv.ty) {
+            (Builtin::OptionUnwrap, _) => {
+                let site = self.site(span, "called `unwrap` on `None`");
+                let trap = self.rt.export("rt_trap");
+                self.sink().i32_const(site as i32).i64_const(0).i64_const(0).call(trap);
+            }
+            (Builtin::OptionExpect, _) => {
+                let site = self.site(span, "{s0}");
+                self.get(&args[0], temps[1]);
+                self.sink().i32_const(site as i32);
+                self.call_rt("rt_assert_fail");
+            }
+            (_, Ty::Result(_, e)) => {
+                let desc = self.statics.desc(e);
+                self.sink().i32_const(desc as i32).local_get(pay);
+                let template = match args.first() {
+                    Some(m) => {
+                        self.get(m, temps[1]);
+                        "{s0}: {s1}"
+                    }
+                    None => {
+                        self.sink().i32_const(0);
+                        "called `unwrap` on an `Err` value: {s0}"
+                    }
+                };
+                let site = self.site(span, template);
+                self.sink().i32_const(site as i32);
+                self.call_rt("rt_unwrap_err");
+            }
+            _ => unreachable!("checked Result"),
+        }
+        self.sink().unreachable();
+        self.close();
+        if !borrowed[0] {
+            self.drop_val(temps[0], &recv.ty);
+        }
+        self.owned.truncate(mark);
     }
 
     /// Pushes the payload slot in `pay` as a value of type `t`, +1.

@@ -1708,7 +1708,19 @@ fn method(caps: &CapTable, recv: &Ty, name: &str) -> Option<(Vec<Ty>, Ty)> {
         (Ty::List(t), "slice") => Some((vec![Ty::Int, Ty::Int], Ty::List(t.clone()))),
         (Ty::List(_), "reverse") => Some((vec![], Ty::Unit)),
         (Ty::List(_), "join") => Some((vec![Ty::Str], Ty::Str)),
-        (Ty::Int, "min" | "max") => Some((vec![Ty::Int], Ty::Int)),
+        (Ty::Int, "min" | "max" | "pow" | "bit_and" | "bit_or" | "bit_xor" | "shl" | "shr") => {
+            Some((vec![Ty::Int], Ty::Int))
+        }
+        (Ty::Int, "checked_add" | "checked_sub" | "checked_mul") => {
+            Some((vec![Ty::Int], Ty::Option(Box::new(Ty::Int))))
+        }
+        (Ty::Int, "abs") => Some((vec![], Ty::Int)),
+        (Ty::Int, "iso_utc") => Some((vec![], Ty::Str)),
+        (Ty::Str, "parse_iso_utc") => Some((vec![], Ty::Option(Box::new(Ty::Int)))),
+        (Ty::Str, "url_decode" | "form_decode") => Some((vec![], Ty::Option(Box::new(Ty::Str)))),
+        (Ty::Str, "url_encode") => Some((vec![], Ty::Str)),
+        (Ty::Option(t), "unwrap") | (Ty::Result(t, _), "unwrap") => Some((vec![], (**t).clone())),
+        (Ty::Option(t), "expect") | (Ty::Result(t, _), "expect") => Some((vec![Ty::Str], (**t).clone())),
         (Ty::Float, "min" | "max") => Some((vec![Ty::Float], Ty::Float)),
         (Ty::Str, "to_lowercase" | "to_uppercase") => Some((vec![], Ty::Str)),
         (Ty::Bytes, "extend") => Some((vec![Ty::Bytes], Ty::Unit)),
@@ -1801,16 +1813,24 @@ const METHODS: &[&str] = &[
     "as_map",
     "as_str",
     "at",
+    "bit_and",
+    "bit_or",
+    "bit_xor",
     "ceil",
     "chars",
+    "checked_add",
+    "checked_mul",
+    "checked_sub",
     "contains",
     "ct_eq",
     "ends_with",
     "err",
+    "expect",
     "extend",
     "filter",
     "find",
     "floor",
+    "form_decode",
     "from_hex",
     "get",
     "insert",
@@ -1821,6 +1841,7 @@ const METHODS: &[&str] = &[
     "is_none",
     "is_ok",
     "is_some",
+    "iso_utc",
     "join",
     "keys",
     "len",
@@ -1833,14 +1854,18 @@ const METHODS: &[&str] = &[
     "ok_or",
     "parse_float",
     "parse_int",
+    "parse_iso_utc",
     "parse_json",
     "pop",
+    "pow",
     "push",
     "remove",
     "replace",
     "reverse",
     "round",
     "sha256",
+    "shl",
+    "shr",
     "slice",
     "sort",
     "sort_by",
@@ -1860,8 +1885,11 @@ const METHODS: &[&str] = &[
     "to_uppercase",
     "trim",
     "try_to_str",
+    "unwrap",
     "unwrap_or",
     "unwrap_or_else",
+    "url_decode",
+    "url_encode",
 ];
 
 fn cap_methods<'a>(caps: &'a CapTable, name: &str) -> &'a [(String, Vec<Ty>, Ty)] {
@@ -3156,6 +3184,12 @@ impl<'a> Checker<'a> {
         Ok(Ty::List(Box::new(t)))
     }
 
+    /// In a test, or in `mod tests` (modules are flat: `tests.kio`), where `unwrap` and
+    /// `expect` may be called (L29).
+    fn in_tests(&self) -> bool {
+        self.in_test || self.home.module == "tests"
+    }
+
     fn method_call(&mut self, e: &Expr, recv: &Expr, name: &str, args: &[Expr]) -> Result<Ty, Diag> {
         let recv_ty = self.operand(recv, None)?;
         if matches!(
@@ -3185,7 +3219,10 @@ impl<'a> Checker<'a> {
             return self.fn_method(e, &recv_ty, name, args);
         }
         let Some((params, ret)) = method(self.caps, &recv_ty, name) else {
-            let names = method_names(self.caps, &recv_ty);
+            let mut names = method_names(self.caps, &recv_ty);
+            if !self.in_tests() {
+                names.retain(|n| !matches!(*n, "unwrap" | "expect"));
+            }
             let fn_field = match &recv_ty {
                 Ty::Struct(..) => fields_of(self.fields, self.tparams, &recv_ty)
                     .iter()
@@ -3211,6 +3248,10 @@ impl<'a> Checker<'a> {
             };
             return Err(err(e.span, format!("no method `{name}` on {recv_ty}"), Some(&hint)));
         };
+        if matches!((&recv_ty, name), (Ty::Option(_) | Ty::Result(..), "unwrap" | "expect")) && !self.in_tests() {
+            let msg = format!("`{name}` is for tests; a stopped run is a 500");
+            return Err(err(e.span, msg, Some("use `?`, `match`, or `unwrap_or`")));
+        }
         if args.len() != params.len() {
             let msg = format!("`{name}` takes {} arguments, found {}", params.len(), args.len());
             let hint = match (&recv_ty, name, args.len()) {

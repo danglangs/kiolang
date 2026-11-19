@@ -697,3 +697,176 @@ fn main() -> Str {
 }"#;
     assert_eq!(shows(src), "0 10 20 30 30 40 ");
 }
+
+/// L29: checked arithmetic is `None` on overflow; `pow` and `abs` stop the run on it, as `+`.
+#[test]
+fn checked_arithmetic_pow_and_abs() {
+    let src = r#"
+fn main() -> List<Option<Int>> {
+    let max = 9223372036854775807;
+    let min = -max - 1;
+    [max.checked_add(1), max.checked_add(0), min.checked_add(-1), min.checked_add(max),
+     min.checked_sub(1), max.checked_sub(-1), 0.checked_sub(max),
+     max.checked_mul(2), min.checked_mul(-1), min.checked_mul(1), (-3).checked_mul(4)]
+}"#;
+    assert_eq!(
+        shows(src),
+        "[None, Some(9223372036854775807), None, Some(-1), None, None, Some(-9223372036854775807), None, None, Some(-9223372036854775808), Some(-12)]"
+    );
+    let src = r#"
+fn main() -> List<Int> {
+    let max = 9223372036854775807;
+    [2.pow(10), (-3).pow(3), 0.pow(0), 7.pow(0), 0.pow(9), 1.pow(max), (-1).pow(max), (-1).pow(max - 1),
+     2.pow(62), (-2).pow(63), (-7).abs(), 7.abs(), 0.abs(), max.abs(), (-max).abs()]
+}"#;
+    assert_eq!(
+        shows(src),
+        "[1024, -27, 1, 1, 0, 1, -1, 1, 4611686018427387904, -9223372036854775808, 7, 7, 0, 9223372036854775807, 9223372036854775807]"
+    );
+    let overflow = |at: &str| (String::from("Int overflow"), at.to_string());
+    assert_eq!(fails("fn main() -> Int { 2.pow(63) }"), overflow("2.pow(63)"));
+    assert_eq!(
+        fails("fn main() -> Int { 3.pow(9223372036854775807) }"),
+        overflow("3.pow(9223372036854775807)")
+    );
+    assert_eq!(
+        fails("fn main() -> Int { let min = -9223372036854775807 - 1; min.abs() }"),
+        overflow("min.abs()")
+    );
+    assert_eq!(
+        fails("fn main() -> Int { 2.pow(-1) }"),
+        ("Int.pow(-1): the exponent must be 0 or more".into(), "2.pow(-1)".into())
+    );
+    let (msg, _) = rejects("fn main() -> Int { 1.checked_add(2) }");
+    assert_eq!(msg, "expected Int, found Option<Int>");
+}
+
+/// L29: the bitwise methods, as Rust's on `i64`; a shift count outside 0 to 63 stops the run.
+#[test]
+fn bitwise_methods() {
+    let src = r#"
+fn main() -> List<Int> {
+    let max = 9223372036854775807;
+    let min = -max - 1;
+    [12.bit_and(10), 12.bit_or(3), 12.bit_xor(10), 5.bit_xor(-1), min.bit_and(-1), max.bit_or(min),
+     1.shl(0), 1.shl(63), 3.shl(62), max.shl(1), (-1).shl(63),
+     min.shr(63), min.shr(1), max.shr(62), (-8).shr(1), (-1).shr(63), 8.shr(0)]
+}"#;
+    assert_eq!(
+        shows(src),
+        "[8, 15, 6, -6, -9223372036854775808, -1, 1, -9223372036854775808, -4611686018427387904, -2, -9223372036854775808, -1, -4611686018427387904, 1, -4, -1, 8]"
+    );
+    let shl = fails("fn main() -> Int { 1.shl(64) }");
+    assert_eq!(
+        shl,
+        ("Int.shl(64): the count must be 0 to 63".into(), "1.shl(64)".into())
+    );
+    let shr = fails("fn main() -> Int { 1.shr(-1) }");
+    assert_eq!(shr.0, "Int.shr(-1): the count must be 0 to 63");
+    let big = fails("fn main() -> Int { let n = 4294967296; 1.shl(n) }");
+    assert_eq!(big.0, "Int.shl(4294967296): the count must be 0 to 63");
+}
+
+/// L29: `url_decode` (`%XX` either case, `+` kept, `None` when not UTF-8 or a `%` lacks two
+/// hex digits) and `url_encode` (all but RFC 3986 unreserved, uppercase).
+#[test]
+fn url_encoding() {
+    let src = r#"
+fn main() -> List<Option<Str>> {
+    ["".url_decode(), "a+b%20c".url_decode(), "%C3%a9%2f%2F".url_decode(), "%zz".url_decode(), "%e9".url_decode(),
+     "%".url_decode(), "%4".url_decode(), "ab%".url_decode(), "%41%".url_decode(), "%+1".url_decode(), "%00".url_decode(),
+     "é ✓".url_decode()]
+}"#;
+    assert_eq!(
+        shows(src),
+        r#"[Some(""), Some("a+b c"), Some("é//"), None, None, None, None, None, None, None, Some("\0"), Some("é ✓")]"#
+    );
+    // `form_decode` (#320): `+` is a space first, so `%2B` stays a `+`.
+    let src = r#"
+fn main() -> List<Option<Str>> {
+    ["a+b%20c".form_decode(), "%2B".form_decode(), "+%2b+".form_decode(), "q=a+%26+b".form_decode(),
+     "".form_decode(), "%zz".form_decode(), "+%e9".form_decode(), "%+".form_decode()]
+}"#;
+    assert_eq!(
+        shows(src),
+        r#"[Some("a b c"), Some("+"), Some(" + "), Some("q=a & b"), Some(""), None, None, None]"#
+    );
+    let src = r#"
+fn main() -> List<Str> {
+    let all = "AZaz09-._~ !#\"$%&'()*+,/:;=?@[]é😀";
+    [all.url_encode(), "".url_encode(), (all.url_encode().url_decode() == Some(all)).to_str()]
+}"#;
+    assert_eq!(
+        shows(src),
+        r#"["AZaz09-._~%20%21%23%22%24%25%26%27%28%29%2A%2B%2C%2F%3A%3B%3D%3F%40%5B%5D%C3%A9%F0%9F%98%80", "", "true"]"#
+    );
+}
+
+/// L29: `iso_utc` over years 0000 to 9999, and `parse_iso_utc`, its inverse, which also takes a
+/// date alone.
+#[test]
+fn iso_dates() {
+    let src = r#"
+fn main() -> List<Str> {
+    [0.iso_utc(), (-1).iso_utc(), 1767225600000.iso_utc(), 951782400000.iso_utc(), 1709164800000.iso_utc(),
+     253402300799999.iso_utc(), (-62167219200000).iso_utc(), (-62135596800001).iso_utc(), 1234.iso_utc()]
+}"#;
+    assert_eq!(
+        shows(src),
+        r#"["1970-01-01T00:00:00.000Z", "1969-12-31T23:59:59.999Z", "2026-01-01T00:00:00.000Z", "2000-02-29T00:00:00.000Z", "2024-02-29T00:00:00.000Z", "9999-12-31T23:59:59.999Z", "0000-01-01T00:00:00.000Z", "0000-12-31T23:59:59.999Z", "1970-01-01T00:00:01.234Z"]"#
+    );
+    let src = r#"
+fn main() -> List<Option<Int>> {
+    ["1970-01-01".parse_iso_utc(), "1970-01-01T00:00:00.000Z".parse_iso_utc(), "2024-02-29".parse_iso_utc(),
+     "9999-12-31T23:59:59.999Z".parse_iso_utc(), "0000-01-01".parse_iso_utc(), "1969-12-31T23:59:59.999Z".parse_iso_utc(),
+     "2026-02-30".parse_iso_utc(), "2023-02-29".parse_iso_utc(), "1900-02-29".parse_iso_utc(), "2000-02-29".parse_iso_utc(),
+     "2026-13-01".parse_iso_utc(), "2026-00-10".parse_iso_utc(), "2026-04-31".parse_iso_utc(), "2026-01-00".parse_iso_utc(),
+     "2026-01-01T24:00:00.000Z".parse_iso_utc(), "2026-01-01T00:60:00.000Z".parse_iso_utc(), "2026-01-01T00:00:60.000Z".parse_iso_utc(),
+     "2026-01-01T00:00:00Z".parse_iso_utc(), "2026-01-01T00:00:00.000".parse_iso_utc(), "2026-01-01 00:00:00.000Z".parse_iso_utc(),
+     "2026-1-01".parse_iso_utc(), "+026-01-01".parse_iso_utc(), "2026-01-01T00:00:00.000+00:00".parse_iso_utc(), "".parse_iso_utc(),
+     "2026-01-01T00:00:00.00aZ".parse_iso_utc(), "2026-01-01T00:00:00.000z".parse_iso_utc()]
+}"#;
+    assert_eq!(
+        shows(src),
+        "[Some(0), Some(0), Some(1709164800000), Some(253402300799999), Some(-62167219200000), Some(-1), \
+         None, None, None, Some(951782400000), None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None]"
+    );
+    let src = r#"
+fn main() -> Bool {
+    let ts = [0, -1, 1, 951782400000, 1767225600123, 253402300799999, -62167219200000, 4102444800000];
+    ts.all(|t| t.iso_utc().parse_iso_utc() == Some(t))
+}"#;
+    assert_eq!(shows(src), "true");
+    let range = "outside years 0000 to 9999";
+    let late = fails("fn main() -> Str { 253402300800000.iso_utc() }");
+    assert_eq!(
+        late,
+        (
+            format!("iso_utc of 253402300800000: {range}"),
+            "253402300800000.iso_utc()".into()
+        )
+    );
+    let early = fails("fn main() -> Str { (-62167219200001).iso_utc() }");
+    assert_eq!(early.0, format!("iso_utc of -62167219200001: {range}"));
+}
+
+/// L29: `unwrap` and `expect` outside a test are refused at the call.
+#[test]
+fn unwrap_is_for_tests() {
+    let hint = Some("use `?`, `match`, or `unwrap_or`".to_string());
+    let cases = [
+        ("fn main() -> Int { Some(1).unwrap() }", "unwrap"),
+        (
+            "fn main() -> Int { let r: Result<Int, Str> = Ok(1); r.expect(\"one\") }",
+            "expect",
+        ),
+        (
+            "fn f(o: Option<Int>) -> Int { o.expect(\"x\") }\nfn main() -> Int { f(Some(1)) }",
+            "expect",
+        ),
+    ];
+    for (src, name) in cases {
+        let want = format!("`{name}` is for tests; a stopped run is a 500");
+        assert_eq!(rejects(src), (want, hint.clone()), "{src}");
+    }
+}

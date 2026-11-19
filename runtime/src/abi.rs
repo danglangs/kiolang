@@ -12,7 +12,7 @@
 use crate::desc::{RawTable, Table};
 use crate::entry::{rt_trap, trap3, trap_texts};
 use crate::obj::{self, Header};
-use crate::{coll, desc, display, float, json, text};
+use crate::{coll, conv, desc, display, float, json, text};
 use alloc::boxed::Box;
 use core::cell::UnsafeCell;
 
@@ -193,6 +193,22 @@ pub unsafe extern "C" fn rt_assert_eq(desc: u32, a: i64, b: i64, site: u32) {
         }
         let (l, r) = (display::debug(t, desc, a as u64), display::debug(t, desc, b as u64));
         trap_texts(site, &[&l, &r])
+    }
+}
+
+/// `r.unwrap()` (`msg` 0) or `r.expect(msg)` on an `Err` whose payload `e` has descriptor
+/// `desc`: the run stops at `site`, showing `e` (after `msg`), as `lang::eval::unwrap_error`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_unwrap_err(desc: u32, e: i64, msg: u32, site: u32) {
+    // SAFETY: the group's contract.
+    unsafe {
+        let e = display::debug(table(), desc, e as u64);
+        if msg == 0 {
+            trap_texts(site, &[&e])
+        }
+        let mut m = obj::bytes(ptr(msg)).to_vec();
+        display::clip(&mut m);
+        trap_texts(site, &[&m, &e])
     }
 }
 
@@ -730,6 +746,66 @@ pub unsafe extern "C" fn rt_str_from_hex_u(s: u32) -> u32 {
 pub unsafe extern "C" fn rt_bytes_try_to_str_u(b: u32) -> u32 {
     // SAFETY: the group's contract.
     unboxed(unsafe { text::try_to_str_opt(ptr(b)) })
+}
+
+/// `s.url_decode()`: the payload is a new `Str`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_str_url_decode_u(s: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unboxed(unsafe { text::url_decode_opt(ptr(s), false) })
+}
+
+/// `s.form_decode()`: the payload is a new `Str`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_str_form_decode_u(s: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unboxed(unsafe { text::url_decode_opt(ptr(s), true) })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_str_url_encode(s: u32) -> u32 {
+    // SAFETY: the group's contract.
+    addr(text::new_str(&conv::url_encode(unsafe { obj::bytes(ptr(s)) })))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_str_parse_iso_utc_u(s: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unboxed(conv::parse_iso_utc(unsafe { obj::bytes(ptr(s)) }).map(|n| n as u64))
+}
+
+/// `ms.iso_utc()`. Error: outside years 0000 to 9999, with `ms`.
+#[no_mangle]
+pub extern "C" fn rt_int_iso_utc(ms: i64, site: u32) -> u32 {
+    match conv::iso_utc(ms) {
+        Some(s) => addr(text::new_str(&s)),
+        None => rt_trap(site, ms, 0),
+    }
+}
+
+/// `a.pow(b)`. Errors: a negative `b` at `negative`, with `b`; an overflow at `overflow`.
+#[no_mangle]
+pub extern "C" fn rt_int_pow(a: i64, b: i64, negative: u32, overflow: u32) -> i64 {
+    if b < 0 {
+        rt_trap(negative, b, 0)
+    }
+    conv::pow(a, b).unwrap_or_else(|| rt_trap(overflow, a, b))
+}
+
+/// `a.checked_add(b)`, `checked_sub`, `checked_mul`: the payload is the `Int`.
+#[no_mangle]
+pub extern "C" fn rt_int_checked_add_u(a: i64, b: i64) -> u32 {
+    unboxed(a.checked_add(b).map(|n| n as u64))
+}
+
+#[no_mangle]
+pub extern "C" fn rt_int_checked_sub_u(a: i64, b: i64) -> u32 {
+    unboxed(a.checked_sub(b).map(|n| n as u64))
+}
+
+#[no_mangle]
+pub extern "C" fn rt_int_checked_mul_u(a: i64, b: i64) -> u32 {
+    unboxed(a.checked_mul(b).map(|n| n as u64))
 }
 
 #[no_mangle]

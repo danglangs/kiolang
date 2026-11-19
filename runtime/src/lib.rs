@@ -7,6 +7,7 @@
 //! - `hmap`: `HashMap`'s table, lang/src/hmap.rs itself (one source for both paths).
 //! - `json`: built-in JSON, parsed into and encoded from kio objects.
 //! - `sort`, `digest`: `sort_by`'s merge sort; SHA-256, hex and `ct_eq`. lang's own files.
+//! - `conv`: `Int.pow`, URL encoding and ISO dates; lang's own file too.
 //! - `obj`: object layout, allocation, `inc`, `dec`, `unique`; the safe-to-call Rust layer.
 //! - `abi`: the `extern "C"` functions generated code calls, over `u32` addresses (wasm32 only).
 //! - `entry`: the `compiled` world's `run` export, and the entry codegen fills (wasm32 only).
@@ -24,6 +25,8 @@ extern crate alloc;
 extern crate std;
 
 pub mod coll;
+#[path = "../../lang/src/conv.rs"]
+pub mod conv;
 pub mod desc;
 #[path = "../../lang/src/digest.rs"]
 pub mod digest;

@@ -1008,3 +1008,47 @@ fn a_record_no_test_takes_is_refused() {
         (2, "", "kio: --http-record hook=snet: no test takes both `hook: Http` and `snet: Dir`\n  hint: give the Dir parameter's name after `=`, or add `snet: Dir` to the test that takes `hook: Http`\n")
     );
 }
+
+/// L29: compiled, a test's `unwrap` or `expect` gives the payload, or the stop is that test's
+/// FAIL at the call with lang's message; a property's cases also run in the interpreter here.
+#[test]
+fn unwrap_and_expect_fail_their_test() {
+    let c = Case::new(
+        r#"enum E { Bad(Int) }
+#[test]
+fn some() { let r: Result<Int, Str> = Ok(4); assert_eq(Some(3).unwrap() + r.expect("four"), 7); }
+#[test]
+fn none() { let o: Option<Int> = None; let _ = o.unwrap(); }
+#[test]
+fn none_expect() { let o: Option<Int> = None; let _ = o.expect("needs a value"); }
+#[test]
+fn err() { let r: Result<Int, Str> = Err("no \"x\""); let _ = r.unwrap(); }
+#[test]
+fn err_expect() { let r: Result<(), E> = Err(E::Bad(2)); r.expect("parsed"); }
+#[test]
+fn prop(n: Int) { assume(n < 9223372036854775807); let f = |m: Int| m.checked_add(1).unwrap(); assert_eq(f(n), n + 1); }
+#[test]
+fn owned() { let xs = [Some("a"), None]; let s = xs[0].unwrap() + "b"; assert_eq(s, "ab"); let r: Result<List<Str>, Str> = Ok(["x"]); assert_eq(r.unwrap().len(), 1); }
+fn main() {}
+"#,
+    );
+    let (code, out, err) = c.kio(&[]);
+    assert_eq!(code, 1, "{err}");
+    let app = &c.app;
+    let want = format!(
+        "FAIL err
+  {app}:9:63: called `unwrap` on an `Err` value: \"no \\\"x\\\"\"
+FAIL err_expect
+  {app}:11:58: parsed: E::Bad(2)
+FAIL none
+  {app}:5:48: called `unwrap` on `None`
+FAIL none_expect
+  {app}:7:55: needs a value
+ok   owned
+ok   prop  (100 cases compiled; seed 1; 5 discarded)
+ok   some
+3 passed, 4 failed
+"
+    );
+    assert_eq!(out, want);
+}

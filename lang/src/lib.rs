@@ -3,6 +3,7 @@ extern crate alloc;
 pub mod ast;
 mod caps_gen;
 pub mod check;
+pub mod conv;
 pub mod digest;
 pub mod eval;
 pub mod hmap;

@@ -780,22 +780,20 @@ fn closures() {
     assert_eq!(body("let f = |x| x; f(1)"), "{(let f (| x | x)); tail (call f 1)}");
 }
 
-/// L28 3: each bitwise operator says kio has none, and the hint names arithmetic or `Bytes`
-/// (and `&&` or `||` for `&` and `|`).
+/// L28 3: each bitwise operator says kio has none, and the hint names L29's `Int` method (and
+/// `&&` or `||` for `&` and `|`).
 #[test]
 fn rejects_bitwise_operators() {
     let msg = "kio has no bitwise operators";
-    let bits = "use arithmetic (`*`, `/`, `%` by powers of 2) or `Bytes`";
-    let shift = "multiply or divide by a power of 2, or use `Bytes`";
-    let and = format!("for logical and, use `&&`; for bits, {bits}");
-    let or = format!("for logical or, use `||`; for bits, {bits}");
-    rejected_with("fn f() -> Int { 5 ^ 3 }", "^", msg, Some(bits));
-    rejected_with("fn f() -> Int { ~5 }", "~", msg, Some(bits));
-    rejected_with("fn f(a: Int) -> Int { a & 1 }", "&", msg, Some(&and));
-    rejected_with("fn f(a: Int) -> Int { f(a) & 1 }", "&", msg, Some(&and));
-    rejected_with("fn f(a: Int) -> Int { a | 1 }", "|", msg, Some(&or));
-    rejected_with("fn f(a: Int) -> Int { a << 2 }", "<<", msg, Some(shift));
-    rejected_with("fn f(a: Int) -> Int { a >> 2 }", ">>", msg, Some(shift));
+    let and = "for logical and, use `&&`; for bits, use `a.bit_and(b)`";
+    let or = "for logical or, use `||`; for bits, use `a.bit_or(b)`";
+    rejected_with("fn f() -> Int { 5 ^ 3 }", "^", msg, Some("use `a.bit_xor(b)`"));
+    rejected_with("fn f() -> Int { ~5 }", "~", msg, Some("use `a.bit_xor(-1)`"));
+    rejected_with("fn f(a: Int) -> Int { a & 1 }", "&", msg, Some(and));
+    rejected_with("fn f(a: Int) -> Int { f(a) & 1 }", "&", msg, Some(and));
+    rejected_with("fn f(a: Int) -> Int { a | 1 }", "|", msg, Some(or));
+    rejected_with("fn f(a: Int) -> Int { a << 2 }", "<<", msg, Some("use `a.shl(n)`"));
+    rejected_with("fn f(a: Int) -> Int { a >> 2 }", ">>", msg, Some("use `a.shr(n)`"));
     // `&` where a value starts is still a reference; `>>` closing two type lists still parses.
     rejected_with("fn f(a: Int) -> Int { g(&a) }", "&", "kio has no references", Some(""));
     parse("fn f(a: List<List<Int>>) -> Bool { a.len() > 1 && 1 < 2 }").unwrap();
@@ -814,7 +812,7 @@ fn rejects_closure_syntax() {
         "fn f() -> Int { a | b }",
         "|",
         "kio has no bitwise operators",
-        Some("for logical or, use `||`; for bits, use arithmetic (`*`, `/`, `%` by powers of 2) or `Bytes`"),
+        Some("for logical or, use `||`; for bits, use `a.bit_or(b)`"),
     );
     // Closures count toward the parser's depth limit.
     let deep = format!("fn f() {{ {}1; }}", "|x| ".repeat(65));

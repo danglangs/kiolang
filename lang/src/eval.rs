@@ -803,6 +803,20 @@ impl<'a> Interp<'a> {
                 Err(e) => Value::Enum(EnumRef::Result, 1, vec![Value::Str(e.into())]),
             });
         }
+        if let Builtin::OptionUnwrap | Builtin::OptionExpect | Builtin::ResultUnwrap | Builtin::ResultExpect = b {
+            let Value::Enum(en, i, payload) = self.expr(recv)? else {
+                unreachable!("checked Option or Result");
+            };
+            let msg = match self.arg(args)?.0 {
+                Some(Value::Str(m)) => Some(m),
+                _ => None,
+            };
+            if i == success(en) {
+                return Ok(payload.into_iter().next().expect("a payload"));
+            }
+            let err = payload.first().map(|e| debug(self.m, e));
+            return Err(fail(span, &unwrap_error(msg.as_deref(), err.as_deref())));
+        }
         if in_place(recv) && args.iter().all(pure) {
             let start = self.path.len();
             let r = self.builtin_in_place(start, b, recv, args, span);
@@ -1046,6 +1060,17 @@ fn matches(p: &Pat, v: &Value) -> bool {
 }
 
 /// The variant of `Option` or `Result` that `?` and `unwrap_or` unwrap: `Some` or `Ok`.
+/// Why `unwrap` or `expect` (message `msg`) stopped, on `None` or on an `Err` shown as `err`;
+/// codegen's templates give the same text.
+pub fn unwrap_error(msg: Option<&str>, err: Option<&str>) -> String {
+    match (msg, err) {
+        (None, None) => "called `unwrap` on `None`".to_string(),
+        (None, Some(e)) => format!("called `unwrap` on an `Err` value: {}", clip(e)),
+        (Some(m), None) => clip(m).into_owned(),
+        (Some(m), Some(e)) => format!("{}: {}", clip(m), clip(e)),
+    }
+}
+
 fn success(en: EnumRef) -> usize {
     match en {
         EnumRef::Option => 1,
@@ -1313,10 +1338,52 @@ fn builtin(recv: &Value, b: Builtin, (arg, arg2): Args, span: Span) -> Res {
                 .collect();
             Value::Str(parts.join(&*str_arg(arg)).into())
         }
-        (B::IntMin | B::IntMax, Value::Int(a)) => match (b, arg) {
-            (B::IntMin, Some(Value::Int(x))) => Value::Int(*a.min(&x)),
-            (_, Some(Value::Int(x))) => Value::Int(*a.max(&x)),
-            _ => unreachable!("checked argument"),
+        (B::IntAbs, Value::Int(a)) => Value::Int(a.checked_abs().ok_or_else(|| fail(span, "Int overflow"))?),
+        (B::IntIsoUtc, Value::Int(a)) => match crate::conv::iso_utc(*a) {
+            Some(s) => Value::Str(s.into()),
+            None => return Err(fail(span, &format!("iso_utc of {a}: outside years 0000 to 9999"))),
+        },
+        // The rest take an `Int` argument.
+        (_, Value::Int(a)) => {
+            let Some(Value::Int(x)) = arg else {
+                unreachable!("checked argument")
+            };
+            let opt = |r: Option<i64>| r.map_or_else(none, |n| some(Value::Int(n)));
+            let shift = |op: &str| match u32::try_from(x) {
+                Ok(n) if n < 64 => Ok(n),
+                _ => Err(fail(span, &format!("Int.{op}({x}): the count must be 0 to 63"))),
+            };
+            match b {
+                B::IntMin => Value::Int(*a.min(&x)),
+                B::IntMax => Value::Int(*a.max(&x)),
+                B::IntCheckedAdd => opt(a.checked_add(x)),
+                B::IntCheckedSub => opt(a.checked_sub(x)),
+                B::IntCheckedMul => opt(a.checked_mul(x)),
+                B::IntBitAnd => Value::Int(a & x),
+                B::IntBitOr => Value::Int(a | x),
+                B::IntBitXor => Value::Int(a ^ x),
+                B::IntShl => Value::Int(a << shift("shl")?),
+                B::IntShr => Value::Int(a >> shift("shr")?),
+                B::IntPow if x < 0 => return Err(fail(span, &format!("Int.pow({x}): the exponent must be 0 or more"))),
+                B::IntPow => Value::Int(crate::conv::pow(*a, x).ok_or_else(|| fail(span, "Int overflow"))?),
+                _ => unreachable!("checked method"),
+            }
+        }
+        (B::StrUrlEncode, Value::Str(s)) => Value::Str(crate::conv::url_encode(s.as_bytes()).into()),
+        (B::StrUrlDecode | B::StrFormDecode, Value::Str(s)) => {
+            let decode = if b == B::StrUrlDecode {
+                crate::conv::url_decode
+            } else {
+                crate::conv::form_decode
+            };
+            match decode(s.as_bytes()).and_then(|b| String::from_utf8(b).ok()) {
+                Some(d) => some(Value::Str(d.into())),
+                None => none(),
+            }
+        }
+        (B::StrParseIsoUtc, Value::Str(s)) => match crate::conv::parse_iso_utc(s.as_bytes()) {
+            Some(n) => some(Value::Int(n)),
+            None => none(),
         },
         (B::FloatMin | B::FloatMax, Value::Float(a)) => match arg {
             Some(Value::Float(x)) => Value::Float(float_min_max(*a, x, b == B::FloatMax)),

@@ -44,13 +44,16 @@ const HINT_STR: &str = "add a closing `\"`";
 /// The error for `^`, `~`, `<<`, `>>`, and `&` or `|` between operands.
 pub(crate) const BITWISE: &str = "kio has no bitwise operators";
 
-/// The hint for bitwise operator `op`: the logical operator it may have meant, else arithmetic.
+/// The hint for bitwise operator `op`: the logical operator it may have meant, and the `Int`
+/// method that does it (L29).
 pub(crate) fn bitwise_hint(op: &str) -> &'static str {
     match op {
-        "&" => "for logical and, use `&&`; for bits, use arithmetic (`*`, `/`, `%` by powers of 2) or `Bytes`",
-        "|" => "for logical or, use `||`; for bits, use arithmetic (`*`, `/`, `%` by powers of 2) or `Bytes`",
-        "<<" | ">>" => "multiply or divide by a power of 2, or use `Bytes`",
-        _ => "use arithmetic (`*`, `/`, `%` by powers of 2) or `Bytes`",
+        "&" => "for logical and, use `&&`; for bits, use `a.bit_and(b)`",
+        "|" => "for logical or, use `||`; for bits, use `a.bit_or(b)`",
+        "<<" => "use `a.shl(n)`",
+        ">>" => "use `a.shr(n)`",
+        "~" => "use `a.bit_xor(-1)`",
+        _ => "use `a.bit_xor(b)`",
     }
 }
 
@@ -293,7 +296,8 @@ pub fn lex_all(src: &str, errs: &mut Vec<Diag>) -> Result<Vec<Token>, Diag> {
                     let inner = bytes.get(i + 1) == Some(&b'!');
                     let open = i + 1 + usize::from(inner);
                     if ch == '^' || ch == '~' {
-                        return Err(err(i, i + 1, BITWISE, Some(bitwise_hint("^"))));
+                        let op = if ch == '^' { "^" } else { "~" };
+                        return Err(err(i, i + 1, BITWISE, Some(bitwise_hint(op))));
                     }
                     if ch != '#' || bytes.get(open) != Some(&b'[') {
                         let msg = format!("unexpected character `{ch}`");
