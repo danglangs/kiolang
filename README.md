@@ -8,7 +8,7 @@ Website and docs: [danglangs.github.io/kiolang](https://danglangs.github.io/kiol
 
 kio is an experimental (v0) language and runtime for generated software whose important guarantees can be checked independently of the agent that wrote it: people approve intent, authority and evidence; machines handle the implementation ([trust](docs/proposals/trust.md)). It combines explicit authority, enforced isolation, value semantics and a compiler built for predictable performance.
 
-The first contract is authority, and it works today: what a program can touch is checked from its code, the host enforces it, and `kio check --base` prints what a change adds in one line. The safety you would otherwise assemble around Python (a sandbox, an egress proxy, a secret store, an authority report) is built in. Correctness and cost evidence are newer: `kio test` runs tests and property tests (passed on the cases that ran, not proved), and `kio review` puts a change's authority, test results and fuel and memory measured on those tests on one page, each line labelled by what backs it ([walkthrough](docs/review-a-change.md)).
+The first contract is authority, and it works today: what a program can touch is checked from its code, the host enforces it, and `kio check --base` prints what a change adds in one line. The safety you would otherwise assemble around Python (a sandbox, an egress proxy, a secret store, an authority report) is built in. Correctness and cost evidence are newer: `kio test` runs tests and property tests (passed on the cases that ran, not proved), and `kio review` puts a change's authority, test results, fuel and memory measured on those tests, and mutants (would a test notice this edit to the changed code?) on one page, each line labelled by what backs it ([walkthrough](docs/review-a-change.md)).
 
 kio runs file jobs, API integrations and stateful web services today; its libraries and tooling are young ([choosing kio today](#choosing-kio-today)).
 
@@ -164,8 +164,8 @@ v0, working end to end.
 | Language | structs, enums, generics, closures, `match` with nested and `\|` patterns, `let`-else, constants, `Float`, `HashMap`, built-in JSON, SHA-256 |
 | Resources, each a grant | files (`Dir`), a key-value store (`Kv`), SQLite (`Db`), an HTTP client (`Http`: any granted method, headers, parallel `send_all`), `Rng`, `Clock`, `Log`, `Hmac` (sign and verify under a key the program never holds), `Secret` (a value the program can compare, never read); serving HTTP and WebSockets |
 | Safety | the authority report before a run; a Wasm sandbox with fuel, memory, time, call and I/O limits; an audit log |
-| Review | `kio review`: a change's authority diff, tests on both sides, fuel and memory per test and what no check covers, on one page; dependencies listed in `kio.deps`, pinned by sha256 |
-| Tests | `#[test]` functions with `assert`/`assert_eq`; `kio test` runs each compiled, with throwaway grants (a temp dir, in-memory stores, a fixed clock, a seeded random source). A test with data parameters is a property: 100 generated inputs, each compiled, a failure shrunk to a minimal input |
+| Review | `kio review`: a change's authority diff, tests on both sides, fuel and memory per test, mutants of the changed code (generated, or written by the reviewer) and the tests that caught them, and what no check covers, on one page; dependencies listed in `kio.deps`, pinned by sha256 |
+| Tests | `#[test]` functions with `assert`/`assert_eq`; `kio test` runs each compiled, with throwaway grants (a temp dir, in-memory stores, a fixed clock, a seeded random source). A test with data parameters is a property: 100 generated inputs, each compiled, a failure shrunk to a minimal input. An `Http` grant can be answered from a file (a fake host), and each test's fuel and peak memory are reported |
 | Speed | compiled to native code through Wasm: 1.1-2.3x Rust on compute, 2.1-7.3x where it allocates; faster than Python on most benchmarks ([table](docs/roadmap.md#speed-today)) |
 
 ## Choosing kio today
@@ -208,7 +208,7 @@ kio is a Rust subset on purpose, and its errors name the fix. Without the refere
 ## Roadmap
 
 - **Now:** an outside developer reviewing real changes with `kio review`: accepting some, rejecting others, and saying when the evidence is not enough; the flagship application (a durable workflow service in [kio-web](https://github.com/danglangs/kio-web/tree/main/examples/flow)) grows alongside.
-- **Next:** mutation runs in `kio review` (would a test catch this deliberate bug?), an independent attacker against the host, and narrowing a capability for a helper (a subdirectory, read-only, one host).
+- **Next:** the flagship's API and CLI steps, an independent attacker against the host, and narrowing a capability for a helper (a subdirectory, read-only, one host).
 - **Later:** contracts the application shows it needs; `par_map` and tasks (pinned).
 
 Where work stands: [docs/status.md](docs/status.md); concurrency: [docs/proposals/concurrency.md](docs/proposals/concurrency.md).

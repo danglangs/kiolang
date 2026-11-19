@@ -9,7 +9,7 @@
 
 kio is an experimental (v0) language and runtime for generated software whose important guarantees can be checked independently of the agent that wrote it: people approve intent, authority and evidence; machines handle the implementation. It combines explicit authority, enforced isolation, value semantics and a compiler built for predictable performance.
 
-The first contract is authority, and it works today: what a program can touch is checked from its code, the host enforces it, and `kio check --base` prints what a change adds in one line. The safety you would otherwise assemble around Python (a sandbox, an egress proxy, a secret store, an authority report) is built in. Correctness and cost evidence are newer: `kio test` runs tests and property tests (passed on the cases that ran, not proved), and `kio review` puts a change's authority, test results and fuel and memory measured on those tests on one page, each line labelled by what backs it ([walkthrough](docs/review-a-change.md)).
+The first contract is authority, and it works today: what a program can touch is checked from its code, the host enforces it, and `kio check --base` prints what a change adds in one line. The safety you would otherwise assemble around Python (a sandbox, an egress proxy, a secret store, an authority report) is built in. Correctness and cost evidence are newer: `kio test` runs tests and property tests (passed on the cases that ran, not proved), and `kio review` puts a change's authority, test results, fuel and memory measured on those tests, and mutants (would a test notice this edit to the changed code?) on one page, each line labelled by what backs it ([walkthrough](docs/review-a-change.md)).
 
 ## One change, reviewed
 
@@ -100,5 +100,5 @@ Then: [review a change](docs/review-a-change.md), [every grant, flag and limit](
 ## Roadmap
 
 - **Now:** an outside developer reviewing real changes with `kio review`: accepting some, rejecting others, and saying when the evidence is not enough; the flagship application (a durable workflow service in [kio-web](https://github.com/danglangs/kio-web/tree/main/examples/flow)) grows alongside.
-- **Next:** mutation runs in `kio review` (would a test catch this deliberate bug?), an independent attacker against the host, and narrowing a capability for a helper (a subdirectory, read-only, one host).
+- **Next:** the flagship's API and CLI steps, an independent attacker against the host, and narrowing a capability for a helper (a subdirectory, read-only, one host).
 - **Later:** contracts the application shows it needs; `par_map` and tasks (pinned).
