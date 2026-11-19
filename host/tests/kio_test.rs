@@ -948,3 +948,62 @@ fn a_record_is_refused_outside_its_rules() {
     assert_eq!(code, 1, "{out}{err}");
     assert!(out.contains("`--http-record` is not a flag of kio run"), "{out}{err}");
 }
+
+/// A record's bytes beyond its body are charged to `--io`, so large headers sent many times
+/// stop the run at the budget, the records written so far within it.
+#[test]
+fn records_are_charged_to_io() {
+    let c = Case::new(
+        r#"#[test]
+fn floods(hook: Http, sent: Dir, log: Log) -> Result<(), LogErr> {
+    let mut v = "a";
+    for _ in 0..12 { v = v + v; }
+    let mut hs: List<Str> = [];
+    for _ in 0..16 { hs.push("x-big: " + v); }
+    for i in 0..100 {
+        let _ = hook.send("POST", "/a", hs, "".to_bytes(), 0);
+        log.write(i.to_str())?;
+    }
+    Ok(())
+}
+"#,
+    );
+    let hook = c.file("hook.http", "POST /a\n200\n");
+    let g = c.file(
+        "t.grants",
+        &format!("--http hook=fake:{hook}\n--http-methods hook=POST\n--http-record hook=sent\n"),
+    );
+    let (code, j) = c.json(&["--grants", &g, "--io", "1"]);
+    assert_eq!(code, 1, "{j}");
+    let t = &j["tests"][0];
+    assert_eq!(
+        (&t["error"]["message"], &t["error"]["hint"]),
+        (
+            &serde_json::json!("too much I/O (limit 1 MB)"),
+            &serde_json::json!("raise it with --io")
+        ),
+        "{j}"
+    );
+    // Each send returned before its line was logged: that many records were written.
+    let written = t["log"].as_str().unwrap().lines().count();
+    let head = "POST /a\n".len() + 16 * "x-big: \n".len() + 16 * 4096 + 1;
+    assert!(
+        written >= 10 && written * head <= 1 << 20,
+        "{written} records of {head} bytes"
+    );
+}
+
+#[test]
+fn a_record_no_test_takes_is_refused() {
+    let c = Case::new("#[test]\nfn t(hook: Http, sent: Dir) {}\n\n#[test]\nfn u(snet: Dir) {}\n");
+    let hook = c.file("hook.http", "GET /a\n200\n");
+    let g = c.file(
+        "t.grants",
+        &format!("--http hook=fake:{hook}\n--http-record hook=snet\n"),
+    );
+    let (code, out, err) = c.kio(&["--grants", &g]);
+    assert_eq!(
+        (code, out.as_str(), err.as_str()),
+        (2, "", "kio: --http-record hook=snet: no test takes both `hook: Http` and `snet: Dir`\n  hint: give the Dir parameter's name after `=`, or add `snet: Dir` to the test that takes `hook: Http`\n")
+    );
+}

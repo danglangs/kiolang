@@ -156,16 +156,23 @@ impl Fake {
 
     /// The answer to the next `method path`: the n-th entry for it answers the n-th such request
     /// and the last repeats; no entry is `Unmatched`, and kept. With `--http-record`, `request`
-    /// is written first as `<grant>-<n>`, n counting this test's requests from 1; an unmatched
-    /// request too, since it was sent. A failed write is the error, and the request is not counted.
-    pub(crate) fn answer(&self, method: &'static str, path: &str, request: &[u8]) -> Result<Answer, String> {
+    /// (its head, then its body) is written first as `<grant>-<n>`, n counting this test's
+    /// requests from 1; an unmatched request too, since it was sent. A failed write is the error,
+    /// and the request is not counted.
+    pub(crate) fn answer(
+        &self,
+        method: &'static str,
+        path: &str,
+        request: Option<(&[u8], &[u8])>,
+    ) -> Result<Answer, String> {
         let mut asked = self.asked.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(r) = &self.record {
+        if let (Some(r), Some((head, body))) = (&self.record, request) {
             let name = format!("{}-{}", r.grant, asked.total + 1);
             // A new file only: a record never replaces one, even one the program wrote first.
             let mut opts = cap_std::fs::OpenOptions::new();
             opts.write(true).create_new(true);
-            let written = (r.dir.open_with(&name, &opts)).and_then(|mut f| f.write_all(request));
+            let written =
+                (r.dir.open_with(&name, &opts)).and_then(|mut f| f.write_all(head).and_then(|()| f.write_all(body)));
             if let Err(e) = written {
                 return Err(format!(
                     "--http-record {}: cannot write `{name}`: {e}; a record is a new file, so leave `{}-*` names to the host",

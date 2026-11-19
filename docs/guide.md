@@ -423,8 +423,8 @@ fn deliver_retries(hook: Http, sent: Dir) -> Result<(), IoErr> {
 ```
 
 - A request with no entry is recorded (it was sent); one the host refused before the lookup (a method not granted, a bad path, header or body, a `send_all` over 64) is not.
-- Records are the host's writes: not charged to `--io`, not calls. Each is a new file: a `hook-2` the program made first stops the run ("cannot write `hook-2`: File exists"). A test with `hook` but no `sent: Dir` runs without a record.
-- Refused: a `hook` that is not a fake ("hook is not a fake", hint "a real grant's requests are in the audit log (--audit)"); a file that also grants `--dir sent` ("records go to a fresh temporary Dir", hint "remove --dir sent"); one grant recorded twice; `--http-record` on `kio test`'s command line, and in `kio run`, `--listen`, `kio check --grants` and `kio review --grants` ("`--http-record` is not a flag of kio run").
+- A record's bytes beyond the body (request line, headers, blank line) are charged to `--io` before it is written, so a run's records stay within `--io` (the body is charged once, as sent); a record is not a call. Each is a new file: a `hook-2` the program made first stops the run ("cannot write `hook-2`: File exists"). A test with `hook` but no `sent: Dir` runs without a record.
+- Refused: a `--http-record hook=snet` no test can take ("no test takes both `hook: Http` and `snet: Dir`"); a `hook` that is not a fake ("hook is not a fake", hint "a real grant's requests are in the audit log (--audit)"); a file that also grants `--dir sent` ("records go to a fresh temporary Dir", hint "remove --dir sent"); one grant recorded twice; `--http-record` on `kio test`'s command line, and in `kio run`, `--listen`, `kio check --grants` and `kio review --grants` ("`--http-record` is not a flag of kio run").
 
 ### Properties
 

@@ -301,30 +301,30 @@ impl Origin {
         self.fake.as_ref().and_then(|f| f.unmatched())
     }
 
-    /// On a fake grant, its answer to `method path` (counted, and recorded with `--http-record`);
-    /// `None` for a real grant. Called only once the host's checks passed. A record that cannot
-    /// be written is the error, which stops the run (`State::stop_record`).
+    /// On a fake grant, its answer to `method path` (counted, and with `--http-record` recorded as
+    /// `head` then `body`); `None` for a real grant. Called only once the host's checks passed and
+    /// the record charged. A record that cannot be written is the error, which stops the run
+    /// (`State::stop_record`).
     fn fake_answer(
         &self,
         method: &'static str,
         path: &str,
-        headers: &[(String, String)],
+        head: Option<&[u8]>,
         body: &[u8],
     ) -> std::result::Result<Option<fake::Answer>, String> {
         let Some(f) = &self.fake else {
             return Ok(None);
         };
-        let request = match f.records() {
-            true => self.record(method, path, headers, body),
-            false => Vec::new(),
-        };
-        f.answer(method, path, &request).map(Some)
+        f.answer(method, path, head.map(|h| (h, body))).map(Some)
     }
 
-    /// The request as HTTP writes it, for `--http-record`: `METHOD /path`, the program's headers
-    /// then each injected one as `name: <injected>` (`perform`'s order, never a value), a blank
-    /// line, and the body's bytes as sent.
-    fn record(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Vec<u8> {
+    /// With `--http-record`, the record of a request up to its body, as HTTP writes it: `METHOD
+    /// /path`, the program's headers then each injected one as `name: <injected>` (`perform`'s
+    /// order, never a value), a blank line. `None` when nothing is recorded.
+    fn record_head(&self, method: &str, path: &str, headers: &[(String, String)]) -> Option<Vec<u8>> {
+        if !self.fake.as_ref().is_some_and(|f| f.records()) {
+            return None;
+        }
         let mut out = format!("{method} {path}\n");
         for (name, value) in headers {
             out += &format!("{name}: {value}\n");
@@ -333,9 +333,7 @@ impl Origin {
             out += &format!("{name}: <injected>\n");
         }
         out.push('\n');
-        let mut out = out.into_bytes();
-        out.extend_from_slice(body);
-        out
+        Some(out.into_bytes())
     }
 
     /// The methods the grant allows: GET, then those `--http-methods` added.
@@ -1493,6 +1491,23 @@ impl State {
         Ok(())
     }
 
+    /// `origin.fake_answer` (`None` for a real grant). With `--http-record`, the record's bytes
+    /// beyond the body (already charged) are charged to `--io` first, so records stay within it.
+    fn fake_lookup(
+        &mut self,
+        origin: &Origin,
+        method: &'static str,
+        path: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<Option<fake::Answer>> {
+        let head = origin.record_head(method, path, headers);
+        if let Some(h) = &head {
+            self.spend_io(h.len())?;
+        }
+        (origin.fake_answer(method, path, head.as_deref(), body)).map_err(|e| self.stop_record(e))
+    }
+
     /// Stop the run: an `--http-record` could not be written (`msg`).
     fn stop_record(&mut self, msg: String) -> wasmtime::Error {
         self.record_failed = true;
@@ -2005,9 +2020,7 @@ impl State {
             body: Vec::new(),
             timeout: HTTP_TIMEOUT,
             as_get: true,
-            fake: origin
-                .fake_answer("GET", &path, &[], &[])
-                .map_err(|e| self.stop_record(e))?,
+            fake: self.fake_lookup(&origin, "GET", &path, &[], &[])?,
         };
         let mut extra = origin.injected();
         let done = self.finish(&origin, req, &mut extra)?;
@@ -2116,7 +2129,7 @@ impl State {
         *extra += &origin.injected();
         self.spend_io(body.len())?;
         *extra += &format!(r#","sent":{}"#, body.len());
-        let fake = (origin.fake_answer(method, path, &headers, &body)).map_err(|e| self.stop_record(e))?;
+        let fake = self.fake_lookup(origin, method, path, &headers, &body)?;
         Ok(Ok(Outbound {
             url,
             method,
