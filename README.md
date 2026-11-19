@@ -12,35 +12,88 @@ What kio checks, independently of the agent that wrote the code:
 
 - **Authority:** which resources a program can reach and which operations it may perform, derived from its code (`kio check`).
 - **Enforcement:** the host refuses everything outside the operator's grants; designed and tested against hostile code ([E3](docs/proposals/e3-scorecard.md), E3c), not independently audited.
-- **Audit and replay:** every host call is logged; a fixed clock and seed reproduce a run.
+- **Audit and replay:** every host call is logged; a fixed clock and seed reproduce a run when the other inputs and host responses are the same.
 - **Behavioural evidence:** compiled tests, generated properties and mutants show which behaviours were exercised and which faults the tests catch (`kio test`, `kio review`).
 - **Resource evidence:** fuel and memory measured per test expose regressions on tested workloads.
 - **Review:** one labelled page of what changed, what was checked and what remains unknown ([walkthrough](docs/review-a-change.md)).
 
-Against Python plus a careful sandbox, the advantage is integration: authority is part of the programming model, and running, testing and review share it. In E3 both stopped 52 of 55 attacks; Python needed an egress proxy, a sandbox profile per task and watchdogs, kio flags on `kio run`. And it is practical: agents write it (42-43 of 45 tasks first try, as Python), and it compiles to native code (1.1-2x Rust on most work, 2-5x where it allocates heavily).
+The advantage is integration: authority is part of the programming model, and running, testing and review share it. And it is practical: agents write it from its reference, and it compiles to native code ([agents](#use-from-an-agent), [performance](#performance)).
 
 The strongest guarantee today is authority over resources. The broader correctness claim is promising and still being validated: passing tests and killed mutants do not show that the requirements are right or every behaviour correct. The aim is a general-purpose language where trust scales better than manual code review, not one that makes review or judgment unnecessary ([trust](docs/proposals/trust.md)).
 
-kio is experimental (v0). It runs file jobs, API integrations and stateful web services today; its libraries and tooling are young ([choosing kio today](#choosing-kio-today)).
+kio is experimental (v0). It runs file jobs, API integrations and stateful web services today; its libraries and tooling are young ([maturity and limits](#maturity-and-limits)).
 
-## Why a new language for generated software?
+## An agent refactors your code. The tests pass.
 
-- **"Can't I just sandbox Python?"** Yes, with work. On 55 prompt-injection attacks ([E3](docs/proposals/e3-scorecard.md)), Python sandboxed by a careful team stopped 52, the same as kio; it took an egress proxy that injects keys and filters methods, a sandbox profile per task and watchdogs. In kio that is flags on `kio run`.
-- **"How do I review a change?"** Permissions through the authority diff: 1-2 exact lines in E3, against an 80-90 line source diff where scanners guess. What the program does with those permissions (an SQL statement, a payload, a deletion path) still takes code review and tests.
-- **"Can agents write it?"** It is a Rust subset on purpose. Given the language reference (`kio mcp`), Haiku, Sonnet and Opus pass 42-43 of 45 backend tasks first try (Python: 39-45) and all 45 by try 5.
-- **"What does it not check yet?"** Whether the code is right inside its grants: a program can stay within every permission and still compute the wrong invoice, or send `customers/` to a granted partner. Today that takes tests and code review; checked correctness evidence is the next stage.
+`tally` sums the cents column of a CSV of orders ([examples/review](examples/review)). An agent pulls row parsing into a helper, `cents`, and adds one condition on the way:
 
-| | kio | Python, careful sandbox | Python, common practice |
-|---|---|---|---|
-| Attacks stopped at run time ([E3](docs/proposals/e3-scorecard.md)) | 52/55 | 52/55 | 40/55 |
-| What it took | flags on `kio run` | a proxy, profiles, watchdogs | a profile and a proxy |
-| Authority summary vs source diff (median lines) | 1-2 | 80-90 | 80-90 |
+```rust
+fn cents(line: Str) -> Option<Int> {
+  let f = line.split(",");
+  if f.len() != 2 { return None; }
+  let c = f[1].trim().parse_int()?;
+  if c > 0 { Some(c) } else { None }
+}
+```
 
-kio restricts how capabilities can appear in programs, which makes authority directly checkable. With Python, comparable run-time restrictions can be enforced from outside, but a complete authority summary needs further restrictions on the language or more tooling.
+`c > 0` drops refunds (negative amounts) from the total. All three tests pass and the authority is unchanged, so the page exits 0. But both mutants that survive sit on the amount condition: no test pins which amounts count. (Output shortened; the full page is in [the walkthrough](docs/review-a-change.md#c-a-change-that-stays-inside-its-authority-and-is-wrong).)
 
-## One change, reviewed
+```
+$ kio review c/tally.kio --base v1/tally.kio --requirements README.md --grants c/tally.grants
+...
+Authority
+  enforced     no change in authority
+...
+Tests
+  ...
+  tested       new: 3 passed, 0 failed
+  ...
+  tested       mutants: 8 of 10 killed (generated at seed 1: 11 drawn of 11 sites, 1 did not check)
+  tested       killed by: main_writes_the_total 8
+  not checked  survived: generated: c/tally.kio:7:8: cents: `>` -> `>=` in `if c > 0 { Some(c) } else { No...`
+  not checked  survived: generated: c/tally.kio:7:10: cents: `0` -> `1` in `if c > 0 { Some(c) } else { None...`
+...
+$ echo $?
+0
+```
 
-An agent writes a job: read today's orders, post them to the CRM ([examples/glance](examples/glance)).
+The reviewer asks for one example: 100 cents of sales minus a 30-cent refund (and a zero row) totals 70.
+
+```rust
+#[test]
+fn refunds_count_against_the_total() {
+  assert_eq(total("id,cents\n1,100\n2,-30\n3,0\n"), 70);
+}
+```
+
+```
+$ kio review c2/tally.kio --base v1/tally.kio --requirements README.md
+...
+  error        FAIL refunds_count_against_the_total
+                 c2/tally.kio:47:3: assert_eq failed: left `100`, right `70`
+...
+$ echo $?
+1
+```
+
+The change is rejected, with a counterexample anyone can rerun. kio did not prove the program correct; it showed what the passing tests had not established and made the missing evidence executable.
+
+When a change adds authority, the diff says so first. An edit to the [orders job below](#a-small-kio-program) that deletes its input after import is one line in `kio check --base` (`~ orders: Dir (+remove)`, exit 3), and under the read-only grant it does not start: ``kio: `orders` is granted `:ro` but the program can write it (`orders remove`)``.
+
+## Quickstart
+
+macOS on Apple silicon (Linux x86_64 and checksums: [first job in 10 minutes](docs/first-job.md)):
+
+```
+$ curl -L https://github.com/danglangs/kiolang/releases/latest/download/kio-aarch64-apple-darwin.tar.gz | tar xz && cd kio-aarch64-apple-darwin && ./kio run hello.kio
+hello, kio
+```
+
+Every flag, limit and output: [docs/guide.md](docs/guide.md); building from source: [its last section](docs/guide.md#from-source).
+
+## A small kio program
+
+A job reads today's orders and posts them to a CRM ([examples/glance](examples/glance)):
 
 ```rust
 fn main(orders: Dir, crm: Http) -> Result<Int, Str> {
@@ -50,121 +103,79 @@ fn main(orders: Dir, crm: Http) -> Result<Int, Str> {
 }
 ```
 
-Three layers, each answering one question:
-
 ```
 signature   which resources the code receives       orders: Dir, crm: Http
 report      which operations it calls on each       main : orders read, crm send POST
 grants      which real resources, and limits        --dir orders=./orders:ro --http crm=api.crm.example
 ```
 
-The operator grants exactly what the job needs: the orders read-only, one host with POST added to GET, and a key the program never sees.
+The operator grants exactly that: the orders read-only, one host with POST added to GET, and a key the host adds and the program never sees.
 
 ```
 $ kio run sync.kio --dir orders=./orders:ro --http crm=api.crm.example \
     --http-methods crm=POST --http-header crm=Authorization:env:CRM_KEY
 ```
 
-Next week an instruction hidden in a ticket the agent reads (a prompt injection) makes it edit `sync.kio` to "archive the file after import". Before reading the diff, compare the edited file with the version on `main`; the permission change is one line:
+There is no `import`, global or ambient I/O: a function without a capability parameter cannot do I/O, and the checker proves it. kio compiles to Wasm and runs in Wasmtime; the host enforces every grant again, with fuel, memory, time and call limits, and logs every call.
+
+## Real applications
+
+### Flow: a durable workflow service
+
+[flow](https://github.com/danglangs/kio-web/tree/main/examples/flow) (agent-built, in [kio-web](https://github.com/danglangs/kio-web)) accepts signed events (`POST /events`, HMAC-verified, stored once per event id in SQLite) and stores each as a job. A worker claims due jobs with a lease, POSTs each to one destination with a key the host adds, retries with exponential backoff, and marks a job dead after 5 attempts. A crash after the POST and before recording it repeats the delivery, so every attempt carries the same `Idempotency-Key` and the destination can deduplicate.
+
+What the worker can reach (`kio check worker.kio`, shortened):
 
 ```
-$ git show main:sync.kio > /tmp/base.kio
-$ kio check sync.kio --base /tmp/base.kio
-~ orders: Dir (+remove)
-authority added (exit 3); --detail lists each function
-```
-
-Shipped anyway, it does not start:
-
-```
-kio: `orders` is granted `:ro` but the program can write it (`orders remove`)
-  hint: drop `:ro`, or remove the write
-```
-
-Review permission changes through the authority diff; use code review and tests for what the program does with them.
-
-| To get this | kio | Python |
-|---|---|---|
-| Only `./orders`, read-only | `--dir orders=./orders:ro` | a sandbox profile or container mounts |
-| Only `api.crm.example`, GET and POST | `--http`, `--http-methods` | an egress proxy with a method filter |
-| A key the code never holds | `--http-header crm=Authorization:env:CRM_KEY` | a proxy that injects it |
-| What a change adds | `kio check --base`, exact | read the source diff; scanners guess |
-
-## Quickstart
-
-No Rust needed: [your first job in 10 minutes](docs/first-job.md) downloads a [release](https://github.com/danglangs/kiolang/releases/latest) (macOS Apple silicon, Linux x86_64) and runs a program that POSTs to an API with a key it never sees.
-
-From source:
-
-```
-rustup target add wasm32-unknown-unknown
-cargo install --git https://github.com/danglangs/kiolang kio
-git clone https://github.com/danglangs/kiolang && cd kiolang
-```
-
-```
-$ kio run examples/tour/hello.kio
-hello, kio
-```
-
-Every flag, limit and output: [docs/guide.md](docs/guide.md).
-
-Walkthroughs: [a helper that gains the network, and the audit log](docs/tour.md#a-helper-that-gains-the-network); [replaying a run](docs/tour.md#replay).
-
-## What is kio
-
-- **Capabilities are parameters.** `main` names each resource it needs (`input: Dir`, `api: Http`, `db: Db`); the operator grants each one by a flag (or a [grants file](docs/guide.md)); there is no `import`, global or ambient I/O. A function without a capability parameter cannot do I/O, and the checker proves it.
-- **The host is the boundary.** kio compiles to Wasm and runs in Wasmtime; the host enforces every grant again, with fuel, memory, time and call limits, and logs every call.
-- **A real language.** Structs, enums, generics, closures, `match`, JSON; files, a key-value store, SQLite, HTTP client and server, WebSockets, HMAC, each a grant. Native code at 1.1-2.3x Rust on compute ([details](#what-works)).
-
-## A real app
-
-[links](https://github.com/danglangs/kio-web/tree/main/examples/links) is a link shortener in [kio-web](https://github.com/danglangs/kio-web): bearer-token auth (hashed, compared in constant time), links in a `Kv` that survives restarts, expiry, random slugs, a log of creates and deletes, a webhook after each create, an HTML page and static files, in 379 lines.
-
-```rust
-fn main(req: Incoming, res: Outgoing, links: Kv, auth: Kv, assets: Dir, links_rng: Rng, now: Clock, log: Log, hook: Http) -> Result<(), WebErr>
-```
-
-```
-$ kio check app.kio
-main               : req body header_names header_values method target, res send, links add delete get scan swap, ..
-all_links          : links scan
-authorized         : auth get
-claim              : links delete swap
-create             : links delete swap, rng int, clock now_ms, log write
+main            : db exec query, now now_ms, dest send POST
+deliver         : dest send POST
+flow::claim     : db exec query
+flow::finish    : db exec
+flow::init      : db exec
+flow::try_claim : db exec query
 ...
-notify             : hook send *, log write
+```
+
+18 tests, five of them properties, exercise stale workers, expired leases, attempt limits and crashes before and after the POST against a reference model. Four written mutants each break one rule, and the tests catch all four:
+
+| Mutant ([flow.mutants](https://github.com/danglangs/kio-web/blob/main/examples/flow/flow.mutants)) | What it breaks |
+|---|---|
+| the done update ignores the lease | a stale worker completes a job it lost |
+| no `Idempotency-Key` header | the destination cannot deduplicate a retry |
+| the claim `UPDATE` without its conditions | two workers take one job |
+| `>` for `>=` on the attempt limit | one attempt too many |
+
+```
+$ FLOW_KEY=test-key kio review worker.kio --base worker.kio --test-grants test.grants --mutations flow.mutants --mutants 0
 ...
-
-46 more use no capability, 12 are unreached (2 use a capability); --all lists every function
-$ cat app.grants
---kv links=links.kv
---kv auth=auth.kv
---dir assets=./static
---rng links_rng
---clock now
---log log=links.log
---http hook=hooks.example
---http-methods hook=POST
---http-header hook=Authorization:env:HOOK_AUTH
---listen 127.0.0.1:8080
-$ HOOK_AUTH='Bearer ...' kio run app.kio --grants app.grants
+  tested       mutants: 4 of 4 killed (flow.mutants (inside NEW's tree) 4 of 4)
 ...
-listening on http://127.0.0.1:8080
 ```
 
-A redirect (`follow`) can only read links and the clock; auth can only read the token hash; nothing can write the token hash or write files, and only `notify` reaches the network: one host, GET and POST, with a key the host adds and the program never sees. With 301 links it serves 15,500 redirects/s and 13,200 listings/s (`ab -c 20`, Apple silicon), a fresh sandbox per request.
+Still for a reader: the SQL text (the report says `db exec`, not which rows) and the destination's deduplication, which kio cannot see.
 
-**Built by an agent, reviewed by authority.** [payhook](https://github.com/danglangs/kio-web/tree/main/examples/payhook) takes signed Stripe-style webhooks, drops replays in SQLite, and posts to a chat webhook with retries. A coding agent that read only kio's docs wrote it in five steps with no kio error; a reviewer approved each step from its diff, without reading the code:
+### More in kio-web
 
-```
-step 2   + stripe: Hmac (verify)      + now: Clock (now_ms)     (verify only, never sign)
-step 3   + db: Db (exec)              + log: Log (write)
-step 4   + slack: Http (send_all POST)                          (one host, key injected)
-step 5   ~ db: Db (+query)                                      (retries pending events)
-```
+| App | What it demonstrates |
+|---|---|
+| [payhook](https://github.com/danglangs/kio-web/tree/main/examples/payhook) (agent-built) | signed Stripe-style webhooks, replays dropped in SQLite, a chat webhook with retries; `Hmac` that can verify, never sign |
+| [links](https://github.com/danglangs/kio-web/tree/main/examples/links) | a link shortener in 379 lines: hashed bearer tokens, a `Kv` that survives restarts, expiry, random slugs, a log, a webhook, HTML and static files |
+| [notes](https://github.com/danglangs/kio-web/tree/main/examples/notes), [kvnotes](https://github.com/danglangs/kio-web/tree/main/examples/kvnotes), [sqlnotes](https://github.com/danglangs/kio-web/tree/main/examples/sqlnotes) | one JSON API over a `Dir`, a `Kv` and a `Db`: the same routes, three different authority reports |
+| [ws](https://github.com/danglangs/kio-web/tree/main/examples/ws) | WebSockets, open only to clients holding a token stored in a `Kv` |
 
-The diffs say what the code can reach; the tests (124 checks) say what it does there. What each grant is, the operator's half, is [app.grants](https://github.com/danglangs/kio-web/tree/main/examples/payhook/app.grants), reviewed beside the code: `kio run app.kio --grants app.grants`, and in CI `kio check app.kio --grants app.grants` binds it to `main` without running or reading a key.
+Two further held-out agent-built apps, built from the public docs alone, are local and unpublished; what they hit became diagnostics, review and docs fixes.
+
+## Why a new language?
+
+Python can be sandboxed as tightly, with work. On 55 prompt-injection attacks ([E3](docs/proposals/e3-scorecard.md)):
+
+| | kio | Python, careful sandbox | Python, common practice |
+|---|---|---|---|
+| Attacks stopped at run time | 52/55 | 52/55 | 40/55 |
+| What it took | flags on `kio run` | an egress proxy that injects keys and filters methods, a profile per task, watchdogs | a profile and a proxy |
+| What a reviewer reads for a change's permissions (median lines) | 1-2, exact | 80-90 of source diff; scanners guess | 80-93 |
+
+kio restricts how capabilities can appear in programs, which makes authority directly checkable. With Python, comparable run-time restrictions can be enforced from outside, but a complete authority summary needs further restrictions on the language or more tooling. Neither checks what a program does inside its grants: one that may read `customers/` and call `partner.example` can send the customers to the partner.
 
 ## What works
 
@@ -176,37 +187,19 @@ v0, working end to end.
 | Resources, each a grant | files (`Dir`), a key-value store (`Kv`), SQLite (`Db`), an HTTP client (`Http`: any granted method, headers, parallel `send_all`), `Rng`, `Clock`, `Log`, `Hmac` (sign and verify under a key the program never holds), `Secret` (a value the program can compare, never read); serving HTTP and WebSockets |
 | Safety | the authority report before a run; a Wasm sandbox with fuel, memory, time, call and I/O limits; an audit log |
 | Review | `kio review`: a change's authority diff, tests on both sides, fuel and memory per test, mutants of the changed code (generated, or written by the reviewer) and the tests that caught them, and what no check covers, on one page; dependencies listed in `kio.deps`, pinned by sha256 |
-| Tests | `#[test]` functions with `assert`/`assert_eq`; `kio test` runs each compiled, with throwaway grants (a temp dir, in-memory stores, a fixed clock, a seeded random source). A test with data parameters is a property: 100 generated inputs, each compiled, a failure shrunk to a minimal input. An `Http` grant can be answered from a file (a fake host), and each test's fuel and peak memory are reported |
-| Speed | compiled to native code through Wasm: 1.1-2x Rust on most work, 2-5x where it allocates heavily ([speed plan](docs/proposals/speed-plan.md)); faster than Python on most benchmarks ([table](docs/roadmap.md#speed-today)) |
+| Tests | `#[test]` functions with `assert`/`assert_eq`; `kio test` runs each compiled, with throwaway grants (a temp dir, in-memory stores, a fixed clock, a seeded random source). A test with data parameters is a property: 100 generated inputs, a failure shrunk to a minimal input. An `Http` grant can be answered from a file (a fake host) |
 
-## Choosing kio today
+## Maturity and limits
 
 - **A good fit:** agent-written jobs and services where you want authority you can review and enforce: file processing, API integrations, webhooks, web services with state.
 - **Not yet:** work that leans on a library ecosystem (local dependencies pinned by hash, no registry; no FFI by design), or that already runs in a maintained hardened sandbox. Agents spend about 2x the tokens writing kio as Python today.
-
-## Use from an agent
-
-`kio mcp` is an MCP server on stdio with two tools: `kio_primer` (idioms, then the language reference) and `kio_check` (errors come back as `{file, line, message, hint}`). There is no run tool: grants are the operator's decision.
-
-```json
-{ "mcpServers": { "kio": { "command": "kio", "args": ["mcp"] } } }
-```
-
-Models write kio as well as Python. Given the language reference (what `kio_primer` serves), on 45 backend tasks ([eval/](eval/)):
-
-| | kio, first try | kio, by try 5 | Python, first try | Python, by try 5 |
-|---|---|---|---|---|
-| Haiku 5.5 | 42/45 | 45/45 | 39/45 | 45/45 |
-| Sonnet 5.5 | 43/45 | 45/45 | 44/45 | 45/45 |
-| Opus 5.5 | 43/45 | 45/45 | 45/45 | 45/45 |
-
-kio is a Rust subset on purpose, and its errors name the fix. Without the reference, models write full Rust and rarely finish: give agents `kio_primer`.
+- **Reviewed by authority, not proof.** A coding agent that read only kio's docs wrote [payhook](https://github.com/danglangs/kio-web/tree/main/examples/payhook) in five steps; a reviewer approved each from its authority diff and the tests (124 checks), without reading the code. The diffs said what it could touch (verify, never sign; POST to one host), not whether the signature result is acted on, what text goes to the chat, or which rows the SQL touches; the tests carried those, and one gap neither caught (a run that dies during an event's third attempt leaves it pending, never retried).
 
 ## Threat model
 
 - **Adversary:** the agent writing the program: buggy, prompt-injected or malicious.
 - **Defended:** the host machine, and every file and network host not granted to this run.
-- **Not defended:** misuse of what was granted. A program that may read `customers/` and call `partner.example` can send the customers to the partner. kio does not track where data came from, and does not judge what an agent should be granted.
+- **Not defended:** misuse of what was granted. kio does not track where data came from, and does not judge what an agent should be granted.
 
 | # | Guarantee | Enforced by |
 |---|---|---|
@@ -216,20 +209,27 @@ kio is a Rust subset on purpose, and its errors name the fix. Without the refere
 | G4 | Network allowlist: an `Http` reaches only granted hosts and methods | Host: rechecked on every redirect, IP literals refused, DNS pinned per run |
 | G5 | Bounded execution: fuel, memory, host calls, I/O and wall-clock | Wasmtime fuel and epochs, per-call timeouts in the host |
 
+## Use from an agent
+
+`kio mcp` is an MCP server on stdio with two tools: `kio_primer` (idioms, then the language reference) and `kio_check` (errors come back as `{file, line, message, hint}`). There is no run tool: grants are the operator's decision.
+
+```json
+{ "mcpServers": { "kio": { "command": "kio", "args": ["mcp"] } } }
+```
+
+Given the language reference, Haiku, Sonnet and Opus 5.5 pass 42-43 of 45 backend tasks first try (Python: 39-45) and all 45 by try 5 ([eval table](docs/roadmap.md#can-models-write-kio)); without it, models write full Rust and rarely finish.
+
+## Performance
+
+Compiled to native code through Wasm, steady execution runs at 1.1-2x Rust on most work and 2-5x where it allocates heavily; each `kio run` also pays a compile and startup cost (about 36 ms for an empty program, Apple M3 Max) that the [speed plan](docs/proposals/speed-plan.md) targets.
+
 ## Roadmap
 
-- **Now:** an outside developer reviewing real changes with `kio review`: accepting some, rejecting others, and saying when the evidence is not enough; the flagship application (a durable workflow service in [kio-web](https://github.com/danglangs/kio-web/tree/main/examples/flow)) grows alongside.
-- **Next:** the flagship's API and CLI steps, an independent attacker against the host, and narrowing a capability for a helper (a subdirectory, read-only, one host).
-- **Later:** contracts the application shows it needs; `par_map` and tasks (pinned).
+- **Available today:** everything under [What works](#what-works), in the [latest release](https://github.com/danglangs/kiolang/releases/latest).
+- **Being evaluated:** a deterministic gate that rejects changes with no reader, generator and reviewer agents against Python at equal evidence, and outside developers reviewing real changes (tasks G1, G2 and W1 in [product-todo](docs/product-todo.md)).
+- **Proposed:** [grouping capabilities](docs/proposals/cap-groups.md), so a helper takes one group instead of five parameters.
 
-Where work stands: [docs/status.md](docs/status.md); concurrency: [docs/proposals/concurrency.md](docs/proposals/concurrency.md).
-
-```
-source ─► check + report ─► lower ─► IR ─┬─► codegen ─► Wasm + runtime ─► Cranelift ─► native code (`kio run`)
-                                         └─► interpreter (native, tests only: the reference)
-```
-
-`lang` (parser, checker, lowering, interpreter; no dependencies), `codegen` and `runtime` (the compiler), `host` (the `kio` binary: Wasmtime, grants, limits), [caps.wit](caps.wit) (the sandbox interface).
+Where work stands: [docs/status.md](docs/status.md).
 
 ## Docs
 
@@ -238,10 +238,16 @@ source ─► check + report ─► lower ─► IR ─┬─► codegen ─► 
 - [docs/guide.md](docs/guide.md): every grant, flag, limit and the audit log.
 - [docs/tour.md](docs/tour.md): walkthroughs: a helper that gains the network (report, `--base`, the audit log), replaying a run.
 - [docs/language.md](docs/language.md): the language and the rules the checker enforces.
-- [docs/design.md](docs/design.md): components, trust boundary, one run step by step.
-- [docs/codegen.md](docs/codegen.md): how a checked program becomes Wasm.
+- [docs/design.md](docs/design.md): components, trust boundary, one run step by step; [docs/codegen.md](docs/codegen.md): how a checked program becomes Wasm.
 - [docs/roadmap.md](docs/roadmap.md) and [docs/perf.md](docs/perf.md): speed against Rust and Python, server numbers; [bench/](bench/README.md) reruns them.
 - [docs/status.md](docs/status.md), the `docs/*-todo.md` task lists and [docs/open_questions.md](docs/open_questions.md): how work proceeds. [CLAUDE.md](CLAUDE.md): how to work on kio.
+
+```
+source ─► check + report ─► lower ─► IR ─┬─► codegen ─► Wasm + runtime ─► Cranelift ─► native code (`kio run`)
+                                         └─► interpreter (native, tests only: the reference)
+```
+
+`lang` (parser, checker, lowering, interpreter; no dependencies), `codegen` and `runtime` (the compiler), `host` (the `kio` binary: Wasmtime, grants, limits), [caps.wit](caps.wit) (the sandbox interface).
 
 ## Related work
 
