@@ -7,9 +7,22 @@
 <p class="cta"><a class="button" href="docs/first-job.md">Your first job in 10 minutes</a> <a class="button secondary" href="https://github.com/danglangs/kiolang">Source on GitHub</a></p>
 </div>
 
-kio is an experimental (v0) language and runtime for software that agents write and review with people minimally in the loop. What a program may touch and which host calls it made are not left to any agent: the checker derives its authority, the host enforces and logs every call, and the same source, grants, fixtures and kio version give the same report. The goal is a workflow where a gate decides most changes and people read only what it flags; that is not yet shown (G1, G2 measure it), and a passing gate today means the authority and tests held, not that the behaviour is right. It combines explicit authority, enforced isolation, value semantics and a compiler built for predictable performance.
+kio makes agent-written software easier to trust without someone reading every line. Agents write and revise the implementation; you approve explicit authority and independently checked evidence, and read the code where that evidence is not enough.
 
-The first contract is authority, and it works today: what a program can touch is checked from its code, the host enforces it, and `kio check --base` prints what a change adds in one line. The safety you would otherwise assemble around Python (a sandbox, an egress proxy, a secret store, an authority report) is built in. Correctness and cost evidence are newer: `kio test` runs tests and property tests (passed on the cases that ran, not proved), and `kio review` puts a change's authority, test results, fuel and memory measured on those tests, and mutants (would a test notice this edit to the changed code?) on one page, each line labelled by what backs it ([walkthrough](docs/review-a-change.md)).
+What kio checks, independently of the agent that wrote the code:
+
+- **Authority:** which resources a program can reach and which operations it may perform, derived from its code (`kio check`).
+- **Enforcement:** the host refuses everything outside the operator's grants; designed and tested against hostile code ([E3](docs/proposals/e3-scorecard.md), E3c), not independently audited.
+- **Audit and replay:** every host call is logged; a fixed clock and seed reproduce a run.
+- **Behavioural evidence:** compiled tests, generated properties and mutants show which behaviours were exercised and which faults the tests catch (`kio test`, `kio review`).
+- **Resource evidence:** fuel and memory measured per test expose regressions on tested workloads.
+- **Review:** one labelled page of what changed, what was checked and what remains unknown ([walkthrough](docs/review-a-change.md)).
+
+Against Python plus a careful sandbox, the advantage is integration: authority is part of the programming model, and running, testing and review share it. In E3 both stopped 52 of 55 attacks; Python needed an egress proxy, a sandbox profile per task and watchdogs, kio flags on `kio run`. And it is practical: agents write it (42-43 of 45 tasks first try, as Python), and it compiles to native code (1.1-2x Rust on most work, 2-5x where it allocates heavily).
+
+The strongest guarantee today is authority over resources. The broader correctness claim is promising and still being validated: passing tests and killed mutants do not show that the requirements are right or every behaviour correct. The aim is a general-purpose language where trust scales better than manual code review, not one that makes review or judgment unnecessary ([trust](docs/proposals/trust.md)).
+
+kio is experimental (v0). It runs file jobs, API integrations and stateful web services today; its libraries and tooling are young.
 
 ## One change, reviewed
 
