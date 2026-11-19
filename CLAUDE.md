@@ -1,6 +1,6 @@
 # Working on kio
 
-kio is a capability-typed language for code AI agents write: the code names what it needs (`input: Dir`), the operator grants it (`--dir input=/data`), nothing else is reachable. Goal: a general-purpose systems language, near-native, memory and capability safe.
+kio is a capability-typed language for code AI agents write: the code names what it needs (`input: Dir`), the operator grants it (`--dir input=/data`), nothing else is reachable. Goal: a general-purpose language for the agentic world, where agents write and review code with people minimally in the loop: the language and host enforce authority, side effects, audit, sandboxing and observability out of the box and deterministically; near-native, memory and capability safe.
 
 **Start here:** [docs/status.md](docs/status.md) (where work stands, what is next, what waits on the maintainer).
 

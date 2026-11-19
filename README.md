@@ -2,11 +2,11 @@
 
 # kio-lang
 
-**A general-purpose language for code AI agents write: review the contracts and the evidence, not every line.**
+**A general-purpose language for the agentic world: agents write and review the code; the language enforces authority, side effects and audit, deterministically.**
 
 Website and docs: [danglangs.github.io/kiolang](https://danglangs.github.io/kiolang/)
 
-kio is an experimental (v0) language and runtime for generated software whose important guarantees can be checked independently of the agent that wrote it: people approve intent, authority and evidence; machines handle the implementation ([trust](docs/proposals/trust.md)). It combines explicit authority, enforced isolation, value semantics and a compiler built for predictable performance.
+kio is an experimental (v0) language and runtime for software that agents write and review with people minimally in the loop. What a program may touch, what side effects it has and what it did are not left to any agent: the checker derives them, the host enforces and logs them, and the same inputs give the same verdict, so a gate can decide without a reader. People set the grants and read only what the gate flags ([trust](docs/proposals/trust.md)). It combines explicit authority, enforced isolation, value semantics and a compiler built for predictable performance.
 
 The first contract is authority, and it works today: what a program can touch is checked from its code, the host enforces it, and `kio check --base` prints what a change adds in one line. The safety you would otherwise assemble around Python (a sandbox, an egress proxy, a secret store, an authority report) is built in. Correctness and cost evidence are newer: `kio test` runs tests and property tests (passed on the cases that ran, not proved), and `kio review` puts a change's authority, test results, fuel and memory measured on those tests, and mutants (would a test notice this edit to the changed code?) on one page, each line labelled by what backs it ([walkthrough](docs/review-a-change.md)).
 

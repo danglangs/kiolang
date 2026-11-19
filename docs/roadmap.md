@@ -1,6 +1,6 @@
 # Roadmap: from v0 to a general language
 
-Where kio stands against its goal of a general-purpose systems language with near-native speed, and what is missing.
+Where kio stands against its goal of a general-purpose language for the agentic world (agents write and review; the language enforces authority, side effects and audit) with near-native speed, and what is missing.
 
 ## Speed today
 
