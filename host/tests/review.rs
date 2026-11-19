@@ -1553,14 +1553,15 @@ fn mutants_killed_and_survived() {
     let (code, out, err) = s.review(&[]);
     assert_eq!(code, 0, "{out}{err}");
     let tests = Sides::section(&out, "Tests");
+    let at = |l: &str| l.replace("{new}", &s.new);
     assert_eq!(
         tests[5..],
         [
             "  not checked  changed, reached by no test: main",
             "  tested       mutants: 2 of 4 killed (generated at seed 1: 4 drawn of 4 sites, 0 did not check)",
             "  tested       killed by: pins_small 2",
-            "  not checked  survived: generated: big: `>=` -> `>` in `...big(n: Int) -> Bool { n >= 100 }`",
-            "  not checked  survived: generated: big: `100` -> `101` in `...(n: Int) -> Bool { n >= 100 }`",
+            &at("  not checked  survived: generated: {new}:3:28: big: `>=` -> `>` in `...big(n: Int) -> Bool { n >= 100 }`"),
+            &at("  not checked  survived: generated: {new}:3:31: big: `100` -> `101` in `...(n: Int) -> Bool { n >= 100 }`"),
         ],
         "{out}"
     );
@@ -1574,10 +1575,9 @@ fn mutants_killed_and_survived() {
         serde_json::json!({"seed": 1, "requested": 20, "sites": 4, "drawn": 4, "made": 4, "did_not_check": 0, "error": null,
             "skipped": [], "constants": [], "mutations": null})
     );
-    let row = |func: &str, from: &str, to: &str, around: &str, killed: Option<&str>| {
-        let line = if func == "small" { 1 } else { 3 };
+    let row = |func: &str, (line, col): (u32, u32), from: &str, to: &str, around: &str, killed: Option<&str>| {
         serde_json::json!({
-            "source": "generated", "written": false, "function": func, "file": s.new, "line": line,
+            "source": "generated", "written": false, "function": func, "file": s.new, "line": line, "col": col,
             "from": from, "to": to, "description": format!("`{from}` -> `{to}` in `{around}`"),
             "killed_by": killed, "stopped_by": null, "discarded_by": null, "how": killed.map(|_| "failed"),
             "tests_run": 1,
@@ -1588,6 +1588,7 @@ fn mutants_killed_and_survived() {
         [
             row(
                 "small",
+                (1, 30),
                 "<",
                 "<=",
                 "...all(n: Int) -> Bool { n < 10 }",
@@ -1595,13 +1596,14 @@ fn mutants_killed_and_survived() {
             ),
             row(
                 "small",
+                (1, 32),
                 "10",
                 "11",
                 "...l(n: Int) -> Bool { n < 10 }",
                 Some("pins_small")
             ),
-            row("big", ">=", ">", "...big(n: Int) -> Bool { n >= 100 }", None),
-            row("big", "100", "101", "...(n: Int) -> Bool { n >= 100 }", None),
+            row("big", (3, 28), ">=", ">", "...big(n: Int) -> Bool { n >= 100 }", None),
+            row("big", (3, 31), "100", "101", "...(n: Int) -> Bool { n >= 100 }", None),
         ]
     );
 }
@@ -1622,12 +1624,13 @@ fn a_mutant_that_loops_runs_out_of_fuel() {
     let (code, out, err) = s.review(&[]);
     assert_eq!(code, 0, "{out}{err}");
     let tests = Sides::section(&out, "Tests");
+    let at = |l: &str| l.replace("{new}", &s.new);
     assert_eq!(
         tests[5..],
         [
             "  tested       mutants: 5 of 6 killed (generated at seed 1: 6 drawn of 6 sites, 0 did not check)",
             "  tested       killed by: counts 5 (1 out of fuel)",
-            "  not checked  survived: generated: count: `0` -> `1` in `...t) -> Int { let mut i = 0; let mut s = 0; while i...`",
+            &at("  not checked  survived: generated: {new}:1:39: count: `0` -> `1` in `...t) -> Int { let mut i = 0; let mut s = 0; while i...`"),
         ],
         "{out}"
     );
@@ -1652,6 +1655,7 @@ fn mutants_are_drawn_by_the_seed() {
     let (_, again, _) = s.review(&["--mutants", "2"]);
     assert_eq!(one, again);
     let (_, two, _) = s.review(&["--mutants", "2", "--seed", "2"]);
+    let at = |l: &str| l.replace("{new}", &s.new);
     let mutants = |out: &str| -> Vec<String> {
         let tests = Sides::section(out, "Tests");
         tests.into_iter().skip_while(|l| !l.contains("mutants:")).collect()
@@ -1661,7 +1665,7 @@ fn mutants_are_drawn_by_the_seed() {
         [
             "  tested       mutants: 1 of 2 killed (generated at seed 1: 2 drawn of 6 sites, 0 did not check)",
             "  tested       killed by: counts 1",
-            "  not checked  survived: generated: count: `0` -> `1` in `...t) -> Int { let mut i = 0; let mut s = 0; while i...`",
+            &at("  not checked  survived: generated: {new}:1:39: count: `0` -> `1` in `...t) -> Int { let mut i = 0; let mut s = 0; while i...`"),
         ],
         "{one}"
     );
@@ -1770,13 +1774,14 @@ fn padding_does_not_dilute_the_draw() {
     let s = Sides::new(BARE, &new);
     let (code, out, err) = s.review(&["--mutants", "4"]);
     assert_eq!(code, 0, "{out}{err}");
+    let at = |l: &str| l.replace("{new}", &s.new);
     assert_eq!(
         mutant_lines(&out),
         [
             "  tested       mutants: 2 of 4 killed (generated at seed 1: 4 drawn of 82 sites, 0 did not check)",
             "  tested       killed by: pads 2",
-            "  not checked  survived: generated: sensitive: `>` -> `>=` in `...ive(n: Int) -> Bool { n > 5 }`",
-            "  not checked  survived: generated: sensitive: `5` -> `6` in `...e(n: Int) -> Bool { n > 5 }`",
+            &at("  not checked  survived: generated: {new}:3:34: sensitive: `>` -> `>=` in `...ive(n: Int) -> Bool { n > 5 }`"),
+            &at("  not checked  survived: generated: {new}:3:36: sensitive: `5` -> `6` in `...e(n: Int) -> Bool { n > 5 }`"),
         ],
         "{out}"
     );
@@ -1836,14 +1841,14 @@ fn a_stop_at_ts_own_fuel_is_not_a_kill() {
     let t = write(s.dir.path(), "t.grants", &format!("--fuel {fuel}\n"));
     let (code, out, err) = s.review(&["--test-grants", &t]);
     assert_eq!(code, 0, "{out}{err}");
-    let shown = |l: &str| l.replace("{fuel}", &fuel.to_string());
+    let at = |l: &str| l.replace("{fuel}", &fuel.to_string()).replace("{new}", &s.new);
     assert_eq!(
         mutant_lines(&out),
         [
             "  tested       mutants: 4 of 6 killed, 1 stopped by T's limits (generated at seed 1: 6 drawn of 6 sites, 0 did not check)",
             "  tested       killed by: counts 4",
-            "  not checked  survived: generated: count: `0` -> `1` in `...t) -> Int { let mut i = 0; let mut s = 0; while i...`",
-            &shown("  not checked  stopped by T's --fuel {fuel} in counts: generated: count: `i += 1;` dropped in `...; while i < n { s += i; i += 1; } s }`"),
+            &at("  not checked  survived: generated: {new}:1:39: count: `0` -> `1` in `...t) -> Int { let mut i = 0; let mut s = 0; while i...`"),
+            &at("  not checked  stopped by T's --fuel {fuel} in counts: generated: {new}:1:79: count: `i += 1;` dropped in `...; while i < n { s += i; i += 1; } s }`"),
         ],
         "{out}"
     );
@@ -1857,11 +1862,12 @@ fn a_comparison_after_a_constant_is_flipped() {
     let s = Sides::new(BARE, new);
     let (code, out, err) = s.review(&[]);
     assert_eq!(code, 0, "{out}{err}");
+    let at = |l: &str| l.replace("{new}", &s.new);
     assert_eq!(
         mutant_lines(&out),
         [
             "  tested       mutants: 0 of 1 killed (generated at seed 1: 1 drawn of 1 sites, 0 did not check)",
-            "  not checked  survived: generated: over: `>` -> `>=` in `...n: Int) -> Bool { LIMIT > n }`",
+            &at("  not checked  survived: generated: {new}:3:33: over: `>` -> `>=` in `...n: Int) -> Bool { LIMIT > n }`"),
             "  not checked  constants are not mutated: LIMIT used by over",
         ],
         "{out}"
@@ -1875,11 +1881,12 @@ fn a_property_that_discards_every_case_kills_nothing() {
     let s = Sides::new(BARE, new);
     let (code, out, err) = s.review(&[]);
     assert_eq!(code, 0, "{out}{err}");
+    let at = |l: &str| l.replace("{new}", &s.new);
     assert_eq!(
         mutant_lines(&out),
         [
             "  tested       mutants: 0 of 1 killed (generated at seed 1: 1 drawn of 1 sites, 0 did not check)",
-            "  not checked  survived: generated: keep: `true` -> `false` in `...keep(n: Int) -> Bool { true }` (kept discarded every case)",
+            &at("  not checked  survived: generated: {new}:1:27: keep: `true` -> `false` in `...keep(n: Int) -> Bool { true }` (kept discarded every case)"),
         ],
         "{out}"
     );
@@ -1958,7 +1965,7 @@ fn a_written_survivor_is_exit_3() {
         mutant_lines(&out),
         [
             format!("  tested       mutants: 0 of 1 killed ({m} 0 of 1)"),
-            format!("  not checked  survived: {m}:1: big: `n >= 100` -> `n > 100`, ran 1 test: \"the boundary moves\""),
+            format!("  not checked  survived: {m}:1: {}:3:26: big: `n >= 100` -> `n > 100`, ran 1 test: \"the boundary moves\"", s.new),
         ],
         "{out}"
     );
@@ -2117,11 +2124,12 @@ fn a_mutations_file_named_generated_is_still_written() {
     };
     let (code, out) = run(false);
     assert_eq!(code, Some(3), "{out}");
+    let at = |l: &str| l.replace("{new}", &s.new);
     assert_eq!(
         mutant_lines(&out),
         [
             "  tested       mutants: 0 of 1 killed (generated 0 of 1)",
-            "  not checked  survived: generated:1: big: `n >= 100` -> `n > 100`, ran 1 test: \"the boundary moves\"",
+            &at("  not checked  survived: generated:1: {new}:3:26: big: `n >= 100` -> `n > 100`, ran 1 test: \"the boundary moves\""),
         ],
         "{out}"
     );
@@ -2156,9 +2164,10 @@ fn a_stop_at_ts_own_calls_is_not_a_kill() {
     let lines = mutant_lines(&out);
     assert!(lines[0].contains("stopped by T's limits"), "{out}");
     assert!(
-        lines
-            .iter()
-            .any(|l| l.starts_with("  not checked  stopped by T's --calls 3 in probes: generated: probe: `<` -> `<=`")),
+        lines.iter().any(|l| l.starts_with(&format!(
+            "  not checked  stopped by T's --calls 3 in probes: generated: {}:1:",
+            s.new
+        )) && l.contains(": probe: `<` -> `<=`")),
         "{out}"
     );
     assert!(!out.contains("killed by: probes"), "{out}");
@@ -2227,7 +2236,8 @@ fn a_written_entry_main_does_not_reach_is_refused() {
         [
             format!("  tested       mutants: 0 of 1 killed ({m} 0 of 1)"),
             format!(
-                "  not checked  survived: {m}:5: worker.kio: deliver: `n < 300` -> `true`, ran 0 tests: \"any status\""
+                "  not checked  survived: {m}:5: {}/./worker.kio:1:30: worker.kio: deliver: `n < 300` -> `true`, ran 0 tests: \"any status\"",
+                s.dir.path().join("new").display()
             ),
             format!("  error        mutants: {m}:1: helper is not reached from NEW's main"),
             "                 hint: name a function `main` reaches; a test or a helper only tests call is not one"

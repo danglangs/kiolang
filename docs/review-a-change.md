@@ -197,9 +197,9 @@ Tests
   tested       tests::stale_completion_changes_nothing: 100 cases compiled; seed 1
   tested       mutants: 15 of 18 killed (generated at seed 1: 20 drawn of 43 sites, 2 did not check)
   tested       killed by: tests::a_claim_needs_the_job_still_due_and_unchanged 7, tests::failure_retries_with_doubling_backoff_then_dies 4, tests::every_attempt_carries_the_event_id_as_the_key 2, tests::expired_lease_is_reclaimed_and_the_old_worker_changes_nothing 2
-  not checked  survived: generated: flow::store: `"database error"` -> `""` in `...!init(db) { return Err("database error"); }`
-  not checked  survived: generated: flow::int_of: `0` -> `1` in `...alue::Int(n) => n, _ => 0 }`
-  not checked  survived: generated: flow::headers: `"Content-Type: application/json"` -> `""` in `["Content-Type: application/json", "Idempotency-Key: " +...`
+  not checked  survived: generated: flow.kio:28:31: flow::store: `"database error"` -> `""` in `...!init(db) { return Err("database error"); }`
+  not checked  survived: generated: flow.kio:49:43: flow::int_of: `0` -> `1` in `...alue::Int(n) => n, _ => 0 }`
+  not checked  survived: generated: flow.kio:70:6: flow::headers: `"Content-Type: application/json"` -> `""` in `["Content-Type: application/json", "Idempotency-Key: " +...`
 Resources
   measured     tests::any_signed_bytes_get_an_answer: fuel 3583775 -> 3854875 (+7.57%), peak memory 2112 KB -> 2112 KB (+0.00%)
   measured     tests::bad_signature_beats_bad_json: fuel 25665 -> 28376 (+10.57%), peak memory 1920 KB -> 1920 KB (+0.00%)
@@ -298,8 +298,8 @@ Tests
   not checked  changed, reached by no test: main
   tested       mutants: 2 of 4 killed (generated at seed 1: 4 drawn of 4 sites, 0 did not check)
   tested       killed by: counts_rows 2
-  not checked  survived: generated: rows: `0` -> `1` in `if n == 0 { 0 } else { n - 1 }`
-  not checked  survived: generated: rows: `0` -> `1` in `if n == 0 { 0 } else { n - 1 }`
+  not checked  survived: generated: b/tally.kio:16:11: rows: `0` -> `1` in `if n == 0 { 0 } else { n - 1 }`
+  not checked  survived: generated: b/tally.kio:16:15: rows: `0` -> `1` in `if n == 0 { 0 } else { n - 1 }`
 Resources
   measured     skips_bad_rows: fuel 16475 -> 17525 (+6.38%), peak memory 1600 KB -> 1600 KB (+0.00%)
   measured     sums_the_cents_column: fuel 15228 -> 16278 (+6.90%), peak memory 1600 KB -> 1600 KB (+0.00%)
@@ -360,8 +360,8 @@ Tests
   not checked  changed: sums_the_cents_column (reaches changed cents, total)
   tested       mutants: 8 of 10 killed (generated at seed 1: 11 drawn of 11 sites, 1 did not check)
   tested       killed by: main_writes_the_total 8
-  not checked  survived: generated: cents: `>` -> `>=` in `if c > 0 { Some(c) } else { No...`
-  not checked  survived: generated: cents: `0` -> `1` in `if c > 0 { Some(c) } else { None...`
+  not checked  survived: generated: c/tally.kio:7:8: cents: `>` -> `>=` in `if c > 0 { Some(c) } else { No...`
+  not checked  survived: generated: c/tally.kio:7:10: cents: `0` -> `1` in `if c > 0 { Some(c) } else { None...`
 Resources
   measured     no test changed by more than 2%
   measured     total over 3 tests on both sides: fuel 55651 -> 55753 (+0.19%), largest peak memory 1728 KB -> 1728 KB (+0.00%)

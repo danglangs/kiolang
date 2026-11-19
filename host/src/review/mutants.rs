@@ -181,9 +181,9 @@ pub(super) fn run(
                         format!("raise T's {limit} (the limit named) so the mutant can finish"),
                     ));
                 }
-                let (from, line) = shown_site(&prog.files[site.file].1, &site);
+                let (from, (n, col, _)) = shown_site(&prog.files[site.file].1, &site);
                 let shown = (
-                    line.0,
+                    (n, col),
                     from,
                     shown_text(&cut(&site.to, 60)),
                     ascii_chars(&w.description),
@@ -211,18 +211,18 @@ pub(super) fn run(
             Ok(Ran::DidNotCheck(_)) => did_not_check += 1,
             Ok(Ran::Ran(end, tests_run, fuel)) => {
                 ran += 1;
-                let (from, line) = shown_site(&new.files[s.file].1, s);
+                let (from, (n, col, around)) = shown_site(&new.files[s.file].1, s);
                 let to = shown_text(&s.to);
                 let description = match to.is_empty() {
-                    true => format!("`{from}` dropped in `{}`", line.1),
-                    false => format!("`{from}` -> `{to}` in `{}`", line.1),
+                    true => format!("`{from}` dropped in `{around}`"),
+                    false => format!("`{from}` -> `{to}` in `{around}`"),
                 };
                 let source = json!({"source": "generated", "written": false});
                 out.push(row(
                     source,
                     s,
                     json_path(new, s.file),
-                    (line.0, from, to, description),
+                    ((n, col), from, to, description),
                     &end,
                     (tests_run, fuel),
                 ));
@@ -281,12 +281,13 @@ pub(super) fn run(
 }
 
 /// One mutant's `--json` row: where it came from (`source`, merged in), its site in NEW's file
-/// `file`, `(line, from, to, description)` as shown, how its runs ended and `(tests run, fuel)`.
+/// `file`, `((line, col), from, to, description)` as shown, how its runs ended and `(tests run,
+/// fuel)`.
 fn row(
     source: serde_json::Value,
     s: &Site,
     file: String,
-    (line, from, to, description): (usize, String, String, String),
+    ((line, col), from, to, description): ((usize, usize), String, String, String),
     end: &End,
     (tests_run, fuel): (usize, u64),
 ) -> serde_json::Value {
@@ -298,7 +299,7 @@ fn row(
             .map(|s| s.1.clone()))
         .or(end.discarded.as_ref().map(|_| "discarded".to_string()));
     let mut row = json!({
-        "function": s.func, "file": file, "line": line,
+        "function": s.func, "file": file, "line": line, "col": col,
         "from": from, "to": to, "description": description,
         "killed_by": end.killed.as_ref().map(|k| &k.0),
         "stopped_by": end.stopped.as_ref().filter(|_| end.killed.is_none()).map(|s| &s.0),
@@ -652,17 +653,19 @@ fn lines(
     let shown = |m: &&serde_json::Value| m["killed_by"].is_null() && (is_generated(m) || m["stopped_by"].is_null());
     for m in out.iter().filter(shown) {
         let (f, d) = (text(m, "function"), text(m, "description"));
+        // The edit's place in NEW, so two mutants with one snippet are told apart.
+        let at = format!("{}:{}:{}", ascii(&text(m, "file")), m["line"], m["col"]);
         // A written mutant: where it is in the file, its program, its edit, then what it breaks,
         // quoted so it cannot pass for the edit.
         let (source, f, d) = match is_generated(&m) {
-            true => ("generated".to_string(), f, d),
+            true => (format!("generated: {at}"), f, d),
             false => {
                 let f = m["program"].as_str().map_or(f.clone(), |p| format!("{p}: {f}"));
                 let n = m["tests_run"].as_u64().unwrap_or_default();
                 let tests = if n == 1 { "test" } else { "tests" };
                 let (from, to, d) = (text(m, "from"), text(m, "to"), d.replace('"', "\\\""));
                 let d = format!("`{from}` -> `{to}`, ran {n} {tests}: \"{d}\"");
-                (format!("{}:{}", text(m, "source"), m["entry"]), f, d)
+                (format!("{}:{}: {at}", text(m, "source"), m["entry"]), f, d)
             }
         };
         let line = match (m["stopped_by"].as_str(), m["discarded_by"].as_str()) {
@@ -842,10 +845,11 @@ fn how(e: &serde_json::Value) -> Result<String, String> {
 /// Characters of the site's line shown on each side of it.
 const AROUND: usize = 24;
 
-/// The site's text, its line number, and the site with up to `AROUND` characters of its line on
-/// each side: each one line, cut, and ASCII as the binds line shows a grant.
-fn shown_site(text: &str, s: &Site) -> (String, (usize, String)) {
-    let n = text[..s.start].matches('\n').count() + 1;
+/// The site's text, its 1-based line and column (`lang::line_col`), and the site with up to
+/// `AROUND` characters of its line on each side: each one line, cut, and ASCII as the binds line
+/// shows a grant.
+fn shown_site(text: &str, s: &Site) -> (String, (usize, usize, String)) {
+    let (n, col) = lang::line_col(text, s.start);
     let before = &text[text[..s.start].rfind('\n').map_or(0, |i| i + 1)..s.start];
     let after = &text[s.end..text[s.end..].find('\n').map_or(text.len(), |i| s.end + i)];
     let b = before.char_indices().rev().nth(AROUND - 1).map_or(0, |(i, _)| i);
@@ -858,7 +862,7 @@ fn shown_site(text: &str, s: &Site) -> (String, (usize, String)) {
     if a < after.len() {
         around += "...";
     }
-    (ascii_chars(&from), (n, around))
+    (ascii_chars(&from), (n, col, around))
 }
 
 /// `t` on one line, runs of whitespace one space.
