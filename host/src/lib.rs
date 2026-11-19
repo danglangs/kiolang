@@ -279,8 +279,9 @@ impl Origin {
     }
 
     /// A grant answered from `file` (T4a), with what one test asks of it: `kio test`'s binder
-    /// only. Methods and headers apply as to a real grant; nothing is ever sent.
-    pub fn fake(file: Arc<fake::FakeFile>) -> Self {
+    /// only. Methods and headers apply as to a real grant; nothing is ever sent. With `record`,
+    /// each request is also written into the test's `Dir` (T4b).
+    pub fn fake(file: Arc<fake::FakeFile>, record: Option<fake::Record>) -> Self {
         Origin {
             https: true,
             host: "fake".into(),
@@ -291,7 +292,7 @@ impl Origin {
             any_addr: false,
             methods: Vec::new(),
             inject: Vec::new(),
-            fake: Some(Arc::new(fake::Fake::new(file))),
+            fake: Some(Arc::new(fake::Fake::new(file, record))),
         }
     }
 
@@ -300,10 +301,41 @@ impl Origin {
         self.fake.as_ref().and_then(|f| f.unmatched())
     }
 
-    /// On a fake grant, its answer to `method path` (counted); `None` for a real grant. Called
-    /// only once the host's checks passed.
-    fn fake_answer(&self, method: &'static str, path: &str) -> Option<fake::Answer> {
-        self.fake.as_ref().map(|f| f.answer(method, path))
+    /// On a fake grant, its answer to `method path` (counted, and recorded with `--http-record`);
+    /// `None` for a real grant. Called only once the host's checks passed. A record that cannot
+    /// be written is the error, which stops the run (`State::stop_record`).
+    fn fake_answer(
+        &self,
+        method: &'static str,
+        path: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> std::result::Result<Option<fake::Answer>, String> {
+        let Some(f) = &self.fake else {
+            return Ok(None);
+        };
+        let request = match f.records() {
+            true => self.record(method, path, headers, body),
+            false => Vec::new(),
+        };
+        f.answer(method, path, &request).map(Some)
+    }
+
+    /// The request as HTTP writes it, for `--http-record`: `METHOD /path`, the program's headers
+    /// then each injected one as `name: <injected>` (`perform`'s order, never a value), a blank
+    /// line, and the body's bytes as sent.
+    fn record(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Vec<u8> {
+        let mut out = format!("{method} {path}\n");
+        for (name, value) in headers {
+            out += &format!("{name}: {value}\n");
+        }
+        for (name, _) in &self.inject {
+            out += &format!("{name}: <injected>\n");
+        }
+        out.push('\n');
+        let mut out = out.into_bytes();
+        out.extend_from_slice(body);
+        out
     }
 
     /// The methods the grant allows: GET, then those `--http-methods` added.
@@ -1133,6 +1165,8 @@ pub struct State {
     unexpected: bool,
     /// Set by a write to a read-only `Kv` store or `Db`.
     read_only_write: bool,
+    /// Set by an `--http-record` that could not be written (T4b); `audit_msg` says why.
+    record_failed: bool,
     /// `(capability parameter, method)` pairs on `main`'s report line; any other call is a checker
     /// bug. Set at the start of every run, whether or not a log is written.
     allowed: HashSet<(String, String)>,
@@ -1180,6 +1214,7 @@ impl State {
             audit: None,
             unexpected: false,
             read_only_write: false,
+            record_failed: false,
             allowed: HashSet::new(),
             handles: HashMap::new(),
             audit_msg: String::new(),
@@ -1456,6 +1491,13 @@ impl State {
             return Err(self.stop_calls());
         }
         Ok(())
+    }
+
+    /// Stop the run: an `--http-record` could not be written (`msg`).
+    fn stop_record(&mut self, msg: String) -> wasmtime::Error {
+        self.record_failed = true;
+        self.audit_msg = msg.clone();
+        wasmtime::Error::msg(msg)
     }
 
     /// Stop the run for exceeding `--calls`.
@@ -1963,7 +2005,9 @@ impl State {
             body: Vec::new(),
             timeout: HTTP_TIMEOUT,
             as_get: true,
-            fake: origin.fake_answer("GET", &path),
+            fake: origin
+                .fake_answer("GET", &path, &[], &[])
+                .map_err(|e| self.stop_record(e))?,
         };
         let mut extra = origin.injected();
         let done = self.finish(&origin, req, &mut extra)?;
@@ -2072,6 +2116,7 @@ impl State {
         *extra += &origin.injected();
         self.spend_io(body.len())?;
         *extra += &format!(r#","sent":{}"#, body.len());
+        let fake = (origin.fake_answer(method, path, &headers, &body)).map_err(|e| self.stop_record(e))?;
         Ok(Ok(Outbound {
             url,
             method,
@@ -2079,7 +2124,7 @@ impl State {
             body,
             timeout,
             as_get: false,
-            fake: origin.fake_answer(method, path),
+            fake,
         }))
     }
 
@@ -3046,7 +3091,7 @@ fn state_limit(s: &State, l: &Limits) -> Option<String> {
             l.memory >> 20
         ));
     }
-    if s.unexpected || s.read_only_write {
+    if s.unexpected || s.read_only_write || s.record_failed {
         return Some(s.audit_msg.clone());
     }
     if s.too_many_calls {

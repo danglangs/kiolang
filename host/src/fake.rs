@@ -2,6 +2,7 @@
 //! of a server. Only `kio test`'s binder builds one (`Origin::fake`); `Origin::parse` refuses
 //! `fake:`. The host's own checks run before a lookup, as on a real grant (`State::prepare`).
 use std::collections::HashMap;
+use std::io::Write;
 use std::sync::{Arc, Mutex, PoisonError};
 
 /// One entry of FILE: its line, `METHOD /path`, and the answer.
@@ -114,11 +115,21 @@ fn response(lines: &[&str], from: usize, status: u16, at: &dyn Fn(usize) -> Stri
 /// The most unmatched requests `Fake::unmatched` names.
 const SHOWN: usize = 5;
 
-/// A fake for one test: FILE's entries and what this test has asked of them.
+/// A fake for one test: FILE's entries, what this test has asked of them, and where
+/// `--http-record` writes each request (T4b).
 #[derive(Debug)]
 pub struct Fake {
     file: Arc<FakeFile>,
     asked: Mutex<Asked>,
+    record: Option<Record>,
+}
+
+/// `--http-record grant=dir`: the grant's name (a kio identifier, so no path characters) and the
+/// open handle of the test's default temporary `Dir` the records go into.
+#[derive(Debug)]
+pub struct Record {
+    pub grant: String,
+    pub dir: cap_std::fs::Dir,
 }
 
 /// Requests so far: per `METHOD /path` how many, in all how many, and those with no entry.
@@ -130,29 +141,50 @@ struct Asked {
 }
 
 impl Fake {
-    pub fn new(file: Arc<FakeFile>) -> Fake {
+    pub fn new(file: Arc<FakeFile>, record: Option<Record>) -> Fake {
         Fake {
             file,
             asked: Mutex::default(),
+            record,
         }
     }
 
+    /// Whether requests are recorded (`--http-record`).
+    pub(crate) fn records(&self) -> bool {
+        self.record.is_some()
+    }
+
     /// The answer to the next `method path`: the n-th entry for it answers the n-th such request
-    /// and the last repeats; no entry is `Unmatched`, and kept.
-    pub(crate) fn answer(&self, method: &'static str, path: &str) -> Answer {
+    /// and the last repeats; no entry is `Unmatched`, and kept. With `--http-record`, `request`
+    /// is written first as `<grant>-<n>`, n counting this test's requests from 1; an unmatched
+    /// request too, since it was sent. A failed write is the error, and the request is not counted.
+    pub(crate) fn answer(&self, method: &'static str, path: &str, request: &[u8]) -> Result<Answer, String> {
         let mut asked = self.asked.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(r) = &self.record {
+            let name = format!("{}-{}", r.grant, asked.total + 1);
+            // A new file only: a record never replaces one, even one the program wrote first.
+            let mut opts = cap_std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            let written = (r.dir.open_with(&name, &opts)).and_then(|mut f| f.write_all(request));
+            if let Err(e) = written {
+                return Err(format!(
+                    "--http-record {}: cannot write `{name}`: {e}; a record is a new file, so leave `{}-*` names to the host",
+                    r.grant, r.grant
+                ));
+            }
+        }
         asked.total += 1;
         let entries: Vec<&Entry> = (self.file.entries.iter())
             .filter(|e| e.method == method && e.path == path)
             .collect();
         let Some(last) = entries.last() else {
             asked.unmatched.push(format!("{method} {path}"));
-            return Answer::Unmatched;
+            return Ok(Answer::Unmatched);
         };
         let n = asked.counts.entry((method, path.to_string())).or_default();
         let e = entries.get(*n).unwrap_or(last);
         *n += 1;
-        e.answer.clone()
+        Ok(e.answer.clone())
     }
 
     /// `3 requests, 1 unmatched: POST /v1/evnts` (the first `SHOWN` unmatched), or `None` when

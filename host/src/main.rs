@@ -444,7 +444,7 @@ fn grants_flags(text: &str, path: &str, rest: &[String]) -> Result<Vec<String>, 
                 "{at}: a grants file cannot name another\n  hint: put those grants in this file"
             )));
         }
-        if !RUN_FLAGS.contains(&flag) {
+        if !RUN_FLAGS.contains(&flag) && flag != "--http-record" {
             return Err(fail(format!(
                 "{at}: unknown flag `{flag}`\n  hint: a line is one of `kio run`'s flags: {}",
                 RUN_FLAGS.join(" ")
@@ -755,6 +755,13 @@ fn run_program(prog: &Program, flags: &[&str], grants_file: Option<&str>, dry: b
                     Err(e) => return fail(format!("--http {name}={origin}: {e}")),
                 }
                 continue;
+            }
+            // `kio test` takes it out of its grants file's flags (`take_records`) before any reach here.
+            ["--http-record", _] => {
+                return fail(
+                    "`--http-record` is not a flag of kio run\n  hint: it records a fake's requests for kio test"
+                        .into(),
+                )
             }
             ["--http-methods", spec] => {
                 match spec.split_once('=') {
@@ -1330,6 +1337,8 @@ struct Tests {
     seed: u64,
     /// Each `--http name=fake:FILE` of the grants file, FILE read once (`fake_file`); not in `flags`.
     fakes: Vec<(String, Arc<FakeFile>)>,
+    /// Each `--http-record grant=dir` of the grants file, as `(grant, dir)`; not in `flags`.
+    records: Vec<(String, String)>,
 }
 
 /// One test's result: its error as `--json` shows one, the time it took and its `Log` lines;
@@ -1568,7 +1577,7 @@ fn test_setup(path: &str, flags: &[&str]) -> Result<Tests, i32> {
                 Err(_) => return Err(fail(format!("--seed {s}: expected a non-negative integer"))),
             },
             [flag, _] if *flag == "--grants" || LIMIT_FLAGS.contains(flag) => rest.extend(pair),
-            [flag, _] if RUN_FLAGS.contains(flag) => {
+            [flag, _] if RUN_FLAGS.contains(flag) || *flag == "--http-record" => {
                 return Err(fail(format!(
                     "`{flag}` is not a flag of kio test\n  hint: name grants in a --grants file, one flag per line"
                 )))
@@ -1598,6 +1607,7 @@ fn test_setup(path: &str, flags: &[&str]) -> Result<Tests, i32> {
         }
     }
     let fakes = take_fakes(&mut flags)?;
+    let records = take_records(&mut flags, &fakes).map_err(fail)?;
     let prog = read_program(path)?;
     let pairs: Vec<(&str, &str)> = prog.files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
     let program = match lang::check_files_for_tests(&pairs, &lang::CapTable::v0()) {
@@ -1623,6 +1633,7 @@ fn test_setup(path: &str, flags: &[&str]) -> Result<Tests, i32> {
         cases,
         seed,
         fakes,
+        records,
     })
 }
 
@@ -1638,6 +1649,47 @@ fn take_fakes(flags: &mut Vec<String>) -> Result<Vec<(String, Arc<FakeFile>)>, i
     }
     *flags = rest;
     Ok(fakes)
+}
+
+/// Take each `--http-record grant=dir` out of `flags` (T4b): `grant` must be one of `fakes`, at
+/// most once, and `dir` no `--dir` of `flags`, since records go only to a test's default
+/// temporary `Dir` (nothing stale from an earlier run is read).
+fn take_records(flags: &mut Vec<String>, fakes: &[(String, Arc<FakeFile>)]) -> Result<Vec<(String, String)>, String> {
+    let (mut records, mut rest): (Vec<(String, String)>, Vec<String>) = (Vec::new(), Vec::new());
+    for pair in flags.chunks(2) {
+        if pair[0] != "--http-record" {
+            rest.extend(pair.iter().cloned());
+            continue;
+        }
+        let spec = &pair[1];
+        let at = format!("--http-record {spec}");
+        let Some((grant, dir)) = spec.split_once('=').filter(|(g, d)| is_ident(g) && is_ident(d)) else {
+            return Err(format!(
+                "{at}: expected grant=dir\n  hint: name a fake Http grant and a Dir parameter: `--http-record hook=sent`"
+            ));
+        };
+        if !fakes.iter().any(|(n, _)| n == grant) {
+            return Err(format!(
+                "{at}: {grant} is not a fake\n  hint: a real grant's requests are in the audit log (--audit)"
+            ));
+        }
+        if records.iter().any(|(g, _)| g == grant) {
+            return Err(format!(
+                "{at}: `{grant}` is recorded twice\n  hint: give one --http-record {grant}"
+            ));
+        }
+        let granted = flags
+            .chunks(2)
+            .any(|p| p[0] == "--dir" && p[1].split('=').next() == Some(dir));
+        if granted {
+            return Err(format!(
+                "{at}: the file grants `--dir {dir}`, and records go to a fresh temporary Dir\n  hint: remove --dir {dir}"
+            ));
+        }
+        records.push((grant.to_string(), dir.to_string()));
+    }
+    *flags = rest;
+    Ok(records)
 }
 
 /// FILE of `--http name=fake:FILE`, under the grants file's rules: a regular file of at most
@@ -1691,7 +1743,7 @@ fn fake_file(name: &str, path: &str, flags: &[String]) -> Result<Arc<FakeFile>, 
         Err(e) => return Err(format!("{at}: {e}")),
     };
     let file = Arc::new(kio_host::fake::parse(path, &text)?);
-    let mut origin = Origin::fake(file.clone());
+    let mut origin = Origin::fake(file.clone(), None);
     let list = flags.chunks(2).find_map(|p| match p[1].split_once('=') {
         Some((n, list)) if p[0] == "--http-methods" && n == name => Some(list),
         _ => None,
@@ -1767,16 +1819,13 @@ fn run_once(tests: &Tests, t: &lang::TestFn, case: Option<(lang::prop::Case, boo
         }
         flags.extend(pair.iter().cloned());
     }
-    // The only place a fake is made: one per test, so each counts its own requests (T4a).
-    let mut fakes = Vec::new();
-    for (name, file) in &tests.fakes {
-        if t.params.iter().any(|(n, ty)| n == name && ty == "Http") {
-            named.push(name.clone());
-            fakes.push((name.clone(), Origin::fake(file.clone())));
-        }
-    }
-    // Shares each fake's counts with the run's, to list what had no entry.
-    let watched = fakes.clone();
+    // This test's fakes, made below once the `Dir`s their records go to are open.
+    let bound: Vec<&(String, Arc<FakeFile>)> = (tests.fakes.iter())
+        .filter(|(name, _)| t.params.iter().any(|(n, ty)| n == name && ty == "Http"))
+        .collect();
+    named.extend(bound.iter().map(|(name, _)| name.clone()));
+    // `(dir, handle)` of each default temporary `Dir` an `--http-record` of a bound fake names.
+    let mut opened: Vec<(String, cap_std::fs::Dir)> = Vec::new();
     let mut temps = Vec::new();
     let mut logs = Vec::new();
     let log = SharedBuf::default();
@@ -1786,7 +1835,19 @@ fn run_once(tests: &Tests, t: &lang::TestFn, case: Option<(lang::prop::Case, boo
             "Dir" => match TempDir::new() {
                 Ok(d) => {
                     let spec = format!("{name}={}", d.0.display());
+                    let recorded =
+                        (tests.records.iter()).any(|(g, dir)| dir == name && bound.iter().any(|(n, _)| n == g));
+                    // Opened once, just after kio made it (mode 0700); records go through this handle.
+                    let handle = if recorded { Some(open_dir(&d.0)) } else { None };
                     temps.push(d);
+                    match handle {
+                        Some(Err(e)) => {
+                            missing = Some(("internal", format!("cannot open a temporary directory: {e}"), None));
+                            break;
+                        }
+                        Some(Ok(h)) => opened.push((name.clone(), h)),
+                        None => {}
+                    }
                     Some(("--dir", spec))
                 }
                 Err(e) => {
@@ -1819,6 +1880,27 @@ fn run_once(tests: &Tests, t: &lang::TestFn, case: Option<(lang::prop::Case, boo
             flags.extend([flag.to_string(), spec]);
         }
     }
+    // The only place a fake is made: one per test, so each counts its own requests (T4a), with
+    // its record's `Dir` handle when the test has that parameter (T4b).
+    let mut fakes = Vec::new();
+    for (name, file) in bound {
+        let dir = (tests.records.iter()).find(|(g, _)| g == name).map(|(_, d)| d);
+        let handle = opened.iter().find(|(d, _)| Some(d) == dir).map(|(_, h)| h.try_clone());
+        let record = match handle {
+            Some(Ok(dir)) => Some(kio_host::fake::Record {
+                grant: name.clone(),
+                dir,
+            }),
+            Some(Err(e)) => {
+                missing = Some(("internal", format!("cannot open a temporary directory: {e}"), None));
+                None
+            }
+            None => None,
+        };
+        fakes.push((name.clone(), Origin::fake(file.clone(), record)));
+    }
+    // Shares each fake's counts with the run's, to list what had no entry.
+    let watched = fakes.clone();
     let (code, out) = captured(true, || match missing {
         Some((kind, msg, hint)) => {
             push_error(kind, &msg, hint, None);
