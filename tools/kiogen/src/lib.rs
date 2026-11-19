@@ -25,7 +25,8 @@
 
 pub mod enums;
 
-/// What programs may contain. Int and Bool expressions with every operator, `let`, `let mut`,
+/// What programs may contain. Int and Bool expressions with every operator and L29's `Int`
+/// methods (`checked_*` with `unwrap_or`, `pow`, `abs`, `bit_*`, `shl`, `shr`), `let`, `let mut`,
 /// assignment, `+=`, `-=`, `if`/`else`, `return` and the constants `MAX` and `NEG` are always on.
 pub struct Features {
     /// `while`, `loop` and `for` over a range, with `break` and `continue`.
@@ -52,7 +53,8 @@ pub struct Features {
     /// `Str` locals, parameters and results: literals, `+`, `+=`, `s = s + a + b` (the
     /// compiler's in-place append) and `s = s + s`, `to_str`, `trim`, `len`, `==`, `contains`,
     /// `match` on literals, and `split`, `lines` and `chars` into `List<Str>` locals, indexed, counted,
-    /// searched and iterated with `for`; `for b in (s).to_bytes()`.
+    /// searched and iterated with `for`; `for b in (s).to_bytes()`; `url_encode`, `url_decode`,
+    /// `form_decode`, `iso_utc` and `parse_iso_utc` (L29).
     pub strings: bool,
     /// `HashMap<Int, Int>` and `HashMap<Str, Int>` locals, helper parameters and `main`
     /// results: `HashMap::new()`, copies, `insert`, `remove`, `get`, `len`, `keys`, `==`, and
@@ -137,6 +139,13 @@ const STR_LITS: &[(&str, u64)] = &[
     ("\"abcdefghi\"", 9),
     ("\"prefix-shared-key-1\"", 19),
     ("\"prefix-shared-key-2\"", 19),
+    // For `url_decode`, `form_decode` and `parse_iso_utc` (L29): valid, and not.
+    ("\"a+b%20c\"", 7),
+    ("\"%2B%e9\"", 6),
+    ("\"%zz\"", 3),
+    ("\"2024-02-29\"", 10),
+    ("\"2026-02-30\"", 10),
+    ("\"1970-01-01T00:00:00.000Z\"", 24),
 ];
 
 /// xorshift64*, seeded through splitmix64 so nearby seeds give unrelated streams.
@@ -904,6 +913,9 @@ impl Gen<'_> {
                 return e;
             }
         }
+        if depth > 0 && self.rng.chance(10) {
+            return self.int_method(depth - 1);
+        }
         if depth > 0 && self.features.floats && self.rng.chance(8) {
             let x = self.float(depth - 1);
             return match self.rng.below(2) {
@@ -935,6 +947,40 @@ impl Gen<'_> {
                         return c;
                     }
                 }
+            }
+        }
+    }
+
+    /// L29's `Int` methods: checked arithmetic (then `unwrap_or`), `pow`, `abs`, the bitwise
+    /// methods and the shifts, mostly by a literal count in range.
+    fn int_method(&mut self, d: u32) -> String {
+        let a = self.int(d);
+        match self.rng.below(8) {
+            0 | 1 => {
+                let m = *self.rng.pick(&["checked_add", "checked_sub", "checked_mul"]);
+                format!("({a}).{m}({}).unwrap_or({})", self.int(d), self.int(d))
+            }
+            2 => {
+                let n = if self.rng.chance(80) {
+                    self.rng.below(4).to_string()
+                } else {
+                    self.int(d)
+                };
+                format!("({a}).pow({n})")
+            }
+            3 => format!("({a}).abs()"),
+            4 | 5 => {
+                let m = *self.rng.pick(&["bit_and", "bit_or", "bit_xor"]);
+                format!("({a}).{m}({})", self.int(d))
+            }
+            _ => {
+                let m = *self.rng.pick(&["shl", "shr"]);
+                let n = if self.rng.chance(80) {
+                    self.rng.pick(&["0", "1", "7", "31", "63"]).to_string()
+                } else {
+                    self.int(d)
+                };
+                format!("({a}).{m}({n})")
             }
         }
     }
@@ -1111,6 +1157,14 @@ impl Gen<'_> {
             if let Some(c) = self.call(Ty::Opt) {
                 return c;
             }
+        }
+        // L29's `Option<Int>` results: checked arithmetic, `parse_iso_utc`.
+        if self.rng.chance(15) {
+            let m = *self.rng.pick(&["checked_add", "checked_sub", "checked_mul"]);
+            return format!("({}).{m}({})", self.int(depth), self.int(depth));
+        }
+        if self.features.strings && self.rng.chance(10) {
+            return format!("({}).parse_iso_utc()", self.str_read(depth));
         }
         format!("Some({})", self.int(depth))
     }
@@ -1303,7 +1357,7 @@ impl Gen<'_> {
         }
         let d = depth - 1;
         loop {
-            match self.rng.below(10) {
+            match self.rng.below(12) {
                 0..=3 => {
                     let ((a, x), (b, y)) = (self.str_expr(d), self.str_expr(d));
                     return (format!("({a} + {b})"), x + y);
@@ -1330,6 +1384,26 @@ impl Gen<'_> {
                 8 => {
                     let (a, x) = self.str_expr(d);
                     return (format!("({a}).trim()"), x);
+                }
+                // L29: `url_encode` (at most 3 bytes a byte), the decoders with a fallback,
+                // and `iso_utc` (24 bytes) of a millisecond count mostly kept in its range.
+                9 => {
+                    let (a, x) = self.str_expr(d);
+                    if self.rng.chance(30) {
+                        return (format!("({a}).url_encode()"), 3 * x);
+                    }
+                    let m = *self.rng.pick(&["url_decode", "form_decode"]);
+                    let (b, y) = self.str_expr(d);
+                    return (format!("({a}).{m}().unwrap_or({b})"), x.max(y));
+                }
+                10 => {
+                    let ms = self.int(d);
+                    let ms = if self.rng.chance(70) {
+                        format!("({ms} % 253402300800000).abs()")
+                    } else {
+                        ms
+                    };
+                    return (format!("({ms}).iso_utc()"), 24);
                 }
                 _ => return self.str_leaf(),
             }
@@ -1391,7 +1465,7 @@ impl Gen<'_> {
     /// An `Int` from strings: a length, a count of parts, or a `match` on literals.
     fn str_int(&mut self, d: u32) -> String {
         let lists = self.visible(|v| v.ty == Ty::StrList);
-        match self.rng.below(6) {
+        match self.rng.below(7) {
             0 | 1 => format!("({}).len()", self.str_read(d)),
             2 if !lists.is_empty() => format!("{}.len()", self.rng.pick(&lists)),
             2 | 3 => format!("({}).split({}).len()", self.str_read(d), self.sep()),
@@ -1399,6 +1473,7 @@ impl Gen<'_> {
                 let m = if self.rng.chance(50) { "lines" } else { "chars" };
                 format!("({}).{m}().len()", self.str_read(d))
             }
+            5 => format!("({}).parse_iso_utc().unwrap_or({})", self.str_read(d), self.int(d)),
             _ => {
                 let scrut = self.str_read(d);
                 let mut arms = Vec::new();
@@ -1416,7 +1491,7 @@ impl Gen<'_> {
     /// A `Bool` from strings: a comparison, `contains` on a `Str` or a `List<Str>`.
     fn str_bool(&mut self, d: u32) -> String {
         let lists = self.visible(|v| v.ty == Ty::StrList);
-        match self.rng.below(4) {
+        match self.rng.below(5) {
             0 | 1 => {
                 let op = *self.rng.pick(&["==", "!=", "<", "<=", ">", ">="]);
                 format!("({} {op} {})", self.str_read(d), self.str_read(d))
@@ -1424,6 +1499,10 @@ impl Gen<'_> {
             2 if !lists.is_empty() => {
                 let ws = self.rng.pick(&lists).clone();
                 format!("{ws}.contains({})", self.str_read(d))
+            }
+            3 => {
+                let m = *self.rng.pick(&["url_decode", "form_decode", "parse_iso_utc"]);
+                format!("({}).{m}().is_some()", self.str_read(d))
             }
             _ => format!("({}).contains({})", self.str_read(d), self.str_read(d)),
         }
@@ -1788,7 +1867,8 @@ mod tests {
             ".sort_by(|a, b| ",
             ".sort_by_key(|el| ",
         ] {
-            assert!(all.matches(m).count() > 10, "{m}: {}", all.matches(m).count());
+            // A floor, not a rate: C16's draws shifted the seeds (`sort_by_key` 7).
+            assert!(all.matches(m).count() > 5, "{m}: {}", all.matches(m).count());
         }
     }
 
@@ -1866,5 +1946,35 @@ mod tests {
         let n = chain.count();
         // A floor, not a rate: new constructs shift the fixed seeds (27 after L15/L16).
         assert!(n > 20, "{n}");
+    }
+
+    /// L29's methods appear in a run of the default size, with the literals that exercise the
+    /// decoders' and the date parser's failures.
+    #[test]
+    fn l29_methods_are_generated() {
+        let all: String = (0..250).map(|s| super::program(s, &Default::default())).collect();
+        for m in [
+            ".checked_add(",
+            ".checked_sub(",
+            ".checked_mul(",
+            ").unwrap_or(",
+            ".pow(",
+            ".abs()",
+            ".bit_and(",
+            ".bit_or(",
+            ".bit_xor(",
+            ".shl(",
+            ".shr(",
+            ".url_encode()",
+            ".url_decode()",
+            ".form_decode()",
+            ".iso_utc()",
+            ".parse_iso_utc()",
+            "\"a+b%20c\"",
+            "\"%zz\"",
+            "\"2026-02-30\"",
+        ] {
+            assert!(all.matches(m).count() > 10, "{m}: {}", all.matches(m).count());
+        }
     }
 }

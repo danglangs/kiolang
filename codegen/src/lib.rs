@@ -2610,11 +2610,20 @@ impl<'m> FuncGen<'_, 'm> {
             // `==` on `Str` or `Bytes`: the bytes, with no descriptor; against a one-byte
             // literal (`c == "x"` in a `chars()` loop), inline (P9).
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), a, b) if matches!(a.ty, Ty::Str | Ty::Bytes) => {
-                match (&a.kind, &b.kind) {
-                    (_, ExprKind::Str(lit)) | (ExprKind::Str(lit), _) if lit.len() == 1 => {
-                        let x = if matches!(b.kind, ExprKind::Str(_)) { a } else { b };
-                        let byte = lit.as_bytes()[0];
-                        self.borrowing(&[&**x], |g, temps, _| {
+                // The one-byte literal's byte and the other operand (`"b" == "bc"` has only
+                // its left side as the literal: C16).
+                let one = |e: &ir::Expr| match &e.kind {
+                    ExprKind::Str(lit) if lit.len() == 1 => Some(lit.as_bytes()[0]),
+                    _ => None,
+                };
+                let pair = match (one(a), one(b)) {
+                    (_, Some(byte)) => Some((byte, &**a)),
+                    (Some(byte), None) => Some((byte, &**b)),
+                    (None, None) => None,
+                };
+                match pair {
+                    Some((byte, x)) => {
+                        self.borrowing(&[x], |g, temps, _| {
                             let Val::One(l) = temps[0] else { unreachable!("a Str") };
                             let mut s = g.sink();
                             s.local_get(l).i32_load(BYTES_LEN).i32_const(1).i32_eq();

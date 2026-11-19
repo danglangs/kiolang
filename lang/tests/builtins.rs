@@ -870,3 +870,56 @@ fn unwrap_is_for_tests() {
         assert_eq!(rejects(src), (want, hint.clone()), "{src}");
     }
 }
+
+/// C16: `==` and `!=` on two `Str` literals where one is a single byte and the other starts
+/// with it (compiled code compared the one-byte literal against its own byte, so `"b" == "bc"`
+/// was `true`). Each case runs compiled too, in the differential harness.
+#[test]
+fn str_equality_against_a_one_byte_literal() {
+    let cases = [
+        ("fn main() -> Bool { \"b\" == \"bc\" }", "false"),
+        ("fn main() -> Bool { \"bc\" == \"b\" }", "false"),
+        ("fn main() -> Bool { \"b\" != \"bc\" }", "true"),
+        ("fn main() -> Bool { \"bc\" != \"b\" }", "true"),
+        ("fn main() -> Bool { \"b\" == \"b\" }", "true"),
+        ("fn main() -> Bool { \"a\" == \"b\" }", "false"),
+        ("fn main() -> Bool { \"\" == \"a\" }", "false"),
+        ("fn main() -> Bool { \"a\" == \"\" }", "false"),
+        ("fn main() -> Bool { let s = \"bc\"; \"b\" == s }", "false"),
+        ("fn main() -> Bool { let s = \"bc\"; s != \"b\" }", "true"),
+        ("fn main() -> Bool { let s = \"b\"; s == \"b\" }", "true"),
+        ("fn main() -> Bool { !(\"b\" == \"prefix-shared-key-2\") }", "true"),
+    ];
+    for (src, want) in cases {
+        assert_eq!(shows(src), want, "{src}");
+    }
+    // kiogen's program that found it: `v1` false made `f0` skip its `if` and return the tail.
+    assert_eq!(shows(C16_FOUND), "-0.5");
+}
+
+const C16_FOUND: &str = r#"
+enum K { Z, One(Int), Two(Int, Option<Int>) }
+fn f0(p0: Int, p1: Int, p2: Int) -> Float {
+    let mut v1: Bool = (!("b" == "prefix-shared-key-2"));
+    if v1 {
+        return ((if v1 {
+        (-(if v1 {
+            match K::One(p1) {
+                K::One(0) => v1 = (((1 >= p0) || (Some(p1) == Some(p2))) || ((5 - (-8)) >= p0)),
+                K::Z => v1 = (!(!(1e308 != 0.49999999999999994))),
+                _ => {
+                v1 = ((-(p2)) <= (("a\nb\n" + "a,b")).lines().len());
+            },
+            }
+            0.5
+        } else {
+            (10.0 + (1.0 % 10.0))
+        }))
+    } else {
+        (2.5 + (0.5 / 0.0))
+    }) - (1e308 % 1.0));
+    }
+    ((0.0 / 0.0) % ((-0.0) - (-1.0)))
+}
+fn main() -> Float { f0(16, 2, 3) }
+"#;
