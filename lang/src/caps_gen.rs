@@ -267,6 +267,10 @@ pub fn v0() -> CapTable {
                 name: "Secret".into(),
                 methods: vec![method("matches", vec![Ty::Str], Ty::Bool)],
             },
+            CapType {
+                name: "Value".into(),
+                methods: vec![method("get", vec![], Ty::Str)],
+            },
         ],
         enums: vec![
             Enum {

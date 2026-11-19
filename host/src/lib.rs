@@ -5,7 +5,8 @@
 //! WebSocket event and its sends (ws.rs); `rng`, `clock` and `log` are the OS's randomness (or a
 //! seeded stream), the system clock (or a fixed time) and an appended file (or stderr); `db` is
 //! a fenced SQLite connection shared across runs (db.rs); `hmac` signs and verifies under a key
-//! the host read at start; `secret` compares a value the host read at start. Every import is
+//! the host read at start; `secret` compares a value the host read at start; `value` reads one
+//! the operator gave at start. Every import is
 //! counted and, if asked, written to an audit log.
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir as RealDir, OpenOptions, OpenOptionsExt};
@@ -2574,10 +2575,10 @@ impl LogSink {
     }
 }
 
-/// The `--rng`, `--clock`, `--log`, `--db`, `--hmac` and `--secret` grants, by `main` parameter name. Every
-/// run (every request under `--listen`) gets fresh handles to them; a `Log`'s byte budget is per
-/// run; a `Db` outlives runs, so each run gets a handle to the same one (db.rs); an `Hmac` key
-/// and a `Secret` value are read once, at start.
+/// The `--rng`, `--clock`, `--log`, `--db`, `--hmac`, `--secret` and `--value` grants, by `main`
+/// parameter name. Every run (every request under `--listen`) gets fresh handles to them; a
+/// `Log`'s byte budget is per run; a `Db` outlives runs, so each run gets a handle to the same
+/// one (db.rs); an `Hmac` key, a `Secret` value and a `Value` are read once, at start.
 #[derive(Clone, Default)]
 pub struct Sources {
     pub rngs: Vec<(String, RngSpec)>,
@@ -2586,6 +2587,7 @@ pub struct Sources {
     pub dbs: Vec<(String, Arc<db::Db>)>,
     pub hmacs: Vec<(String, HmacKey)>,
     pub secrets: Vec<(String, SecretValue)>,
+    pub values: Vec<(String, ValueText)>,
     /// The `Dir` grants given `:ro` (H27), by name.
     pub read_only_dirs: Vec<String>,
 }
@@ -2648,6 +2650,45 @@ impl SecretValue {
     /// What the audit header shows: the one method the grant allows, never the value.
     pub(crate) fn label(&self) -> String {
         "matches".into()
+    }
+}
+
+/// A `--value name=TEXT` grant (H35): a run-time value for `main`, read with `get`. Not a secret:
+/// the audit header shows it (`label`).
+#[derive(Clone, Debug)]
+pub struct ValueText(Arc<str>);
+
+/// The most bytes a `--value` holds.
+pub const VALUE_MAX: usize = 4 << 10;
+
+impl ValueText {
+    /// `text` as given, which may be empty. Refused: over `VALUE_MAX` bytes, or any control
+    /// character (a value is one line of plain text; a file under a `--dir` holds more).
+    pub fn new(text: String) -> std::result::Result<Self, String> {
+        if text.len() > VALUE_MAX {
+            return Err(format!(
+                "the value is over {VALUE_MAX} bytes\n  hint: `--value` takes at most 4 KB; put a longer value in a file under a `--dir`"
+            ));
+        }
+        if let Some(c) = text.chars().find(|c| c.is_control()) {
+            return Err(format!(
+                "the value holds a control character (U+{:04X})\n  hint: `--value` takes one line of plain text; put more in a file under a `--dir`",
+                c as u32
+            ));
+        }
+        Ok(ValueText(text.into()))
+    }
+
+    /// What the audit header shows: the value, ASCII only, `\` doubled and every other character
+    /// escaped (as `kio review`'s grants line shows it), so no character passes for another.
+    pub(crate) fn label(&self) -> String {
+        (self.0.chars())
+            .map(|c| match c {
+                '\\' => "\\\\".to_string(),
+                ' '..='~' => c.to_string(),
+                c => format!("\\u{{{:02x}}}", c as u32),
+            })
+            .collect()
     }
 }
 
@@ -2802,6 +2843,30 @@ impl kio::caps::secret::HostSecret for State {
 
     fn drop(&mut self, h: Resource<kio::caps::secret::Secret>) -> Result<()> {
         let _ = self.table.delete(Resource::<SecretValue>::new_own(h.rep()));
+        Ok(())
+    }
+}
+
+impl kio::caps::value::Host for State {}
+
+impl kio::caps::value::HostValue for State {
+    /// The value as given; its bytes are charged to `--io`, as a `Dir` read's.
+    fn get(&mut self, h: Resource<kio::caps::value::Value>) -> Result<String> {
+        self.call(
+            h.rep(),
+            "get",
+            "get",
+            |s| {
+                let v = s.table.get(&Resource::<ValueText>::new_borrow(h.rep()))?.0.clone();
+                s.spend_io(v.len())?;
+                Ok(v.to_string())
+            },
+            ok,
+        )
+    }
+
+    fn drop(&mut self, h: Resource<kio::caps::value::Value>) -> Result<()> {
+        let _ = self.table.delete(Resource::<ValueText>::new_own(h.rep()));
         Ok(())
     }
 }
@@ -3219,6 +3284,10 @@ fn push_grants(
     for (name, value) in sources.secrets {
         let target = Some(value.label());
         add(name, "Secret", s.table.push(value)?.rep(), target);
+    }
+    for (name, value) in sources.values {
+        let target = Some(value.label());
+        add(name, "Value", s.table.push(value)?.rep(), target);
     }
     for b in &bound {
         s.handles.insert(b.rep, (b.name.clone(), b.kind));

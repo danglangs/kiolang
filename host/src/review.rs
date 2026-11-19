@@ -59,6 +59,7 @@ const NO_BLIND_SPOT: &[(&str, &[&str])] = &[
     ("Clock", &["now_ms"]),
     ("Hmac", &["verify"]),
     ("Secret", &["matches"]),
+    ("Value", &["get"]),
 ];
 
 const SAME_AUTHOR: &str = "tests and properties were written by the same author as the code unless stated";
@@ -951,7 +952,9 @@ fn bound(g: &str, bytes: &[u8]) -> Vec<String> {
     let mut items = Vec::new();
     for &(flag, spec) in &pairs {
         let item = match flag {
-            "--dir" | "--kv" | "--db" | "--rng" | "--clock" | "--log" | "--hmac" | "--secret" => shown(spec),
+            "--dir" | "--kv" | "--db" | "--rng" | "--clock" | "--log" | "--hmac" | "--secret" | "--value" => {
+                shown(spec)
+            }
             "--listen" | "--host" | "--ws-origin" => format!("{flag} {}", shown(spec)),
             "--http" => {
                 let name = spec.split_once('=').map_or(spec, |(n, _)| n);

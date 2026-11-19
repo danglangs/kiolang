@@ -24,6 +24,7 @@ use crate::entry::kio::caps::log::{Log, LogErr};
 use crate::entry::kio::caps::net::{Http, HttpErr, HttpRequest, HttpResponse};
 use crate::entry::kio::caps::rng::Rng;
 use crate::entry::kio::caps::secret::Secret;
+use crate::entry::kio::caps::value::Value;
 use crate::entry::kio::caps::web::Incoming;
 use crate::entry::kio::caps::ws::{WsErr, WsMessage, WsSend};
 use crate::obj::{self, to_slot, Header};
@@ -725,6 +726,13 @@ pub unsafe extern "C" fn rt_cap_secret_matches(_: u32, h: u32, presented: u32) -
     // SAFETY: the contract above.
     let (s, presented) = unsafe { (handle(h, Secret::from_handle), text(presented)) };
     u32::from(s.matches(presented))
+}
+
+#[no_mangle]
+pub extern "C" fn rt_cap_value_get(_: u32, h: u32) -> u32 {
+    // SAFETY: see `handle`.
+    let v = unsafe { handle(h, Value::from_handle) };
+    addr(str_obj(in_place(|| v.get())))
 }
 
 fn database(h: u32) -> ManuallyDrop<Db> {

@@ -349,6 +349,7 @@ pub const COVERS: &[(&str, &str, &[&str])] = &[
     ("Hmac", "sign", &[]),
     ("Hmac", "verify", &["sign"]),
     ("Secret", "matches", &[]),
+    ("Value", "get", &[]),
 ];
 
 /// Of `gains` on a capability of type `ty` (`None`: nothing is covered), whether any is

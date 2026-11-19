@@ -5,14 +5,14 @@ mod review;
 use kio_host::fake::FakeFile;
 use kio_host::{
     listen, open_dir, ClockSpec, Diag, FileId, HmacKey, Kio, Limits, LogSink, Origin, RngSpec, SecretValue, Server,
-    Sources, Used,
+    Sources, Used, ValueText,
 };
 use serde_json::json;
 use std::cell::RefCell;
 use std::sync::Arc;
 
 /// `kio run`'s flags.
-const USAGE: &str = "[--grants file] [--dir name=path[:ro]]... [--http name=host]... [--http-methods name=POST,PUT,..]... [--http-header name=Header:env:VAR|file:path]... [--kv name=path[:ro]|:memory:]... [--kv-mb mb] [--db name=path[:ro]|:memory:]... [--db-mb mb] [--rng name[=seed:N]]... [--clock name[=fixed:T]]... [--log name=path|-]... [--hmac name=env:VAR|file:path[:verify]]... [--secret name=env:VAR|file:path]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]...";
+const USAGE: &str = "[--grants file] [--dir name=path[:ro]]... [--http name=host]... [--http-methods name=POST,PUT,..]... [--http-header name=Header:env:VAR|file:path]... [--kv name=path[:ro]|:memory:]... [--kv-mb mb] [--db name=path[:ro]|:memory:]... [--db-mb mb] [--rng name[=seed:N]]... [--clock name[=fixed:T]]... [--log name=path|-]... [--hmac name=env:VAR|file:path[:verify]]... [--secret name=env:VAR|file:path]... [--value name=TEXT]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]...";
 
 fn main() {
     // The host checks and lowers programs natively, and compiled code runs on this thread's stack
@@ -298,7 +298,7 @@ fn check_base(path: &str, base: &str, detail: bool) -> i32 {
 }
 
 /// Every flag of `kio run`, each with one value: what a grants file may hold.
-const RUN_FLAGS: [&str; 23] = [
+const RUN_FLAGS: [&str; 24] = [
     "--dir",
     "--http",
     "--http-methods",
@@ -312,6 +312,7 @@ const RUN_FLAGS: [&str; 23] = [
     "--log",
     "--hmac",
     "--secret",
+    "--value",
     "--fuel",
     "--timeout",
     "--memory",
@@ -784,6 +785,16 @@ fn run_program(prog: &Program, flags: &[&str], grants_file: Option<&str>, dry: b
                 secret_specs.push(spec);
                 continue;
             }
+            ["--value", spec] => {
+                let Some((name, text)) = spec.split_once('=').filter(|(n, _)| !n.is_empty()) else {
+                    return fail(format!("--value {spec}: expected name=TEXT"));
+                };
+                match ValueText::new(text.to_string()) {
+                    Ok(v) => sources.values.push((name.into(), v)),
+                    Err(e) => return refuse(format!("--value {name}: {e}")),
+                }
+                continue;
+            }
             [flag @ ("--fuel" | "--timeout" | "--memory" | "--stack" | "--calls" | "--io"), n] => {
                 let Some(v) = n.parse::<u64>().ok().filter(|&v| v > 0) else {
                     return fail(format!("{flag} {n}: expected a positive integer"));
@@ -1112,6 +1123,7 @@ fn run_program(prog: &Program, flags: &[&str], grants_file: Option<&str>, dry: b
         named.extend(log_paths.iter().map(|(n, _)| (n.clone(), "Log")));
         named.extend(sources.hmacs.iter().map(|(n, _)| (n.clone(), "Hmac")));
         named.extend(sources.secrets.iter().map(|(n, _)| (n.clone(), "Secret")));
+        named.extend(sources.values.iter().map(|(n, _)| (n.clone(), "Value")));
         // `--listen` grants these by type, to the parameters of that type.
         let socket = ["Incoming", "Outgoing", "WsMessage", "WsSend"];
         for (n, ty) in params.iter().filter(|_| listen.is_some()) {
@@ -1305,7 +1317,7 @@ const LIMIT_FLAGS: [&str; 6] = ["--fuel", "--timeout", "--memory", "--stack", "-
 
 /// The flags of a grant to one parameter, `--flag name=..` (`--rng name` and `--clock name`
 /// too), and the parameter's capability type.
-const NAMED: [(&str, &str); 11] = [
+const NAMED: [(&str, &str); 12] = [
     ("--dir", "Dir"),
     ("--http", "Http"),
     ("--http-methods", "Http"),
@@ -1317,6 +1329,7 @@ const NAMED: [(&str, &str); 11] = [
     ("--log", "Log"),
     ("--hmac", "Hmac"),
     ("--secret", "Secret"),
+    ("--value", "Value"),
 ];
 
 /// The time a test's `Clock` reads unless the grants file names it.
@@ -1905,7 +1918,7 @@ fn run_once(tests: &Tests, t: &lang::TestFn, case: Option<(lang::prop::Case, boo
                 logs.push((name.clone(), LogSink::new(Box::new(log.clone()), "test")));
                 None
             }
-            "Http" | "Hmac" | "Secret" => {
+            "Http" | "Hmac" | "Secret" | "Value" => {
                 let msg = format!("test `{}` needs `{name}: {ty}`", t.name);
                 missing = Some(("grant", msg, Some("name it in a --grants file")));
                 break;

@@ -286,6 +286,7 @@ fn instantiate(
                 "Db" => Grant::Db(Resource::new_own(rep)),
                 "Hmac" => Grant::Hmac(Resource::new_own(rep)),
                 "Secret" => Grant::Secret(Resource::new_own(rep)),
+                "Value" => Grant::Value(Resource::new_own(rep)),
                 _ => Grant::WsSend(Resource::new_own(rep)),
             }
         })
@@ -1040,6 +1041,7 @@ impl Server {
         grants.extend(src.dbs.iter().map(|(n, d)| (n.clone(), "Db", Some(d.label()))));
         grants.extend(src.hmacs.iter().map(|(n, k)| (n.clone(), "Hmac", Some(k.label()))));
         grants.extend(src.secrets.iter().map(|(n, v)| (n.clone(), "Secret", Some(v.label()))));
+        grants.extend(src.values.iter().map(|(n, v)| (n.clone(), "Value", Some(v.label()))));
         grants
     }
 

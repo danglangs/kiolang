@@ -160,6 +160,14 @@ interface secret {
   }
 }
 
+interface value {
+  // A value the operator gave at start (`--value name=TEXT`: UTF-8, at most 4 KB, no control
+  // characters), for the program to read. Not a secret: the audit header shows it.
+  resource value {
+    get: func() -> string;
+  }
+}
+
 // Compiled kio (docs/codegen.md): the runtime with the program appended, one core module.
 world compiled {
   import fs;
@@ -173,6 +181,7 @@ world compiled {
   import db;
   import hmac;
   import secret;
+  import value;
   use fs.{dir};
   use net.{http};
   use web.{incoming, outgoing};
@@ -184,11 +193,12 @@ world compiled {
   use db.{db};
   use hmac.{hmac};
   use secret.{secret};
+  use value.{value};
 
   // One handle per capability parameter of `main`, in parameter order.
   variant grant {
     dir(dir), http(http), incoming(incoming), outgoing(outgoing), kv(kv), ws-message(ws-message), ws-send(ws-send),
-    rng(rng), clock(clock), log(log), db(db), hmac(hmac), secret(secret),
+    rng(rng), clock(clock), log(log), db(db), hmac(hmac), secret(secret), value(value),
   }
   // main's value printed, and whether main returned `Err`.
   record outcome { value: string, failed: bool }

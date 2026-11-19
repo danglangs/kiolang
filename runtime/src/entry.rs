@@ -27,6 +27,7 @@ impl Guest for Runtime {
             Grant::Db(r) => (10, r.handle()),
             Grant::Hmac(r) => (11, r.handle()),
             Grant::Secret(r) => (12, r.handle()),
+            Grant::Value(r) => (13, r.handle()),
         });
         // SAFETY: one thread, and nothing else holds a reference to `GRANTED`.
         unsafe { *GRANTED.0.get() = handles.collect() };
