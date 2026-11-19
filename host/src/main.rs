@@ -1606,6 +1606,7 @@ fn test_setup(path: &str, flags: &[&str], read: &FakeReads) -> Result<Tests, i32
             return Err(fail(format!("--stack {n}: at most {} KB", kio_host::MAX_STACK >> 10)));
         }
     }
+    http_names(&flags).map_err(fail)?;
     let fakes = take_fakes(&mut flags, read)?;
     let records = take_records(&mut flags, &fakes).map_err(fail)?;
     let prog = read_program(path)?;
@@ -1645,6 +1646,22 @@ fn test_setup(path: &str, flags: &[&str], read: &FakeReads) -> Result<Tests, i32
         fakes,
         records,
     })
+}
+
+/// Each `--http` grant name of a test grants file an identifier: a grant no test takes is never
+/// bound, so nothing else checks it, and `kio review` shows it.
+fn http_names(flags: &[String]) -> Result<(), String> {
+    for pair in flags.chunks(2).filter(|p| p[0] == "--http") {
+        let name = pair[1].split_once('=').map_or(pair[1].as_str(), |(n, _)| n);
+        if !is_ident(name) {
+            return Err(format!(
+                "--http {}: `{}` is not a grant name\n  hint: name the test's Http parameter (letters, digits, _): `--http hook=fake:hook.http`",
+                kio_host::escape_line(&pair[1]),
+                kio_host::escape_line(name)
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Each fake FILE already read, by path as the grants file names it: its bytes, or why not.

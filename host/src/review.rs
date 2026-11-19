@@ -74,6 +74,8 @@ struct Inputs {
     fakes: Vec<(String, String)>,
     /// Each FILE of `fakes` read once, for both sides' tests and Identity.
     fake_files: Vec<(String, Result<Vec<u8>, String>)>,
+    /// Each FILE of `fake_files` that `kio test`'s rules accept (`fake_file`): only these are hashed.
+    fakes_ok: Vec<String>,
     requirements: Option<[(String, Option<String>); 2]>,
     entries: Vec<Entry>,
 }
@@ -225,11 +227,12 @@ pub(crate) fn review(path: &str, flags: &[&str], json: bool) -> i32 {
     println!("Identity");
     page.identity.iter().for_each(|l| println!("  {l}"));
     for p in &page.changed {
-        println!(
-            "  {:<12} {} changed while the review ran",
-            "error",
-            kio_host::escape_line(p)
-        );
+        // A fake's name as its Identity line shows it.
+        let p = match inputs.fakes_ok.contains(p) {
+            true => ascii(p),
+            false => kio_host::escape_line(p),
+        };
+        println!("  {:<12} {} changed while the review ran", "error", p);
     }
     code
 }
@@ -326,16 +329,10 @@ fn inputs(path: &str, flags: &[&str]) -> Result<Inputs, i32> {
     if let Some(t) = &test_grants {
         shared_state(&t.0)?;
     }
-    let fakes = match &test_grants {
-        Some((t, _)) => test_fakes(t)?,
-        None => Vec::new(),
+    let (fakes, fake_files, fakes_ok) = match &test_grants {
+        Some((t, bytes)) => test_fakes(t, bytes, path)?,
+        None => Default::default(),
     };
-    let mut fake_files: Vec<(String, Result<Vec<u8>, String>)> = Vec::new();
-    for (_, f) in &fakes {
-        if !fake_files.iter().any(|(p, _)| p == f) {
-            fake_files.push((f.clone(), read_fake(f)));
-        }
-    }
     let requirements = match requirements {
         Some(file) if Path::new(file).is_absolute() => {
             return Err(fail(format!(
@@ -372,6 +369,7 @@ fn inputs(path: &str, flags: &[&str]) -> Result<Inputs, i32> {
         test_grants,
         fakes,
         fake_files,
+        fakes_ok,
         requirements,
         entries: read_entries,
     })
@@ -438,14 +436,51 @@ fn shared_state(t: &str) -> Result<(), i32> {
     Ok(())
 }
 
-/// Each `--http name=fake:FILE` of the test grants file `t`, as `(name, FILE)`.
-fn test_fakes(t: &str) -> Result<Vec<(String, String)>, i32> {
-    let (flags, _) = with_grants(&["--grants", t])?;
+/// A test grants file's fakes: each `--http name=fake:FILE` as `(name, FILE)`, each FILE read
+/// once (its bytes or why not), and the FILEs `kio test`'s rules accept.
+type Fakes = (
+    Vec<(String, String)>,
+    Vec<(String, Result<Vec<u8>, String>)>,
+    Vec<String>,
+);
+
+/// The fakes of the test grants file `t`, parsed from the `bytes` read and hashed. A grant name
+/// that is not an identifier, or a FILE outside NEW's directory (the change does not show it),
+/// is refused.
+fn test_fakes(t: &str, bytes: &[u8], new: &str) -> Result<Fakes, i32> {
+    let at = format!("--test-grants {}", kio_host::escape_line(t));
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return Err(fail(format!("{at}: not UTF-8")));
+    };
+    let flags = grants_flags(text, t, &[])?;
+    http_names(&flags).map_err(|e| fail(format!("{at}: {e}")))?;
     let fake = |p: &[String]| match p[1].split_once('=') {
         Some((name, o)) if p[0] == "--http" => Some((name.to_string(), o.strip_prefix("fake:")?.to_string())),
         _ => None,
     };
-    Ok(flags.chunks(2).filter_map(fake).collect())
+    let fakes: Vec<(String, String)> = flags.chunks(2).filter_map(fake).collect();
+    // As `--grants G` is compared only inside NEW's directory: canonical, so no symlink leads out.
+    let dir = Path::new(new).parent().filter(|d| !d.as_os_str().is_empty());
+    let dir = dir.unwrap_or(".".as_ref()).canonicalize();
+    let (mut files, mut ok) = (Vec::new(), Vec::<String>::new());
+    for (name, f) in &fakes {
+        if let (Ok(d), Ok(c)) = (&dir, Path::new(f).canonicalize()) {
+            if !c.starts_with(d) {
+                return Err(fail(format!(
+                    "{at}: --http {name}=fake:{}: outside {}'s directory, so the change does not show it\n  hint: keep the fake file beside the program it tests",
+                    kio_host::escape_line(f),
+                    kio_host::escape_line(new)
+                )));
+            }
+        }
+        if !files.iter().any(|(p, _)| p == f) {
+            files.push((f.clone(), read_fake(f)));
+        }
+        if fake_file(name, f, &flags, &files).is_ok() && !ok.contains(f) {
+            ok.push(f.clone());
+        }
+    }
+    Ok((fakes, files, ok))
 }
 
 /// The requirements file `file` beside the program `program`: its path and text, `None` when it
@@ -834,20 +869,7 @@ fn bound(g: &str, bytes: &[u8]) -> Vec<String> {
     let Ok(flags) = captured(true, || grants_flags(text, g, &[])).0 else {
         return vec![];
     };
-    // ASCII only, `\` doubled: no character can pass for another (`о` for `o`, `，` for `,`).
-    let shown = |s: &str| {
-        let s: String = (s.chars())
-            .map(|c| match c {
-                '\\' => "\\\\".to_string(),
-                ' '..='~' => c.to_string(),
-                c => format!("\\u{{{:02x}}}", c as u32),
-            })
-            .collect();
-        match s.contains([',', ';', '(', ')', '"', ' ']) {
-            true => format!("\"{}\"", s.replace('"', "\\\"")),
-            false => s,
-        }
-    };
+    let shown = ascii;
     let pairs: Vec<(&str, &str)> = flags.chunks(2).map(|p| (p[0].as_str(), p[1].as_str())).collect();
     let mut items = Vec::new();
     for &(flag, spec) in &pairs {
@@ -871,6 +893,22 @@ fn bound(g: &str, bytes: &[u8]) -> Vec<String> {
         items.push(item);
     }
     items
+}
+
+/// `s` as the page shows a part of a grant: ASCII only, `\` doubled, so no character can pass for
+/// another (`о` for `o`, `，` for `,`), and quoted when it holds a character that separates parts.
+fn ascii(s: &str) -> String {
+    let s: String = (s.chars())
+        .map(|c| match c {
+            '\\' => "\\\\".to_string(),
+            ' '..='~' => c.to_string(),
+            c => format!("\\u{{{:02x}}}", c as u32),
+        })
+        .collect();
+    match s.contains([',', ';', '(', ')', '"', ' ']) {
+        true => format!("\"{}\"", s.replace('"', "\\\"")),
+        false => s,
+    }
 }
 
 /// `kio check path --grants g`'s binding, its errors in `--json`'s object; dry, so a server's
@@ -916,16 +954,14 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
                 .map(|l| ("", format!("  {}", kio_host::escape_line(l.trim_start())))),
         );
         resources(&[], &[], page);
-        return (json!({"grants": shown, "setup_error": e}), false, true);
+        return (
+            json!({"grants": shown, "fakes": fakes_json(inputs), "setup_error": e}),
+            false,
+            true,
+        );
     }
     let answered: Vec<String> = (inputs.fakes.iter())
-        .map(|(n, f)| {
-            format!(
-                "{} answered from {}",
-                kio_host::escape_line(n),
-                kio_host::escape_line(f)
-            )
-        })
+        .map(|(n, f)| format!("{} answered from {}", ascii(n), ascii(f)))
         .collect();
     let line = match answered.is_empty() {
         true => format!("grants: {shown}"),
@@ -1375,7 +1411,7 @@ fn not_checked(inputs: &Inputs, page: &mut Page) {
         }
     }
     for (n, f) in &inputs.fakes {
-        let (n, f) = (kio_host::escape_line(n), kio_host::escape_line(f));
+        let (n, f) = (ascii(n), ascii(f));
         page.not_checked.push(format!(
             "{n}: Http: tests ran against {f}, not a server; the real endpoint's answers are untested"
         ));
@@ -1452,27 +1488,35 @@ fn identity(inputs: &Inputs, page: &mut Page) -> serde_json::Value {
             .collect();
         deps[side] = json!(rows);
     }
-    let mut file = |what: &str, f: &Option<(String, Vec<u8>)>| {
+    let mut file = |what: &str, f: &Option<(String, Vec<u8>)>, show: fn(&str) -> String| {
         f.as_ref().map(|(g, bytes)| {
-            let path = kio_host::escape_line(g);
+            let path = show(g);
             page.identity.push(format!("{what} {path} sha256:{}", hash(bytes)));
             shown.push((g.clone(), Some(hash(bytes))));
             json!({"path": g, "sha256": hash(bytes)})
         })
     };
     let old_of = |b: &Beside| b.as_ref().ok().and_then(|(_, o)| o.file());
-    let grants = file("grants", &inputs.grants);
-    let old_grants = file("old grants", &old_of(&inputs.old_grants));
-    let test_grants = file("test grants", &inputs.test_grants);
-    // A FILE that could not be read was not: its error is the tests' on both sides.
+    let grants = file("grants", &inputs.grants, kio_host::escape_line);
+    let old_grants = file("old grants", &old_of(&inputs.old_grants), kio_host::escape_line);
+    let test_grants = file("test grants", &inputs.test_grants, kio_host::escape_line);
+    // A FILE that could not be read, or that `kio test` refuses, answered nothing: its error is
+    // the tests' on both sides.
     let test_fakes: Vec<_> = (inputs.fake_files.iter())
-        .filter_map(|(p, r)| file("test fake", &r.as_ref().ok().map(|b| (p.clone(), b.clone()))))
+        .filter(|(p, _)| inputs.fakes_ok.contains(p))
+        .filter_map(|(p, r)| file("test fake", &r.as_ref().ok().map(|b| (p.clone(), b.clone())), ascii))
         .collect();
     let entry_grants: Vec<_> = (inputs.entries.iter())
-        .filter_map(|e| file(&format!("{}: entry grants", e.name), &e.grants))
+        .filter_map(|e| file(&format!("{}: entry grants", e.name), &e.grants, kio_host::escape_line))
         .collect();
     let old_entry_grants: Vec<_> = (inputs.entries.iter())
-        .filter_map(|e| file(&format!("{}: old entry grants", e.name), &old_of(&e.old_grants)))
+        .filter_map(|e| {
+            file(
+                &format!("{}: old entry grants", e.name),
+                &old_of(&e.old_grants),
+                kio_host::escape_line,
+            )
+        })
         .collect();
     let mut files = Vec::new();
     let requirements = inputs.requirements.as_ref().map(|sides| {

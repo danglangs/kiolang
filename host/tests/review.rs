@@ -1327,54 +1327,123 @@ fn sha(b: &[u8]) -> String {
 }
 
 /// Each fake of the test grants file is hashed in Identity, named on the grants line and has a
-/// Not checked line; its file name escaped, as it comes from the change's author.
+/// Not checked line. Its file name comes from the change's author, so it is shown as the binds
+/// line shows a grant: ASCII only, quoted when it holds a separator.
 #[test]
 fn fakes_on_the_page() {
     let s = Sides::new(HOOKED, HOOKED);
-    let hook = write(s.dir.path(), "hook.http", HOOK);
-    let odd = write(s.dir.path(), "api\u{1b}[31m.http", "GET /up\n200\n");
-    let shown = odd.replace('\u{1b}', "\\u{1b}");
+    let up = "GET /up\n200\n";
+    let hook = write(s.dir.path(), "new/hook.http", HOOK);
+    let esc = write(s.dir.path(), "new/api\u{1b}[31m.http", up);
+    // A Cyrillic `о`: reads as `hook.http`.
+    let look = write(s.dir.path(), "new/h\u{43e}ok.http", up);
+    // Would read as a second grant on the grants line.
+    let sep = write(s.dir.path(), "new/hook.http), dest answered from dest.http (POST)", up);
+    let (esc_s, look_s, sep_s) = (
+        esc.replace('\u{1b}', "\\u{1b}"),
+        look.replace('\u{43e}', "\\u{43e}"),
+        format!("\"{sep}\""),
+    );
     let t = write(
         s.dir.path(),
         "t.grants",
-        &format!("--http hook=fake:{hook}\n--http-methods hook=POST\n--http api=fake:{odd}\n"),
+        &format!(
+            "--http hook=fake:{hook}\n--http-methods hook=POST\n--http api=fake:{esc}\n--http look=fake:{look}\n--http dest=fake:{sep}\n"
+        ),
     );
     let (code, out, err) = s.review(&["--test-grants", &t]);
     assert_eq!(code, 0, "{out}{err}");
-    assert!(!out.contains('\u{1b}'), "{out}");
+    assert!(out.is_ascii(), "{out}");
     let tests = Sides::section(&out, "Tests");
     assert_eq!(
         tests[..3],
         [
-            format!("  tested       grants: {t} (hook answered from {hook}, api answered from {shown})"),
+            format!(
+                "  tested       grants: {t} (hook answered from {hook}, api answered from {esc_s}, look answered from {look_s}, dest answered from {sep_s})"
+            ),
             "  tested       old: 1 passed, 0 failed".to_string(),
             "  tested       new: 1 passed, 0 failed".to_string(),
         ],
         "{out}"
     );
     let not_checked = Sides::section(&out, "Not checked");
-    let untested = |n: &str, f: &str| {
-        format!(
-            "  not checked  {n}: Http: tests ran against {f}, not a server; the real endpoint's answers are untested"
-        )
-    };
-    assert!(not_checked.contains(&untested("hook", &hook)), "{out}");
-    assert!(not_checked.contains(&untested("api", &shown)), "{out}");
     let identity = Sides::section(&out, "Identity");
-    let (h, a) = (sha(HOOK.as_bytes()), sha(b"GET /up\n200\n"));
-    assert!(identity.contains(&format!("  test fake {hook} sha256:{h}")), "{out}");
-    assert!(identity.contains(&format!("  test fake {shown} sha256:{a}")), "{out}");
+    let (h, u) = (sha(HOOK.as_bytes()), sha(up.as_bytes()));
+    for (n, f, sum) in [
+        ("hook", &hook, &h),
+        ("api", &esc_s, &u),
+        ("look", &look_s, &u),
+        ("dest", &sep_s, &u),
+    ] {
+        let line = format!(
+            "  not checked  {n}: Http: tests ran against {f}, not a server; the real endpoint's answers are untested"
+        );
+        assert!(not_checked.contains(&line), "{line}\n{out}");
+        let line = format!("  test fake {f} sha256:{sum}");
+        assert!(identity.contains(&line), "{line}\n{out}");
+    }
 
     let (code, out, err) = s.review(&["--test-grants", &t, "--json"]);
     assert_eq!(code, 0, "{err}");
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-    let fakes = serde_json::json!([{"grant": "hook", "path": hook}, {"grant": "api", "path": odd}]);
+    let fakes = serde_json::json!([
+        {"grant": "hook", "path": hook}, {"grant": "api", "path": esc},
+        {"grant": "look", "path": look}, {"grant": "dest", "path": sep}
+    ]);
     assert_eq!(v["tests"]["fakes"], fakes);
     assert_eq!(v["not_checked"]["fakes"], fakes);
     assert_eq!(
         v["identity"]["test_fakes"],
-        serde_json::json!([{"path": hook, "sha256": h}, {"path": odd, "sha256": a}])
+        serde_json::json!([
+            {"path": hook, "sha256": h}, {"path": esc, "sha256": u},
+            {"path": look, "sha256": u}, {"path": sep, "sha256": u}
+        ])
     );
+}
+
+/// A test grants file's `--http` name must be an identifier; a fake FILE must be inside NEW's
+/// directory, so the change shows it; a FILE `kio test` refuses is not hashed.
+#[test]
+fn fakes_refused() {
+    let s = Sides::new(HOOKED, HOOKED);
+    let up = write(s.dir.path(), "new/up.http", "GET /up\n200\n");
+    let t = write(
+        s.dir.path(),
+        "t.grants",
+        &format!("--http x: Http send GET: nothing is sent=fake:{up}\n"),
+    );
+    let (code, out, err) = s.review(&["--test-grants", &t]);
+    assert_eq!((code, out.as_str()), (2, ""), "{err}");
+    assert!(
+        err.contains(&format!(
+            "--test-grants {t}: --http x: Http send GET: nothing is sent=fake:{up}: `x: Http send GET: nothing is sent` is not a grant name"
+        )),
+        "{err}"
+    );
+    assert!(err.contains("hint: name the test's Http parameter"), "{err}");
+    let (code, _, err) = kio(&s.dir.path().join("tmp"), &["test", &s.new, "--grants", &t]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("is not a grant name"), "{err}");
+
+    let outside = write(s.dir.path(), "hook.http", HOOK);
+    let t = write(s.dir.path(), "t.grants", &format!("--http hook=fake:{outside}\n"));
+    let (code, out, err) = s.review(&["--test-grants", &t]);
+    assert_eq!((code, out.as_str()), (2, ""), "{err}");
+    assert!(
+        err.contains(&format!(
+            "--test-grants {t}: --http hook=fake:{outside}: outside {}'s directory, so the change does not show it\n  hint: keep the fake file beside the program it tests",
+            s.new
+        )),
+        "{err}"
+    );
+
+    // `PUT` is not granted: `kio test` refuses the file, so no test ran on it and it has no hash.
+    let put = write(s.dir.path(), "new/put.http", "PUT /x\n200\n");
+    let t = write(s.dir.path(), "t.grants", &format!("--http hook=fake:{put}\n"));
+    let (code, out, err) = s.review(&["--test-grants", &t]);
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(out.contains("--http hook grants only"), "{out}");
+    assert!(!out.contains("test fake"), "{out}");
 }
 
 /// A file `name` below `dir`, `depth` levels down at most.
@@ -1395,7 +1464,7 @@ fn a_fake_changed_during_the_review() {
     let waits = "\n#[test]\nfn waits(d: Dir, watch: Dir) -> Result<(), IoErr> {\n    d.write(\"started\", \"\".to_bytes())?;\n    let mut i = 0;\n    while i < 100000 && !watch.exists(\"go\")? { i += 1; }\n    Ok(())\n}\n";
     let app = format!("{HOOKED}{waits}");
     let s = Sides::new(&app, &app);
-    let hook = write(s.dir.path(), "hook\u{1b}.http", HOOK);
+    let hook = write(s.dir.path(), "new/hook\u{1b}.http", HOOK);
     let shown = hook.replace('\u{1b}', "\\u{1b}");
     let watch = s.dir.path().join("watch");
     std::fs::create_dir(&watch).unwrap();

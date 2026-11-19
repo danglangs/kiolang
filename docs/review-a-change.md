@@ -89,7 +89,7 @@ Identity
   test fake hook.http sha256:..
 ```
 
-`tested` still means the tests passed, against the answers written in `hook.http`: read that file as part of the change (does a real endpoint answer like this, a 503 then a 200?). kio reads it once, so both sides' tests got the same answers; a change to it during the review is an `error` in Identity.
+`tested` still means the tests passed, against the answers written in `hook.http`: read that file as part of the change (does a real endpoint answer like this, a 503 then a 200?). kio reads it once, so both sides' tests got the same answers; a change to it during the review is an `error` in Identity. The file must sit inside NEW's directory, and its name is shown ASCII-escaped and quoted as on the binds line, so `h\u{43e}ok.http` cannot pass for `hook.http`.
 
 ## 5. Decide
 
