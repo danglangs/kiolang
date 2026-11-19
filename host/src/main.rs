@@ -2,12 +2,14 @@ mod deps;
 mod mcp;
 mod review;
 
+use kio_host::fake::FakeFile;
 use kio_host::{
     listen, open_dir, ClockSpec, Diag, FileId, HmacKey, Kio, Limits, LogSink, Origin, RngSpec, SecretValue, Server,
     Sources, Used,
 };
 use serde_json::json;
 use std::cell::RefCell;
+use std::sync::Arc;
 
 /// `kio run`'s flags.
 const USAGE: &str = "[--grants file] [--dir name=path[:ro]]... [--http name=host]... [--http-methods name=POST,PUT,..]... [--http-header name=Header:env:VAR|file:path]... [--kv name=path[:ro]|:memory:]... [--kv-mb mb] [--db name=path[:ro]|:memory:]... [--db-mb mb] [--rng name[=seed:N]]... [--clock name[=fixed:T]]... [--log name=path|-]... [--hmac name=env:VAR|file:path[:verify]]... [--secret name=env:VAR|file:path]... [--fuel n] [--timeout secs] [--memory mb] [--stack kb] [--calls n] [--io mb] [--audit log] [--listen addr] [--ws-origin origin]... [--host name]...";
@@ -697,6 +699,8 @@ struct TestRun<'a> {
     logs: Vec<(String, LogSink)>,
     /// A property's case: its values, and whether it runs in the interpreter (test builds only).
     case: Option<(lang::prop::Case, bool)>,
+    /// The grants file's fakes for this test's `Http` parameters (`Origin::fake`), by name.
+    fakes: Vec<(String, Origin)>,
 }
 
 /// `run`'s work once the flags (`grants_file`'s first) and the program, as read, are known.
@@ -707,7 +711,8 @@ fn run_program(prog: &Program, flags: &[&str], grants_file: Option<&str>, dry: b
     let files = &prog.files[..];
     set_json(|o| o.deps = prog.deps.clone());
     let mut dirs = Vec::new();
-    let mut https: Vec<(String, Origin)> = Vec::new();
+    // A test's fakes are bound as the objects `run_once` built, never from a flag.
+    let mut https: Vec<(String, Origin)> = test.as_mut().map_or(Vec::new(), |t| std::mem::take(&mut t.fakes));
     // `(name, methods)` of each `--http-methods`, applied once every `--http` is known.
     let mut http_methods: Vec<(String, String)> = Vec::new();
     // Each `--http-header` as given, read once every `--http` is known.
@@ -741,6 +746,12 @@ fn run_program(prog: &Program, flags: &[&str], grants_file: Option<&str>, dry: b
                 };
                 match Origin::parse(origin) {
                     Ok(o) => https.push((name.to_string(), o)),
+                    // `kio test` takes a fake out of the flags before any reach here (`test_setup`).
+                    Err(e) if origin.starts_with("fake:") => {
+                        return fail(format!(
+                            "--http {name}={origin}: {e}\n  hint: grant a host (--http {name}=https://hooks.example); a fake belongs in the grants file kio test reads"
+                        ))
+                    }
                     Err(e) => return fail(format!("--http {name}={origin}: {e}")),
                 }
                 continue;
@@ -1317,6 +1328,8 @@ struct Tests {
     /// Cases per property (`--cases`) and the seed they are generated from (`--seed`).
     cases: usize,
     seed: u64,
+    /// Each `--http name=fake:FILE` of the grants file, FILE read once (`fake_file`); not in `flags`.
+    fakes: Vec<(String, Arc<FakeFile>)>,
 }
 
 /// One test's result: its error as `--json` shows one, the time it took and its `Log` lines;
@@ -1330,6 +1343,8 @@ struct TestResult {
     /// Fuel and peak memory compiled code used (a property's: fuel summed over its generated
     /// cases, peak memory their largest); `None` when a run did not start.
     used: Option<Used>,
+    /// Each fake that had a request with no entry: `hook: 3 requests, 1 unmatched: POST /x`.
+    unmatched: Vec<String>,
 }
 
 /// How a property's cases ran: generated cases (each compiled), discards, shrink runs, and the
@@ -1408,6 +1423,9 @@ fn result_json(r: &TestResult) -> serde_json::Value {
     let ms = (r.ms * 10.0).round() / 10.0;
     let mut row = json!({"name": r.name, "ok": r.error.is_none(), "ms": ms, "error": r.error, "log": r.log,
         "fuel": r.used.map(|u| u.fuel), "peak_memory": r.used.map(|u| u.peak_memory)});
+    if r.error.is_some() && !r.unmatched.is_empty() {
+        row["unmatched"] = json!(r.unmatched);
+    }
     if let Some(p) = &r.prop {
         let input = (p.input.as_ref()).map(|(vs, _)| {
             vs.iter()
@@ -1479,6 +1497,8 @@ fn result_lines(tests: &Tests, r: &TestResult) -> Vec<String> {
         }
     }
     out.extend(error_lines(e).into_iter().map(|l| format!("  {l}")));
+    // The paths are the program's: escaped, as a message is.
+    out.extend(r.unmatched.iter().map(|u| format!("  {}", kio_host::escape_shown(u))));
     if !r.log.is_empty() {
         out.push("  log:".into());
         out.extend(r.log.lines().map(|l| format!("    {l}")));
@@ -1556,7 +1576,7 @@ fn test_setup(path: &str, flags: &[&str]) -> Result<Tests, i32> {
             _ => return Err(usage()),
         }
     }
-    let (flags, grants_file) = with_grants(&rest)?;
+    let (mut flags, grants_file) = with_grants(&rest)?;
     let server = ["--audit", "--listen", "--ws-origin", "--host"];
     if let Some(flag) = flags.iter().step_by(2).find(|f| server.contains(&f.as_str())) {
         return Err(fail(format!(
@@ -1577,6 +1597,7 @@ fn test_setup(path: &str, flags: &[&str]) -> Result<Tests, i32> {
             return Err(fail(format!("--stack {n}: at most {} KB", kio_host::MAX_STACK >> 10)));
         }
     }
+    let fakes = take_fakes(&mut flags)?;
     let prog = read_program(path)?;
     let pairs: Vec<(&str, &str)> = prog.files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
     let program = match lang::check_files_for_tests(&pairs, &lang::CapTable::v0()) {
@@ -1601,21 +1622,98 @@ fn test_setup(path: &str, flags: &[&str]) -> Result<Tests, i32> {
         path: path.to_string(),
         cases,
         seed,
+        fakes,
     })
+}
+
+/// Take each `--http name=fake:FILE` out of `flags`, with FILE read once (`fake_file`).
+fn take_fakes(flags: &mut Vec<String>) -> Result<Vec<(String, Arc<FakeFile>)>, i32> {
+    let (mut fakes, mut rest) = (Vec::new(), Vec::new());
+    for pair in flags.chunks(2) {
+        let spec = pair[1].split_once('=').filter(|_| pair[0] == "--http");
+        match spec.and_then(|(name, o)| Some(name).zip(o.strip_prefix("fake:"))) {
+            Some((name, path)) => fakes.push((name.to_string(), fake_file(name, path, flags).map_err(fail)?)),
+            None => rest.extend(pair.iter().cloned()),
+        }
+    }
+    *flags = rest;
+    Ok(fakes)
+}
+
+/// FILE of `--http name=fake:FILE`, under the grants file's rules: a regular file of at most
+/// 1 MiB, with no other hard links, not inside a writable `--dir` nor the file of a `--log`,
+/// `--kv` or `--db` of `flags` (the program could rewrite its next run's answers); then parsed,
+/// and each entry's method one the grant allows.
+fn fake_file(name: &str, path: &str, flags: &[String]) -> Result<Arc<FakeFile>, String> {
+    let at = format!("--http {name}=fake:{path}");
+    let own = "\n  hint: give kio a fake file of its own";
+    let changes = "the program could rewrite its next run's answers";
+    if std::fs::metadata(path).is_ok_and(|m| std::os::unix::fs::MetadataExt::nlink(&m) > 1) {
+        return Err(format!(
+            "{at}: `{path}` has other hard links; {changes} through one{own}"
+        ));
+    }
+    for pair in flags.chunks(2) {
+        let Some((n, target)) = pair[1].split_once('=') else {
+            continue;
+        };
+        let (target, ro) = kio_host::kv::split_spec(target);
+        let flag = &pair[0];
+        let why = match flag.as_str() {
+            "--dir"
+                if !ro && kio_host::path_id(target.as_ref()).is_ok_and(|id| kio_host::within(path.as_ref(), id)) =>
+            {
+                format!("is inside `--dir {n}={target}`")
+            }
+            "--log" | "--kv" | "--db" if same_file(path, target) => format!("is the `{flag} {n}` file"),
+            _ => continue,
+        };
+        return Err(format!("{at}: `{path}` {why}; {changes}{own}"));
+    }
+    let text = match read_regular(path.as_ref(), GRANTS_MAX, false) {
+        Ok(bytes) => String::from_utf8(bytes).map_err(|_| format!("{at}: not UTF-8"))?,
+        Err(Unread::TooLarge) => {
+            return Err(format!(
+                "{at}: over 1 MiB\n  hint: a fake file holds a few answers; write each body small"
+            ))
+        }
+        Err(e) => return Err(format!("{at}: {e}")),
+    };
+    let file = Arc::new(kio_host::fake::parse(path, &text)?);
+    let mut origin = Origin::fake(file.clone());
+    let list = flags.chunks(2).find_map(|p| match p[1].split_once('=') {
+        Some((n, list)) if p[0] == "--http-methods" && n == name => Some(list),
+        _ => None,
+    });
+    // A bad list is `run_program`'s to report, as for a real grant.
+    if let Some(Err(_)) = list.map(|l| origin.allow_methods(l)) {
+        return Ok(file);
+    }
+    if let Some(e) = file.entries.iter().find(|e| !origin.allows(e.method)) {
+        return Err(format!(
+            "{path}:{}: {} {}: --http {name} grants only {}\n  hint: add {} to --http-methods {name}, or drop the entry",
+            e.line,
+            e.method,
+            e.path,
+            origin.granted_methods().join(", "),
+            e.method
+        ));
+    }
+    Ok(file)
 }
 
 /// Runs test `t` of `tests`: an example test once, a property on its cases (`run_property`).
 fn run_test(tests: &Tests, t: &lang::TestFn) -> TestResult {
     let start = std::time::Instant::now();
-    let (error, log, prop, used) = match t.inputs.is_empty() {
+    let (error, log, prop, used, unmatched) = match t.inputs.is_empty() {
         true => {
             let r = run_once(tests, t, None);
-            (r.error, r.log, None, r.used)
+            (r.error, r.log, None, r.used, r.unmatched)
         }
         false => {
             let (error, log, info) = run_property(tests, t);
             let used = info.used;
-            (error, log, Some(info), used)
+            (error, log, Some(info), used, Vec::new())
         }
     };
     TestResult {
@@ -1625,6 +1723,7 @@ fn run_test(tests: &Tests, t: &lang::TestFn) -> TestResult {
         log,
         prop,
         used,
+        unmatched,
     }
 }
 
@@ -1635,6 +1734,7 @@ struct Once {
     error: Option<serde_json::Value>,
     log: String,
     used: Option<Used>,
+    unmatched: Vec<String>,
 }
 
 /// Runs test `t` of `tests` once, on `case` for a property: the grants file's grant for each
@@ -1656,6 +1756,16 @@ fn run_once(tests: &Tests, t: &lang::TestFn, case: Option<(lang::prop::Case, boo
         }
         flags.extend(pair.iter().cloned());
     }
+    // The only place a fake is made: one per test, so each counts its own requests (T4a).
+    let mut fakes = Vec::new();
+    for (name, file) in &tests.fakes {
+        if t.params.iter().any(|(n, ty)| n == name && ty == "Http") {
+            named.push(name.clone());
+            fakes.push((name.clone(), Origin::fake(file.clone())));
+        }
+    }
+    // Shares each fake's counts with the run's, to list what had no entry.
+    let watched = fakes.clone();
     let mut temps = Vec::new();
     let mut logs = Vec::new();
     let log = SharedBuf::default();
@@ -1710,6 +1820,7 @@ fn run_once(tests: &Tests, t: &lang::TestFn, case: Option<(lang::prop::Case, boo
                 test: t,
                 logs,
                 case,
+                fakes,
             };
             let grants = tests.grants_file.as_deref();
             run_program(&tests.prog, &flags, grants, false, Some(run))
@@ -1724,11 +1835,15 @@ fn run_once(tests: &Tests, t: &lang::TestFn, case: Option<(lang::prop::Case, boo
             "file": null, "line": null, "col": null}),
         );
     }
+    let unmatched = (watched.iter())
+        .filter_map(|(name, o)| o.fake_unmatched().map(|u| format!("{name}: {u}")))
+        .collect();
     Once {
         code,
         error,
         log: text,
         used: out.used,
+        unmatched,
     }
 }
 

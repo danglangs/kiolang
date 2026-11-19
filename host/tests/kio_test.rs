@@ -519,3 +519,245 @@ fn ungranted(api: Http) {}
     );
     assert_eq!(out, want);
 }
+
+/// T4a: what `hook: Http` answers in the fake tests below.
+const HOOK: &str = "# hook.http: one entry per response\nPOST /v1/events\n503\n---\nPOST /v1/events\n200\nContent-Type: application/json\nx-two: b\n\n{\"ok\":true}\n---\nGET /v1/status?full=1\n200\n\nup\n---\nGET /v1/down\n503\n---\nGET /moved\n302\nlocation: /v1/status?full=1\n---\nPOST /v1/slow\ntimeout\n";
+
+const FAKE: &str = r#"fn post(hook: Http, p: Str) -> Result<HttpResponse, HttpErr> { hook.send("POST", p, [], "x".to_bytes(), 0) }
+
+#[test]
+fn answers(hook: Http) -> Result<(), HttpErr> {
+    assert_eq(post(hook, "/v1/events")?.status, 503);
+    let r = post(hook, "/v1/events")?;
+    assert_eq(r.status, 200);
+    assert_eq(r.headers, ["content-type: application/json", "x-two: b"]);
+    assert_eq(r.body.to_str(), "{\"ok\":true}");
+    assert_eq(post(hook, "/v1/events")?.status, 200);
+    assert_eq(hook.get("/v1/status?full=1")?.to_str(), "up");
+    assert_eq(hook.get("/v1/down"), Err(HttpErr::Status(503)));
+    assert_eq(hook.get("/moved"), Err(HttpErr::Status(302)));
+    assert_eq(hook.send("GET", "/moved", [], "".to_bytes(), 0)?.status, 302);
+    Ok(())
+}
+
+#[test]
+fn slow(hook: Http) { assert_eq(post(hook, "/v1/slow"), Err(HttpErr::Timeout)); }
+
+#[test]
+fn typo(hook: Http) -> Result<(), HttpErr> {
+    assert_eq(post(hook, "/v1/events")?.status, 503);
+    assert_eq(post(hook, "/v1/evnts"), Err(HttpErr::Denied));
+    assert(false, "after");
+    Ok(())
+}
+
+#[test]
+fn handled(hook: Http) { assert_eq(post(hook, "/nowhere"), Err(HttpErr::Denied)); }
+
+#[test]
+fn put(hook: Http) {
+    let m = "PU" + "T";
+    assert_eq(hook.send(m, "/v1/events", [], "".to_bytes(), 0), Err(HttpErr::Denied));
+    assert(false, "after put");
+}
+"#;
+
+#[test]
+fn a_fake_answers_from_its_file() {
+    let c = Case::new(FAKE);
+    let hook = c.file("hook.http", HOOK);
+    let g = c.file(
+        "t.grants",
+        &format!("--http hook=fake:{hook}\n--http-methods hook=POST\n"),
+    );
+    let (code, out, err) = c.kio(&["--grants", &g]);
+    assert_eq!(code, 1, "{err}");
+    let app = &c.app;
+    // An unmatched request is `Denied`, and listed when its test fails; a method not granted is
+    // `Denied` before any lookup, so it is not listed.
+    let want = format!(
+        "ok   answers\nok   handled\nFAIL put\n  {app}:36:5: assertion failed: after put\nok   slow\nFAIL typo\n  {app}:25:5: assertion failed: after\n  hook: 2 requests, 1 unmatched: POST /v1/evnts\n3 passed, 2 failed\n"
+    );
+    assert_eq!(out, want, "{err}");
+    let (_, j) = c.json(&["--grants", &g]);
+    let t = &j["tests"];
+    assert_eq!(
+        t[4]["unmatched"],
+        serde_json::json!(["hook: 2 requests, 1 unmatched: POST /v1/evnts"])
+    );
+    assert!(t[1]["unmatched"].is_null() && t[2]["unmatched"].is_null(), "{j}");
+    // `timeout` answers at once: under 100 ms more than `handled`, which also sends one request.
+    let ms = |i: usize| t[i]["ms"].as_f64().unwrap();
+    assert!(ms(3) < ms(1) + 100.0, "{j}");
+}
+
+/// A test grants file's fake is refused everywhere else, by name.
+#[test]
+fn a_fake_is_refused_outside_kio_test() {
+    let t = tempfile::tempdir().unwrap();
+    let hook = write(t.path(), "hook.http", HOOK);
+    let spec = format!("hook=fake:{hook}");
+    let refusal = format!(
+        "kio: --http {spec}: a fake answers tests only\n  hint: grant a host (--http hook=https://hooks.example); a fake belongs in the grants file kio test reads\n"
+    );
+    let main = write(t.path(), "main.kio", "fn main(hook: Http) -> Int { 1 }\n");
+    let (code, out, err) = kio_in(t.path(), &["run", &main, "--http", &spec]);
+    assert_eq!((code, out.as_str(), err.as_str()), (2, "", refusal.as_str()));
+    let g = write(t.path(), "g.grants", &format!("--http {spec}\n"));
+    let (code, _, err) = kio_in(t.path(), &["run", &main, "--grants", &g]);
+    assert_eq!((code, err.as_str()), (2, refusal.as_str()));
+    let (code, _, err) = kio_in(t.path(), &["check", &main, "--grants", &g]);
+    assert_eq!((code, err.as_str()), (2, refusal.as_str()));
+    let app = write(
+        t.path(),
+        "app.kio",
+        "fn main(req: Incoming, res: Outgoing, hook: Http) -> Result<(), WebErr> { res.send(200, [], [], \"ok\".to_bytes()) }\n",
+    );
+    let (code, _, err) = kio_in(t.path(), &["run", &app, "--listen", "127.0.0.1:0", "--http", &spec]);
+    assert_eq!((code, err.as_str()), (2, refusal.as_str()));
+    let (code, out, err) = kio_in(t.path(), &["review", &main, "--base", &main, "--grants", &g]);
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(out.contains("a fake answers tests only"), "{out}{err}");
+    assert!(
+        out.contains("a fake belongs in the grants file kio test reads"),
+        "{out}{err}"
+    );
+}
+
+#[test]
+fn a_fake_file_error_names_its_line() {
+    let c = Case::new("#[test]\nfn t(hook: Http) {}\n");
+    let methods = "GET, HEAD, POST, PUT, PATCH, DELETE or OPTIONS";
+    let cases = [
+        (
+            "POST /a\n200\n---\nFETCH /b\n200\n",
+            format!("4: expected METHOD /path ({methods})"),
+        ),
+        ("# c\n\nPOST a\n200\n", format!("3: expected METHOD /path ({methods})")),
+        ("POST /a\n200\n---\n", format!("4: expected METHOD /path ({methods})")),
+        ("POST /a\n2000\n", "2: expected a status 100-599 or timeout".into()),
+        ("POST /a\n", "2: expected a status 100-599 or timeout".into()),
+        ("POST /a\n200\nok\n\nbody\n", "3: expected name: value".into()),
+        ("POST /a\ntimeout\n\nbody\n", "4: expected --- after timeout".into()),
+    ];
+    for (text, want) in cases {
+        let hook = c.file("hook.http", text);
+        let g = c.file(
+            "t.grants",
+            &format!("--http hook=fake:{hook}\n--http-methods hook=POST\n"),
+        );
+        let (code, out, err) = c.kio(&["--grants", &g]);
+        assert_eq!(
+            (code, out.as_str(), err),
+            (2, "", format!("kio: {hook}:{want}\n")),
+            "{text}"
+        );
+    }
+    // An entry for a method the grant does not allow.
+    let hook = c.file("hook.http", "POST /a\n200\n---\nPUT /x\n200\n");
+    let g = c.file(
+        "t.grants",
+        &format!("--http hook=fake:{hook}\n--http-methods hook=post\n"),
+    );
+    let (code, _, err) = c.kio(&["--grants", &g]);
+    assert_eq!(
+        (code, err),
+        (2, format!("kio: {hook}:4: PUT /x: --http hook grants only GET, POST\n  hint: add PUT to --http-methods hook, or drop the entry\n"))
+    );
+}
+
+#[test]
+fn a_fake_file_follows_the_grants_file_rules() {
+    let c = Case::new("#[test]\nfn t(hook: Http, d: Dir) {}\n");
+    let data = c.dir.path().join("data");
+    std::fs::create_dir(&data).unwrap();
+    let inner = write(&data, "hook.http", HOOK);
+    let spec = format!("hook=fake:{inner}");
+    let g = c.file("t.grants", &format!("--http {spec}\n--dir d={}\n", data.display()));
+    let (code, _, err) = c.kio(&["--grants", &g]);
+    assert_eq!(
+        (code, err),
+        (2, format!("kio: --http {spec}: `{inner}` is inside `--dir d={}`; the program could rewrite its next run's answers\n  hint: give kio a fake file of its own\n", data.display()))
+    );
+    // Read-only, the program cannot change it.
+    let g = c.file(
+        "t.grants",
+        &format!(
+            "--http {spec}\n--http-methods hook=POST\n--dir d={}:ro\n",
+            data.display()
+        ),
+    );
+    let (code, out, err) = c.kio(&["--grants", &g]);
+    assert_eq!(code, 0, "{out}{err}");
+    let hook = c.file("hook.http", HOOK);
+    std::fs::hard_link(&hook, c.dir.path().join("other")).unwrap();
+    let spec = format!("hook=fake:{hook}");
+    let g = c.file("t.grants", &format!("--http {spec}\n"));
+    let (code, _, err) = c.kio(&["--grants", &g]);
+    assert_eq!(
+        (code, err),
+        (2, format!("kio: --http {spec}: `{hook}` has other hard links; the program could rewrite its next run's answers through one\n  hint: give kio a fake file of its own\n"))
+    );
+    let g = c.file("t.grants", "--http hook=fake:missing.http\n");
+    let (code, _, err) = c.kio(&["--grants", &g]);
+    assert_eq!(code, 2);
+    assert!(
+        err.starts_with("kio: --http hook=fake:missing.http: cannot read: "),
+        "{err}"
+    );
+}
+
+/// `--http-header` applies to a fake as to a real grant, and its value reaches nothing.
+#[test]
+fn a_fakes_header_value_appears_nowhere() {
+    let c = Case::new(
+        r#"#[test]
+fn sends(hook: Http) -> Result<(), HttpErr> {
+    assert_eq(hook.send("POST", "/v1/events", ["Authorization: mine"], "".to_bytes(), 0), Err(HttpErr::Invalid));
+    assert_eq(hook.send("POST", "/v1/events", [], "".to_bytes(), 0)?.status, 503);
+    assert_eq(hook.send("POST", "/v1/nope", [], "".to_bytes(), 0), Err(HttpErr::Denied));
+    assert(false, "show everything");
+    Ok(())
+}
+"#,
+    );
+    let hook = c.file("hook.http", HOOK);
+    let g = c.file(
+        "t.grants",
+        &format!(
+            "--http hook=fake:{hook}\n--http-methods hook=POST\n--http-header hook=Authorization:env:KIO_T4A_SECRET\n"
+        ),
+    );
+    let secret = "t4a-secret-value-81f2";
+    let tmp = c.dir.path().join("tmp");
+    for json in [false, true] {
+        let mut args = vec!["test", c.app.as_str(), "--grants", g.as_str()];
+        args.extend(json.then_some("--json"));
+        let o = Command::new(env!("CARGO_BIN_EXE_kio"))
+            .args(&args)
+            .env("TMPDIR", &tmp)
+            .env("KIO_T4A_SECRET", secret)
+            .output()
+            .unwrap();
+        let (out, err) = (String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+        assert_eq!(o.status.code(), Some(1), "{out}{err}");
+        assert!(
+            out.contains("hook: 2 requests, 1 unmatched: POST /v1/nope"),
+            "{out}{err}"
+        );
+        assert!(!out.contains(secret) && !err.contains(secret), "{out}{err}");
+    }
+    let mut stack = vec![c.dir.path().to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(d).unwrap() {
+            let p = e.unwrap().path();
+            match p.is_dir() {
+                true => stack.push(p),
+                false => assert!(
+                    !String::from_utf8_lossy(&std::fs::read(&p).unwrap()).contains(secret),
+                    "{p:?}"
+                ),
+            }
+        }
+    }
+}

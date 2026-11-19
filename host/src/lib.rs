@@ -30,6 +30,7 @@ use bindings::kio;
 mod compiled;
 mod config;
 pub mod db;
+pub mod fake;
 mod grants;
 #[cfg(feature = "test-hooks")]
 mod interp;
@@ -205,6 +206,9 @@ pub struct Origin {
     methods: Vec<&'static str>,
     /// `--http-header`: headers (names lowercased) the host adds to every request and hop.
     inject: Vec<(String, Secret)>,
+    /// `kio test`'s fake (T4a): requests that pass the host's checks are answered from it, and
+    /// never sent. Set only by `Origin::fake`.
+    fake: Option<Arc<fake::Fake>>,
 }
 
 /// A header value from `--http-header`, an `--hmac` key or a `--secret` value. It is only ever
@@ -226,6 +230,10 @@ impl Origin {
     /// Parse `host[:port]` (HTTPS), `http://host[:port]` or `https://host[:port]`; nothing else.
     pub fn parse(spec: &str) -> std::result::Result<Self, String> {
         let bad = |why: &str| format!("{spec:?}: {why}; expected host, http://host:port or https://host:port");
+        // Only `kio test`'s binder makes a fake, as an object (`Origin::fake`): never from a flag.
+        if spec.starts_with("fake:") {
+            return Err("a fake answers tests only".into());
+        }
         let (https, rest) = match spec.split_once("://") {
             Some(("http", r)) => (false, r),
             Some(("https", r)) => (true, r),
@@ -266,7 +274,41 @@ impl Origin {
             any_addr,
             methods: Vec::new(),
             inject: Vec::new(),
+            fake: None,
         })
+    }
+
+    /// A grant answered from `file` (T4a), with what one test asks of it: `kio test`'s binder
+    /// only. Methods and headers apply as to a real grant; nothing is ever sent.
+    pub fn fake(file: Arc<fake::FakeFile>) -> Self {
+        Origin {
+            https: true,
+            host: "fake".into(),
+            port: 443,
+            pinned: Arc::default(),
+            lookups: Arc::default(),
+            read: Arc::default(),
+            any_addr: false,
+            methods: Vec::new(),
+            inject: Vec::new(),
+            fake: Some(Arc::new(fake::Fake::new(file))),
+        }
+    }
+
+    /// The fake's unmatched requests (`Fake::unmatched`); `None` for a real grant.
+    pub fn fake_unmatched(&self) -> Option<String> {
+        self.fake.as_ref().and_then(|f| f.unmatched())
+    }
+
+    /// On a fake grant, its answer to `method path` (counted); `None` for a real grant. Called
+    /// only once the host's checks passed.
+    fn fake_answer(&self, method: &'static str, path: &str) -> Option<fake::Answer> {
+        self.fake.as_ref().map(|f| f.answer(method, path))
+    }
+
+    /// The methods the grant allows: GET, then those `--http-methods` added.
+    pub fn granted_methods(&self) -> Vec<&'static str> {
+        std::iter::once("GET").chain(self.methods.iter().copied()).collect()
     }
 
     /// This grant for one run: the same origin and methods with nothing resolved yet, so no run
@@ -632,6 +674,9 @@ struct Outbound {
     /// `get`'s rules: a non-2xx status is `Status`, a redirect not followed is `denied`, and the
     /// body is read only on 2xx. `send`'s: every status is a response, with its body.
     as_get: bool,
+    /// On a fake grant, its answer, looked up once every check passed (in request order, so a
+    /// batch counts in list order); `perform` sends nothing.
+    fake: Option<fake::Answer>,
 }
 
 /// What a request got back.
@@ -727,6 +772,10 @@ fn perform(origin: &Origin, req: &Outbound, deadline: Instant, budget: &AtomicI6
         cut: false,
         result: Err(HttpErr::Denied),
     };
+    if let Some(answer) = &req.fake {
+        done.result = fake_result(origin, req, answer, budget, &mut done.read);
+        return done;
+    }
     let mut url = req.url.clone();
     let result = loop {
         let config = ureq::Agent::config_builder()
@@ -804,6 +853,38 @@ fn perform(origin: &Origin, req: &Outbound, deadline: Instant, budget: &AtomicI6
     done.cut = until == deadline && matches!(result, Err(HttpErr::Timeout));
     done.result = result;
     done
+}
+
+/// A fake's `answer` to `req`, as `perform` treats a server's: no entry is `denied`; `get` turns a
+/// non-2xx (a 3xx too: nothing is followed) into `Status`; a body is charged to `budget` and is
+/// `too-large` past it. `read` gets the body bytes.
+fn fake_result(
+    origin: &Origin,
+    req: &Outbound,
+    answer: &fake::Answer,
+    budget: &AtomicI64,
+    read: &mut usize,
+) -> std::result::Result<Inbound, kio::caps::net::HttpErr> {
+    use kio::caps::net::HttpErr;
+    match answer {
+        fake::Answer::Unmatched => Err(HttpErr::Denied),
+        fake::Answer::Timeout => Err(HttpErr::Timeout),
+        fake::Answer::Response(status, _, _) if req.as_get && !(200..300).contains(status) => {
+            Err(HttpErr::Status(*status))
+        }
+        fake::Answer::Response(status, headers, body) => {
+            *read = body.len();
+            origin.read.fetch_add(body.len() as u64, Relaxed);
+            if budget.fetch_sub(body.len() as i64, Relaxed) < body.len() as i64 {
+                return Err(HttpErr::TooLarge);
+            }
+            Ok(Inbound {
+                status: *status,
+                headers: headers.clone(),
+                body: body.clone(),
+            })
+        }
+    }
 }
 
 /// `path` with symlinks resolved, though it may not exist yet: its nearest existing ancestor made
@@ -1876,6 +1957,7 @@ impl State {
             body: Vec::new(),
             timeout: HTTP_TIMEOUT,
             as_get: true,
+            fake: origin.fake_answer("GET", &path),
         };
         let mut extra = origin.injected();
         let done = self.finish(&origin, req, &mut extra)?;
@@ -1991,6 +2073,7 @@ impl State {
             body,
             timeout,
             as_get: false,
+            fake: origin.fake_answer(method, path),
         }))
     }
 

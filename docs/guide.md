@@ -109,6 +109,8 @@ $ API_AUTH="Bearer $(cat ~/.keys/stripe)" kio run charge.kio --http stripe=api.s
 
 Grant only origins that do not echo request headers back: an endpoint like httpbin's `/headers` returns the key in its response body, which the program can read and leak.
 
+`--http api=fake:api.http` answers from a file instead of a server, in `kio test`'s grants file only ([Tests](#a-fake-host)); `kio run`, `--listen`, `kio check --grants` and `kio review --grants` refuse it: "--http api=fake:api.http: a fake answers tests only".
+
 A path, not a URL: `get(path)` takes a path on the granted host; anything else (`https://other.example/..`, `//other.example`) is `HttpErr::Denied` without a request. Redirects are rechecked against the grant, IP literals and private addresses are refused, DNS is pinned per run.
 
 Under `--listen` each request gets its own `Http` handle (its own DNS lookup, pinned for that request) with the same grant, methods and limits; its audit lines carry `"req":N`. A request holds at most 64 HTTP requests in flight; the process 64 per worker (at least 1,024), so a running request is never refused one. Past that (workers a deadline left behind) a new `get`, `send` or `send_all` is `Err(Timeout)` at once, nothing sent (audited `"busy":true`); other calls, a `Dir` read for one, are unaffected. A request may make 1,000 calls (`--calls`). Every outbound HTTP request, each redirect hop and each `send_all` request included, takes one call before it is sent, so a run sends at most `--calls` requests; a hop with no call left is not sent and the run stops for `--calls` (each request's audit line has `"redirects":N`, the hops it sent after the first). A path built from request input is the program's to check: the host keeps it on the granted host, but `?`, `/` and `..` inside it reach that host as given.
@@ -343,7 +345,7 @@ $ kio run spin.kio --fuel 1000 --json
 | `Clock` | fixed at 2026-01-01T00:00:00Z |
 | `Rng` | `seed:1` |
 | `Log` | a buffer, printed when the test fails |
-| `Http`, `Hmac`, `Secret` | none: the test fails with "test `t` needs `api: Http`", hint "name it in a --grants file" |
+| `Http`, `Hmac`, `Secret` | none (an `Http` can be a [fake](#a-fake-host)): the test fails with "test `t` needs `api: Http`", hint "name it in a --grants file" |
 | `Incoming`, `Outgoing`, `WsMessage`, `WsSend` | never (a grants file's `--listen` is refused): "test `t` needs `req: Incoming`", hint "only `kio run --listen` grants a server's capabilities; test the handler's logic in a function" |
 
 A test fails on a failed `assert` or `assert_eq`, an `Err` return (shown as `Err("..")`), a runtime error, a limit or a refused grant. Exit 0 when every test passes (a file with no tests prints `0 passed, 0 failed`), 1 when any fails, 2 for a check error or a usage error: a bad limit, or a `--filter` no test name contains ("no test matches `x`"). A failure's message and hint are printed with control characters escaped as `Log` lines are (`\n`, `\u{1b}`); `--json` carries them as they are. `--audit`, `--listen`, `--ws-origin` and `--host` are refused, and grants go in the file, not on the command line.
@@ -371,6 +373,32 @@ note: handles used 14,006,746 fuel; --listen gives each request 10,000,000 (rais
 ok   parses  (fuel 6,739; peak memory 1728 KB)
 2 passed, 0 failed
 ```
+
+### A fake host
+
+In the grants file, `--http hook=fake:hook.http` binds `hook: Http` to the answers in `hook.http` (a path relative to the working directory) instead of a server; nothing is sent. `--http-methods` and `--http-header` apply as to a real grant, and the host's own checks run first: a method not granted or a bad path is `Denied`, a bad header `Invalid`, a body over 8 MB `TooLarge`. The header's value never reaches the fake.
+
+```
+# hook.http: one entry per response, `---` between.
+# METHOD /path, then a status or `timeout`, response headers, a blank line, the body.
+POST /v1/events
+503
+---
+POST /v1/events
+200
+content-type: application/json
+
+{"ok":true}
+---
+POST /v1/slow
+timeout
+```
+
+- An entry answers a request with the same method and path (query included). The n-th entry for one `METHOD /path` answers the n-th such request and the last repeats, so `503` then `200` tests a retry; `send_all` counts in list order.
+- `timeout` is `Err(Timeout)` at once. A 3xx is the response (`send`) or `Err(Status(3xx))` (`get`): never followed. `get` turns any non-2xx into `Err(Status(n))`.
+- No entry is `Err(Denied)`, as a real grant refuses a path outside it. A failing test lists the requests that had none: `hook: 3 requests, 1 unmatched: POST /v1/evnts` (`--json`: `unmatched`).
+- The file is read once, before the first test: UTF-8, at most 1 MiB, a regular file with no other hard links, not inside a writable `--dir` nor a `--log`, `--kv` or `--db` file of the same grants file ("give kio a fake file of its own"). Blank lines and `#` lines before an entry's request line are skipped; header names are lowercased; a body runs to the next `---` line, its last newline dropped. Each error names its line (`hook.http:7: expected METHOD /path (GET, HEAD, POST, PUT, PATCH, DELETE or OPTIONS)`, `expected a status 100-599 or timeout`, `expected name: value`), and an entry for a method the grant lacks is refused (`hook.http:3: PUT /x: --http hook grants only GET, POST`).
+- Each request counts toward `--calls` and `--io`, as a real one.
 
 ### Properties
 
