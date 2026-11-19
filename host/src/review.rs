@@ -24,7 +24,7 @@ type Row = (&'static str, String);
 const BLIND_SPOTS: [(&str, &[&str], &str); 8] = [
     (
         "Db",
-        &["exec", "query", "transaction"],
+        &["exec", "query", "transaction", "exec_rows", "transaction_rows"],
         "the SQL text and what it changes",
     ),
     (

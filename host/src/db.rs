@@ -84,10 +84,11 @@ pub fn split_spec(spec: &str) -> (&str, bool) {
     crate::kv::split_spec(spec)
 }
 
-/// The first write (`exec`, `transaction`) an authority report's `main` line shows on `name`.
+/// The first write (`exec`, `transaction`, `exec_rows`, `transaction_rows`) an authority report's
+/// `main` line shows on `name`.
 pub fn write_in_report(report: &str, name: &str) -> Option<&'static str> {
     let calls = crate::main_calls(report);
-    ["exec", "transaction"]
+    ["exec", "transaction", "exec_rows", "transaction_rows"]
         .into_iter()
         .find(|m| calls.contains(&(name.to_string(), m.to_string())))
 }
@@ -270,7 +271,8 @@ impl Db {
     }
 
     /// Run `sqls` with `params` (one list per statement) under the connection's lock: one
-    /// statement for `query` and `exec`, all of them in one transaction otherwise. Waits for
+    /// statement for `query` and `exec`, in one transaction otherwise, all or nothing (the last
+    /// statement's rows for `exec_rows` and `transaction_rows`). Waits for
     /// the connection, then for another process's lock, at most `BUSY_TIMEOUT` each, or until
     /// `deadline`; a statement still running at `deadline` is interrupted.
     fn run(
@@ -306,9 +308,17 @@ impl Db {
         if !conn.is_autocommit() {
             trusted("ROLLBACK")?;
         }
-        if mode != Mode::Transaction {
-            return statement(&conn, &sqls[0], &params[0], mode == Mode::Query);
-        }
+        // `exec_rows` runs inside a transaction too: a result cap stops it partway through its
+        // rows, and in autocommit mode the write so far would stay.
+        let rows = match mode {
+            Mode::Query => return statement(&conn, &sqls[0], &params[0], Rows::ReadOnly),
+            Mode::Exec => return statement(&conn, &sqls[0], &params[0], Rows::Refused(EXEC_ROWS)),
+            Mode::ExecRows => Rows::Wanted,
+            Mode::Transaction => Rows::Refused("the statement returns rows: run it with `transaction_rows`"),
+            Mode::TransactionRows => {
+                Rows::Refused("the statement returns rows: only the last statement of `transaction_rows` may")
+            }
+        };
         if sqls.len() != params.len() {
             return Err(invalid(format!(
                 "{} statements but {} parameter lists: give each statement its own list",
@@ -320,20 +330,21 @@ impl Db {
             return Err(Fail::TooLarge("statements"));
         }
         trusted("BEGIN")?;
-        let run = || -> std::result::Result<i64, Fail> {
-            let mut changes = 0;
-            for (sql, p) in sqls.iter().zip(params) {
-                changes += statement(&conn, sql, p, false)?.changes;
+        let run = || -> std::result::Result<Out, Fail> {
+            let mut out = Out::default();
+            for (i, (sql, p)) in sqls.iter().zip(params).enumerate() {
+                let last = i + 1 == sqls.len() && mode != Mode::Transaction;
+                let o = statement(&conn, sql, p, if last { Rows::Wanted } else { rows })?;
+                out.changes += o.changes;
+                if last {
+                    (out.rows, out.bytes) = (o.rows, o.bytes);
+                }
             }
             trusted("COMMIT")?;
-            Ok(changes)
+            Ok(out)
         };
         match run() {
-            Ok(changes) => Ok(Out {
-                rows: vec![],
-                changes,
-                bytes: 0,
-            }),
+            Ok(out) => Ok(out),
             Err(e) => {
                 // An interrupted write has already rolled the transaction back.
                 if !conn.is_autocommit() {
@@ -349,10 +360,26 @@ impl Db {
 enum Mode {
     Query,
     Exec,
+    ExecRows,
     Transaction,
+    TransactionRows,
 }
 
-/// What a call produced: the rows (`query` only), the rows changed and the bytes of the rows.
+/// `exec`'s refusal of a statement with result columns.
+const EXEC_ROWS: &str = "the statement returns rows: run it with `exec_rows`";
+
+/// What a statement may do with result columns: return its rows (`exec_rows`, the last of
+/// `transaction_rows`); return them only if SQLite reports it read-only (`query`: a write is
+/// `denied`); or none at all (`exec`, `transaction`: `invalid` with this message).
+#[derive(Clone, Copy)]
+enum Rows {
+    Wanted,
+    ReadOnly,
+    Refused(&'static str),
+}
+
+/// What a call produced: the rows (`query`, `exec_rows`, `transaction_rows`), the rows changed
+/// and the bytes of the rows.
 #[derive(Default)]
 struct Out {
     rows: Vec<Vec<SqlValue>>,
@@ -407,9 +434,9 @@ fn authorize(ctx: &AuthContext, host: bool, read_only: bool) -> Authorization {
     }
 }
 
-/// Prepare `sql`, bind `params` and step it to the end: its rows if `want_rows`, else an error
-/// at the first row. Rows past `ROWS_MAX` or `BYTES_MAX` are `too-large`.
-fn statement(conn: &Connection, sql: &str, params: &[SqlValue], want_rows: bool) -> std::result::Result<Out, Fail> {
+/// Prepare `sql`, bind `params` and step it to the end: its rows as `rows` allows. Rows past
+/// `ROWS_MAX` or `BYTES_MAX` are `too-large`.
+fn statement(conn: &Connection, sql: &str, params: &[SqlValue], rows: Rows) -> std::result::Result<Out, Fail> {
     if sql.contains('\0') {
         return Err(invalid("the SQL holds a NUL byte".into()));
     }
@@ -426,9 +453,11 @@ fn statement(conn: &Connection, sql: &str, params: &[SqlValue], want_rows: bool)
     if n == 0 && cols == 0 && stmt.expanded_sql().is_none() {
         return Err(invalid("no statement".into()));
     }
-    // Before anything runs, so an `INSERT .. RETURNING` under `exec` inserts nothing.
-    if cols > 0 && !want_rows {
-        return Err(invalid("the statement returns rows: run it with `query`".into()));
+    // Before anything runs, so an `INSERT .. RETURNING` under `exec` or `query` inserts nothing.
+    match rows {
+        Rows::Refused(why) if cols > 0 => return Err(invalid(why.into())),
+        Rows::ReadOnly if !stmt.readonly() => return Err(Fail::Db(DbErr::Denied)),
+        _ => {}
     }
     for (i, p) in params.iter().enumerate() {
         match p {
@@ -580,6 +609,47 @@ impl HostDb for State {
         )
     }
 
+    fn exec_rows(
+        &mut self,
+        h: Resource<Handle>,
+        sql: String,
+        params: Vec<SqlValue>,
+    ) -> Result<Result<Vec<Vec<SqlValue>>, DbErr>> {
+        let arg = sql.clone();
+        self.call(
+            h.rep(),
+            "exec_rows",
+            &arg,
+            |s| {
+                s.writable_db(&h, "exec_rows")?;
+                let r = s.db_run(&h, Mode::ExecRows, vec![sql], vec![params])?;
+                Ok(r.map(|o| o.rows))
+            },
+            db_outcome,
+        )
+    }
+
+    fn transaction_rows(
+        &mut self,
+        h: Resource<Handle>,
+        sqls: Vec<String>,
+        params: Vec<Vec<SqlValue>>,
+    ) -> Result<Result<Vec<Vec<SqlValue>>, DbErr>> {
+        let arg = sqls.join("; ");
+        self.call(
+            h.rep(),
+            "transaction_rows",
+            &arg,
+            |s| {
+                s.writable_db(&h, "transaction_rows")?;
+                s.audit_extra = format!(r#","statements":{}"#, sqls.len());
+                let r = s.db_run(&h, Mode::TransactionRows, sqls, params)?;
+                Ok(r.map(|o| o.rows))
+            },
+            db_outcome,
+        )
+    }
+
     fn transaction(
         &mut self,
         h: Resource<Handle>,
@@ -609,8 +679,8 @@ impl HostDb for State {
 
 impl State {
     /// Stop the run if the database behind `h` is read-only: the startup check refuses a program
-    /// whose report shows `exec` or `transaction` on it, so this is defence in depth (the
-    /// authorizer and the read-only open would refuse the write too).
+    /// whose report shows `exec`, `transaction`, `exec_rows` or `transaction_rows` on it, so this
+    /// is defence in depth (the authorizer and the read-only open would refuse the write too).
     fn writable_db(&mut self, h: &Resource<Handle>, method: &str) -> Result<()> {
         if !self.table.get(&Resource::<Arc<Db>>::new_borrow(h.rep()))?.read_only {
             return Ok(());
@@ -623,9 +693,10 @@ impl State {
 
     /// Run `sqls` with `params` on the database behind `h`, on a worker within the run's
     /// deadline (H5): parameter bytes are charged to `--io` first, result bytes after; the
-    /// parameter count, the rows or rows changed, and the limit a `TooLarge` hit (`rows`,
-    /// `bytes`, `value`, `sql`, `statements`, `memory`, `db-mb`) go in the audit line. A statement the
-    /// deadline interrupts stops the run as a timeout.
+    /// parameter count, the rows and the rows changed (each method's own), the limit a `TooLarge`
+    /// hit (`rows`, `bytes`, `value`, `sql`, `statements`, `memory`, `db-mb`) and, for a write
+    /// `query` refused, the hint, go in the audit line. A statement the deadline interrupts stops
+    /// the run as a timeout.
     fn db_run(
         &mut self,
         h: &Resource<Handle>,
@@ -644,7 +715,8 @@ impl State {
                 self.spend_io(out.bytes)?;
                 self.audit_extra += &match mode {
                     Mode::Query => format!(r#","rows":{}"#, out.rows.len()),
-                    _ => format!(r#","changes":{}"#, out.changes),
+                    Mode::Exec | Mode::Transaction => format!(r#","changes":{}"#, out.changes),
+                    _ => format!(r#","changes":{},"rows":{}"#, out.changes, out.rows.len()),
                 };
                 Ok(Ok(out))
             }
@@ -652,6 +724,9 @@ impl State {
                 Ok((e, limit)) => {
                     if let Some(limit) = limit {
                         self.audit_extra += &format!(r#","limit":"{limit}""#);
+                    }
+                    if mode == Mode::Query && matches!(e, DbErr::Denied) {
+                        self.audit_extra += r#","hint":"`query` only reads: use `exec` or `exec_rows`""#;
                     }
                     Ok(Err(e))
                 }

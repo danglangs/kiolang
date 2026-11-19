@@ -430,7 +430,7 @@ fn call(ty: &str, m: &str) -> String {
         ("Kv", "add") => r#""k", 1"#,
         ("Kv", "keys") => r#""""#,
         ("Kv", _) => r#""k""#,
-        ("Db", "transaction") => "[], []",
+        ("Db", "transaction" | "transaction_rows") => "[], []",
         ("Db", _) => r#""select 1", []"#,
         ("Hmac", "sign") => r#""m".to_bytes()"#,
         ("Hmac", "verify") => r#""m".to_bytes(), "m".to_bytes()"#,

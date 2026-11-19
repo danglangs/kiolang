@@ -467,25 +467,29 @@ impl lang::Caps for Native<'_> {
                 let id = self.sql_value;
                 let params = sql_values(params, id)?;
                 let r = HostDb::query(s, own(rep), sql.to_string(), params).map_err(stop)?;
-                let row = |r: Vec<SqlValue>| list(r.into_iter().map(|v| sql_value(v, id)).collect());
-                result(r.map(|rows| list(rows.into_iter().map(row).collect())).map_err(db_err))
+                result(r.map(|rows| sql_rows(rows, id)).map_err(db_err))
             }
             ("Db", "exec", [Value::Str(sql), Value::List(params)]) => {
                 let params = sql_values(params, self.sql_value)?;
                 let r = HostDb::exec(s, own(rep), sql.to_string(), params).map_err(stop)?;
                 result(r.map(Value::Int).map_err(db_err))
             }
-            ("Db", "transaction", [Value::List(sqls), Value::List(lists)]) => {
+            ("Db", "exec_rows", [Value::Str(sql), Value::List(params)]) => {
                 let id = self.sql_value;
-                let lists = lists
-                    .iter()
-                    .map(|l| match l {
-                        Value::List(l) => sql_values(l, id),
-                        _ => Err("expected a List<List<SqlValue>>".to_string()),
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
+                let params = sql_values(params, id)?;
+                let r = HostDb::exec_rows(s, own(rep), sql.to_string(), params).map_err(stop)?;
+                result(r.map(|rows| sql_rows(rows, id)).map_err(db_err))
+            }
+            ("Db", "transaction", [Value::List(sqls), Value::List(lists)]) => {
+                let lists = sql_lists(lists, self.sql_value)?;
                 let r = HostDb::transaction(s, own(rep), texts(sqls)?, lists).map_err(stop)?;
                 result(r.map(Value::Int).map_err(db_err))
+            }
+            ("Db", "transaction_rows", [Value::List(sqls), Value::List(lists)]) => {
+                let id = self.sql_value;
+                let lists = sql_lists(lists, id)?;
+                let r = HostDb::transaction_rows(s, own(rep), texts(sqls)?, lists).map_err(stop)?;
+                result(r.map(|rows| sql_rows(rows, id)).map_err(db_err))
             }
             ("Hmac", "sign", [Value::Bytes(m)]) => result(
                 HostHmac::sign(s, own(rep), m.to_vec())
@@ -545,6 +549,22 @@ fn sql_values(v: &[Value], id: EnumId) -> Result<Vec<SqlValue>, String> {
         _ => Err("expected a List<SqlValue>".to_string()),
     };
     v.iter().map(value).collect()
+}
+
+/// The parameter lists of a `List<List<SqlValue>>` argument.
+fn sql_lists(v: &[Value], id: EnumId) -> Result<Vec<Vec<SqlValue>>, String> {
+    v.iter()
+        .map(|l| match l {
+            Value::List(l) => sql_values(l, id),
+            _ => Err("expected a List<List<SqlValue>>".to_string()),
+        })
+        .collect()
+}
+
+/// Rows as a `List<List<SqlValue>>` of the program's enum `id`.
+fn sql_rows(rows: Vec<Vec<SqlValue>>, id: EnumId) -> Value {
+    let row = |r: Vec<SqlValue>| list(r.into_iter().map(|v| sql_value(v, id)).collect());
+    list(rows.into_iter().map(row).collect())
 }
 
 /// A `SqlValue` as the program's enum `id`, variants in caps.wit order.

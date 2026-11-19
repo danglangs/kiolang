@@ -131,7 +131,8 @@ interface db {
   // A SQL value: a column of a row, or a `?` parameter. A `float` NaN binds as NULL (SQLite's rule).
   variant sql-value { null, int(s64), float(f64), text(string), blob(list<u8>) }
   // invalid: bad SQL, two statements in one call, a wrong parameter count, with SQLite's message;
-  // denied: a statement the host refuses (ATTACH, a PRAGMA, a transaction, a write on `:ro`);
+  // denied: a statement the host refuses (ATTACH, a PRAGMA, a transaction, a write on `:ro`, a
+  // write under `query`);
   // busy: another process held the database past the timeout; too-large: a result over 10,000
   // rows or 8 MB, or a value past the limits; constraint: a constraint failed, with the message.
   variant db-err { invalid(string), denied, busy, too-large, constraint(string) }
@@ -139,10 +140,16 @@ interface db {
   // One SQLite database the operator granted (`--db name=path`, `path:ro` or `:memory:`). One
   // statement per call; values reach SQL only as `?` parameters.
   resource db {
-    query:       func(sql: string, params: list<sql-value>) -> result<list<list<sql-value>>, db-err>;  // rows, columns in SELECT order
-    exec:        func(sql: string, params: list<sql-value>) -> result<s64, db-err>;                    // rows changed
+    // A statement SQLite reports read-only (`sqlite3_stmt_readonly`): its rows, columns in SELECT
+    // order. A statement that writes is denied.
+    query:       func(sql: string, params: list<sql-value>) -> result<list<list<sql-value>>, db-err>;
+    exec:        func(sql: string, params: list<sql-value>) -> result<s64, db-err>;                    // rows changed; a statement with result columns is invalid
+    // One statement that may write, and its rows (`INSERT .. RETURNING`); limits as `query`'s.
+    exec-rows:   func(sql: string, params: list<sql-value>) -> result<list<list<sql-value>>, db-err>;
     // Each statement with its own parameters, in one transaction: all or nothing; rows changed in all.
     transaction: func(sqls: list<string>, params: list<list<sql-value>>) -> result<s64, db-err>;
+    // `transaction`, returning the last statement's rows; an earlier statement with result columns is invalid.
+    transaction-rows: func(sqls: list<string>, params: list<list<sql-value>>) -> result<list<list<sql-value>>, db-err>;
   }
 }
 

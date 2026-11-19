@@ -71,7 +71,7 @@ fn main(req: Incoming, res: Outgoing, db: Db) -> Result<(), WebErr> {
   if path == "/notes" && method == "POST" {
     let Some(n) = parse(req.body()) else { return error(res, 400, "invalid note"); };
     let tags = Json::Arr(n.tags.map(|t| Json::Str(t))).to_json();
-    let Ok(rows) = db.query("INSERT INTO notes (title, body, tags) VALUES (?, ?, ?) RETURNING id",
+    let Ok(rows) = db.exec_rows("INSERT INTO notes (title, body, tags) VALUES (?, ?, ?) RETURNING id",
       [SqlValue::Text(n.title), SqlValue::Text(n.body), SqlValue::Text(tags)]) else { return error(res, 500, "db"); };
     let id = match rows[0][0] { SqlValue::Int(n) => n, _ => 0 };
     return reply(res, 201, obj(["id"], [Json::Num(id)]));

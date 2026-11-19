@@ -246,12 +246,37 @@ pub fn v0() -> CapTable {
                         Ty::Result(Box::new(Ty::Int), Box::new(Ty::Enum("DbErr".into(), vec![]))),
                     ),
                     method(
+                        "exec_rows",
+                        vec![Ty::Str, Ty::List(Box::new(Ty::Enum("SqlValue".into(), vec![])))],
+                        Ty::Result(
+                            Box::new(Ty::List(Box::new(Ty::List(Box::new(Ty::Enum(
+                                "SqlValue".into(),
+                                vec![],
+                            )))))),
+                            Box::new(Ty::Enum("DbErr".into(), vec![])),
+                        ),
+                    ),
+                    method(
                         "transaction",
                         vec![
                             Ty::List(Box::new(Ty::Str)),
                             Ty::List(Box::new(Ty::List(Box::new(Ty::Enum("SqlValue".into(), vec![]))))),
                         ],
                         Ty::Result(Box::new(Ty::Int), Box::new(Ty::Enum("DbErr".into(), vec![]))),
+                    ),
+                    method(
+                        "transaction_rows",
+                        vec![
+                            Ty::List(Box::new(Ty::Str)),
+                            Ty::List(Box::new(Ty::List(Box::new(Ty::Enum("SqlValue".into(), vec![]))))),
+                        ],
+                        Ty::Result(
+                            Box::new(Ty::List(Box::new(Ty::List(Box::new(Ty::Enum(
+                                "SqlValue".into(),
+                                vec![],
+                            )))))),
+                            Box::new(Ty::Enum("DbErr".into(), vec![])),
+                        ),
                     ),
                 ],
             },

@@ -121,7 +121,7 @@ fn errors_teach_and_agree_both_ways() {
         "0 1 [constraint: UNIQUE constraint failed: t.n] [constraint: NOT NULL constraint failed: t.n] \
          [invalid: near \"SELEC\": syntax error at byte 0] [invalid: one statement per call] \
          [invalid: the statement takes 2 parameters, 1 were given] [invalid: the statement takes 1 parameters, 2 were given] \
-         [invalid: the statement returns rows: run it with `query`] [invalid: the statement returns rows: run it with `query`] \
+         [invalid: the statement returns rows: run it with `exec_rows`] [invalid: the statement returns rows: run it with `exec_rows`] \
          [invalid: no statement] [invalid: the SQL holds a NUL byte] [invalid: no such column: \"not a string\" - should this be a string literal in single-quotes? at byte 7] 1"
     );
 }
@@ -240,9 +240,85 @@ fn a_transaction_that_fails_partway_rolls_back() {
     }"#;
     assert_eq!(
         both(main),
-        "0 [constraint: UNIQUE constraint failed: t.n] 0 [invalid: the statement returns rows: run it with `query`] \
+        "0 [constraint: UNIQUE constraint failed: t.n] 0 [invalid: the statement returns rows: run it with `transaction_rows`] \
          [invalid: 1 statements but 2 parameter lists: give each statement its own list] 0 2 1 1"
     );
+}
+
+/// H37: rows from a write through `exec_rows` and `transaction_rows`, both ways: `RETURNING`
+/// on an insert, update and delete; a statement with no rows gives none; only the last statement
+/// of `transaction_rows` may return rows, and a failing one applies nothing.
+#[test]
+fn rows_from_a_write() {
+    let main = r#"fn main(db: Db) -> Str {
+      let a = show(db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, n TEXT UNIQUE)", []));
+      let b = rows(db.exec_rows("INSERT INTO t (n) VALUES (?), (?) RETURNING id, n", [SqlValue::Text("a"), SqlValue::Text("b")]));
+      let c = rows(db.exec_rows("UPDATE t SET n = upper(n) WHERE id = ? RETURNING n", [SqlValue::Int(1)]));
+      let d = rows(db.exec_rows("DELETE FROM t WHERE id = 2 RETURNING id", []));
+      let e = rows(db.exec_rows("SELECT count(*) FROM t", []));
+      let f = rows(db.exec_rows("INSERT INTO t (n) VALUES ('c')", []));
+      let g = rows(db.transaction_rows(["INSERT INTO t (n) VALUES (?)", "INSERT INTO t (n) VALUES (?) RETURNING id, n"], [[SqlValue::Text("d")], [SqlValue::Text("e")]]));
+      let h = rows(db.transaction_rows(["INSERT INTO t (n) VALUES (?) RETURNING id", "INSERT INTO t (n) VALUES (?)"], [[SqlValue::Text("f")], [SqlValue::Text("g")]]));
+      let i = rows(db.transaction_rows(["INSERT INTO t (n) VALUES (?)", "INSERT INTO t (n) VALUES (?) RETURNING id"], [[SqlValue::Text("h")], [SqlValue::Text("A")]]));
+      let j = rows(db.transaction_rows(["INSERT INTO t (n) VALUES (?)", "SELECT count(*) FROM t"], [[SqlValue::Text("i")], []]));
+      let k = rows(db.transaction_rows([], []));
+      let dup = rows(db.exec_rows("INSERT INTO t (n) VALUES ('A') RETURNING id", []));
+      a + " [" + b + "] [" + c + "] [" + d + "] [" + e + "] [" + f + "] [" + g + "] [" + h + "] [" + i + "] [" + j + "] [" + k + "] [" + dup + "] "
+        + rows(db.query("SELECT n FROM t ORDER BY id", []))
+    }"#;
+    assert_eq!(
+        both(main),
+        "0 [1,'a';2,'b'] ['A'] [2] [1] [] [4,'e'] [invalid: the statement returns rows: only the last statement of `transaction_rows` may] \
+         [constraint: UNIQUE constraint failed: t.n] [5] [] [constraint: UNIQUE constraint failed: t.n] 'A';'c';'d';'e';'i'"
+    );
+}
+
+/// H37: `query` runs only what SQLite reports read-only. A write is `denied` and changes nothing,
+/// on a writable database too; reads of every shape still run; the audit line says what to use.
+#[test]
+fn query_refuses_writes() {
+    let main = r#"fn main(db: Db) -> Str {
+      let a = show(db.exec("CREATE TABLE t (n TEXT)", []));
+      let b = show(db.exec("INSERT INTO t VALUES ('v1')", []));
+      let w = [rows(db.query("INSERT INTO t VALUES ('v2')", [])), rows(db.query("INSERT INTO t VALUES ('v2') RETURNING n", [])),
+        rows(db.query("UPDATE t SET n = 'x'", [])), rows(db.query("DELETE FROM t", [])), rows(db.query("CREATE TABLE u (x)", [])),
+        rows(db.query("WITH c AS (SELECT 1) INSERT INTO t SELECT * FROM c", [])), rows(db.query("DROP TABLE t", []))];
+      let r = [rows(db.query("SELECT n FROM t", [])), rows(db.query("PRAGMA table_info(t)", [])),
+        rows(db.query("WITH c(x) AS (SELECT 2) SELECT x FROM c", [])), rows(db.query("SELECT count(*) FROM pragma_table_info('t')", []))];
+      a + " " + b + " [" + w.join("|") + "] [" + r.join("|") + "]"
+    }"#;
+    assert_eq!(
+        both(main),
+        "0 1 [denied|denied|denied|denied|denied|denied|denied] ['v1'|0,'n','TEXT',0,null,0|2|1]"
+    );
+    let log = Log(Arc::default());
+    let mut kio = Kio::new(Limits::default()).unwrap();
+    kio.audit(Log(log.0.clone()), vec![]);
+    kio.grant_sources(memory());
+    kio.run(&format!("{SHOW}{main}"), vec![]).unwrap().unwrap();
+    let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        text.contains(
+            r#""method":"query","arg":"INSERT INTO t VALUES ('v2')","bytes":0,"result":"denied","params":0,"hint":"`query` only reads: use `exec` or `exec_rows`""#
+        ),
+        "{text}"
+    );
+    assert_eq!(text.matches(r#""hint":"#).count(), 7, "{text}");
+}
+
+/// H37: `exec_rows`' rows are capped as `query`'s (10,000 rows, 8 MB), and a write whose rows
+/// pass the cap is not applied, since the cap stops the statement partway through its rows.
+#[test]
+fn exec_rows_limits_apply_and_roll_back() {
+    let main = r#"fn main(db: Db) -> Str {
+      let a = show(db.exec("CREATE TABLE t (x)", []));
+      let many = rows(db.exec_rows("INSERT INTO t SELECT x FROM (WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 10001) SELECT x FROM c) RETURNING x", []));
+      let big = rows(db.exec_rows("INSERT INTO t VALUES (zeroblob(4194304)), (zeroblob(4194304)), (zeroblob(1)) RETURNING x", []));
+      let fits = match db.exec_rows("INSERT INTO t SELECT x FROM (WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 10000) SELECT x FROM c) RETURNING x", []) {
+        Ok(rs) => rs.len().to_str(), Err(e) => err(e) };
+      a + " [" + many + "] [" + big + "] " + fits + " " + rows(db.query("SELECT count(*) FROM t", []))
+    }"#;
+    assert_eq!(both(main), "0 [too-large] [too-large] 10000 10000");
 }
 
 /// The result limits (10,000 rows, 8 MB), SQLite's lowered limits (8 MB values, 1 MB of SQL,
@@ -631,6 +707,11 @@ fn read_only_grant_refusals() {
     for (method, call) in [
         ("exec", r#"db.exec("DELETE FROM t", [])"#),
         ("transaction", r#"db.transaction(["DELETE FROM t"], [[]])"#),
+        ("exec_rows", r#"db.exec_rows("DELETE FROM t RETURNING n", [])"#),
+        (
+            "transaction_rows",
+            r#"db.transaction_rows(["DELETE FROM t RETURNING n"], [[]])"#,
+        ),
         ("exec", r#"helper(db)"#),
     ] {
         let src = format!(

@@ -842,10 +842,21 @@ pub unsafe extern "C" fn rt_cap_db_exec(ret: u32, h: u32, sql: u32, params: u32)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn rt_cap_db_transaction(ret: u32, h: u32, sqls: u32, params: u32) -> u32 {
-    // SAFETY: the contract above: `sqls` is a live `List<Str>` and `params` a live
-    // `List<List<SqlValue>>`, each element live.
-    let (sqls, params): (Vec<String>, Vec<Vec<SqlValue>>) = unsafe {
+pub unsafe extern "C" fn rt_cap_db_exec_rows(ret: u32, h: u32, sql: u32, params: u32) -> u32 {
+    // SAFETY: the contract above.
+    let (sql, params) = unsafe { (text(sql), sql_values(params)) };
+    let d = database(h);
+    let r = in_place(|| d.exec_rows(sql, &params));
+    db_result(ret, r, |t, v| to_slot(rows(t, payload(t, ret, 0), v)))
+}
+
+/// The statements and parameter lists of a `transaction` or `transaction_rows`, copied.
+///
+/// # Safety
+/// `sqls` is a live `List<Str>` and `params` a live `List<List<SqlValue>>`, each element live.
+unsafe fn statements(sqls: u32, params: u32) -> (Vec<String>, Vec<Vec<SqlValue>>) {
+    // SAFETY: the caller's guarantee.
+    unsafe {
         let sqls = obj::elems(ptr(sqls))
             .iter()
             .map(|&s| String::from(text(addr(obj::from_slot(s)))));
@@ -853,7 +864,22 @@ pub unsafe extern "C" fn rt_cap_db_transaction(ret: u32, h: u32, sqls: u32, para
             .iter()
             .map(|&l| sql_values(addr(obj::from_slot(l))));
         (sqls.collect(), params.collect())
-    };
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_cap_db_transaction(ret: u32, h: u32, sqls: u32, params: u32) -> u32 {
+    // SAFETY: the contract above.
+    let (sqls, params) = unsafe { statements(sqls, params) };
     let d = database(h);
     db_result(ret, in_place(|| d.transaction(&sqls, &params)), |_, n| n as u64)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_cap_db_transaction_rows(ret: u32, h: u32, sqls: u32, params: u32) -> u32 {
+    // SAFETY: the contract above.
+    let (sqls, params) = unsafe { statements(sqls, params) };
+    let d = database(h);
+    let r = in_place(|| d.transaction_rows(&sqls, &params));
+    db_result(ret, r, |t, v| to_slot(rows(t, payload(t, ret, 0), v)))
 }

@@ -172,7 +172,7 @@ fn every_capability_method_compiles() {
     let src = format!("fn main({}) {{\n{body}}}", params.join(", "));
     let wasm = compile(&module(&src)).unwrap();
     wasmparser::Validator::new().validate_all(&wasm.component).unwrap();
-    assert_eq!(calls, 43);
+    assert_eq!(calls, 45);
 }
 
 #[test]
