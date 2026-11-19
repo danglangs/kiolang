@@ -2212,8 +2212,9 @@ impl<'m> FuncGen<'_, 'm> {
             .i32_load8_u(BYTES_DATA)
             .local_tee(b)
             .i32_const(0x80)
-            .i32_lt_u()
-            .if_(BlockType::Empty)
+            .i32_lt_u();
+        self.open(Open::If, BlockType::Empty);
+        self.sink()
             .local_get(ascii)
             .local_get(b)
             .i32_const(CHAR1)
@@ -2233,8 +2234,8 @@ impl<'m> FuncGen<'_, 'm> {
             .i32_load(BYTES_LEN)
             .local_get(i)
             .i32_add()
-            .local_set(i)
-            .end();
+            .local_set(i);
+        self.close();
         self.loops.push((brk, cont, self.owned.len()));
         self.block(body, false);
         self.loops.pop();
