@@ -278,6 +278,21 @@ pub unsafe extern "C" fn rt_str_chars(desc: u32, s: u32) -> u32 {
     unsafe { addr(text::chars(desc, ptr(s))) }
 }
 
+/// Compiled `for c in s.chars()` (P9): the character starting at byte `i`. Traps unless `i` is
+/// a character boundary before the end.
+#[no_mangle]
+pub unsafe extern "C" fn rt_str_char(s: u32, i: u32) -> u32 {
+    // SAFETY: the group's contract.
+    unsafe { addr(text::char_at(ptr(s), i as usize)) }
+}
+
+/// Compiled `for c in s.chars()` (P9): the pinned `Str` of ASCII byte 0; byte `b`'s is
+/// `b * text::CHAR1` bytes after it.
+#[no_mangle]
+pub extern "C" fn rt_str_ascii() -> u32 {
+    addr(text::ascii(0))
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rt_str_trim(s: u32) -> u32 {
     // SAFETY: the group's contract.

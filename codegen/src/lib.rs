@@ -776,6 +776,9 @@ const BYTES_DATA: wasm_encoder::MemArg = wasm_encoder::MemArg {
     memory_index: 0,
 };
 
+/// Bytes between the runtime's pinned one-character ASCII `Str`s (runtime/src/text.rs `CHAR1`).
+const CHAR1: i32 = 24;
+
 /// An object's reference count, at byte 0.
 const RC: wasm_encoder::MemArg = wasm_encoder::MemArg {
     offset: 0,
@@ -2044,7 +2047,10 @@ impl<'m> FuncGen<'_, 'm> {
                 self.close();
                 self.close();
             }
-            StmtKind::ForList(x, xs, body) => self.for_list(*x, xs, body, s.span),
+            StmtKind::ForList(x, xs, body) => match &xs.kind {
+                ExprKind::Builtin(ir::Builtin::StrChars, recv, _) => self.for_chars(*x, recv, body),
+                _ => self.for_list(*x, xs, body, s.span),
+            },
             StmtKind::Break => {
                 let (brk, _, mark) = *self.loops.last().expect("checked loop");
                 self.release(mark);
@@ -2147,6 +2153,97 @@ impl<'m> FuncGen<'_, 'm> {
         self.close();
         self.close();
         // After a `break`, `x` still holds that pass's element; otherwise it is 0.
+        self.end_scope(mark);
+    }
+
+    /// `for c in s.chars()` without the list (P9): the loop holds its own reference to `s` (or
+    /// borrows a borrowed parameter), as `for_list` holds the list, and walks its UTF-8 by byte
+    /// offset. An ASCII byte's `c` is the runtime's pinned `Str`, computed inline; any other
+    /// character's comes from `rt_str_char`, a new `Str`, and the offset moves on by its length.
+    /// `c` is owned by the loop even when the body only borrows it: released at the end of
+    /// each pass and by any exit.
+    fn for_chars(&mut self, x: ir::LocalId, s: &ir::Expr, body: &ir::Block) {
+        if s.ty == Ty::Never {
+            return self.expr(s);
+        }
+        let mark = self.owned.len();
+        let text = self.temp(ValType::I32);
+        match s.kind {
+            ExprKind::Local(id) if self.is_lent(id) => {
+                let Val::One(l) = self.local(id) else {
+                    unreachable!("a Str")
+                };
+                self.sink().local_get(l).local_set(text);
+            }
+            _ => {
+                self.expr(s);
+                self.sink().local_set(text);
+                self.own(Val::One(text), &Ty::Str);
+            }
+        }
+        let Val::One(c) = self.local(x) else {
+            unreachable!("a Str")
+        };
+        self.owned.push(Owned::ptr(c));
+        let (n, i, b, ascii) = (
+            self.temp(ValType::I32),
+            self.temp(ValType::I32),
+            self.temp(ValType::I32),
+            self.temp(ValType::I32),
+        );
+        self.call_rt("rt_str_ascii");
+        self.sink()
+            .local_set(ascii)
+            .local_get(text)
+            .i32_load(BYTES_LEN)
+            .local_set(n)
+            .i32_const(0)
+            .local_set(i);
+        let brk = self.open(Open::Block, BlockType::Empty);
+        let top = self.open(Open::Loop, BlockType::Empty);
+        self.sink().local_get(i).local_get(n).i32_ge_u();
+        self.br_if(brk);
+        let cont = self.open(Open::Block, BlockType::Empty);
+        // `i < n`, and `s` cannot change while the loop holds it, so the byte is in bounds.
+        self.sink()
+            .local_get(text)
+            .local_get(i)
+            .i32_add()
+            .i32_load8_u(BYTES_DATA)
+            .local_tee(b)
+            .i32_const(0x80)
+            .i32_lt_u()
+            .if_(BlockType::Empty)
+            .local_get(ascii)
+            .local_get(b)
+            .i32_const(CHAR1)
+            .i32_mul()
+            .i32_add()
+            .local_set(c)
+            .local_get(i)
+            .i32_const(1)
+            .i32_add()
+            .local_set(i)
+            .else_()
+            .local_get(text)
+            .local_get(i);
+        self.call_rt("rt_str_char");
+        self.sink()
+            .local_tee(c)
+            .i32_load(BYTES_LEN)
+            .local_get(i)
+            .i32_add()
+            .local_set(i)
+            .end();
+        self.loops.push((brk, cont, self.owned.len()));
+        self.block(body, false);
+        self.loops.pop();
+        self.close();
+        self.dec_and_zero(&[Owned::ptr(c)]);
+        self.br(top);
+        self.close();
+        self.close();
+        // After a `break`, `c` still holds that pass's character; otherwise it is 0.
         self.end_scope(mark);
     }
 

@@ -444,9 +444,30 @@ static ASCII: [Char1; 128] = {
     t
 };
 
+/// Bytes from one pinned ASCII `Str` to the next: compiled `for c in s.chars()` takes byte
+/// `b`'s as `ascii(0) + b * CHAR1` (P9; codegen/src/lib.rs `CHAR1`).
+pub const CHAR1: usize = size_of::<Char1>();
+const _: () = assert!(CHAR1 == 24);
+
 /// The pinned `Str` holding ASCII byte `b`.
-fn ascii(b: u8) -> *mut Header {
+pub fn ascii(b: u8) -> *mut Header {
     (&raw const ASCII[b as usize]).cast::<Header>().cast_mut()
+}
+
+/// The character of `s` starting at byte `i`, as `chars()` gives it: compiled
+/// `for c in s.chars()` calls this for each non-ASCII character instead of building the list
+/// (P9). Traps (a slice panic) unless `i` is a character boundary before the end.
+///
+/// # Safety
+/// The module's contract.
+pub unsafe fn char_at(s: *mut Header, i: usize) -> *mut Header {
+    // SAFETY: the caller's guarantee.
+    let s = unsafe { str_of(s) };
+    let c = s[i..].chars().next().expect("before the end");
+    match c.is_ascii() {
+        true => ascii(c as u8),
+        false => new_str(&s[i..i + c.len_utf8()]),
+    }
 }
 
 /// `Str.trim()`: Unicode whitespace off both ends.

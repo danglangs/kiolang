@@ -186,6 +186,40 @@ fn chars_shares_ascii() {
     assert_eq!(obj::live(), base);
 }
 
+/// P9: compiled `for c in s.chars()` finds ASCII byte `b`'s `Str` `b * CHAR1` bytes after
+/// `ascii(0)`, and any other character's with `char_at`, stepping by its length; `char_at`
+/// refuses an offset that is not a character boundary before the end.
+#[test]
+fn char_at_steps_through_chars() {
+    let _g = lock();
+    let base = obj::live();
+    for b in 0..128u8 {
+        let a = text::ascii(0).expose_provenance() + text::CHAR1 * usize::from(b);
+        assert_eq!(a, text::ascii(b).expose_provenance());
+    }
+    let c = s("a\u{7f}é中😀z");
+    let mut got = Vec::new();
+    let mut i = 0;
+    // SAFETY: a live `Str`; each result is dropped.
+    unsafe {
+        while i < obj::bytes(c).len() {
+            let ch = text::char_at(c, i);
+            if obj::bytes(ch)[0] < 0x80 {
+                assert_eq!(ch, text::ascii(obj::bytes(ch)[0]));
+            }
+            i += obj::bytes(ch).len();
+            got.push(take(ch));
+        }
+        assert_eq!(got, ["a", "\u{7f}", "é", "中", "😀", "z"]);
+        for bad in [3, 5, 12, 13] {
+            let r = std::panic::catch_unwind(|| text::char_at(c, bad));
+            assert!(r.is_err(), "{bad}");
+        }
+    }
+    dec(c);
+    assert_eq!(obj::live(), base);
+}
+
 #[test]
 fn lines_trim_contains() {
     let _g = lock();

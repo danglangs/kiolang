@@ -1,5 +1,5 @@
 {
-  "kio": "kio 0.1.3 (002311f + P9), macOS arm64, rustc 1.100.0",
+  "kio": "kio 0.1.4 (35dad3c + P9), macOS arm64, rustc 1.100.0",
   "rows": {
     "startup": {
       "value": "0",
@@ -63,7 +63,7 @@
     },
     "chars": {
       "value": "10",
-      "fuel": 15600,
+      "fuel": 12128,
       "peak_memory": 1769472
     },
     "map_insert": {

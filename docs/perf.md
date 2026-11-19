@@ -30,7 +30,7 @@ Since C5 `kio run` and `--listen` run compiled code. Measured on an Apple Silico
 
 The baseline is CI's (Linux x86_64, the Rust pinned in rust-toolchain.toml: the runtime is compiled by it, so another Rust changes fuel). Fuel counts the program's work from `run` on, not Wasmtime's memory initialization (free on Linux, a page-padded copy elsewhere; #268), so the same Rust gives the same numbers on every OS.
 
-CI's `perf` job runs `bench/gate.py` on every push and pull request: each `bench/kio` program once (the empty program is the `startup` row), with run.py's inputs and limits, compared with `bench/baseline.json`. Two rows have no Rust or Python twin and are gated only (bench/gate.py `ROWS`): `chars`, a 100-character `chars()` loop, and `map_insert`, 1,000 inserts of new `Str` keys (P9).
+CI's `perf` job runs `bench/gate.py` on every push and pull request: each `bench/kio` program once (the empty program is the `startup` row), with run.py's inputs and limits, compared with `bench/baseline.json`. Two rows have no Rust or Python twin and are gated only (bench/gate.py `ROWS`): `chars`, a 100-character `chars()` loop, and `map_insert`, 1,000 inserts of new `Str` keys (P9). Compiled `for c in s.chars()` builds no list: 53 fuel a character over 100 ASCII characters, 51 over 1,000 (startup subtracted; a byte loop about 29).
 
 | Gated | Fails when |
 |---|---|
