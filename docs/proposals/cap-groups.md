@@ -1,8 +1,8 @@
 # Grouping capabilities
 
-Design only (maintainer-approved to write, 2026-11-19; A3 #1, F15; A2 friction 3.7). Revised after an outside review, before a soundness review and a build decision. A change to language semantics is a one-way door: this note is written so the decision takes one reading.
+Design only (maintainer-approved to write, 2026-11-19; A3 #1, F15; A2 friction 3.7). Revised 2026-11-19; ready to pin as a task. A change to language semantics is a one-way door: this note is written so the decision takes one reading.
 
-**What grouping does and does not do.** Grouping preserves explicit capability provenance and per-operation reporting: every method a function may call is still charged to one capability, and that capability is still traced to the `main` grant it came from. Narrow groups and individual fields support least-authority interfaces; grouping itself does not grant less. A helper that takes a broad `Env` receives all of its authority, whether or not it uses it, and its report line says so.
+**What grouping does and does not do.** Grouping preserves explicit capability provenance and per-operation reporting: every method a function may call is still charged to one capability, and that capability is still traced to the `main` grant it came from. Narrow groups and individual fields support least-authority interfaces; grouping itself does not grant less. A helper that takes a broad `Env` receives all of its authority, whether or not it uses it; its report line lists what it uses, not what it holds (Limits), so a use added later appears as `+`.
 
 ## The problem
 
@@ -122,7 +122,7 @@ No equality, no display, no methods, no pattern: a capability struct is never a 
 
 Three things, kept apart.
 
-**1. Function lines (as today).** A function's line is its effects against its own leaves: `(function, leaf, method)`, a leaf being a capability parameter or a field of one, named by its path: `inspect : d query`, `handle : env.db exec query, env.admin matches`. A helper's contract is about its parameters, whatever it is called with. A program without capability structs prints a byte-identical report.
+**1. Function lines (as today).** A function's line is its effects against its own leaves: `(function, leaf, method)`, a leaf being a capability parameter or a field of one, named by its path: `inspect : d query`, `handle : env.db exec query, env.admin matches`. A helper's contract is about its parameters, whatever it is called with. A program without capability structs prints a byte-identical `kio check` report; its `kio check --base` and `kio review` output can differ by (c) below, which is a deliberate behaviour change.
 
 **2. Binding maps, one per call edge.** A call site `s` in `f` of `g` gives a partial map from `g`'s leaves to `f`'s leaves, read off the checked bindings (P5: the type recorded at each span, never a name):
 
@@ -134,14 +134,14 @@ Three things, kept apart.
 
 Charging is today's `uses` fixpoint over these maps: `effects(f)` includes `map_s(effects(g))` for every edge `s`. A whole-group pass is one edge with a map per field; a literal is one edge whose map may send two fields to one leaf.
 
-**3. Provenance.** Composing the maps along every path from `main` gives each leaf of each function its **origins**: the `main` grants bound to it on some path. `main`'s own leaves are the grants. `main`'s line, `Authority.main`, every host startup check (`:ro`, `:verify`, verbs) and `--base`'s grant lines are computed exactly as today from the fixpoint; `main`'s parameters are capability types, so nothing there changes shape.
+**3. Provenance.** The same fixed point, read the other way: starting from `main`'s leaves and following each edge's map forward gives each leaf of each function its **origins**, the `main` grants bound to it on some path. Charging, `passed`/`users` and origins are one computation over one set of per-edge maps (pinning note below). The fixed point is exact per edge: a self edge adds nothing, a cycle contributes what its composed maps carry, and origins are never merged over a recursive component. The only over-approximation is today's: the union over call sites of one function. `main`'s own leaves are the grants. `main`'s line, `Authority.main`, every host startup check (`:ro`, `:verify`, verbs) and `--base`'s grant lines are computed exactly as today from the fixpoint; `main`'s parameters are capability types, so nothing there changes shape.
 
 Worked examples:
 
 | Program | Lines and maps |
 |---|---|
 | Two call sites: `main(primary: Db, backup: Db) { inspect(primary); inspect(backup) }`, `inspect(d: Db)` queries | `inspect : d query`; edges `{d -> primary}`, `{d -> backup}`; `main : primary query, backup query`; origins of `inspect.d` = {primary, backup}. The two edges stay distinct; `d` is not "primary or backup" on the function line |
-| Recursion: `walk(d: Dir, n: Int) { .. walk(d, n - 1) }`; mutual `a(x, y) { b(y, x) }`, `b(x, y) { a(y, x) }` | the self edge `{d -> d}` adds nothing; the cycle gives `a.x`, `a.y`, `b.x`, `b.y` each both origins and both functions each other's methods: possible authority, over-approximated as today |
+| Recursion: `walk(d: Dir, n: Int) { .. walk(d, n - 1) }`; mutual `a(x, y) { b(y, x) }`, `b(x, y) { a(y, x); x.query(..) }`, `main(p, q) { a(p, q) }` | the self edge `{d -> d}` adds nothing. The cycle's maps `{b.x -> a.y, b.y -> a.x}` and `{a.x -> b.y, a.y -> b.x}` compose to the identity: `b : x query`, `a : y query`, `a.x` and `b.y` nothing; origins `a.x` {p}, `a.y` {q}, `b.x` {q}, `b.y` {p}, one each |
 | Aliasing: `handle(Env { a: db, b: db }, r)`, `query` on `e.a`, `exec` on `e.b` | `handle : env.a query, env.b exec`; map `{e.a -> db, e.b -> db}`; `main : db exec query` (the union); origins of both leaves {db} |
 | Two same-typed grants: `handle(Env { a: x, b: y }, r)` | `main : x query, y exec`; origins `env.a` {x}, `env.b` {y}; a `:ro` on `y` is refused at startup by `main`'s line |
 | Narrowing: `route(env)` calls `create_provider(env.db, env.audit, env.now, r)` and `save(Writer { db: env.db, audit: env.audit }, ..)` | maps `{db -> env.db, audit -> env.audit, now -> env.now}` and `{w.db -> env.db, w.audit -> env.audit}`; `create_provider : db query, audit append, now now_ms` unchanged from today |
@@ -156,12 +156,12 @@ A test's authority (`entry_authority`) lists fields as grants: `db: Db (exec que
 | | Key | Shown | Counts as added |
 |---|---|---|---|
 | (a) grant lines | `main`'s `(grant, type)` and the methods `main` reaches on it, exactly as today | `~ db: Db (+query)` | as today |
-| (b) function lines | `(function, leaf, method)`; a leaf's key is its short name (the last path component) and type when unique among the function's leaves, else its path | the path, `+ handle: env.admin matches` | as today (covered-by rules apply per leaf) |
+| (b) function lines | `(function, leaf, method)`, the leaf keyed by its path; leaves matched across versions in two passes (below) | the path, `+ handle: env.admin matches` | as today (covered-by rules apply per leaf) |
 | (c) binding lines | `(function, leaf)` to its origin set | `~ inspect: d from backup (was primary)` | when a leaf gains an origin: the function now holds a grant it did not |
 
-Leaf identity between a grouped and an ungrouped interface: `db: Db` and `env.db: Db` in the same function are the same leaf under (b), because the key is the short name and type (`fn merge(a: Env, b: Env)` has two `db` leaves, so those are keyed `a.db`, `b.db`). For a program without groups the key is the parameter name, so today's function lines are byte-identical.
+**Matching leaves across versions.** Within one program a leaf is its path, always (`db`, `env.db`, `a.db`). Between base and new, a function's leaves are matched in two passes: first by identical path; then, among the leaves still unmatched on both sides, by (short name, type) when that pair is unique among the unmatched on each side. A key therefore never depends on a leaf that exists on one side only. So `db: Db` becoming `env.db: Db` is one leaf (pass two), `a_db, b_db` becoming `a.db, b.db` is a `-`/`+` pair (two `db` short names on the new side), and adding a parameter `db: Db` beside an existing `env.db` leaves `env.db` matched by path and `db` new. For a program without groups both passes reduce to today's key, the parameter name, and (b) prints the same lines.
 
-**No change.** A pure grouping refactor shows `no change in authority` when, for every function `main` reaches, every leaf in the base has a leaf of the same key in the new program with the same methods and the same origins, and (a) is unchanged. Composing the new binding maps must therefore agree with the old ones leaf by leaf: `handle(db, admin, ..)` with maps `{db -> db, admin -> admin}` and `handle(Env { db: db, admin: admin })` with `{e.db -> db, e.admin -> admin}` agree. The A3 refactor below meets this; so does moving a leaf into or out of a group, or narrowing a group. Renamed parameters are not suppressed: `d` to `dir` is a removed and an added leaf, as today.
+**No change.** A pure grouping refactor shows `no change in authority` when, for every function `main` reaches, every leaf in the base has a leaf of the same key in the new program with the same methods and the same origins, and (a) is unchanged. Composing the new binding maps must therefore agree with the old ones leaf by leaf: `handle(db, admin, ..)` with maps `{db -> db, admin -> admin}` and `handle(Env { db: db, admin: admin })` with `{e.db -> db, e.admin -> admin}` agree. The A3 refactor below meets this; so does moving a leaf into or out of a group, or narrowing a group. Renames: a group parameter rename (`env: Env` to `e: Env`) is silent, since its leaves match in pass two by field name and type; a leaf parameter or field rename (`d` to `dir`, `env.db` to `env.primary`) is a removed and an added leaf and exits 3, as today's parameter rename does. Whether a pure rename should stay exit 3 is a separate question, not this proposal's.
 
 **Swaps detected.** Any binding that gives a function a `(grant, method)` it did not have, on any line:
 
@@ -169,16 +169,29 @@ Leaf identity between a grouped and an ungrouped interface: `db: Db` and `env.db
 - `f(x); g(y)` to `f(y); g(x)`, both `exec`: (a) unchanged (`x exec, y exec`); (c) `~ f: d from y (was x)`, `~ g: d from x (was y)`. Exit 3: each function holds a grant it did not.
 - `inspect(primary)` to `inspect(primary); inspect(backup)`: (a) `~ backup: Db (+query)`; (c) `~ inspect: d from primary, backup (was primary)`.
 
-**Blind spots** (see Limits): a function that already receives both grants, with the calls' roles swapped (`inspect(primary); inspect(backup)` reordered; or `copy(src, dst)` to `copy(dst, src)` when both grants already reach `copy` with the same methods on both). (a), (b) and (c) are all unchanged: it is a correctness change, not an authority change, and belongs in review's Not checked section: `not checked  inspect: d from primary, backup; which call uses which is behaviour`, marked `(changed: F)` by R1a4's rule when a caller's text changed.
+**Blind spots** (see Limits), stated per leaf: a rebinding is invisible only when every affected leaf already had, in the base, the origin it now has. `copy(a, b); copy(b, a)` reordered, or `inspect(primary); inspect(backup)` reordered: every leaf of `copy` and `inspect` had both origins before and after, so (a), (b) and (c) are unchanged. A single `copy(a, b)` becoming `copy(b, a)` is not a blind spot: today (a) moves when the methods differ (`~ a: Dir (+write -read)`), and under (c) `copy.src` gains origin `b` even when they do not. The invisible case is a correctness change, not an authority change, and belongs in review's Not checked section: `not checked  inspect: d from primary, backup; which call uses which is behaviour`, marked `(changed: F)` by R1a4's rule when a caller's text changed.
 
-Interaction with what exists: R1a4's `derived  read in load` under a grant line is `users` over `passed`, which is (c)'s relation read from the grant side; the two never disagree. P8 holds: only functions `main` reaches have origins or lines. `--detail` prints (b) then (c). `kio review` labels (b) and (c) `derived`, (a) `enforced`; `--json` gains `authority.bindings[]` with `{function, leaf, from, was}`.
+**Output and exit code** (decided by the maintainer, 2026-11-19: a gained origin counts toward exit 3). When (c) adds and no grant line adds, `kio check --base` prints by default, as R1a4 #2 does for function lines, a header that tells a rebinding apart from a grant-effect change, then the lines:
+
+```
+derived  grants unchanged; capability binding changed: f, g
+~ f: d from y (was x)
+~ g: d from x (was y)
+authority added (exit 3)
+```
+
+When a grant line already adds, the (c) lines that added print after the grant lines. `--detail` adds the (c) lines that did not add (an origin lost; a gain already covered by a grant line's `+`). `kio review` shows the same rows under Authority labelled `derived`, grant lines `enforced`; `--json` gains `authority.bindings[]` of `{function, leaf, from: [grants], was: [grants] | null}` (`null` for a leaf new in this version).
+
+**Leaf-only programs.** (c) applies to programs that use no group. Their `kio check` output is byte-identical to v0.1.5; their `kio check --base` and `kio review` output and exit code differ exactly when some function's leaf changed its origin set (`f(x); g(y)` to `f(y); g(x)` exits 0 today and 3 under (c)). G1's gate and CI scripts will see these new exit 3s; they are the gain, and the release that ships (c) says so in its notes.
+
+Interaction with what exists: R1a4's `derived  read in load` under a grant line is `users` over `passed`, which is (c)'s relation read from the grant side; both come from the one set of edge maps, so they cannot disagree. P8 holds: only functions `main` reaches have origins or lines.
 
 ### How each constraint holds
 
 | Constraint | Under A |
 |---|---|
 | Per capability, per method, traced to a grant | `env.db query` is a method on one leaf; a struct has no methods, so no line can say `env *`; each leaf's origins follow the binding maps to `main`'s grants |
-| `--base` one-liners | `main` is flat, so grant lines are the same text; function lines keyed by leaf as today; binding changes are their own one-liners |
+| `--base` one-liners | `main` is flat, so grant lines are the same text; function lines keyed by leaf path, matched across versions by path then by (short name, type); binding changes are their own one-liners under a header that says `grants unchanged` |
 | Host trusts nothing | lowering flattens; `grants.rs`, the handle table, every host function and the audit log are untouched; a wrong checker still cannot grant a handle |
 | No ambient authority | a struct is received or built from the receiver's own parameters, in argument position; `let`, fields, returns, closures, `fn` types, type arguments and patterns are refused with today's errors; a library function's authority is its parameters' leaves |
 | Values copy | a struct has no storage: its leaves are the handles they always were; no `let`, write, `==` or print can observe it |
@@ -245,14 +258,20 @@ tests::call     : env.db exec query transaction, env.admin matches, env.rng byte
 
 > Group what travels together: a service's environment, a job's clock and log. A specialized helper takes the leaves it uses (`fn save(audit: Dir, now: Clock, ..)`) or a narrow group (`Writer { db, audit, now }`), so its report line is its own authority. One program-wide `Env` passed to every function is not the default library interface: each such function's line becomes the whole program's authority, and the report tells a reviewer nothing about what it does.
 
+### Pinning notes (for the task)
+
+- **A distinct type.** A capability struct parameter must behave as `Ty::Cap` at every site that matches it today (`cap_type_ok`, the `main` rule, `lookup`'s capture check, the `let` binding check, `operand`, `expr`'s `Name` case, equality, `value`, `fn_value`, `method_call`'s receiver, assignment targets, `cap_in`, `has_fn`/`carries`, the test partition, `cap_params`, `entry_authority`'s filter, both `MAX_PARAMS` counts) and at the new ones (`Field` on a group records `Ty::Cap` at the span so `cap_param` finds it; `Field` on a capability is "no field"; `struct_lit` of a group in argument position only, through `ExprKind::Module` for `booking::Env { .. }`, no `..base`, values through `operand`; the type-argument walk). A missed site is an escape that `match` wildcards will not catch: give groups their own `Ty::Group(key)` variant so every site is visited deliberately, and take adversarial rows 5 and 6 as the independent check.
+- **One set of edge maps.** Build the per-edge binding maps once; derive `uses` (forward), `passed`/`users` (closure from a grant) and origins (the same closure, read per leaf) from them. Two hand-written walks will drift once edges carry whole-group and literal maps.
+- **Lowering.** Parameter expansion in declared field order; `Field` to the leaf local; a whole-group argument to n locals; a literal to its places in declared field order, whatever order the literal writes; test-entry leaf locals named by short name; `own_uses` in parameter order then field order; kiogen generates groups.
+
 ### Acceptance tests
 
 Functional (the task's "Done:"):
 
 - Checker, one test per row of the rules table asserting message and hint; `struct Env { a: Dir, b: Dir }` accepted; `struct Empty {}` still data; `pub struct` across a module (`booking::Env { .. }`); a generic function taking `env: Env` reported once.
-- Report (lang/tests/report.rs): `handle`'s line with paths; charging through a whole pass, a literal from `main`, and a narrowing literal (`Writer { db: env.db, audit: env.audit }`) charges only those leaves; `main`'s line byte-identical to the ungrouped program; a program without groups prints a byte-identical report; `--base` of grouped against ungrouped is `no change in authority`; `--detail` shows `+ handle: env.admin matches` when the field is new; a parameter rename alone prints nothing; `users` finds `create_provider` through the group.
+- Report (lang/tests/report.rs): `handle`'s line with paths; charging through a whole pass, a literal from `main`, and a narrowing literal (`Writer { db: env.db, audit: env.audit }`) charges only those leaves; `main`'s line byte-identical to the ungrouped program; a program without groups prints a byte-identical report; `--base` of grouped against ungrouped is `no change in authority`; `--detail` shows `+ handle: env.admin matches` when the field is new; a group parameter rename (`env` to `e`) prints nothing; a leaf parameter or field rename prints `-`/`+` and exits 3, as today; a leaf-only program's `--base` text and exit differ from v0.1.5 only when some leaf's origin set changed; `users` finds `create_provider` through the group.
 - Lowering and runtime: kiogen generates capability structs; differential tests pass on both runtimes; a 1,000-leaf function is refused by rule 9.
-- Host (host/tests/kio_test.rs, review.rs): a test taking `env: Env` is granted by field name from the grants file and by type without one; a missing `--secret admin` names the flag; `kio review` of a change adding a field shows `+ admin: Secret (matches)` once and the `derived` line names the function; a mutant in a function reached only through a group runs.
+- Host (host/tests/kio_test.rs, review.rs): a test's leaves are named by their short names (rule 8 makes them unique), the IR entry's locals carry those names, the host's per-call check against the entry's line and the interpreter's binding by local name use them, and the property rules (`Http` refused, a file `Dir`/`Kv`/`Db` must be `:ro`, `--log` to a file refused) see the flattened fields; a test taking `env: Env` is granted by field name from the grants file and by type without one; a missing `--secret admin` names the flag; `kio review` of a change adding a field shows `+ admin: Secret (matches)` once and the `derived` line names the function; a mutant in a function reached only through a group runs.
 - A3 (local, not committed): the refactor above checks, `kio test` 28 pass, `kio check --base` against stage 4 prints `no change in authority`.
 
 Adversarial (each a test; the expected text is the acceptance):
@@ -260,31 +279,46 @@ Adversarial (each a test; the expected text is the acceptance):
 | # | Attempt | Expected |
 |---|---|---|
 | 1 | Two `Db` fields swapped between base and new (`Env { a: y, b: x }`), the callee calls `exec` on `e.a` | grant lines `~ x: Db (-exec)`, `~ y: Db (+exec)`; binding lines `~ handle: env.a from y (was x)`, `~ handle: env.b from x (was y)`; the function line unchanged (`handle : env.a exec`); exit 3; a `:ro` grant on `y` is refused at startup |
-| 1b | `f(x); g(y)` to `f(y); g(x)`, both callees `exec` | grant lines unchanged; binding lines `~ f: d from y (was x)`, `~ g: d from x (was y)`; exit 3 |
-| 1c | `inspect(primary); inspect(backup)` reordered, or `copy(src, dst)` to `copy(dst, src)` with both already reaching `copy` | (a), (b), (c) unchanged, exit 0; the Not checked line `inspect: d from primary, backup; which call uses which is behaviour` is marked `(changed: main)` |
+| 1b | `f(x); g(y)` to `f(y); g(x)`, both callees `exec` | grant lines unchanged; by default the header `derived  grants unchanged; capability binding changed: f, g` then `~ f: d from y (was x)`, `~ g: d from x (was y)`; exit 3 |
+| 1c | `copy(a, b); copy(b, a)` reordered (every leaf of `copy` already has both origins) | (a), (b), (c) unchanged, exit 0; the Not checked line `copy: src from a, b; which call uses which is behaviour` is marked `(changed: main)` |
+| 1d | A single `copy(a, b)` to `copy(b, a)`, `read` on `src`, `write` on `dst` | (a) `~ a: Dir (+write -read)`, `~ b: Dir (+read -write)`; (c) `~ copy: src from b (was a)`, `~ copy: dst from a (was b)`; exit 3. With `read` on both: (a) unchanged, (c) as before, exit 3 under the `grants unchanged; capability binding changed: copy` header |
 | 2 | One grant supplied to two fields, `Env { a: db, b: db }`, `query` on `e.a` and `exec` on `e.b` | `main : db exec query` (the union); `--base` against `Env { a: db, b: other }` shows `~ db: Db (+exec)`, `- other: Db (exec)`, `~ handle: env.b from db (was other)` |
-| 2b | A pure grouping refactor of A3 stage 4, and the same with one leaf moved out of the group, and with `route` narrowed to `Writer` | `no change in authority` each time; a parameter renamed in the same change prints its `-`/`+` function lines as today |
+| 2b | A pure grouping refactor of A3 stage 4, and the same with one leaf moved out of the group, with `route` narrowed to `Writer`, and with the group parameter renamed `env` to `e` | `no change in authority` each time; a leaf parameter or field renamed in the same change prints its `-`/`+` function lines and exits 3, as today |
 | 3 | Same-typed grants with different restrictions through every path: `ro: Db` (`:ro`) into a field a callee `exec`s on, through a whole pass, a literal and a narrowing literal; `v: Hmac` (`:verify`) into a field `sign`ed; `api: Http` whose field is `send`t with a non-literal verb | each refused at startup by `main`'s line (`exec` on `ro`, `sign` on `v`); the report says `env.api send *`, and `--base` from `send POST` to `send *` adds |
 | 4 | Shadowing and modules: a local `env` of a data type with a field `db` declared after a parameter `env: Env`, then `env.db.query(..)` in and after its block; `web::Env` and the root's `Env`; two modules each declaring `Env`; a literal of the wrong module's type | inside the block `env.db` is data (no method `query`; nothing charged), after it the capability again, by the checked type at the span (P5), as the shadowing test of P5 does for a leaf; a wrong type is "expected `web::Env`, found `Env`" |
-| 5 | Escapes of a whole group: `let e = env;`, `[env]`, `Some(env)`, `struct Job { env: Env }`, `enum E { A(Env) }`, `fn pick(..) -> Env`, `fn f(x: fn(Env))`, `id::<Env>(env)`, `\|\| env.db.query(..)`, `match env { e => .. }`, `env = other`, `if let x = env` | each refused with the rule-3 or rule-4 text; no program with one checks |
+| 5 | Escapes of a whole group: `let e = env;`, `[env]`, `Some(env)`, `struct Job { env: Env }`, `enum E { A(Env) }`, `fn pick(..) -> Env`, `fn f(x: fn(Env))`, `id::<Env>(env)`, `\|\| env.db.query(..)`, `\|e: Env\| ..`, `match env { e => .. }`, `env = other`, `if let x = env`, `assert_eq(env, env)`, `handle(if c { env } else { e2 }, r)`, `let x = { env };`, `handle({ env }, r)` | each refused with the rule-3 or rule-4 text (a block or `if` yielding a group is a value, not an argument place); no program with one checks |
 | 6 | Escapes of a field: `let d = env.db;`, `[env.db]`, `Some(env.db)`, `Job { d: env.db }`, `return env.db`, `\|x\| env.db.read(x)`, `env.db = x`, `match env.db { .. }`, `env.db == env.db` | each refused: ``capability `env.db` bound to local``, ``closure captures capability `env` ``, "capabilities have no equality", today's texts for the rest |
 | 7 | `Http` verbs through fields and helpers: `env.api.send(v, ..)` with `v` a constant, a literal, a parameter; `send_all` with a list built in a helper that takes `env` | the same verbs as the leaf program (`send PUT`, `send_all POST`, `send *`); P7's rules unchanged by the path |
 | 8 | Test flattening collisions: `fn t(env: Env, db: Int)`, `fn t(a: Env, b: Env)` with a shared field name, `fn t(env: Env, db: Db)` | rule 8's error at the test's signature, before `kio test` opens any grant or temporary directory |
 | 9 | A capability struct declared in a dependency (`kio.deps`) and used by the root; a dependency's helper taking a group from the root | the dependency gains only what the root passes; its lines show paths; `kio review`'s dependency comparison unchanged |
 | 10 | 999 leaves across groups (`a: Env500, b: Env499`, one data parameter) | rule 9 refuses at the signature |
+| 11 | Matching: base `h(env: Env)` with `Env { db: primary }`; new `h(env: Env, db: Db)` called `h(Env { db: primary }, backup)`, `x(db)` added | `env.db` matched by path (no line); `+ h: db ..` with `x`'s methods and `authority.bindings[]` `{leaf: "db", from: ["backup"], was: null}`; never `~ h: db from backup (was primary)` |
+| 12 | Matching: `merge(a_db: Db, b_db: Db)` to `merge(a: Env, b: Env)`, same calls | two `db` short names on the new side: `- merge: a_db ..`, `- merge: b_db ..`, `+ merge: a.db ..`, `+ merge: b.db ..`, exit 3 (a grouping that renames its leaves is not silent; renaming the fields `a_db`, `b_db` makes it silent) |
+| 13 | A leaf-only program re-pairing same-typed grants (`f(x); g(y)` to `f(y); g(x)`, both `exec`) | v0.1.5: `no change in authority`, exit 0. Under (c): the `grants unchanged; capability binding changed: f, g` header, two `~` lines, exit 3 |
+| 14 | Property rules through a field: `#[test] fn t(xs: List<Int>, env: Env)` where `Env` holds `api: Http`, or a `Db` the grants file binds to a file without `:ro` | refused with today's texts naming the field (`may not take `api: Http` yet`) |
+| 15 | A function shared by two entries with different origins: `init(db)` from `app.kio` with `db` and from `remind.kio` with `archive` | one function line; (c) per entry, the entry's prefixed `remind.kio: ~ init: db from archive (was db)` when it changes (R1a3) |
+| 16 | A `main` grant renamed (`primary` to `main_db`), nothing else | today `- primary: Db (..)`, `+ main_db: Db (..)`, exit 3; every (c) line of every function it reaches would read `from main_db (was primary)`: folded under the grant's `-`/`+` pair (one line `  bindings follow the rename: f, g`), not printed one by one |
+| 17 | `--json` shape | `authority.bindings[]` rows `{function, leaf, from, was}`, `was: null` for a leaf new in this version, `from: []` never (a leaf `main` does not reach has no row) |
 
 ### Limits
 
 What the report and diff do not see, stated so the review page can say so:
 
-- **Roles swapped among grants a function already holds.** `inspect(primary); inspect(backup)` reordered, or `copy(src, dst)` to `copy(dst, src)` when both grants already reach `copy` with the same methods: no grant line, function line or binding line moves. It is a correctness change. Review lists each function whose leaf has two or more origins of one type under Not checked (`inspect: d from primary, backup; which call uses which is behaviour`), marked `(changed: F)` when a caller's text changed; the audit log, per grant name, is where the actual binding of a run is visible.
-- **Possible, not actual.** A function line is possible authority (as today): a leaf reached on two paths holds both origins, a cycle gives every participant every origin. Grouping adds no imprecision of its own, but a broad `Env` makes "possible" wide on purpose; the guideline above is the answer, not the checker.
+- **Roles swapped among origins a leaf already has.** A rebinding is invisible only when every affected leaf already had, in the base, the origin it now has: `copy(a, b); copy(b, a)` reordered. No grant line, function line or binding line moves. It is a correctness change. Review lists each function whose leaf has two or more origins of one type under Not checked (`inspect: d from primary, backup; which call uses which is behaviour`), marked `(changed: F)` when a caller's text changed; the audit log, per grant name, is where the actual binding of a run is visible.
+- **Possible, not actual.** A function line is possible authority (as today): a leaf reached on two paths holds both origins; the fixed point is exact per edge, so a cycle adds only what its maps carry. Grouping adds no imprecision of its own, but a broad `Env` makes "possible" wide on purpose; the guideline above is the answer, not the checker.
 - **What flows through a capability.** Which SQL text, path or body a call carries is Not checked today and stays so; a group does not change it.
+- **Held, not used.** A function line is what a function may call, not what it holds (`own_uses` drops a leaf with no methods, today too). A function taking `Env` holds every field and may pass `env` whole to anything; `handle : env.db exec query` says nothing about `env.admin` until something reached through `handle` calls it, and then the use appears as `+`. Printing held leaves (`env.admin -`) would be a new line shape for every tool; not done.
+- **A leaf count is not a grant count.** `Env { a: db, b: db }` prints `handle : env.a query, env.b exec`: two leaves, one grant; `main`'s line has the union.
+- **A `main` grant rename** moves every leaf's origin it reaches; (c) lines that differ only by the renamed grant are folded under its `-`/`+` pair (adversarial 16) rather than printed one by one.
 - **Same type, same use, different restriction.** Two `Db` grants with the same methods but one `:ro`: swapping them is refused at startup only if the `:ro` grant now reaches a write; a swap between two `:ro` grants or two unrestricted ones is the first bullet.
 
 ### Undo
 
-Lowering's flattening is a source rewrite: inline each capability struct parameter as its fields, each `env.f` as `f`, each literal as its places. Undoing the feature is one checker rule back (row 1 refusing every struct with a capability field, today's message) plus that rewrite as a script for programs that used it. Binding lines (c) stand on their own (they detect swaps the function lines never showed) and need not be undone with it. Nothing below the checker, no grant, grants file, audit line or `main` report line ever depended on the feature; only function lines (`env.db`) and `--detail` lines spelled paths.
+Lowering's flattening is a source rewrite: inline each capability struct parameter as its fields, each `env.f` as `f`, each literal as its places. Undoing the feature is one checker rule back (row 1 refusing every struct with a capability field, today's message) plus that rewrite as a script for programs that used it. Binding lines (c) stand on their own (they detect rebindings in leaf-only programs that today exit 0) and need not be undone with it; undoing (c) alone restores today's `--base` exit codes. Nothing below the checker, no grant, grants file, audit line or `main` report line ever depended on the feature; only function lines (`env.db`) and `--detail` lines spelled paths.
+
+## Decided
+
+A gained binding origin counts toward exit 3, and the default output of `kio check --base` prints the binding change that triggered it, labelled `derived` and distinct from `main`'s grant effects (the header above). Maintainer, 2026-11-19.
 
 ## Open for the maintainer
 
@@ -295,4 +329,3 @@ Lowering's flattening is a source rewrite: inline each capability struct paramet
 | Nesting and `..base` | not in v1; both are pure extensions | allow one level now |
 | Report spelling | paths, `env.db exec query` | grouped, `env: Env (db exec query, admin matches)`: a second line shape for every tool |
 | A `let env = Env { .. }` alias | no: rule 1's "never a local" stays whole; one literal per call site in `main` is the cost | allow an immutable `let` of a literal of parameter names |
-| Binding lines (c) in `kio check --base` | print them under `--detail` with the function lines, and always in `kio review`; a gained origin is exit 3 | print only in `kio review`; or a gained origin exit 0 when `main`'s line is unchanged (then 1b above passes unseen) |
