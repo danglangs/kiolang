@@ -83,7 +83,7 @@ fn deliver_retries(hook: Http, sent: Dir) -> Result<(), IoErr> {
 }
 ```
 
-`--http-record hook=sent` is refused when `hook` is not a fake (`hook is not a fake; a real grant's requests are in the audit log (--audit)`) or when the file also grants `--dir sent=..` (`records go to a fresh temporary Dir; remove --dir sent`): the record always lands in a default temporary `Dir`, so nothing stale from an earlier run is read, and the host writes it through that directory's open handle (cap-std), never by path. A test that has `hook` but no `sent: Dir` runs without a record, as any grant for a parameter a test lacks is ignored. Record writes are the host's own: not charged to `--io`, not host calls.
+`--http-record hook=sent` is refused when `hook` is not a fake (`hook is not a fake; a real grant's requests are in the audit log (--audit)`) or when the file also grants `--dir sent=..` (`records go to a fresh temporary Dir; remove --dir sent`): the record always lands in a default temporary `Dir`, so nothing stale from an earlier run is read, and the host writes it through that directory's open handle (cap-std), never by path. A test that has `hook` but no `sent: Dir` runs without a record, as any grant for a parameter a test lacks is ignored. A record's bytes beyond its body (request line, headers, blank line) are charged to `--io` before it is written, so records stay within `--io` (the body is already charged, as sent); a record is not a host call. A record no test can take (no test has both `hook: Http` and `sent: Dir`) is refused at setup.
 
 ## Interactions
 

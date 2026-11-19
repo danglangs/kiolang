@@ -817,3 +817,194 @@ fn sends(hook: Http) -> Result<(), HttpErr> {
         }
     }
 }
+
+/// T4b: a fake's requests, recorded into the test's `sent: Dir`.
+const RECORD: &str = r#"#[test]
+fn records(hook: Http, sent: Dir) -> Result<(), IoErr> {
+    let bin = match "00ff0d0a2d2d2d0a80".from_hex() { Some(b) => b, None => "".to_bytes() };
+    let rs = hook.send_all([
+        HttpRequest { method: "POST", path: "/v1/events?x=1", headers: ["X-Id: 7"], body: "{\"id\":1}".to_bytes(), timeout_ms: 0 },
+        HttpRequest { method: "POST", path: "/bin", headers: [], body: bin, timeout_ms: 0 },
+    ]);
+    assert_eq(rs.len(), 2);
+    assert_eq(sent.list("")?, ["hook-1", "hook-2"]);
+    assert_eq(sent.read("hook-1")?.to_str(), "POST /v1/events?x=1\nx-id: 7\nauthorization: <injected>\n\n{\"id\":1}");
+    let mut want = "POST /bin\nauthorization: <injected>\n\n".to_bytes();
+    want.extend(bin);
+    assert_eq(sent.read("hook-2")?, want);
+    // Refused by the host before the lookup: no record. Unmatched: recorded, it was sent.
+    assert_eq(hook.send("PU" + "T", "/v1/events", [], "".to_bytes(), 0), Err(HttpErr::Denied));
+    assert_eq(hook.get("/nowhere"), Err(HttpErr::Denied));
+    assert_eq(sent.list("")?.len(), 3);
+    assert_eq(sent.read("hook-3")?.to_str(), "GET /nowhere\nauthorization: <injected>\n\n");
+    Ok(())
+}
+
+#[test]
+fn numbers_per_test(hook: Http, sent: Dir) -> Result<(), IoErr> {
+    let _ = hook.get("/v1/status");
+    assert_eq(sent.list("")?, ["hook-1"]);
+    Ok(())
+}
+
+#[test]
+fn taken(hook: Http, sent: Dir) -> Result<(), IoErr> {
+    sent.create("hook-1", "mine".to_bytes())?;
+    let _ = hook.get("/v1/status");
+    Ok(())
+}
+
+#[test]
+fn without_sent(hook: Http, out: Dir) -> Result<(), IoErr> {
+    assert_eq(hook.get("/v1/status"), Ok("up".to_bytes()));
+    assert_eq(out.list("")?.len(), 0);
+    Ok(())
+}
+"#;
+
+#[test]
+fn a_fake_records_what_it_was_sent() {
+    let c = Case::new(RECORD);
+    let hook = c.file(
+        "hook.http",
+        "POST /v1/events?x=1\n200\n---\nPOST /bin\n201\n---\nGET /v1/status\n200\n\nup\n",
+    );
+    let key = c.file("key.txt", "Bearer s3cret-t4b");
+    let g = c.file(
+        "t.grants",
+        &format!("--http hook=fake:{hook}\n--http-methods hook=POST\n--http-header hook=Authorization:file:{key}\n--http-record hook=sent\n"),
+    );
+    let (code, out, err) = c.kio(&["--grants", &g]);
+    assert_eq!(
+        (code, out.as_str()),
+        (
+            1,
+            "ok   numbers_per_test\nok   records\nFAIL taken\n  --http-record hook: cannot write `hook-1`: File exists (os error 17); a record is a new file, so leave `hook-*` names to the host\nok   without_sent\n3 passed, 1 failed\n"
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_record_is_refused_outside_its_rules() {
+    let c = Case::new("#[test]\nfn t(hook: Http, sent: Dir) {}\n");
+    let hook = c.file("hook.http", "GET /a\n200\n");
+    let fake = format!("--http hook=fake:{hook}\n");
+    let data = c.dir.path().join("data");
+    std::fs::create_dir(&data).unwrap();
+    let cases = [
+        (
+            "--http hook=example.com\n--http-record hook=sent\n".to_string(),
+            "kio: --http-record hook=sent: hook is not a fake\n  hint: a real grant's requests are in the audit log (--audit)\n".to_string(),
+        ),
+        (
+            format!("{fake}--http-record other=sent\n"),
+            "kio: --http-record other=sent: other is not a fake\n  hint: a real grant's requests are in the audit log (--audit)\n".into(),
+        ),
+        (
+            format!("{fake}--http-record hook=sent\n--dir sent={}\n", data.display()),
+            "kio: --http-record hook=sent: the file grants `--dir sent`, and records go to a fresh temporary Dir\n  hint: remove --dir sent\n".into(),
+        ),
+        (
+            format!("{fake}--http-record hook=../sent\n"),
+            "kio: --http-record hook=../sent: expected grant=dir\n  hint: name a fake Http grant and a Dir parameter: `--http-record hook=sent`\n".into(),
+        ),
+        (
+            format!("{fake}--http-record hook=sent\n--http-record hook=other\n"),
+            "kio: --http-record hook=other: `hook` is recorded twice\n  hint: give one --http-record hook\n".into(),
+        ),
+    ];
+    for (grants, want) in cases {
+        let g = c.file("t.grants", &grants);
+        let (code, out, err) = c.kio(&["--grants", &g]);
+        assert_eq!((code, out.as_str(), err), (2, "", want), "{grants}");
+    }
+    let (code, _, err) = c.kio(&["--http-record", "hook=sent"]);
+    assert_eq!(
+        (code, err.as_str()),
+        (2, "kio: `--http-record` is not a flag of kio test\n  hint: name grants in a --grants file, one flag per line\n")
+    );
+    // Every other command refuses it, on the command line and in a grants file.
+    let refusal = "kio: `--http-record` is not a flag of kio run\n  hint: it records a fake's requests for kio test\n";
+    let t = c.dir.path();
+    let main = write(t, "main.kio", "fn main(hook: Http) -> Int { 1 }\n");
+    let (code, _, err) = kio_in(t, &["run", &main, "--http-record", "hook=sent"]);
+    assert_eq!((code, err.as_str()), (2, refusal));
+    let g = write(t, "g.grants", "--http-record hook=sent\n");
+    let (code, _, err) = kio_in(t, &["run", &main, "--grants", &g]);
+    assert_eq!((code, err.as_str()), (2, refusal));
+    let (code, _, err) = kio_in(t, &["check", &main, "--grants", &g]);
+    assert_eq!((code, err.as_str()), (2, refusal));
+    let app = write(
+        t,
+        "server.kio",
+        "fn main(req: Incoming, res: Outgoing) -> Result<(), WebErr> { res.send(200, [], [], \"ok\".to_bytes()) }\n",
+    );
+    let (code, _, err) = kio_in(
+        t,
+        &["run", &app, "--listen", "127.0.0.1:0", "--http-record", "hook=sent"],
+    );
+    assert_eq!((code, err.as_str()), (2, refusal));
+    let (code, out, err) = kio_in(t, &["review", &main, "--base", &main, "--grants", &g]);
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(out.contains("`--http-record` is not a flag of kio run"), "{out}{err}");
+}
+
+/// A record's bytes beyond its body are charged to `--io`, so large headers sent many times
+/// stop the run at the budget, the records written so far within it.
+#[test]
+fn records_are_charged_to_io() {
+    let c = Case::new(
+        r#"#[test]
+fn floods(hook: Http, sent: Dir, log: Log) -> Result<(), LogErr> {
+    let mut v = "a";
+    for _ in 0..12 { v = v + v; }
+    let mut hs: List<Str> = [];
+    for _ in 0..16 { hs.push("x-big: " + v); }
+    for i in 0..100 {
+        let _ = hook.send("POST", "/a", hs, "".to_bytes(), 0);
+        log.write(i.to_str())?;
+    }
+    Ok(())
+}
+"#,
+    );
+    let hook = c.file("hook.http", "POST /a\n200\n");
+    let g = c.file(
+        "t.grants",
+        &format!("--http hook=fake:{hook}\n--http-methods hook=POST\n--http-record hook=sent\n"),
+    );
+    let (code, j) = c.json(&["--grants", &g, "--io", "1"]);
+    assert_eq!(code, 1, "{j}");
+    let t = &j["tests"][0];
+    assert_eq!(
+        (&t["error"]["message"], &t["error"]["hint"]),
+        (
+            &serde_json::json!("too much I/O (limit 1 MB)"),
+            &serde_json::json!("raise it with --io")
+        ),
+        "{j}"
+    );
+    // Each send returned before its line was logged: that many records were written.
+    let written = t["log"].as_str().unwrap().lines().count();
+    let head = "POST /a\n".len() + 16 * "x-big: \n".len() + 16 * 4096 + 1;
+    assert!(
+        written >= 10 && written * head <= 1 << 20,
+        "{written} records of {head} bytes"
+    );
+}
+
+#[test]
+fn a_record_no_test_takes_is_refused() {
+    let c = Case::new("#[test]\nfn t(hook: Http, sent: Dir) {}\n\n#[test]\nfn u(snet: Dir) {}\n");
+    let hook = c.file("hook.http", "GET /a\n200\n");
+    let g = c.file(
+        "t.grants",
+        &format!("--http hook=fake:{hook}\n--http-record hook=snet\n"),
+    );
+    let (code, out, err) = c.kio(&["--grants", &g]);
+    assert_eq!(
+        (code, out.as_str(), err.as_str()),
+        (2, "", "kio: --http-record hook=snet: no test takes both `hook: Http` and `snet: Dir`\n  hint: give the Dir parameter's name after `=`, or add `snet: Dir` to the test that takes `hook: Http`\n")
+    );
+}

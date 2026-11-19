@@ -400,6 +400,32 @@ timeout
 - The file is read once, before the first test: UTF-8, at most 1 MiB, a regular file with no other hard links, not inside a writable `--dir` nor a file of a `--log`, `--kv` or `--db` of the same grants file (a database's `-wal`, `-journal` and `-shm` included; "give kio a fake file of its own"). Blank lines and `#` lines before an entry's request line are skipped; an entry's path follows a request's rules (one leading `/`, no space, `\`, `#` or control character); header names are lowercased; a body runs to the next `---` line, its last newline dropped; a line's trailing `\r` is dropped, so a CRLF file answers as an LF one. Each error names its line (`hook.http:7: expected METHOD /path (GET, HEAD, POST, PUT, PATCH, DELETE or OPTIONS)`, `expected a status 100-599 or timeout`, `expected name: value`), and an entry for a method the grant lacks is refused (`hook.http:3: PUT /x: --http hook grants only GET, POST`).
 - Each request counts toward `--calls` and `--io`, as a real one.
 
+A test reads back what it sent: `--http-record hook=sent` in the same grants file writes each request on `hook` into the test's default temporary `sent: Dir` before its answer returns, as `hook-1`, `hook-2`, .. (numbered per test from 1; `send_all` in list order). A record is the request as HTTP writes it, byte-exact (a binary body too): `METHOD /path`, the program's headers (names lowercased) then each injected one as `name: <injected>`, never its value, a blank line, the body.
+
+```
+POST /v1/events
+content-type: application/json
+authorization: <injected>
+
+{"id":1}
+```
+
+```
+#[test]
+fn deliver_retries(hook: Http, sent: Dir) -> Result<(), IoErr> {
+    deliver(hook, Event { id: 1 });                          // hook.http: 503, then 200
+    assert_eq(sent.list("")?.len(), 2);
+    let second = sent.read("hook-2")?.to_str();
+    assert(second.starts_with("POST /v1/events\n"), "method and path");
+    assert(second.ends_with("\n\n{\"id\":1}"), "body");
+    Ok(())
+}
+```
+
+- A request with no entry is recorded (it was sent); one the host refused before the lookup (a method not granted, a bad path, header or body, a `send_all` over 64) is not.
+- A record's bytes beyond the body (request line, headers, blank line) are charged to `--io` before it is written, so a run's records stay within `--io` (the body is charged once, as sent); a record is not a call. Each is a new file: a `hook-2` the program made first stops the run ("cannot write `hook-2`: File exists"). A test with `hook` but no `sent: Dir` runs without a record.
+- Refused: a `--http-record hook=snet` no test can take ("no test takes both `hook: Http` and `snet: Dir`"); a `hook` that is not a fake ("hook is not a fake", hint "a real grant's requests are in the audit log (--audit)"); a file that also grants `--dir sent` ("records go to a fresh temporary Dir", hint "remove --dir sent"); one grant recorded twice; `--http-record` on `kio test`'s command line, and in `kio run`, `--listen`, `kio check --grants` and `kio review --grants` ("`--http-record` is not a flag of kio run").
+
 ### Properties
 
 A test with data parameters is a property ([language.md](language.md#properties)). It runs on `--cases` generated inputs (default 100, at most 100,000) from `--seed` (default 1); case `i` depends only on the seed and `i`, so a run repeats exactly. Each case runs compiled, through an entry that calls the test with the case's values built in IR (never printed and reparsed), in a fresh instance with fresh grants (a new temporary `Dir` per case) under the limits. A failing case is shrunk, each candidate another compiled run (at most 200, keeping the failure's kind; "shrinking stopped after 200 runs" when the cap ends it), and the smallest runs once more. kio's own CI also runs every case its tests generate in the interpreter and fails on any difference; `kio test` itself has no interpreter.
