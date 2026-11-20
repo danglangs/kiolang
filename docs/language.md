@@ -151,7 +151,7 @@ let out = Json::Arr([Json::Num(1), Json::Float(2.5), Json::Null]).to_json();   /
 
 ## Tests
 
-`#[test]` before a top-level `fn`, in the root or a module file, marks a test; it is kio's only attribute. A test takes no type parameters, returns `()` or `Result<(), E>` (an `Err` fails it), and its parameters are capabilities, which the runner grants, or data, which it generates (a property, below). No code calls a test or names it as a value. `kio test` runs them, compiled, each with its own grants ([guide.md](guide.md#tests)); it needs no `main`, `kio run` and `kio check` still do.
+`#[test]` before a top-level `fn`, in the root or a module file, marks a test; it is kio's only attribute. A test takes no type parameters, returns `()` or `Result<(), E>` (an `Err` fails it), and its parameters are capabilities, which the runner grants (a capability struct's fields each by the field's name, so a test's parameter names and field names must be distinct: "test `t` names `db` twice: `env.db` and `db`"), or data, which it generates (a property, below). No code calls a test or names it as a value. `kio test` runs them, compiled, each with its own grants ([guide.md](guide.md#tests)); it needs no `main`, `kio run` and `kio check` still do.
 
 `assert(cond: Bool, msg: Str)` and `assert_eq(a, b)` (two values of one type that `==` accepts) are built-in functions, usable anywhere; no function may take their names. Both arguments are evaluated, as in any call; then a false `cond` stops the run with `assertion failed: <msg>`, and unequal values with ``assert_eq failed: left `<a>`, right `<b>` `` (each as `kio run` prints a nested value: `"a"`, `[1, 2]`, `P { x: 1 }`; a message or value past 4,096 bytes is cut there and ends `...`), at the call. A local named `assert` hides the built-in, as it hides a function.
 
@@ -220,15 +220,19 @@ A WebSocket server is `fn main(msg: WsMessage, conn: WsSend, ..)` under `--liste
 
 ## Rules the checker enforces
 
-1. **Capabilities are parameters only.** A cap can be received as a parameter, have a method called on it, or be passed as an argument. These are rejected:
+1. **Capabilities are parameters only.** A capability is a capability type (`Dir`, `Db`, ..) or a **capability struct**: a `struct` with at least one field, every field a capability type. A capability can be received as a parameter, have a method called on it, or be passed whole as an argument; a capability struct can also have a field read, `env.db`, which is a capability wherever a capability name may stand. A capability struct is built only by a literal that is a whole argument, each value a capability parameter of the caller or a field of one: `handle(Env { db: db, now: now }, r)`, `save(Writer { db: env.db, audit: env.audit }, r)`. `main` takes capability types only (its parameters are the grants); a `#[test]` may take a capability struct, and each field is then a grant of the field's name and type. These are rejected, for both kinds:
 
    ```
-   let d = input;                     // bound to a local
-   struct Job { dir: Dir }            // stored in a field
+   let d = input;                     // bound to a local ("capability `input` bound to local `d`"; `let d = env.db;` the same)
+   struct Job { dir: Dir, n: Int }    // a struct mixes capabilities and data; `struct Job { dirs: List<Dir> }` nests one
    fn pick(a: Dir, b: Dir) -> Dir     // returned
    let dirs = [input, out];           // put in a list
    fn f(x: Option<Dir>)               // nested in a type
+   let e = Env { db: db, now: now };  // a capability struct built outside an argument
+   struct Env<T> { db: Db }           // a capability struct cannot be generic, or hold another capability struct
    ```
+
+   A capability struct has no equality, no display, no methods and no pattern: it is never a value. Lowering flattens it to its fields, so the host, the runtime and the audit log see a program of plain capability parameters; the report names each field by its path (`handle : env.db exec query, env.admin matches`). Group what travels together; a specialized helper takes the leaves it uses, so its report line is its own authority ([guide.md](guide.md#capability-structs)).
 
    A `fn` type may not mention a capability (`fn(Dir)`, `fn() -> Option<Dir>`), and a function with a capability parameter cannot be used as a value: "function values cannot take or return capabilities". Pass the capability to a named function instead.
 

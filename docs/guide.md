@@ -271,6 +271,29 @@ listening on ws://127.0.0.1:8080
 
 Throughput: 73,800 requests/s with keep-alive (kio-web hello, roadmap.md "Speed today"), 17,800-20,200 without ([perf.md](perf.md)), a fresh sandbox per request.
 
+## Capability structs
+
+A `struct` whose fields are all capability types is a capability struct: a parameter a helper or a test takes in place of five, read as `env.db`, passed whole or narrowed to a smaller one, and built only where it is passed, from the caller's own capabilities ([language.md](language.md#rules-the-checker-enforces), rule 1). `main` keeps one parameter per grant; the struct is the program's business, flattened before anything the host sees, so grants, the audit log and `main`'s report line are what they would be without it.
+
+```
+pub struct Env { db: Db, admin: Secret, now: Clock, audit: Dir }
+struct Writer { db: Db, audit: Dir }
+
+pub fn handle(env: Env, r: Req) -> Resp {
+  if !env.admin.matches(r.auth) { return err(403, "admin only"); }
+  save(Writer { db: env.db, audit: env.audit }, r)                 // narrowed: `save` holds two leaves
+}
+
+fn main(req: Incoming, res: Outgoing, db: Db, admin: Secret, now: Clock, audit: Dir) -> Result<(), WebErr> {
+  let out = handle(Env { db: db, admin: admin, now: now, audit: audit }, parse(req));
+  ..
+}
+```
+
+The report names each field by its path, and a function's line is still per capability, per method: `handle : env.db exec query, env.admin matches, env.audit append`; `save : w.db exec, w.audit append`. A test may take one (`fn book_a_slot(env: Env)`): each field is a grant of the field's name (`--secret admin=file:..` grants `env.admin`), so a test's parameter names and field names must be distinct, and `kio test`'s defaults apply per field.
+
+Group what travels together: a service's environment, a job's clock and log. A specialized helper takes the leaves it uses (`fn save(audit: Dir, now: Clock, ..)`) or a narrow group (`Writer { db, audit, now }`), so its report line is its own authority. One program-wide `Env` passed to every function is not the default library interface: each such function's line becomes the whole program's authority, and the report tells a reviewer nothing about what it does. A function's line is what it may call, not what it holds: `handle : env.db exec` says nothing about `env.admin` until something reached through `handle` calls it, and then the use appears as `+` in `kio check --base`.
+
 ## Grants file
 
 `--grants app.grants` reads flags from a file, kept and reviewed beside the code. One flag per line, as on the command line, split at the first space with no quoting (the value is the rest of the line, spaces and quotes included); blank lines and lines starting with `#` are skipped. Any `kio run` flag but `--grants` may appear.
@@ -357,7 +380,7 @@ $ kio run spin.kio --fuel 1000 --json
 
 ## Tests
 
-`kio test prog.kio [--grants file] [--filter substr] [--cases n] [--seed s] [--json] [--verbose] [limits]` runs every `#[test]` function ([language.md](language.md#tests)) whose name contains `--filter`, sorted by name (`util::t` for one in `util.kio`). The program needs no `main`. Each test is compiled as the entry and runs in a fresh instance with the default limits (or the limit flags given). Each parameter gets the grants file's grant of its name and type (`--kv k=..` is for `k: Kv`, `--hmac k=..` for `k: Hmac`, `--secret k=..` for `k: Secret`, `--value k=..` for `k: Value`); the file's other grants are ignored for that test, and a test is held to its own authority as `kio run` holds `main` (`:ro`, `:verify`, the source and grants-file checks). A parameter the file does not name gets, by type:
+`kio test prog.kio [--grants file] [--filter substr] [--cases n] [--seed s] [--json] [--verbose] [limits]` runs every `#[test]` function ([language.md](language.md#tests)) whose name contains `--filter`, sorted by name (`util::t` for one in `util.kio`). The program needs no `main`. Each test is compiled as the entry and runs in a fresh instance with the default limits (or the limit flags given). Each parameter gets the grants file's grant of its name and type (`--kv k=..` is for `k: Kv`, `--hmac k=..` for `k: Hmac`, `--secret k=..` for `k: Secret`, `--value k=..` for `k: Value`; a [capability struct](#capability-structs) parameter's fields each by the field's name); the file's other grants are ignored for that test, and a test is held to its own authority as `kio run` holds `main` (`:ro`, `:verify`, the source and grants-file checks). A parameter the file does not name gets, by type:
 
 | Type | Default |
 |---|---|

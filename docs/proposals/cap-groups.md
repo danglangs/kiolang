@@ -1,6 +1,6 @@
 # Grouping capabilities
 
-Design only (maintainer-approved to write, 2026-11-19; A3 #1, F15; A2 friction 3.7). Revised 2026-11-19; ready to pin as a task. A change to language semantics is a one-way door: this note is written so the decision takes one reading.
+Design (maintainer-approved to write, 2026-11-19; A3 #1, F15; A2 friction 3.7). Revised 2026-11-19; implemented as L32a-L32c the same day ([lang-todo.md](../lang-todo.md), decisions #334-#342 in [open_questions.md](../open_questions.md)); the user-facing text is in guide.md "Capability structs" and language.md rule 1. A change to language semantics is a one-way door: this note is written so the decision takes one reading.
 
 **What grouping does and does not do.** Grouping preserves explicit capability provenance and per-operation reporting: every method a function may call is still charged to one capability, and that capability is still traced to the `main` grant it came from. Narrow groups and individual fields support least-authority interfaces; grouping itself does not grant less. A helper that takes a broad `Env` receives all of its authority, whether or not it uses it; its report line lists what it uses, not what it holds (Limits), so a use added later appears as `+`.
 

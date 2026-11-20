@@ -227,7 +227,7 @@ Compiled to native code through Wasm, steady execution runs at 1.1-2x Rust on mo
 
 - **Available today:** everything under [What works](#what-works), in the [latest release](https://github.com/danglangs/kiolang/releases/latest).
 - **Being evaluated:** a deterministic gate that rejects changes with no reader, generator and reviewer agents against Python at equal evidence, and outside developers reviewing real changes (tasks G1, G2 and W1 in [product-todo](docs/product-todo.md)).
-- **Proposed:** [grouping capabilities](docs/proposals/cap-groups.md), so a helper takes one group instead of five parameters.
+- **In the next release:** [capability structs](docs/guide.md#capability-structs), so a helper or a test takes one `env: Env` instead of five parameters while the report stays per capability, per method.
 
 Where work stands: [docs/status.md](docs/status.md).
 

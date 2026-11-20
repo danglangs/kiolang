@@ -783,11 +783,15 @@ fn entry_authority(
                     push("derived", &format!("  {m} in {}", fs.join(", ")));
                 }
             }
-            if funcs && diff.added && !diff.grant_added {
-                // Exit 3 with no grant added: name the functions whose lines add.
-                let names: Vec<&str> = (diff.funcs.iter())
-                    .filter_map(|l| Some(l.strip_prefix("+ ")?.split_once(": ")?.0))
-                    .collect();
+            // A `main` grant renamed moves every binding it reaches: one line, not one per leaf.
+            if let Some(l) = diff.renamed() {
+                push("derived", &l);
+            }
+            // Exit 3 with no grant added: name the functions whose lines add.
+            let names: Vec<&str> = (diff.funcs.iter())
+                .filter_map(|l| Some(l.strip_prefix("+ ")?.split_once(": ")?.0))
+                .collect();
+            if funcs && diff.added && !diff.grant_added && !names.is_empty() {
                 let grants = if diff.grants.is_empty() {
                     "grants unchanged"
                 } else {
@@ -801,10 +805,16 @@ fn entry_authority(
             if funcs {
                 diff.funcs.iter().for_each(|l| push("derived", l));
             }
+            // Binding lines (L32): the grants each leaf is bound to, where that changed.
+            if let Some(h) = diff.binding_header() {
+                push("derived", &h);
+            }
+            diff.binding_lines(false).iter().for_each(|l| push("derived", l));
             let gained: Vec<_> = (gained.iter())
                 .map(|(g, m, fs)| json!({"grant": g, "method": m, "functions": fs}))
                 .collect();
-            let v = json!({"grants": diff.grants, "funcs": diff.funcs, "added": diff.added, "gained": gained});
+            let bindings = kio_host::bindings_json(&diff);
+            let v = json!({"grants": diff.grants, "funcs": diff.funcs, "bindings": bindings, "added": diff.added, "gained": gained});
             (v, true)
         }
         Err((is_base, diags)) => {
@@ -1472,6 +1482,36 @@ fn not_checked(inputs: &Inputs, page: &mut Page) {
                 .push(format!("{prefix}{param}: {ty} {}: {what}{mark}", reached.join(", ")));
             rows.push(
                 json!({"entry": entry, "grant": param, "type": ty, "methods": reached, "what": what, "changed": users}),
+            );
+        }
+        // A leaf bound to two or more grants of one type (L32): which call site binds which is
+        // behaviour, which no line shows; a reordering of those calls moves nothing above.
+        let origins = lang::origins(&p);
+        for ((f, leaf), grants) in &origins {
+            if f == "main" || grants.len() < 2 {
+                continue;
+            }
+            let ty = |g: &String| a.main.iter().find(|(n, _)| n == g).map(|(_, t)| t.clone());
+            let mut tys: Vec<Option<String>> = grants.iter().map(ty).collect();
+            tys.sort();
+            tys.dedup();
+            if tys.len() == grants.len() {
+                continue;
+            }
+            // Marked when a caller's text changed (R1a4): the callers `main` reaches.
+            let users: Vec<String> = (lang::reachable(&p, ["main"]).into_iter())
+                .filter(|c| c != f && changes.changed.contains(c) && lang::reachable(&p, [c.as_str()]).contains(f))
+                .collect();
+            let mark = match users.is_empty() {
+                true => String::new(),
+                false => format!(" (changed: {})", users.join(", ")),
+            };
+            let from: Vec<String> = grants.iter().cloned().collect();
+            let what = "which call uses which is behaviour";
+            page.not_checked
+                .push(format!("{prefix}{f}: {leaf} from {}; {what}{mark}", from.join(", ")));
+            rows.push(
+                json!({"entry": entry, "function": f, "leaf": leaf, "from": from, "what": what, "changed": users}),
             );
         }
     }
