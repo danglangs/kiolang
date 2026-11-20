@@ -30,6 +30,8 @@ Since C5 `kio run` and `--listen` run compiled code. Measured on an Apple Silico
 
 Apple M3 Max, release, load 22-36 from other agents' builds. Five interleaved rounds; each runs every build on both workloads: 30,000 `ab -k -c 12` requests after 3,000 to warm up, server CPU time from `ps` (getrusage) over the 30,000. Hello is kio-web's `GET /hello/kio`; JSON is the speed plan's `POST /bookings` (parse, validate four fields, 201 with JSON). Best (mean) of five.
 
+The absolute figures below depend on load: CPU a request falls as load rises on macOS (C23, 2026-11-20: at load 6-7 the C17 binary measures 135 µs for JSON, main 135, Rust 14.7; with 24 CPU hogs main measures 68). Compare builds only within interleaved rounds, and quote the in-process probe at 1 thread (JSON 30 µs) as the load-independent figure.
+
 | Build | hello CPU a request | JSON CPU a request | hello req/s | JSON req/s |
 |---|---|---|---|---|
 | before (main, e0410e4) | 120 µs (131) | 139 µs (147) | 45.9 k | 40.9 k |

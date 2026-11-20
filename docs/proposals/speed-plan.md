@@ -36,7 +36,7 @@ Startup and services (the parts the rows above leave out):
 | a handler that only sends "ok", CPU per request | | | 128-131 µs | |
 | `GET /hello/kio` req/s (run.py, load 69 to 15) | 229 k | 28.5 k | 50.0 k (table: 73.8 k at C8b4, quieter machine) | |
 
-CPU per request is `ps` CPU time of the server over 50 k `ab -k -c 12` requests, robust to load where req/s is not. The JSON request's compiled code is 54 k fuel (about 3 µs); the hello request 33 k.
+CPU per request is `ps` CPU time of the server over 50 k `ab -k -c 12` requests, not robust to load (C23: it falls as load rises, kernel contention on macOS), so every figure states its load and concurrency. The JSON request's compiled code is 54 k fuel (about 3 µs); the hello request 33 k.
 
 So: compute-only code is 1.1-1.5x Rust; allocation-heavy rows are 1.6-2.1x except five (closures 5.2x, `Map` 4.8x, json.kio 5.1x, `HashMap` 4.1x, `logscan` 3.7x). The two largest gaps on realistic work are outside the table: a request costs 22x Rust's CPU and 5x Python's, and every `kio run` spends 33 ms compiling the runtime.
 
