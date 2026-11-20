@@ -5,6 +5,11 @@
 use kio_host::{Kio, Limits};
 use sha2::{Digest, Sha256};
 use std::path::Path;
+use std::sync::Mutex;
+
+/// The cache's lookup counters are process-wide: every test here that compiles in this process
+/// holds this, so a test reading the counters sees only its own compiles.
+static STATS: Mutex<()> = Mutex::new(());
 
 /// `kio run` with `$XDG_CACHE_HOME` at `xdg`: exit code, stdout, stderr.
 fn kio_run(xdg: &Path, args: &[&str]) -> (i32, String, String) {
@@ -33,6 +38,7 @@ const OTHER: &str = "fn main(d: Dir, src: Dir) -> Result<Int, IoErr> { Ok(2) }";
 /// was, byte for byte.
 #[test]
 fn a_planted_entry_is_never_loaded_or_touched() {
+    let _stats = STATS.lock().unwrap_or_else(|e| e.into_inner());
     let t = tempfile::tempdir().unwrap();
     // The old format: named by the SHA-256 of kio's version, a 0 byte and the program's Wasm;
     // holding the native code, then its SHA-256.
@@ -88,6 +94,7 @@ fn a_planted_entry_is_never_loaded_or_touched() {
 /// `$XDG_CACHE_HOME`, and the library, which has no cache to configure, runs from source alone.
 #[test]
 fn every_run_compiles_and_writes_no_cache() {
+    let _stats = STATS.lock().unwrap_or_else(|e| e.into_inner());
     let t = tempfile::tempdir().unwrap();
     let prog = t.path().join("p.kio");
     std::fs::write(&prog, "fn main() -> Int { 3 }").unwrap();
@@ -102,12 +109,15 @@ fn every_run_compiles_and_writes_no_cache() {
     }
 }
 
-/// No path in the host loads native code from bytes: `Component::deserialize` and
-/// `deserialize_file` trust what they are given. Components are made with `Component::new` from
-/// the Wasm codegen just produced.
+/// No native code enters from outside the binary: no path in the host loads native code from
+/// bytes (`Component::deserialize` and `deserialize_file` trust what they are given), components
+/// are made with `Component::new` from the Wasm codegen just produced, and the runtime's
+/// embedded code (host/src/runtime_cache.rs) is `include_bytes!` of the build's output alone:
+/// that file names no file, environment variable or path.
 #[test]
-fn the_host_never_deserializes_native_code() {
-    let mut dirs = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+fn no_native_code_enters_from_outside_the_binary() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut dirs = vec![src.clone()];
     while let Some(dir) = dirs.pop() {
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
@@ -119,6 +129,49 @@ fn the_host_never_deserializes_native_code() {
             assert!(!text.contains("deserialize"), "{}", path.display());
         }
     }
+    let cache = std::fs::read_to_string(src.join("runtime_cache.rs")).unwrap();
+    assert_eq!(cache.matches("include_bytes!(").count(), 1);
+    assert!(cache.contains(r#"include_bytes!(concat!(env!("OUT_DIR"), "/runtime.cache"))"#));
+    for forbidden in [
+        "std::fs", "fs::", "File", "std::env", "env::", "var_os", "Path", "read(", "read_to", "open(",
+    ] {
+        assert!(!cache.contains(forbidden), "runtime_cache.rs mentions {forbidden:?}");
+    }
+}
+
+/// On the release targets with the baseline's features (every CI runner, every Mac with Apple
+/// silicon), the engine `kio run` makes is served the embedded code: a downloaded binary gets
+/// the gain, not only the machine that built it (`config::baseline`).
+#[test]
+fn the_release_targets_are_served() {
+    let _stats = STATS.lock().unwrap_or_else(|e| e.into_inner());
+    let kio = Kio::new(Limits::default()).unwrap();
+    let release_target = cfg!(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        any(target_os = "linux", target_os = "macos")
+    ));
+    if release_target {
+        assert!(kio.runtime_cache_served());
+    }
+}
+
+/// `kio run --json` says whether the runtime came from the binary and how the lookups went.
+#[test]
+fn json_reports_the_runtime_cache() {
+    let t = tempfile::tempdir().unwrap();
+    let prog = t.path().join("p.kio");
+    std::fs::write(&prog, "fn main() -> Int { 3 }").unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_kio"))
+        .args(["run", prog.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    let line: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let cache = &line["runtime_cache"];
+    assert!(cache["served"].is_boolean(), "{line}");
+    if cache["served"] == true {
+        assert!(cache["hits"].as_u64().unwrap() > 500, "{line}");
+    }
+    assert!(cache["misses"].as_u64().unwrap() >= 1, "{line}");
 }
 
 /// The runtime's native code comes from the binary (host/src/runtime_cache.rs): compiling a
@@ -129,6 +182,7 @@ fn the_host_never_deserializes_native_code() {
 /// floor here allows for it.
 #[test]
 fn the_runtime_is_served_from_the_binary() {
+    let _stats = STATS.lock().unwrap_or_else(|e| e.into_inner());
     let (hits0, misses0) = Kio::runtime_cache_stats();
     let mut kio = Kio::new(Limits::default()).unwrap();
     assert_eq!(kio.run("fn main() -> Int { 3 }", vec![]).unwrap().unwrap().value, "3");
@@ -143,6 +197,7 @@ fn the_runtime_is_served_from_the_binary() {
 /// native code as `kio run`'s, so it is served from the binary too.
 #[test]
 fn a_server_is_served_from_the_binary() {
+    let _stats = STATS.lock().unwrap_or_else(|e| e.into_inner());
     let (hits0, _) = Kio::runtime_cache_stats();
     let src = r#"fn main(req: Incoming, res: Outgoing) -> Result<(), WebErr> {
         res.send(200, [], [], "ok".to_bytes())
@@ -152,4 +207,47 @@ fn a_server_is_served_from_the_binary() {
         .unwrap();
     let (hits, _) = Kio::runtime_cache_stats();
     assert!(hits - hits0 > 500, "hits {}", hits - hits0);
+}
+
+/// An engine the seed does not fit (here: one asked to compile from source, as an engine with
+/// another fingerprint is) compiles everything itself: the program runs the same, and the cache
+/// is never consulted.
+#[test]
+fn an_engine_without_the_seed_compiles_from_source() {
+    let _stats = STATS.lock().unwrap_or_else(|e| e.into_inner());
+    let src = "fn sq(x: Int) -> Int { x * x } fn main() -> Int { sq(7) - 1 }";
+    let before = Kio::runtime_cache_stats();
+    let mut plain = Kio::new_with_engine(Limits::default(), false, true).unwrap();
+    assert_eq!(plain.run(src, vec![]).unwrap().unwrap().value, "48");
+    assert_eq!(Kio::runtime_cache_stats(), before, "no lookup on a plain engine");
+    let mut cached = Kio::new_with_engine(Limits::default(), true, true).unwrap();
+    assert_eq!(cached.run(src, vec![]).unwrap().unwrap().value, "48");
+    assert!(
+        Kio::runtime_cache_stats().0 > before.0,
+        "the cached engine looked the runtime up"
+    );
+}
+
+/// A function the seed lacks (every program function) misses and is compiled from source; what
+/// a run compiles is never kept, so the same program misses as often the second time.
+#[test]
+fn misses_compile_from_source_and_are_never_kept() {
+    let _stats = STATS.lock().unwrap_or_else(|e| e.into_inner());
+    let src = r#"fn a(x: Int) -> Int { x + 1 }
+        fn b(s: Str) -> Str { s + "!" }
+        fn c(xs: List<Int>) -> Int { xs.len() }
+        fn main() -> Str { b(a(1).to_str()) + c([1, 2]).to_str() }"#;
+    let mut kio = Kio::new_with_engine(Limits::default(), true, false).unwrap();
+    let mut counts = Vec::new();
+    for _ in 0..2 {
+        let (h0, m0) = Kio::runtime_cache_stats();
+        assert_eq!(kio.run(src, vec![]).unwrap().unwrap().value, "2!2");
+        let (h, m) = Kio::runtime_cache_stats();
+        counts.push((h - h0, m - m0));
+    }
+    assert!(counts[0].1 >= 4, "the program's own functions miss: {counts:?}");
+    assert_eq!(
+        counts[0], counts[1],
+        "a second compile hits and misses exactly as the first"
+    );
 }

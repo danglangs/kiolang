@@ -64,7 +64,7 @@ fn seed_runtime_cache() {
         .encode()
         .expect("wrapping the runtime as a component");
     let recorder = std::sync::Arc::new(Recorder::default());
-    let mut config = config::compile_config();
+    let mut config = config::compile_config_with(env::var_os("CARGO_FEATURE_CACHE_CHECKS").is_some());
     config
         .enable_incremental_compilation(recorder.clone())
         .expect("Cranelift's incremental cache");

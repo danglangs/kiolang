@@ -112,7 +112,8 @@ fn json_results() {
         (Some(false), Some(1), Some(5))
     );
     let keys: Vec<_> = j.as_object().unwrap().keys().cloned().collect();
-    assert_eq!(keys, ["failed", "ok", "passed", "tests"]);
+    assert_eq!(keys, ["failed", "ok", "passed", "runtime_cache", "tests"]);
+    assert!(j["runtime_cache"]["served"].is_boolean());
     let tests = j["tests"].as_array().unwrap();
     let names: Vec<_> = tests.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert_eq!(names, ["adds", "adds_wrong", "asserts", "errs", "indexes", "loops"]);
@@ -508,6 +509,18 @@ fn ungranted(api: Http) {}
 
     let (code, out, _) = c.kio(&["--cases", "3", "--verbose"]);
     assert_eq!(code, 1);
+    // `--verbose` also says where the runtime's native code came from (C18); its counts vary.
+    let runtime: Vec<&str> = out.lines().filter(|l| l.starts_with("runtime: ")).collect();
+    assert_eq!(runtime.len(), 1, "{out}");
+    assert!(
+        runtime[0].contains(" cache hits, ") && runtime[0].ends_with(" misses)"),
+        "{out}"
+    );
+    let out: String = out
+        .lines()
+        .filter(|l| !l.starts_with("runtime: "))
+        .map(|l| format!("{l}\n"))
+        .collect();
     let v = |(f, kb): (u64, u64)| format!("  (fuel {}; peak memory {kb} KB)", commas(f));
     let failures = failures.replacen("heavy_fails\n", &format!("heavy_fails{}\n", v(fails)), 1);
     let want = format!(

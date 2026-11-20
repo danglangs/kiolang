@@ -365,17 +365,18 @@ Each run writes a `start` line (program hash, dependencies, grants, limits), its
 | `diff` | `check --base`: `{"grants", "funcs", "added", "deps"}`, `deps` each dependency whose pin changed, `[{"name", "old", "new"}]` (`null` where absent) |
 | `audit` | the `--audit` path (appended across runs) |
 | `used` | `run`: `{"fuel", "calls", "io", "peak_memory", "ms"}` |
+| `runtime_cache` | `run`, `test`: `{"served", "hits", "misses"}`: whether the runtime's native code came from the binary rather than being compiled with the program, and Cranelift's lookups in it (C18) |
 | `deps` | `check`, `run`: each dependency loaded through `kio.deps`, `[{"name", "path", "sha256"}]` |
 
 Kinds: `check`, `grant` (a grant that does not bind, exit 1; one the host refuses at startup, exit 2), `usage` (exit 2), `deps` (a `kio.deps` error, exit 2), `err` (`main` returned `Err`), `runtime`, `fuel`, `memory`, `timeout`, `stack`, `calls`, `io` (a limit; the hint names its flag), `denied` (the host stopped a call), `internal`.
 
 ```
 $ kio run job.kio --dir input=in:ro --json
-{"audit":null,"deps":[],"diff":null,"errors":[],"hidden":{"no_capability":0,"unreached":0,"unreached_with_capability":0},"ok":true,"report":["main : input read"],"report_tests":[],"used":{"calls":1,"fuel":98619,"io":5,"ms":0.5,"peak_memory":1966080},"value":"{\"alice\": 1}"}
+{"audit":null,"deps":[],"diff":null,"errors":[],"hidden":{"no_capability":0,"unreached":0,"unreached_with_capability":0},"ok":true,"report":["main : input read"],"report_tests":[],"runtime_cache":{"hits":1028,"misses":32,"served":true},"used":{"calls":1,"fuel":98619,"io":5,"ms":0.5,"peak_memory":1966080},"value":"{\"alice\": 1}"}
 $ kio run job.kio --json
-{"audit":null,"deps":[],"diff":null,"errors":[{"col":9,"file":"job.kio","hint":"grant it: `--dir input=path`","kind":"grant","line":1,"message":"no grant for `input: Dir`"}],"hidden":{"no_capability":0,"unreached":0,"unreached_with_capability":0},"ok":false,"report":["main : input read"],"report_tests":[],"used":null,"value":null}
+{"audit":null,"deps":[],"diff":null,"errors":[{"col":9,"file":"job.kio","hint":"grant it: `--dir input=path`","kind":"grant","line":1,"message":"no grant for `input: Dir`"}],"hidden":{"no_capability":0,"unreached":0,"unreached_with_capability":0},"ok":false,"report":["main : input read"],"report_tests":[],"runtime_cache":{"hits":1028,"misses":32,"served":true},"used":null,"value":null}
 $ kio run spin.kio --fuel 1000 --json
-{"audit":null,"deps":[],"diff":null,"errors":[{"col":null,"file":null,"hint":"raise it with --fuel","kind":"fuel","line":null,"message":"out of fuel (limit 1000)"}],"hidden":{"no_capability":0,"unreached":0,"unreached_with_capability":0},"ok":false,"report":["main : none"],"report_tests":[],"used":{"calls":0,"fuel":1000,"io":0,"ms":0.2,"peak_memory":1179648},"value":null}
+{"audit":null,"deps":[],"diff":null,"errors":[{"col":null,"file":null,"hint":"raise it with --fuel","kind":"fuel","line":null,"message":"out of fuel (limit 1000)"}],"hidden":{"no_capability":0,"unreached":0,"unreached_with_capability":0},"ok":false,"report":["main : none"],"report_tests":[],"runtime_cache":{"hits":1028,"misses":32,"served":true},"used":{"calls":0,"fuel":1000,"io":0,"ms":0.2,"peak_memory":1179648},"value":null}
 ```
 
 ## Tests
@@ -403,7 +404,7 @@ FAIL totals
     read 2 rows
 1 passed, 1 failed
 $ kio test app.kio --filter parses --json
-{"failed":0,"ok":true,"passed":1,"tests":[{"error":null,"fuel":6739,"log":"","ms":41.2,"name":"parses","ok":true,"peak_memory":1769472}]}
+{"failed":0,"ok":true,"passed":1,"runtime_cache":{"hits":1028,"misses":32,"served":true},"tests":[{"error":null,"fuel":6739,"log":"","ms":41.2,"name":"parses","ok":true,"peak_memory":1769472}]}
 ```
 
 `--json`'s `error` is an `errors` entry of [JSON output](#json-output) (an assertion is `runtime`, an `Err` return `err`). A check or usage error prints `{"ok": false, "passed": 0, "failed": 0, "tests": [], "errors": [..]}`.

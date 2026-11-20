@@ -16,6 +16,9 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      # Every runtime-cache hit checked against a fresh compile (host/src/config.rs), on the
+      # corpus and a generated batch against a plain engine.
+      - run: cargo test -p kio --features cache-checks --test cache --test cache_differential
       - run: cargo build -p kio && KIO=target/debug/kio eval/check_refs.sh
       - run: KIO=target/debug/kio python3 -m unittest discover tools/kio-py/tests
       - run: cargo clippy -p runtime --target wasm32-unknown-unknown --features test-heap -- -D warnings

@@ -41,6 +41,9 @@ struct JsonOut {
     used: Option<Used>,
     /// The dependencies `kio check` loaded through `kio.deps` (PK1).
     deps: Vec<kio_host::Dep>,
+    /// `run`: whether the runtime's native code came from the binary, and the cache lookups
+    /// (C18, host/src/runtime_cache.rs).
+    runtime_cache: Option<serde_json::Value>,
 }
 
 /// `--json`'s report fields from `s` (P8): `report` holds `main`'s section only.
@@ -101,6 +104,7 @@ fn cli() -> i32 {
         "diff": o.diff,
         "audit": o.audit,
         "used": used,
+        "runtime_cache": o.runtime_cache,
         "deps": o.deps.iter().map(|d| json!({"name": d.name, "path": d.path, "sha256": d.sha256})).collect::<Vec<_>>(),
     });
     println!("{line}");
@@ -1260,7 +1264,10 @@ fn run_program(prog: &Program, flags: &[&str], grants_file: Option<&str>, dry: b
         Some(t) => kio.run_test(files, &t.test.name, dirs, https),
         None => kio.run_files(files, dirs, https),
     };
-    set_json(|o| o.used = kio.used());
+    set_json(|o| {
+        o.used = kio.used();
+        o.runtime_cache = Some(runtime_cache_json());
+    });
     match result {
         Err(e) if e.downcast_ref::<kio_host::Refused>().is_some() => refuse(format!("{e}")),
         Err(e) => {
@@ -1442,15 +1449,32 @@ fn test(path: &str, flags: &[&str], json: bool, verbose: bool) -> i32 {
         let rows: Vec<_> = results.iter().map(result_json).collect();
         println!(
             "{}",
-            json!({"ok": failed == 0, "passed": passed, "failed": failed, "tests": rows})
+            json!({"ok": failed == 0, "passed": passed, "failed": failed, "tests": rows,
+                "runtime_cache": runtime_cache_json()})
         );
     } else {
         for r in &results {
             test_lines(&tests, r, verbose).iter().for_each(|l| println!("{l}"));
         }
+        if verbose {
+            let (served, hits, misses) = Kio::runtime_cache_status();
+            let served = if served {
+                "served from the binary"
+            } else {
+                "compiled from source"
+            };
+            println!("runtime: {served} ({hits} cache hits, {misses} misses)");
+        }
         println!("{passed} passed, {failed} failed");
     }
     i32::from(failed > 0)
+}
+
+/// `--json`'s `runtime_cache`: whether the runtime's native code came from the binary, and the
+/// lookups Cranelift made in it (C18, host/src/runtime_cache.rs).
+fn runtime_cache_json() -> serde_json::Value {
+    let (served, hits, misses) = Kio::runtime_cache_status();
+    json!({"served": served, "hits": hits, "misses": misses})
 }
 
 /// `kio test --json`'s row for `r`.

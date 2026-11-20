@@ -136,7 +136,7 @@ P9 done: a `chars()` loop 617 -> 51 fuel a character (compiled `for c in s.chars
 
 ## Waiting on the maintainer
 
-C18 prototype (branch, measured, not merged; compiler-todo C18, open_questions #345): the runtime's native code compiled at build time into Cranelift's incremental cache and embedded in the binary; `kio run` of an empty program 38 to 27 ms (to 21 ms with a one-line Cranelift fix, `DataFlowGraph::clear` not clearing `exception_tables`, which needs an upstream patch), every row the same gain, steady execution and fuel unchanged, `kio review` 326 to 240 ms. Merge needs the adversarial review of runtime_cache.rs and a decision on the Cranelift fix.
+C18 prototype (branch, measured, not merged; compiler-todo C18, open_questions #345): the runtime's native code compiled at build time into Cranelift's incremental cache and embedded in the binary; `kio run` of an empty program 38 to 27 ms (-29%; -46% with a one-line Cranelift fix, `DataFlowGraph::clear` not clearing `exception_tables`, which needs an upstream patch), every row the same gain, steady execution matched on fuel and outputs (cached against uncached: host/tests/cache_differential.rs), the flow test suite -14%, `kio review` 326 to 240 ms (-26%), no change per `--listen` request. Merge needs the adversarial review of runtime_cache.rs and a decision on the Cranelift fix.
 
 Signing the macOS binary needs an Apple account (#232). Tuples stay deferred (today a hint, L20) unless an eval shows models still reach for them. Approved: L21-L26, H22, H23 (a caps.wit change), P4 (the grants file), E3, E3b (2026-11-11) and C8c9 (per-loop fuel, after C8c4 and C8c3, with a security review); C8c9 stays waiting on its turn in the queue.
 

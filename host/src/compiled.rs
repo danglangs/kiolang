@@ -375,6 +375,8 @@ pub struct Shared {
     engine: Engine,
     stack: usize,
     ticker: Arc<Ticker>,
+    /// Whether the engine takes the runtime's native code from the binary (runtime_cache.rs).
+    cached: bool,
 }
 
 impl Shared {
@@ -385,7 +387,12 @@ impl Shared {
         config.enable_incremental_compilation(Arc::new(FunctionCache::default()))?;
         let engine = Engine::new(&config)?;
         let ticker = Arc::new(Ticker(spawn_ticker(&engine)));
-        Ok(Shared { engine, stack, ticker })
+        Ok(Shared {
+            engine,
+            stack,
+            ticker,
+            cached: false,
+        })
     }
 }
 
@@ -438,6 +445,8 @@ impl wasmtime::CacheStore for FunctionCache {
 /// fresh store, so its counters and deadline start over; compiling is not charged to it.
 pub struct Kio {
     engine: Engine,
+    /// Whether the engine takes the runtime's native code from the binary (runtime_cache.rs).
+    runtime_cached: bool,
     limits: Limits,
     _ticker: Arc<Ticker>,
     /// The audit log and the `(name, path)` of each `Dir` grant, for the next run.
@@ -473,9 +482,9 @@ impl Kio {
         set_stack(&mut config, limits.stack);
         // The runtime's native code comes from the binary when the engine matches the build's
         // (runtime_cache.rs); the program's functions are compiled per run either way.
-        let (engine, _) = crate::runtime_cache::engine(config)?;
+        let (engine, cached) = crate::runtime_cache::engine(config)?;
         let ticker = Arc::new(Ticker(spawn_ticker(&engine)));
-        Ok(Kio::with(engine, ticker, limits))
+        Ok(Kio::with(engine, ticker, limits, cached))
     }
 
     /// Like `new`, on `shared`'s engine (T5): a function compiled for an earlier run on `shared`
@@ -484,12 +493,34 @@ impl Kio {
         if shared.stack != limits.stack {
             wasmtime::bail!("an engine for a {} B stack, not {} B", shared.stack, limits.stack);
         }
-        Ok(Kio::with(shared.engine.clone(), shared.ticker.clone(), limits))
+        Ok(Kio::with(
+            shared.engine.clone(),
+            shared.ticker.clone(),
+            limits,
+            shared.cached,
+        ))
     }
 
-    fn with(engine: Engine, ticker: Arc<Ticker>, limits: Limits) -> Self {
+    /// Test only: a runner whose engine takes the runtime's native code from the binary
+    /// (`cached`) or compiles everything from source, on one thread or in parallel.
+    #[cfg(feature = "test-hooks")]
+    pub fn new_with_engine(limits: Limits, cached: bool, parallel: bool) -> Result<Self> {
+        let mut config = config::compile_config();
+        set_stack(&mut config, limits.stack);
+        config.parallel_compilation(parallel);
+        let (engine, cached) = if cached {
+            crate::runtime_cache::engine(config)?
+        } else {
+            (Engine::new(&config)?, false)
+        };
+        let ticker = Arc::new(Ticker(spawn_ticker(&engine)));
+        Ok(Kio::with(engine, ticker, limits, cached))
+    }
+
+    fn with(engine: Engine, ticker: Arc<Ticker>, limits: Limits, runtime_cached: bool) -> Self {
         Kio {
             engine,
+            runtime_cached,
             limits,
             _ticker: ticker,
             audit: None,
@@ -553,11 +584,23 @@ impl Kio {
         Ok((lowered.wasm.component, native))
     }
 
-    /// Test only: lookups of the runtime's embedded native code so far, `(hits, misses)`, over
-    /// every engine of this process (runtime_cache.rs).
-    #[cfg(feature = "test-hooks")]
+    /// Whether this runner's engine takes the runtime's native code from the binary
+    /// (runtime_cache.rs); otherwise it compiles the runtime with each program.
+    pub fn runtime_cache_served(&self) -> bool {
+        self.runtime_cached
+    }
+
+    /// Whether any engine of this process was served the runtime's native code, and the lookups
+    /// so far over every engine, `(served, hits, misses)`: `kio run --json`'s `runtime_cache`.
+    pub fn runtime_cache_status() -> (bool, u64, u64) {
+        crate::runtime_cache::status()
+    }
+
+    /// Lookups of the runtime's embedded native code so far, `(hits, misses)`, over every
+    /// engine of this process.
     pub fn runtime_cache_stats() -> (u64, u64) {
-        crate::runtime_cache::stats()
+        let (_, hits, misses) = crate::runtime_cache::status();
+        (hits, misses)
     }
 
     /// The message for a run that hit one of its limits, or `None` for any other error.

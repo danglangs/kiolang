@@ -27,6 +27,7 @@ fn kio(cwd: &Path, args: &[&str]) -> (i32, Value, String) {
             "ok",
             "report",
             "report_tests",
+            "runtime_cache",
             "used",
             "value"
         ]

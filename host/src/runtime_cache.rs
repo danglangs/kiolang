@@ -7,32 +7,39 @@
 //!
 //! What this trusts, and how each requirement of C18 holds:
 //! - Only bytes the build produced reach Cranelift: `SEED` is `include_bytes!` of the build
-//!   script's output. No file, environment variable, cache directory or other source is read,
-//!   and nothing is ever written: `insert` keeps nothing and returns false, so a run's compiled
-//!   functions never enter the cache. open_questions #75 stands: no native code is loaded from
-//!   disk, and no program can plant any.
+//!   script's output. No file, environment variable, cache directory or other source is read
+//!   (host/tests/cache.rs checks this file's text), and nothing is ever written: `insert` keeps
+//!   nothing and returns false, so a run's compiled functions never enter the cache.
+//!   open_questions #75 stands: no native code enters from outside the binary, and no program
+//!   can plant any.
 //! - The engine is fixed at build time and checked at load: the seed carries the build engine's
 //!   `config::fingerprint` (Wasmtime's own compatibility hash of target, CPU features, compiler
-//!   flags and tunables). `engine` serves the seed only to an engine whose fingerprint is equal;
-//!   any other engine compiles from source. Cranelift also refuses an entry from another
-//!   Cranelift version (its version marker) and compiles the function instead. Both the seed
-//!   and the binary come from one Cargo.lock, so one Wasmtime version.
+//!   flags and tunables; `config::baseline` pins the ISA so it is the same on every machine of a
+//!   release target that has the baseline's features). `engine` serves the seed only to an
+//!   engine whose fingerprint is equal; any other engine compiles from source. Cranelift also
+//!   refuses an entry from another Cranelift version (its version marker) and compiles the
+//!   function instead. Both the seed and the binary come from one Cargo.lock, so one Wasmtime
+//!   version.
 //! - Program data patches no native bytes: a cached entry is a function compiled from an IR
 //!   whose SHA-256 is the key, resolved against the program's module exactly as a function
 //!   compiled this run would be (Cranelift's `apply_params`); the program supplies Wasm, and the
 //!   host compiles whatever is not in the cache. A program function whose IR equals a runtime
-//!   function's gets that IR's code, which compiling would also produce.
+//!   function's gets that IR's code, which compiling would also produce. With the host's
+//!   `cache-checks` feature Cranelift compiles every hit as well and asserts the two equal.
 //! - The module is one core module as before: memory, handles, fuel, epochs, traps and the
 //!   instance per run are untouched (docs/codegen.md, "Pipeline"). A miss costs only the time
 //!   to compile that function.
 
 use std::borrow::Cow;
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, OnceLock};
 use wasmtime::{CacheStore, Config, Engine, Result};
 
 /// host/build.rs's output; its format is described there.
 const SEED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime.cache"));
+
+/// An entry's fixed part: a 32-byte key and a 4-byte length.
+const ENTRY_HEAD: usize = 36;
 
 /// The seed, parsed: the build engine's fingerprint and the entries, sorted by key.
 struct Seed {
@@ -51,6 +58,11 @@ fn parse(bytes: &'static [u8]) -> Option<Seed> {
     let (fingerprint, rest) = rest.split_first_chunk::<8>()?;
     let (count, mut rest) = rest.split_first_chunk::<4>()?;
     let count = u32::from_le_bytes(*count) as usize;
+    // Each entry takes at least its head, so a count the bytes cannot hold is refused before
+    // anything is allocated for it.
+    if count > rest.len() / ENTRY_HEAD {
+        return None;
+    }
     let mut entries = Vec::with_capacity(count);
     for _ in 0..count {
         let (key, r) = rest.split_at_checked(32)?;
@@ -70,35 +82,41 @@ fn parse(bytes: &'static [u8]) -> Option<Seed> {
 
 static HITS: AtomicU64 = AtomicU64::new(0);
 static MISSES: AtomicU64 = AtomicU64::new(0);
+static SERVED: AtomicBool = AtomicBool::new(false);
 
-/// Cache lookups so far: `(hits, misses)`, over every engine of this process (a test hook).
-#[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
-pub fn stats() -> (u64, u64) {
-    (HITS.load(Relaxed), MISSES.load(Relaxed))
+/// Whether any engine of this process was served the embedded code, and the lookups so far,
+/// `(hits, misses)`, over every engine of this process (`kio run --json`, `kio test --verbose`).
+pub fn status() -> (bool, u64, u64) {
+    (SERVED.load(Relaxed), HITS.load(Relaxed), MISSES.load(Relaxed))
 }
 
-/// The embedded seed as Cranelift's cache: read-only.
-struct Embedded(&'static Seed);
+/// The embedded seed as Cranelift's cache: read-only, and answering nothing until `armed`.
+struct Embedded {
+    seed: &'static Seed,
+    armed: AtomicBool,
+}
 
 impl std::fmt::Debug for Embedded {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
             f,
             "the runtime's embedded native code ({} functions)",
-            self.0.entries.len()
+            self.seed.entries.len()
         )
     }
 }
 
 impl CacheStore for Embedded {
     fn get(&self, key: &[u8]) -> Option<Cow<'_, [u8]>> {
-        let found = self.0.entries.binary_search_by(|(k, _)| (*k).cmp(key)).ok();
-        match found {
-            Some(i) => {
+        if !self.armed.load(Relaxed) {
+            return None;
+        }
+        match self.seed.entries.binary_search_by(|(k, _)| (*k).cmp(key)) {
+            Ok(i) => {
                 HITS.fetch_add(1, Relaxed);
-                Some(Cow::Borrowed(self.0.entries[i].1))
+                Some(Cow::Borrowed(self.seed.entries[i].1))
             }
-            None => {
+            Err(_) => {
                 MISSES.fetch_add(1, Relaxed);
                 None
             }
@@ -113,17 +131,27 @@ impl CacheStore for Embedded {
 
 /// An engine for `config`, serving the runtime's embedded native code when `config` builds the
 /// engine the seed was made for (same fingerprint), and compiling everything from source
-/// otherwise. The second value says which.
+/// otherwise. The second value says which. The store is attached before the engine exists and
+/// armed only once the engine's fingerprint is known to match; nothing compiles in between, and
+/// an unarmed store answers no lookup. An engine that does not match is made again without the
+/// store, so Cranelift does not serialize what it compiles for it.
 pub fn engine(mut config: Config) -> Result<(Engine, bool)> {
-    let engine = Engine::new(&config)?;
+    let plain = config.clone();
     let Some(seed) = seed() else {
-        return Ok((engine, false));
+        return Ok((Engine::new(&plain)?, false));
     };
+    let store = Arc::new(Embedded {
+        seed,
+        armed: AtomicBool::new(false),
+    });
+    config.enable_incremental_compilation(store.clone())?;
+    let engine = Engine::new(&config)?;
     if crate::config::fingerprint(&engine) != seed.fingerprint {
-        return Ok((engine, false));
+        return Ok((Engine::new(&plain)?, false));
     }
-    config.enable_incremental_compilation(Arc::new(Embedded(seed)))?;
-    Ok((Engine::new(&config)?, true))
+    store.armed.store(true, Relaxed);
+    SERVED.store(true, Relaxed);
+    Ok((engine, true))
 }
 
 #[cfg(test)]
@@ -148,12 +176,16 @@ mod tests {
     }
 
     #[test]
-    fn a_truncated_or_unsorted_seed_is_no_seed() {
+    fn a_truncated_unsorted_or_overcounted_seed_is_no_seed() {
         assert!(parse(&SEED[..SEED.len() - 1]).is_none());
         // The first key made the largest possible: no longer sorted, so refused.
         let mut edited = SEED.to_vec();
         let first_key = 8 + 8 + 4;
         edited[first_key..first_key + 32].fill(0xff);
         assert!(parse(Box::leak(edited.into_boxed_slice())).is_none());
+        // A count the bytes cannot hold is refused before any entry is read.
+        let mut counted = SEED.to_vec();
+        counted[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(parse(Box::leak(counted.into_boxed_slice())).is_none());
     }
 }

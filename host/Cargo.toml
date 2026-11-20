@@ -15,6 +15,9 @@ path = "src/lib.rs"
 [features]
 # Test-only hooks; never enabled in the shipped binary.
 test-hooks = []
+# Cranelift checks every runtime-cache hit against a fresh compile (src/config.rs); CI runs the
+# cache tests with it.
+cache-checks = []
 
 [dependencies]
 cap-std = "4"
