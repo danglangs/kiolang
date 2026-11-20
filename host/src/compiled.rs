@@ -381,6 +381,11 @@ pub struct Shared {
 }
 
 impl Shared {
+    /// Whether the engine takes the runtime's native code from the binary (runtime_cache.rs).
+    pub fn runtime_cache_served(&self) -> bool {
+        self.cached
+    }
+
     /// An engine for runs with a `stack`-byte stack limit (`Limits::stack`): the runtime's
     /// functions from the binary, and what its runs compile kept in memory behind them
     /// (`runtime_cache::engine` with `keep`).
@@ -547,17 +552,10 @@ impl Kio {
         self.runtime_cached
     }
 
-    /// Whether any engine of this process was served the runtime's native code, and the lookups
-    /// so far over every engine, `(served, hits, misses)`: `kio run --json`'s `runtime_cache`.
-    pub fn runtime_cache_status() -> (bool, u64, u64) {
-        crate::runtime_cache::status()
-    }
-
     /// Lookups of the runtime's embedded native code so far, `(hits, misses)`, over every
-    /// engine of this process.
+    /// engine of this process (`--json`'s `runtime_cache`).
     pub fn runtime_cache_stats() -> (u64, u64) {
-        let (_, hits, misses) = crate::runtime_cache::status();
-        (hits, misses)
+        crate::runtime_cache::stats()
     }
 
     /// The message for a run that hit one of its limits, or `None` for any other error.

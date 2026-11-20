@@ -44,7 +44,7 @@ impl wasmtime::CacheStore for Recorder {
 }
 
 /// Compiles runtime.wasm (codegen's build, `DEP_KIO_RUNTIME_RUNTIME_WASM`) wrapped as a
-/// component, with `config::compile_config()`, recording every function's native code under
+/// component, with `config::compile_config_for` the binary's target, recording every function's native code under
 /// Cranelift's key for it (a SHA-256 of the function's IR and the ISA), and writes
 /// `OUT_DIR/runtime.cache`: `kio-rtc1`, the engine's `config::fingerprint` (u64), the entry
 /// count (u32), then the entries sorted by key (32-byte key, u32 length, bytes); integers
@@ -64,7 +64,12 @@ fn seed_runtime_cache() {
         .encode()
         .expect("wrapping the runtime as a component");
     let recorder = std::sync::Arc::new(Recorder::default());
-    let mut config = config::compile_config_with(env::var_os("CARGO_FEATURE_CACHE_CHECKS").is_some());
+    // The binary's target, not the build machine's: `x86_64-unknown-linux-musl` is built on a gnu
+    // runner. The binary reads it back as `KIO_TARGET` (config.rs) so both pick the same baseline.
+    let target = env::var("TARGET").expect("cargo sets TARGET");
+    println!("cargo:rustc-env=KIO_TARGET={target}");
+    let checks = env::var_os("CARGO_FEATURE_CACHE_CHECKS").is_some();
+    let mut config = config::compile_config_for(&target, checks);
     config
         .enable_incremental_compilation(recorder.clone())
         .expect("Cranelift's incremental cache");

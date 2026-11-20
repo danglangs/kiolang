@@ -1264,9 +1264,10 @@ fn run_program(prog: &Program, flags: &[&str], grants_file: Option<&str>, dry: b
         Some(t) => kio.run_test(files, &t.test.name, dirs, https),
         None => kio.run_files(files, dirs, https),
     };
+    let served = kio.runtime_cache_served();
     set_json(|o| {
         o.used = kio.used();
-        o.runtime_cache = Some(runtime_cache_json());
+        o.runtime_cache = Some(runtime_cache_json(served));
     });
     match result {
         Err(e) if e.downcast_ref::<kio_host::Refused>().is_some() => refuse(format!("{e}")),
@@ -1450,15 +1451,15 @@ fn test(path: &str, flags: &[&str], json: bool, verbose: bool) -> i32 {
         println!(
             "{}",
             json!({"ok": failed == 0, "passed": passed, "failed": failed, "tests": rows,
-                "runtime_cache": runtime_cache_json()})
+                "runtime_cache": runtime_cache_json(tests.engine.runtime_cache_served())})
         );
     } else {
         for r in &results {
             test_lines(&tests, r, verbose).iter().for_each(|l| println!("{l}"));
         }
         if verbose {
-            let (served, hits, misses) = Kio::runtime_cache_status();
-            let served = if served {
+            let (hits, misses) = Kio::runtime_cache_stats();
+            let served = if tests.engine.runtime_cache_served() {
                 "served from the binary"
             } else {
                 "compiled from source"
@@ -1470,10 +1471,10 @@ fn test(path: &str, flags: &[&str], json: bool, verbose: bool) -> i32 {
     i32::from(failed > 0)
 }
 
-/// `--json`'s `runtime_cache`: whether the runtime's native code came from the binary, and the
-/// lookups Cranelift made in it (C18, host/src/runtime_cache.rs).
-fn runtime_cache_json() -> serde_json::Value {
-    let (served, hits, misses) = Kio::runtime_cache_status();
+/// `--json`'s `runtime_cache`: whether this command's engine takes the runtime's native code
+/// from the binary, and the lookups Cranelift made in it (C18, host/src/runtime_cache.rs).
+fn runtime_cache_json(served: bool) -> serde_json::Value {
+    let (hits, misses) = Kio::runtime_cache_stats();
     json!({"served": served, "hits": hits, "misses": misses})
 }
 

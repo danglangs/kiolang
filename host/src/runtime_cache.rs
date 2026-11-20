@@ -84,12 +84,12 @@ fn parse(bytes: &'static [u8]) -> Option<Seed> {
 
 static HITS: AtomicU64 = AtomicU64::new(0);
 static MISSES: AtomicU64 = AtomicU64::new(0);
-static SERVED: AtomicBool = AtomicBool::new(false);
 
-/// Whether any engine of this process was served the embedded code, and the lookups so far,
-/// `(hits, misses)`, over every engine of this process (`kio run --json`, `kio test --verbose`).
-pub fn status() -> (bool, u64, u64) {
-    (SERVED.load(Relaxed), HITS.load(Relaxed), MISSES.load(Relaxed))
+/// The lookups so far, `(hits, misses)`, over every engine of this process (`--json`'s
+/// `runtime_cache`, `kio test --verbose`); whether an engine is served is the engine's own
+/// (`Kio::runtime_cache_served`).
+pub fn stats() -> (u64, u64) {
+    (HITS.load(Relaxed), MISSES.load(Relaxed))
 }
 
 /// The most bytes of compiled functions the memory layer keeps (T5).
@@ -200,7 +200,6 @@ pub fn engine(mut config: Config, keep: bool) -> Result<(Engine, bool)> {
         });
     }
     store.armed.store(true, Relaxed);
-    SERVED.store(true, Relaxed);
     Ok((engine, true))
 }
 
@@ -213,6 +212,29 @@ mod tests {
         let seed = seed().expect("the build script wrote a well-formed seed");
         assert!(seed.entries.len() > 500, "{} entries", seed.entries.len());
         assert!(seed.entries.windows(2).all(|w| w[0].0 < w[1].0));
+    }
+
+    /// The seed was compiled for this binary's target (host/build.rs, cargo's `TARGET`), with the
+    /// baseline chosen from the target's name alone, so the build script and the binary agree on
+    /// it however the build machine differs from the target.
+    #[test]
+    fn the_seed_is_for_this_binary_target() {
+        let target = env!("KIO_TARGET");
+        let checks = cfg!(feature = "cache-checks");
+        let for_target = Engine::new(&crate::config::compile_config_for(target, checks)).unwrap();
+        assert_eq!(crate::config::fingerprint(&for_target), seed().unwrap().fingerprint);
+        for (name, flags) in [
+            ("x86_64-unknown-linux-musl", 5),
+            ("x86_64-unknown-linux-gnu", 5),
+            ("x86_64-apple-darwin", 5),
+            ("aarch64-apple-darwin", 0),
+            ("aarch64-unknown-linux-gnu", 0),
+        ] {
+            let (triple, baseline) = crate::config::baseline(name).unwrap();
+            assert_eq!((triple, baseline.len()), (name, flags));
+        }
+        assert!(crate::config::baseline("x86_64-pc-windows-msvc").is_none());
+        assert!(crate::config::baseline("").is_none());
     }
 
     #[test]

@@ -10,6 +10,7 @@ it) and the lines after it are its expected output (stdout and stderr), compared
 exactly but for audit timings (`"ms":1.2`). Other blocks (the download) are not
 run. CI runs this in a container without Rust (ci.yml, job first-job).
 """
+import json
 import os
 import re
 import shutil
@@ -68,8 +69,29 @@ def main():
             failed += 1
             print(f"--- step {i + 1}: $ {cmd}\nwant:\n" + "\n".join(want) + "\nhave:\n" + "\n".join(have))
     print(f"{len(todo) - failed}/{len(todo)} commands as in the guide, {time.time() - start:.1f} s")
+    failed += served_check(root)
     shutil.rmtree(work)
     sys.exit(1 if failed else 0)
+
+
+def served_check(root):
+    """The release binary must run on the runtime's native code built into it (C18): the seed
+    was compiled for the release target's ISA baseline, which this machine must have. Returns
+    1 on failure."""
+    prog = os.path.join(root, "served.kio")
+    with open(prog, "w") as f:
+        f.write("fn main() -> Int { 1 }\n")
+    run = subprocess.run([os.path.join(root, "kio"), "run", prog, "--json"], capture_output=True, text=True)
+    try:
+        cache = json.loads(run.stdout)["runtime_cache"]
+    except (ValueError, KeyError):
+        print(f"--- kio run --json gave no runtime_cache:\n{run.stdout}{run.stderr}")
+        return 1
+    if cache.get("served") is not True:
+        print(f"--- the runtime was not served from the binary: {cache}")
+        return 1
+    print(f"runtime served from the binary: {cache['hits']} cache hits, {cache['misses']} misses")
+    return 0
 
 
 main()

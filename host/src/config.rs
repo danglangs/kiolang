@@ -2,26 +2,41 @@
 //! there with this configuration and embedded in the binary (runtime_cache.rs, C18).
 
 /// The engine settings every run uses: fuel and epoch interruption bound a run's work and time.
-/// The ISA is `baseline()` when the host supports it, so the native code the build embedded
-/// fits every machine the release targets run on; a host that does not gets Cranelift's
-/// inferred features and compiles from source.
+/// The ISA is the `baseline` of this binary's own target when the host has its features, so the
+/// native code the build embedded fits every machine the release targets run on; a host that
+/// lacks them gets Cranelift's inferred features and compiles from source.
 pub fn compile_config() -> wasmtime::Config {
     compile_config_with(cfg!(feature = "cache-checks"))
 }
 
 /// `compile_config`, with Cranelift's incremental-cache checks on when `checks` (the host's
-/// `cache-checks` feature; host/build.rs reads `CARGO_FEATURE_CACHE_CHECKS`): every cache hit is
-/// also compiled and must equal the cached code, or Cranelift panics.
+/// `cache-checks` feature): every cache hit is also compiled and must equal the cached code, or
+/// Cranelift panics. The target is the one this binary was compiled for (`KIO_TARGET`, set by
+/// host/build.rs from cargo's `TARGET`), never the machine it runs on.
 pub fn compile_config_with(checks: bool) -> wasmtime::Config {
+    let pin = baseline(option_env!("KIO_TARGET").unwrap_or("")).filter(|(_, flags)| host_has(flags));
+    configured(pin, checks)
+}
+
+/// The settings host/build.rs compiles the seed with: `target`'s baseline, pinned whatever the
+/// build machine has (the seed is for the machines the binary will run on, and a build host
+/// lacking a feature must not produce an unpinned seed), with checks as `compile_config_with`
+/// (the build script reads `CARGO_FEATURE_CACHE_CHECKS`).
+#[cfg_attr(not(test), allow(dead_code))] // the build script's and the tests'
+pub fn compile_config_for(target: &str, checks: bool) -> wasmtime::Config {
+    configured(baseline(target), checks)
+}
+
+fn configured(pin: Option<(&'static str, &'static [&'static str])>, checks: bool) -> wasmtime::Config {
     let mut config = wasmtime::Config::new();
     config.consume_fuel(true);
     config.epoch_interruption(true);
-    if let Some((triple, flags)) = baseline() {
-        config.target(triple).expect("the host's own triple");
+    if let Some((triple, flags)) = pin {
+        config.target(triple).expect("a release target's triple");
         for flag in flags {
             // SAFETY (Wasmtime marks the method unsafe because code built for a feature the host
-            // lacks would fault): `baseline` returns a flag only after the host reported the
-            // feature.
+            // lacks would fault): the binary enables a flag only after `host_has` reported the
+            // feature; the build script's engine only compiles, never runs, what it builds.
             unsafe { config.cranelift_flag_enable(flag) };
         }
     }
@@ -33,37 +48,44 @@ pub fn compile_config_with(checks: bool) -> wasmtime::Config {
     config
 }
 
-/// The ISA baseline of the release targets, if this host runs one and has its features: the
-/// triple to compile for (an explicit target turns Cranelift's host feature inference off) and
-/// the Cranelift flags to enable. aarch64 is Armv8.0 as Cranelift assumes it (no LSE, no
-/// pointer authentication: compiled kio has no atomics). x86-64 is level v2: SSE3 to SSE4.2 and
-/// POPCNT, which every x86-64 CPU since about 2009 has, and which Cranelift wants for `f64`
-/// rounding (`roundsd`) and bit counts without a library call. Anything else is `None`: the
-/// engine infers the host's features and the embedded code is not used.
-pub fn baseline() -> Option<(&'static str, &'static [&'static str])> {
-    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-    return Some(("aarch64-apple-darwin", &[]));
-    #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
-    return Some(("aarch64-unknown-linux-gnu", &[]));
-    #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
-    {
-        let supported = std::arch::is_x86_feature_detected!("sse3")
-            && std::arch::is_x86_feature_detected!("ssse3")
-            && std::arch::is_x86_feature_detected!("sse4.1")
-            && std::arch::is_x86_feature_detected!("sse4.2")
-            && std::arch::is_x86_feature_detected!("popcnt");
-        let triple = match (cfg!(target_os = "macos"), cfg!(target_env = "musl")) {
-            (true, _) => "x86_64-apple-darwin",
-            (false, true) => "x86_64-unknown-linux-musl",
-            (false, false) => "x86_64-unknown-linux-gnu",
-        };
-        return supported.then_some((
-            triple,
-            &["has_sse3", "has_ssse3", "has_sse41", "has_sse42", "has_popcnt"],
-        ));
-    }
-    #[allow(unreachable_code)]
-    None
+/// x86-64 level v2: SSE3 to SSE4.2 and POPCNT, which every x86-64 CPU since about 2009 has, and
+/// which Cranelift wants for `f64` rounding (`roundsd`) and bit counts without a library call.
+const X86_64_V2: &[&str] = &["has_sse3", "has_ssse3", "has_sse41", "has_sse42", "has_popcnt"];
+
+/// The ISA baseline for `target`, one of the release targets' families: the triple to compile
+/// for (an explicit target turns Cranelift's host feature inference off) and the Cranelift flags
+/// to enable. aarch64 is Armv8.0 as Cranelift assumes it (no LSE, no pointer authentication:
+/// compiled kio has no atomics); x86-64 is `X86_64_V2`. Any other target is `None`: the engine
+/// infers the host's features and the embedded code is not used. The triple is chosen from the
+/// target's name alone, so host/build.rs (a host program) and the binary it builds agree on it
+/// even when one is built for another machine (`x86_64-unknown-linux-musl` on a gnu runner).
+pub fn baseline(target: &str) -> Option<(&'static str, &'static [&'static str])> {
+    Some(match target {
+        "aarch64-apple-darwin" => ("aarch64-apple-darwin", &[]),
+        "aarch64-unknown-linux-gnu" => ("aarch64-unknown-linux-gnu", &[]),
+        "aarch64-unknown-linux-musl" => ("aarch64-unknown-linux-musl", &[]),
+        "x86_64-apple-darwin" => ("x86_64-apple-darwin", X86_64_V2),
+        "x86_64-unknown-linux-gnu" => ("x86_64-unknown-linux-gnu", X86_64_V2),
+        "x86_64-unknown-linux-musl" => ("x86_64-unknown-linux-musl", X86_64_V2),
+        _ => return None,
+    })
+}
+
+/// Whether this machine has every feature in `flags` (the baseline's; `X86_64_V2` or none).
+fn host_has(flags: &[&str]) -> bool {
+    flags.iter().all(|flag| match *flag {
+        #[cfg(target_arch = "x86_64")]
+        "has_sse3" => std::arch::is_x86_feature_detected!("sse3"),
+        #[cfg(target_arch = "x86_64")]
+        "has_ssse3" => std::arch::is_x86_feature_detected!("ssse3"),
+        #[cfg(target_arch = "x86_64")]
+        "has_sse41" => std::arch::is_x86_feature_detected!("sse4.1"),
+        #[cfg(target_arch = "x86_64")]
+        "has_sse42" => std::arch::is_x86_feature_detected!("sse4.2"),
+        #[cfg(target_arch = "x86_64")]
+        "has_popcnt" => std::arch::is_x86_feature_detected!("popcnt"),
+        _ => false,
+    })
 }
 
 /// What decides an engine's native code: Wasmtime's own compatibility hash of its target, CPU
