@@ -399,29 +399,37 @@ struct FunctionCache(Mutex<Functions>);
 
 #[derive(Debug, Default)]
 struct Functions {
-    by_key: std::collections::HashMap<Vec<u8>, Vec<u8>>,
+    by_key: std::collections::HashMap<Vec<u8>, Arc<[u8]>>,
     bytes: usize,
 }
 
 impl wasmtime::CacheStore for FunctionCache {
     fn get(&self, key: &[u8]) -> Option<std::borrow::Cow<'_, [u8]>> {
-        let cache = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        cache.by_key.get(key).map(|v| std::borrow::Cow::Owned(v.clone()))
+        // `get` may borrow only from `self`, and an entry can go when the cache empties, so the
+        // bytes are copied; outside the lock, which holds only while the `Arc` is cloned.
+        let entry = self
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .by_key
+            .get(key)
+            .cloned();
+        entry.map(|v| std::borrow::Cow::Owned(v.to_vec()))
     }
 
     fn insert(&self, key: &[u8], value: Vec<u8>) -> bool {
+        let bytes = key.len() + value.len();
         let mut cache = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        if cache.by_key.contains_key(key) {
+        if bytes > CACHE_MAX || cache.by_key.contains_key(key) {
             return false;
         }
         // Full: start over. Most entries are cases' own functions, never met again, and the
         // functions every run shares come back on the next compile.
-        let bytes = key.len() + value.len();
         if cache.bytes + bytes > CACHE_MAX {
             *cache = Functions::default();
         }
         cache.bytes += bytes;
-        cache.by_key.insert(key.to_vec(), value);
+        cache.by_key.insert(key.to_vec(), value.into());
         true
     }
 }
