@@ -30,10 +30,13 @@ pub fn lower_entry(p: &Program, caps: &CapTable, entry: &str) -> Module {
     let funcs = sorted(p.funcs.keys().filter(lowered).collect());
     // So is a generic type: one struct or enum per instance, made when its type is lowered.
     let plain = |k: &&String| p.tparams[*k].is_empty();
-    // The capability structs (`KvEntry`) at fixed ids, in table order; then the program's.
+    // The capability structs (`KvEntry`) at fixed ids, in table order; then the program's. A
+    // capability struct (L32) is no type here: its parameters are flattened to its fields.
     let mut structs: Vec<String> = caps.structs.iter().map(|s| s.name.clone()).collect();
     structs.extend(sorted(
-        p.structs.keys().filter(|k| !structs.contains(k) && plain(k)).collect(),
+        (p.structs.keys())
+            .filter(|k| !structs.contains(k) && plain(k) && !p.is_group(k))
+            .collect(),
     ));
     // The capability error enums, then `Json`, at fixed ids; then the program's.
     let mut enums: Vec<String> = caps.enums.iter().map(|e| e.name.clone()).collect();
@@ -198,6 +201,7 @@ impl Ids {
             check::Ty::Fn(ps, r) => Ty::Fn(ps.iter().map(|t| self.held(t)).collect(), inner(r)),
             check::Ty::Never => Ty::Never,
             check::Ty::Param(t) => unreachable!("type parameter `{t}` outside an instance"),
+            check::Ty::Group(g) => unreachable!("capability struct `{g}` is flattened to its fields"),
         }
     }
 
@@ -231,16 +235,34 @@ impl Ids {
             binds,
             locals: Vec::new(),
             scope: Vec::new(),
+            groups: Vec::new(),
         };
+        // A capability struct parameter is one parameter per field, in field order (L32): a
+        // test's by the field's short name, which `kio test` grants; any other's by its path.
         for (param, ty) in f.params.iter().zip(&sig.params) {
-            l.bind(&param.name, &l.subst(ty), param.span);
+            let check::Ty::Group(g) = ty else {
+                l.bind(&param.name, &l.subst(ty), param.span);
+                continue;
+            };
+            let leaves = (p.fields[g].iter())
+                .map(|(field, t)| {
+                    let name = if f.test {
+                        field.clone()
+                    } else {
+                        format!("{}.{field}", param.name)
+                    };
+                    l.slot(name, l.ids.held(t), param.span)
+                })
+                .collect();
+            l.groups.push((&param.name, leaves));
         }
+        let params = l.locals.len() as u32;
         let body = l.block(&f.body);
         let ret = self.ty(&l.subst(&sig.ret));
         Func {
             name,
             locals: l.locals,
-            params: f.params.len() as u32,
+            params,
             ret,
             body,
             span: f.span,
@@ -278,6 +300,9 @@ struct Lowerer<'a> {
     locals: Vec<Local>,
     /// Names in scope, innermost last.
     scope: Vec<(&'a str, LocalId)>,
+    /// Each capability struct parameter: its name and the slot of each field, in field order.
+    /// A function has one parameter of a name, and nothing else can bind a capability struct.
+    groups: Vec<(&'a str, Vec<LocalId>)>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -287,14 +312,86 @@ impl<'a> Lowerer<'a> {
     }
 
     fn bind_ty(&mut self, name: &'a str, ty: Ty, span: Span) -> LocalId {
-        let id = LocalId(self.locals.len() as u32);
-        self.locals.push(Local {
-            name: name.to_string(),
-            ty,
-            span,
-        });
+        let id = self.slot(name.to_string(), ty, span);
         self.scope.push((name, id));
         id
+    }
+
+    /// A new slot that no name in scope reaches.
+    fn slot(&mut self, name: String, ty: Ty, span: Span) -> LocalId {
+        let id = LocalId(self.locals.len() as u32);
+        self.locals.push(Local { name, ty, span });
+        id
+    }
+
+    /// The slot of field `name` of the capability struct parameter `base` names.
+    fn leaf(&self, base: &ast::Expr, k: &str, name: &str) -> LocalId {
+        let ExprKind::Name(g) = &base.kind else {
+            unreachable!("checked capability struct");
+        };
+        let i = self.p.fields[k]
+            .iter()
+            .position(|(n, _)| n == name)
+            .expect("checked field");
+        self.groups
+            .iter()
+            .find(|(n, _)| n == g)
+            .expect("checked capability struct")
+            .1[i]
+    }
+
+    /// The slot of the capability `e` names: a parameter, or a field of a capability struct.
+    fn cap_local(&self, e: &'a ast::Expr) -> LocalId {
+        match &e.kind {
+            ExprKind::Name(name) => self.lookup(name),
+            ExprKind::Field(base, name) => match self.checked(base.span) {
+                check::Ty::Group(k) => self.leaf(base, &k, name),
+                _ => unreachable!("checked capability receiver"),
+            },
+            _ => unreachable!("checked capability receiver"),
+        }
+    }
+
+    /// A call's arguments: a capability struct argument (a parameter passed whole, or a
+    /// literal) is one argument per field, in field order (L32).
+    fn args(&mut self, args: &'a [ast::Expr]) -> Vec<Expr> {
+        let mut out = Vec::new();
+        for a in args {
+            let check::Ty::Group(k) = self.checked(a.span) else {
+                out.push(self.expr(a));
+                continue;
+            };
+            let fields = &self.p.fields[&k];
+            let inits = match &a.kind {
+                ExprKind::StructLit(_, inits, _) => inits,
+                ExprKind::Module(_, inner) => match &inner.kind {
+                    ExprKind::StructLit(_, inits, _) => inits,
+                    _ => unreachable!("checked capability struct argument"),
+                },
+                ExprKind::Name(g) => {
+                    let ids = &self
+                        .groups
+                        .iter()
+                        .find(|(n, _)| n == g)
+                        .expect("checked capability struct")
+                        .1;
+                    for (id, (_, t)) in ids.iter().zip(fields) {
+                        out.push(Expr {
+                            kind: ir::ExprKind::Local(*id),
+                            ty: self.ids.ty(t),
+                            span: a.span,
+                        });
+                    }
+                    continue;
+                }
+                _ => unreachable!("checked capability struct argument"),
+            };
+            for (f, _) in fields {
+                let (_, x) = inits.iter().find(|(n, _)| n == f).expect("checked field");
+                out.push(self.expr(x));
+            }
+        }
+        out
     }
 
     fn lookup(&self, name: &str) -> LocalId {
@@ -548,6 +645,9 @@ impl<'a> Lowerer<'a> {
             ExprKind::Bool(b) => ir::ExprKind::Bool(*b),
             ExprKind::Unit => ir::ExprKind::Unit,
             ExprKind::Name(name) if builtin(name).is_some() => self.variant_value(ty, name, &[]),
+            ExprKind::Name(_) if matches!(ty, check::Ty::Group(_)) => {
+                unreachable!("a capability struct stands only as an argument or a field read's base")
+            }
             ExprKind::Name(name) => match self.local(name) {
                 Some(x) => ir::ExprKind::Local(x),
                 None => match self.p.consts.get(&*key(self.module, name)) {
@@ -602,10 +702,13 @@ impl<'a> Lowerer<'a> {
             ExprKind::Block(b) => ir::ExprKind::Block(self.block(b)),
             ExprKind::Call(callee, args) => self.call(ty, callee, args),
             ExprKind::Method(recv, name, args) => self.method(recv, name, args),
-            ExprKind::Field(base, name) => {
-                let field = self.field(base.span, name);
-                ir::ExprKind::Field(Box::new(self.expr(base)), field)
-            }
+            ExprKind::Field(base, name) => match self.checked(base.span) {
+                check::Ty::Group(k) => ir::ExprKind::Local(self.leaf(base, &k, name)),
+                _ => {
+                    let field = self.field(base.span, name);
+                    ir::ExprKind::Field(Box::new(self.expr(base)), field)
+                }
+            },
             ExprKind::Index(base, index) => ir::ExprKind::Index(Box::new(self.expr(base)), Box::new(self.expr(index))),
             ExprKind::List(items) => ir::ExprKind::List(self.exprs(items)),
             ExprKind::StructLit(_, inits, base) => self.struct_lit(ty, inits, base.as_deref()),
@@ -685,7 +788,7 @@ impl<'a> Lowerer<'a> {
             },
             _ => return ir::ExprKind::CallValue(Box::new(self.expr(callee)), self.exprs(args)),
         };
-        ir::ExprKind::Call(self.func(callee.span, &k), self.exprs(args))
+        ir::ExprKind::Call(self.func(callee.span, &k), self.args(args))
     }
 
     /// Lifts the closure at `span`, of type `ty`, to a new function whose parameters are its
@@ -709,6 +812,7 @@ impl<'a> Lowerer<'a> {
             binds: self.binds.clone(),
             locals: Vec::new(),
             scope: Vec::new(),
+            groups: Vec::new(),
         };
         let names = &self.p.captures[&span];
         let mut captured = Vec::new();
@@ -825,12 +929,9 @@ impl<'a> Lowerer<'a> {
         use check::Ty as T;
         let mutation = match (&self.checked(recv.span), name) {
             (T::Cap(c), _) => {
-                let ExprKind::Name(cap) = &recv.kind else {
-                    unreachable!("checked capability receiver");
-                };
                 let methods = &self.caps.caps[self.ids.caps[c] as usize].methods;
                 let m = methods.iter().position(|(n, ..)| n == name).expect("checked method");
-                return ir::ExprKind::CapCall(self.lookup(cap), m as u32, self.exprs(args));
+                return ir::ExprKind::CapCall(self.cap_local(recv), m as u32, self.exprs(args));
             }
             (T::Bool, "to_str") => {
                 let lit = |s: &str| Expr {

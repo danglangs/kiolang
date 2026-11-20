@@ -992,11 +992,18 @@ fn rule1_local() {
 
 #[test]
 fn rule1_field_and_payload() {
+    // `struct Job { dir: Dir }` alone is a capability struct (L32); a mixed struct is refused.
     assert_rejected(
-        "struct Job { dir: Dir } fn main() {}",
+        "struct Job { dir: Dir, n: Int } fn main() {}",
+        "struct `Job` mixes capabilities and data: `n: Int`",
+        "a struct holds capabilities only or no capability; move `n` to a data struct",
+        "n: Int",
+    );
+    assert_rejected(
+        "struct Job { dirs: List<Dir> } fn main() {}",
         "capability type in a field",
         ONLY_PARAMS,
-        "Dir",
+        "List<Dir>",
     );
     assert_rejected(
         "enum E { A(Dir) } fn main() {}",

@@ -2,8 +2,93 @@ use crate::ast::*;
 use crate::check::{key, module_of, Program, Ty};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-/// Methods reachable on each capability parameter, keyed by (function, parameter).
+/// Methods reachable on each capability leaf, keyed by (function, leaf path). A leaf is a
+/// capability parameter (`d`) or a field of a capability struct parameter (`env.db`).
 type Uses = BTreeMap<(String, String), BTreeSet<String>>;
+
+/// The call graph read for authority, one set of maps every derivation shares (L32): each
+/// capability method a function calls on one of its own leaves, and each call edge from a
+/// function to another with its binding map, each leaf of the callee that receives a leaf of the
+/// caller. A leaf argument binds a capability parameter; a capability struct passed whole binds
+/// each field to the same field; a literal binds each field to the leaf written for it.
+struct Edges {
+    direct: Vec<(String, String, String)>,
+    calls: Vec<(String, String, Map)>,
+}
+
+/// A call edge's binding map: each `(callee leaf, caller leaf)`.
+type Map = Vec<(String, String)>;
+
+fn edges(p: &Program) -> Edges {
+    let mut e = Edges {
+        direct: Vec::new(),
+        calls: Vec::new(),
+    };
+    for (name, f) in &p.funcs {
+        walk_block(&f.body, &mut |n| {
+            let Node::Expr(x) = n else { return };
+            match &x.kind {
+                ExprKind::Method(recv, m, args) => {
+                    if let Some(d) = leaf_of(p, recv) {
+                        let http = matches!(p.types.get(&recv.span), Some(Ty::Cap(t)) if t == "Http");
+                        match (http, m.as_str(), args.first()) {
+                            (true, "send", Some(v)) => e.direct.push((name.clone(), d, format!("send {}", verb(p, v)))),
+                            (true, "send_all", Some(l)) => {
+                                for v in send_all_verbs(p, f, l) {
+                                    e.direct.push((name.clone(), d.clone(), format!("send_all {v}")));
+                                }
+                            }
+                            _ => e.direct.push((name.clone(), d, m.clone())),
+                        }
+                    }
+                }
+                ExprKind::Call(callee, args) => {
+                    // `Some(x)` and the like are calls on names that are not functions. A
+                    // generic function's capability parameters are concrete, so every instance
+                    // is charged the same.
+                    let Some(g) = callee_key(name, callee) else { return };
+                    let (Some(g_fn), Some(sig)) = (p.funcs.get(&g), p.sigs.get(&g)) else {
+                        return;
+                    };
+                    let mut map = Vec::new();
+                    for ((arg, param), ty) in args.iter().zip(&g_fn.params).zip(&sig.params) {
+                        match ty {
+                            Ty::Cap(_) => map.extend(leaf_of(p, arg).map(|d| (param.name.clone(), d))),
+                            Ty::Group(k) => map.extend(group_arg(p, k, &param.name, arg)),
+                            _ => {}
+                        }
+                    }
+                    if !map.is_empty() {
+                        e.calls.push((name.clone(), g, map));
+                    }
+                }
+                _ => {}
+            }
+        });
+    }
+    e
+}
+
+/// The binding map of a capability struct `k` argument `arg` to parameter `param` of the callee:
+/// a parameter passed whole binds field to field, a literal each field to its written leaf.
+fn group_arg(p: &Program, k: &str, param: &str, arg: &Expr) -> Map {
+    let inits = match (&arg.kind, p.types.get(&arg.span)) {
+        (ExprKind::Name(g), Some(Ty::Group(_))) => {
+            return (p.fields[k].iter())
+                .map(|(f, _)| (format!("{param}.{f}"), format!("{g}.{f}")))
+                .collect()
+        }
+        (ExprKind::StructLit(_, inits, _), Some(Ty::Group(_))) => inits,
+        (ExprKind::Module(_, inner), Some(Ty::Group(_))) => match &inner.kind {
+            ExprKind::StructLit(_, inits, _) => inits,
+            _ => return Vec::new(),
+        },
+        _ => return Vec::new(),
+    };
+    (inits.iter())
+        .filter_map(|(f, x)| leaf_of(p, x).map(|d| (format!("{param}.{f}"), d)))
+        .collect()
+}
 
 /// What a program may do: per function, each capability parameter that calls something with the
 /// methods it may call (in parameter order); and `main`'s parameters as `(name, type)`.
@@ -183,6 +268,7 @@ pub fn items_used<'a>(p: &Program, funcs: impl IntoIterator<Item = &'a String>) 
     }
     while let Some(t) = tys.pop() {
         match t {
+            Ty::Group(k) => _ = out.insert(k),
             Ty::Struct(k, args) | Ty::Enum(k, args) => {
                 tys.extend(args);
                 if out.insert(k.clone()) {
@@ -392,10 +478,14 @@ fn notes_str(notes: &[String]) -> String {
     }
 }
 
-/// The type of parameter `d` of function `f`, as the source writes it.
+/// The capability type of leaf `d` of function `f`.
 fn param_ty(p: &Program, f: &str, d: &str) -> Option<String> {
-    let f = p.funcs.get(f)?;
-    f.params.iter().find(|e| e.name == d).map(|e| type_str(&e.ty))
+    p.funcs
+        .contains_key(f)
+        .then(|| p.leaves(f))?
+        .into_iter()
+        .find(|(e, _)| e == d)
+        .map(|(_, t)| t)
 }
 
 /// The authority `new` has that `old` lacks, and the reverse. A gained method covered by one
@@ -487,27 +577,29 @@ pub fn users(p: &Program, grant: &str, methods: &[&str]) -> Vec<String> {
         .collect()
 }
 
-/// Each `(function, parameter)` `main`'s parameter `grant` reaches, `("main", grant)` included:
-/// passed whole as a call's argument, parameter to parameter, as `uses` charges methods.
+/// Each `(function, leaf)` `main`'s parameter `grant` reaches, `("main", grant)` included: the
+/// closure of the edge maps from it, as `uses` charges methods.
 fn passed(p: &Program, grant: &str) -> BTreeSet<(String, String)> {
+    passed_in(&edges(p), grant)
+}
+
+fn passed_in(e: &Edges, grant: &str) -> BTreeSet<(String, String)> {
     let mut seen = BTreeSet::new();
     let mut todo = vec![("main".to_string(), grant.to_string())];
     while let Some(fd) = todo.pop() {
-        let Some(f) = p.funcs.get(&fd.0) else { continue };
         if !seen.insert(fd.clone()) {
             continue;
         }
-        walk_block(&f.body, &mut |n| {
-            let Node::Expr(e) = n else { return };
-            let ExprKind::Call(callee, args) = &e.kind else { return };
-            let Some(g) = callee_key(&fd.0, callee) else { return };
-            let Some(g_fn) = p.funcs.get(&g) else { return };
-            for (arg, param) in args.iter().zip(&g_fn.params) {
-                if cap_param(p, arg) == Some(fd.1.as_str()) {
-                    todo.push((g.clone(), param.name.clone()));
-                }
+        for (caller, callee, map) in &e.calls {
+            if *caller != fd.0 {
+                continue;
             }
-        });
+            todo.extend(
+                map.iter()
+                    .filter(|(_, from)| *from == fd.1)
+                    .map(|(to, _)| (callee.clone(), to.clone())),
+            );
+        }
     }
     seen
 }
@@ -545,11 +637,11 @@ fn in_parens(items: impl IntoIterator<Item = String>) -> String {
 
 /// The structure `report` prints.
 pub fn authority(p: &Program) -> Authority {
-    let mut uses = uses(p);
+    let mut uses = uses(p, &edges(p));
     let mut a = Authority::default();
     // A test is not `main`'s authority: no function calls one.
-    for (name, f) in p.funcs.iter().filter(|(_, f)| !f.test) {
-        a.funcs.insert(name.clone(), own_uses(&mut uses, name, f));
+    for name in p.funcs.iter().filter(|(_, f)| !f.test).map(|(k, _)| k) {
+        a.funcs.insert(name.clone(), own_uses(&mut uses, p, name));
     }
     if let Some(f) = p.funcs.get("main") {
         a.main = f.params.iter().map(|d| (d.name.clone(), type_str(&d.ty))).collect();
@@ -558,86 +650,60 @@ pub fn authority(p: &Program) -> Authority {
 }
 
 /// The authority of function `entry` (a test's key, or `main`) as `authority` gives `main`'s:
-/// its line alone, named `main`, and its parameters as `main`'s. The host checks a test's
-/// grants and calls against it as it checks `main`'s.
+/// its line alone, named `main`, and its leaves as `main`'s parameters, each by its short name
+/// (a capability struct's field is a grant of the field's name; rule 8 keeps them distinct). The
+/// host checks a test's grants and calls against it as it checks `main`'s.
 pub fn entry_authority(p: &Program, entry: &str) -> Authority {
-    let f = &p.funcs[entry];
     let mut a = Authority::default();
-    a.funcs.insert("main".into(), own_uses(&mut uses(p), entry, f));
+    let short = |path: &str| path.rsplit('.').next().unwrap_or_default().to_string();
+    let line = (own_uses(&mut uses(p, &edges(p)), p, entry).into_iter())
+        .map(|(d, ms)| (short(&d), ms))
+        .collect();
+    a.funcs.insert("main".into(), line);
     // A property's data parameters are generated inputs, not grants.
-    let caps = f
-        .params
-        .iter()
-        .filter(|d| matches!(&d.ty.kind, TypeKind::Named(n, a) if a.is_empty() && p.is_cap(n)));
-    a.main = caps.map(|d| (d.name.clone(), type_str(&d.ty))).collect();
+    a.main = p.test_leaves(entry);
     a
 }
 
-/// The capability parameters of function `name` (`f`) that call something, with the methods.
-fn own_uses(uses: &mut Uses, name: &str, f: &Fn) -> Vec<(String, BTreeSet<String>)> {
+/// The capability leaves of function `name` that call something, with the methods, in
+/// parameter then field order.
+fn own_uses(uses: &mut Uses, p: &Program, name: &str) -> Vec<(String, BTreeSet<String>)> {
     let mut params = Vec::new();
-    for d in &f.params {
-        if let Some(ms) = uses
-            .remove(&(name.to_string(), d.name.clone()))
-            .filter(|ms| !ms.is_empty())
-        {
-            params.push((d.name.clone(), ms));
+    for (d, _) in p.leaves(name) {
+        if let Some(ms) = uses.remove(&(name.to_string(), d.clone())).filter(|ms| !ms.is_empty()) {
+            params.push((d, ms));
         }
     }
     params
 }
 
-/// The methods each capability parameter of each function may call, through helpers too.
-fn uses(p: &Program) -> Uses {
-    let is_cap = |d: &Param| matches!(&d.ty.kind, TypeKind::Named(n, a) if a.is_empty() && p.is_cap(n));
+/// The methods each capability leaf of each function may call, through helpers too: the
+/// fixpoint of `effects(f) ⊇ map_s(effects(g))` over the edge maps.
+fn uses(p: &Program, e: &Edges) -> Uses {
     let mut uses = Uses::new();
-    for (name, f) in &p.funcs {
-        for d in f.params.iter().filter(|d| is_cap(d)) {
-            uses.insert((name.clone(), d.name.clone()), BTreeSet::new());
+    for name in p.funcs.keys() {
+        for (d, _) in p.leaves(name) {
+            uses.insert((name.clone(), d), BTreeSet::new());
+        }
+    }
+    for (f, d, m) in &e.direct {
+        if let Some(set) = uses.get_mut(&(f.clone(), d.clone())) {
+            set.insert(m.clone());
         }
     }
     // Sets only grow and are bounded by the method names, so this stops.
     let mut grown = true;
     while grown {
         grown = false;
-        for (name, f) in &p.funcs {
-            let mut found = Vec::new();
-            // Rule 1: a capability is only a parameter name, as a receiver or a whole argument.
-            walk_block(&f.body, &mut |n| {
-                let Node::Expr(e) = n else { return };
-                match &e.kind {
-                    ExprKind::Method(recv, m, args) => {
-                        if let Some(d) = cap_param(p, recv) {
-                            let http = matches!(p.types.get(&recv.span), Some(Ty::Cap(t)) if t == "Http");
-                            match (http, m.as_str(), args.first()) {
-                                (true, "send", Some(v)) => found.push((d.to_string(), format!("send {}", verb(p, v)))),
-                                (true, "send_all", Some(l)) => {
-                                    let verbs = send_all_verbs(p, f, l);
-                                    found.extend(verbs.iter().map(|v| (d.to_string(), format!("send_all {v}"))))
-                                }
-                                _ => found.push((d.to_string(), m.clone())),
-                            }
-                        }
+        for (f, g, map) in &e.calls {
+            for (to, from) in map {
+                let Some(ms) = uses.get(&(g.clone(), to.clone())).cloned() else {
+                    continue;
+                };
+                if let Some(set) = uses.get_mut(&(f.clone(), from.clone())) {
+                    for m in ms {
+                        grown |= set.insert(m);
                     }
-                    ExprKind::Call(callee, args) => {
-                        // `Some(x)` and the like are calls on names that are not functions. A
-                        // generic function's capability parameters are concrete, so every instance
-                        // is charged the same.
-                        let Some(g) = callee_key(name, callee) else { return };
-                        let Some(g_fn) = p.funcs.get(&g) else { return };
-                        for (arg, param) in args.iter().zip(&g_fn.params) {
-                            if let (Some(d), Some(ms)) = (cap_param(p, arg), uses.get(&(g.clone(), param.name.clone())))
-                            {
-                                found.extend(ms.iter().map(|m| (d.to_string(), m.clone())));
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            });
-            for (d, m) in found {
-                if let Some(set) = uses.get_mut(&(name.clone(), d)) {
-                    grown |= set.insert(m);
                 }
             }
         }
@@ -1021,13 +1087,18 @@ fn walk<'a>(e: &'a Expr, visit: &mut dyn FnMut(Node<'a>)) {
     }
 }
 
-/// The capability parameter `e` names, as the checker resolved it. The checker records a
-/// capability type only for a name bound to a parameter of the function it is in (rule 1), so
-/// a local, closure parameter, pattern binding or loop variable that shadows the parameter's
-/// name is not charged to it.
-fn cap_param<'a>(p: &Program, e: &'a Expr) -> Option<&'a str> {
+/// The capability leaf `e` names, by its path, as the checker resolved it: a parameter `d`, or
+/// a field `env.db` of a capability struct parameter. The checker records a capability type
+/// only for a name bound to a parameter of the function it is in (rule 1), so a local, closure
+/// parameter, pattern binding or loop variable that shadows the parameter's name is not charged
+/// to it (P5).
+fn leaf_of(p: &Program, e: &Expr) -> Option<String> {
     match (&e.kind, p.types.get(&e.span)?) {
-        (ExprKind::Name(d), Ty::Cap(_)) => Some(d),
+        (ExprKind::Name(d), Ty::Cap(_)) => Some(d.clone()),
+        (ExprKind::Field(base, f), Ty::Cap(_)) => match (&base.kind, p.types.get(&base.span)?) {
+            (ExprKind::Name(g), Ty::Group(_)) => Some(format!("{g}.{f}")),
+            _ => None,
+        },
         _ => None,
     }
 }

@@ -41,8 +41,6 @@ pub struct Program {
     pub(crate) enums: HashMap<String, Enum>,
     /// Constants by key, each checked to be a literal of its type; lowering inlines them.
     pub(crate) consts: HashMap<String, Const>,
-    /// Return type of each capability method, keyed by (capability, method), such as (`Dir`, `read`).
-    pub(crate) cap_methods: HashMap<(String, String), Ty>,
     /// Resolved payload types of every enum, for checking host values.
     pub(crate) variants: Variants,
     pub(crate) fields: Fields,
@@ -107,15 +105,14 @@ impl Program {
             .filter(|(_, f)| f.test)
             .map(|(k, f)| {
                 let sig = &self.sigs[k];
-                let (caps, data): (Vec<_>, Vec<_>) = (f.params.iter().zip(&sig.params))
-                    .map(|(p, ty)| (p.name.clone(), ty))
-                    .partition(|(_, ty)| matches!(ty, Ty::Cap(_)));
+                let data =
+                    (f.params.iter().zip(&sig.params)).filter(|(_, ty)| !matches!(ty, Ty::Cap(_) | Ty::Group(_)));
                 TestFn {
                     name: k.clone(),
                     module: module_of(k).to_string(),
                     span: f.span,
-                    params: caps.into_iter().map(|(n, ty)| (n, ty.to_string())).collect(),
-                    inputs: data.into_iter().map(|(n, ty)| (n, ty.to_string())).collect(),
+                    params: self.test_leaves(k),
+                    inputs: data.map(|(p, ty)| (p.name.clone(), ty.to_string())).collect(),
                     ret: sig.ret.clone(),
                 }
             })
@@ -158,8 +155,23 @@ impl Program {
         }
     }
 
-    pub(crate) fn is_cap(&self, ty: &str) -> bool {
-        self.cap_methods.keys().any(|(c, _)| c == ty)
+    /// Whether struct `k` is a capability struct (L32).
+    pub(crate) fn is_group(&self, k: &str) -> bool {
+        self.fields.get(k).is_some_and(|f| is_group(f))
+    }
+
+    /// The capability leaves of function `k` (`leaves`), each by its path.
+    pub(crate) fn leaves(&self, k: &str) -> Vec<(String, String)> {
+        let names: Vec<&str> = self.funcs[k].params.iter().map(|p| p.name.as_str()).collect();
+        leaves(&self.fields, &names, &self.sigs[k].params)
+    }
+
+    /// The leaves of test `k` by their short names, each a grant: a capability struct's field
+    /// is granted by the field's name (rule 8 keeps them distinct). `main`'s are its parameters.
+    pub(crate) fn test_leaves(&self, k: &str) -> Vec<(String, String)> {
+        (self.leaves(k).into_iter())
+            .map(|(path, ty)| (path.rsplit('.').next().unwrap_or_default().to_string(), ty))
+            .collect()
     }
 }
 
@@ -182,6 +194,10 @@ pub enum Ty {
     HashMap(Box<Ty>, Box<Ty>),
     /// A capability, which only a parameter can hold.
     Cap(String),
+    /// A capability struct by key (L32): a struct whose fields are all capabilities. A
+    /// parameter only, like a capability; its fields are read as `env.db`, and lowering
+    /// flattens it to its fields.
+    Group(String),
     /// A function value: parameter types and return type. Never mentions a capability.
     Fn(Vec<Ty>, Box<Ty>),
     /// A type parameter `T` of the generic function being checked: opaque, so it can be
@@ -322,7 +338,9 @@ impl fmt::Display for Ty {
                 let args: Vec<_> = args.iter().map(Ty::to_string).collect();
                 write!(f, "{name}<{}>", args.join(", "))
             }
-            Ty::Struct(name, _) | Ty::Enum(name, _) | Ty::Cap(name) | Ty::Param(name) => f.write_str(name),
+            Ty::Struct(name, _) | Ty::Enum(name, _) | Ty::Cap(name) | Ty::Group(name) | Ty::Param(name) => {
+                f.write_str(name)
+            }
             Ty::Option(t) => write!(f, "Option<{t}>"),
             Ty::Result(t, e) => write!(f, "Result<{t}, {e}>"),
             Ty::List(t) => write!(f, "List<{t}>"),
@@ -377,6 +395,9 @@ struct Scope<'a> {
     mods: &'a HashSet<String>,
     tparams: &'a [TParam],
     types: Option<(&'a Fields, &'a Variants)>,
+    /// The capability structs, by key, once the first pass over the types has found them
+    /// (`is_group`); a name among them resolves to `Ty::Group`.
+    groups: &'a HashSet<String>,
 }
 
 impl Scope<'_> {
@@ -1240,6 +1261,9 @@ fn user_type(
         _ => return Ok(None),
     };
     let name = bare(k);
+    if scope.groups.contains(k) && args.is_empty() {
+        return Ok(Some(Ty::Group(k.to_string())));
+    }
     if args.len() != tparams.len() {
         let msg = format!("`{name}` takes {} type arguments, found {}", tparams.len(), args.len());
         let hint = match tparams.is_empty() {
@@ -1291,7 +1315,7 @@ enum Place<'a> {
 /// The first capability named inside `ty`.
 fn cap_in(ty: &Ty) -> Option<&str> {
     match ty {
-        Ty::Cap(c) => Some(c),
+        Ty::Cap(c) | Ty::Group(c) => Some(c),
         Ty::Option(t) | Ty::List(t) => cap_in(t),
         Ty::Result(t, e) | Ty::Map(t, e) | Ty::HashMap(t, e) => cap_in(t).or_else(|| cap_in(e)),
         Ty::Fn(ps, r) => ps.iter().find_map(cap_in).or_else(|| cap_in(r)),
@@ -1333,7 +1357,7 @@ fn cap_type_ok(ty: &Ty, span: Span, place: Place) -> Result<(), Diag> {
         format!("take `{cap}` as a parameter"),
     );
     let (msg, hint) = match place {
-        Place::Param if matches!(ty, Ty::Cap(_)) => return Ok(()),
+        Place::Param if matches!(ty, Ty::Cap(_) | Ty::Group(_)) => return Ok(()),
         Place::Param => nested,
         Place::Local if !matches!(ty, Ty::Cap(_)) => nested,
         Place::Field => ("capability type in a field".to_string(), hint),
@@ -1402,11 +1426,60 @@ fn signature(
         let ty = resolve(&p.ty, caps, structs, enums, scope)?;
         cap_type_ok(&ty, p.ty.span, Place::Param)?;
         if scope.module.is_empty() && f.name == "main" && !matches!(ty, Ty::Cap(_)) {
+            if let (Ty::Group(g), Some((fields, _))) = (&ty, scope.types) {
+                let grants: Vec<String> = fields[g].iter().map(|(n, t)| format!("{n}: {t}")).collect();
+                let msg = format!("`main` cannot take capability struct `{}`", bare(g));
+                let hint = format!(
+                    "main's parameters are the grants: write `{}` and build `{} {{ .. }}` where it is passed",
+                    grants.join(", "),
+                    bare(g)
+                );
+                return Err(err(p.ty.span, msg, Some(&hint)));
+            }
             let msg = format!("`main` parameter `{}` is not a capability", p.name);
             let hint = "`main` parameters must be capabilities, like `input: Dir`";
             return Err(err(p.span, msg, Some(hint)));
         }
         params.push(ty);
+    }
+    if let Some((fields, _)) = scope.types {
+        // Rule 9: the limit counts a capability struct's fields, which lowering makes parameters.
+        let mut count = 0;
+        for (p, ty) in f.params.iter().zip(&params) {
+            count += match ty {
+                Ty::Group(g) => fields[g].len(),
+                _ => 1,
+            };
+            if count > MAX_PARAMS {
+                let total: usize = params
+                    .iter()
+                    .map(|t| if let Ty::Group(g) = t { fields[g].len() } else { 1 })
+                    .sum();
+                let what = format!("`{}` takes {total} parameters", f.name);
+                return Err(too_many_params(p.span, what));
+            }
+        }
+        // Rule 8: a test's entry names its leaves by short name, beside its data parameters, so
+        // parameter names and capability struct field names must be distinct.
+        if f.test {
+            let mut seen: Vec<(&str, String)> = Vec::new();
+            for (p, ty) in f.params.iter().zip(&params) {
+                let own: Vec<(&str, String)> = match ty {
+                    Ty::Group(g) => fields[g]
+                        .iter()
+                        .map(|(n, _)| (n.as_str(), format!("{}.{n}", p.name)))
+                        .collect(),
+                    _ => vec![(p.name.as_str(), p.name.clone())],
+                };
+                for (short, path) in own {
+                    if let Some((_, first)) = seen.iter().find(|(s, _)| *s == short) {
+                        let msg = format!("test `{}` names `{short}` twice: `{first}` and `{path}`", f.name);
+                        return Err(err(p.span, msg, Some("rename the field or drop the parameter")));
+                    }
+                    seen.push((short, path));
+                }
+            }
+        }
     }
     let typed: Vec<_> = f
         .params
@@ -1498,10 +1571,73 @@ fn struct_fields(
             return Err(err(p.span, msg, Some("rename one of them")));
         }
         let ty = resolve(&p.ty, caps, structs, enums, scope)?;
-        cap_type_ok(&ty, p.ty.span, Place::Field)?;
+        // A whole capability type may be a field: the struct is then a capability struct, or
+        // mixed and refused below.
+        if !matches!(ty, Ty::Cap(_) | Ty::Group(_)) {
+            cap_type_ok(&ty, p.ty.span, Place::Field)?;
+        }
         fields.push((p.name.clone(), ty));
     }
+    // Recognition (L32), once every capability struct is known (the second pass; a field's
+    // struct type may be one): at least one field, every field a capability type.
+    let caps_held = fields
+        .iter()
+        .filter(|(_, t)| matches!(t, Ty::Cap(_) | Ty::Group(_)))
+        .count();
+    if scope.types.is_none() {
+        return Ok(fields);
+    }
+    if caps_held > 0 && caps_held < fields.len() {
+        let (name, ty) = fields
+            .iter()
+            .find(|(_, t)| !matches!(t, Ty::Cap(_) | Ty::Group(_)))
+            .unwrap();
+        let at = s.fields.iter().find(|p| p.name == *name).map_or(s.span, |p| p.span);
+        let msg = format!("struct `{}` mixes capabilities and data: `{name}: {ty}`", s.name);
+        let hint = format!("a struct holds capabilities only or no capability; move `{name}` to a data struct");
+        return Err(err(at, msg, Some(&hint)));
+    }
+    if caps_held > 0 {
+        if let Some((name, Ty::Group(g))) = fields.iter().find(|(_, t)| matches!(t, Ty::Group(_))) {
+            let at = s.fields.iter().find(|p| p.name == *name).map_or(s.span, |p| p.span);
+            let msg = format!("capability struct `{}` nests `{}`", s.name, bare(g));
+            let hint = format!("list `{}`'s fields in `{}`", bare(g), s.name);
+            return Err(err(at, msg, Some(&hint)));
+        }
+        if let Some(t) = s.tparams.first() {
+            let msg = format!("capability struct `{}` cannot be generic", s.name);
+            let hint = "remove `<..>`: a capability struct lists capability types only";
+            return Err(err(t.span, msg, Some(hint)));
+        }
+    }
     Ok(fields)
+}
+
+/// Whether `fields` are a capability struct's: at least one, every one a capability type.
+pub(crate) fn is_group(fields: &[(String, Ty)]) -> bool {
+    !fields.is_empty() && fields.iter().all(|(_, t)| matches!(t, Ty::Cap(_)))
+}
+
+/// The capability leaves of a function with parameters `names` of types `tys`: each capability
+/// parameter by its name, each field of a capability struct parameter by its path `env.db`, in
+/// parameter then field order, with its capability type's name.
+pub(crate) fn leaves(fields: &Fields, names: &[&str], tys: &[Ty]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (name, ty) in names.iter().zip(tys) {
+        match ty {
+            Ty::Cap(c) => out.push((name.to_string(), c.clone())),
+            Ty::Group(g) => {
+                for (f, t) in &fields[g] {
+                    let Ty::Cap(c) = t else {
+                        unreachable!("a capability struct's fields are capabilities")
+                    };
+                    out.push((format!("{name}.{f}"), c.clone()));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 fn enum_variants(
@@ -1960,6 +2096,20 @@ fn contains_itself(name: &str, fields: &Fields, variants: &Variants, tparams: &T
     false
 }
 
+/// A capability, or a field of a capability struct, where a value is needed (rules 1 and 4).
+fn cap_as_value(span: Span) -> Diag {
+    let hint = "call methods on the parameter itself";
+    err(span, "capability used as a value".to_string(), Some(hint))
+}
+
+/// The name a `Name` expression holds.
+fn name_of(e: &Expr) -> String {
+    match &e.kind {
+        ExprKind::Name(n) => n.clone(),
+        _ => unreachable!("a name"),
+    }
+}
+
 fn no_field(span: Span, field: &str, ty: &str, decl: &[(String, Ty)]) -> Diag {
     let names: Vec<_> = decl.iter().map(|(n, _)| n.as_str()).collect();
     let hint = suggest(field, &names, "fields");
@@ -2212,10 +2362,12 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable, need_main: bool) -> Result
         }
     }
 
-    // Types before signatures, which may name them.
+    // Types before signatures, which may name them. The first pass knows no capability struct
+    // (a field of one is a plain struct type until this pass has found them all).
     let mut fields = Fields::new();
     let mut variants = Variants::new();
     let mut tparams = TypeParams::new();
+    let no_groups = HashSet::new();
     for name in &order {
         let own = match structs.get(name) {
             Some(s) => &s.tparams,
@@ -2227,6 +2379,7 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable, need_main: bool) -> Result
             mods: &mods,
             tparams: own,
             types: None,
+            groups: &no_groups,
         };
         let resolved =
             check_tparams(own, caps, &structs, &enums, scope.module).and_then(|()| match structs.get(name) {
@@ -2252,13 +2405,19 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable, need_main: bool) -> Result
         return Err(diags);
     }
     // The bounds of the type arguments fields and payloads name, now that `has_fn` can walk
-    // every type: the same types resolved again.
+    // every type, and the capability structs now known (a field or payload of one is refused):
+    // the same types resolved again.
+    let groups: HashSet<String> = (fields.iter())
+        .filter(|(_, f)| is_group(f))
+        .map(|(k, _)| k.clone())
+        .collect();
     for name in &order {
         let scope = Scope {
             module: module_of(name),
             mods: &mods,
             tparams: structs.get(name).map_or_else(|| &enums[name].tparams, |s| &s.tparams),
             types: Some((&fields, &variants)),
+            groups: &groups,
         };
         let resolved = match structs.get(name) {
             Some(s) => struct_fields(s, caps, &structs, &enums, scope).map(drop),
@@ -2279,6 +2438,7 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable, need_main: bool) -> Result
             mods: &mods,
             tparams: &f.tparams,
             types: Some((&fields, &variants)),
+            groups: &groups,
         };
         match signature(f, &sigs, caps, &structs, &enums, scope) {
             Ok(sig) => {
@@ -2322,6 +2482,7 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable, need_main: bool) -> Result
                 mods: &mods,
                 tparams: &f.tparams,
                 types: Some((&fields, &variants)),
+                groups: &groups,
             },
             scopes: Vec::new(),
             ret: Ty::Unit,
@@ -2407,13 +2568,6 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable, need_main: bool) -> Result
         captures,
         item_uses,
         instances,
-        cap_methods: (caps.caps.iter())
-            .flat_map(|c| {
-                c.methods
-                    .iter()
-                    .map(|(m, _, ret)| ((c.name.clone(), m.clone()), ret.clone()))
-            })
-            .collect(),
         // Replaced below: lowering reads the rest of the program.
         ir: ir::Module {
             funcs: Vec::new(),
@@ -2657,7 +2811,7 @@ impl<'a> Checker<'a> {
         // value to generate, and a bounded size together, since the host builds each case.
         let mut total = 0u64;
         for (p, ty) in f.params.iter().zip(&sig.params) {
-            if !sig.test || matches!(ty, Ty::Cap(_)) {
+            if !sig.test || matches!(ty, Ty::Cap(_) | Ty::Group(_)) {
                 continue;
             }
             let hint = Some("build it inside the test");
@@ -2678,7 +2832,7 @@ impl<'a> Checker<'a> {
                     .params
                     .iter()
                     .zip(&sig.params)
-                    .filter(|(_, t)| !matches!(t, Ty::Cap(_)));
+                    .filter(|(_, t)| !matches!(t, Ty::Cap(_) | Ty::Group(_)));
                 let n = data.fold(0u64, |n, (_, t)| n.saturating_add(input_values(shape, t, 0)));
                 let msg = format!(
                     "`{}`'s data parameters have up to {n} values together; a property may have at most {MAX_INPUT_VALUES}",
@@ -2755,7 +2909,7 @@ impl<'a> Checker<'a> {
                 c.captures.push(name.to_string());
             }
         }
-        if let (true, Ty::Cap(ty)) = (captured, &self.scopes[i][name].ty) {
+        if let (true, Ty::Cap(ty) | Ty::Group(ty)) = (captured, &self.scopes[i][name].ty) {
             let hint = format!("use a named function that takes it as a parameter, `{name}: {ty}`");
             return Err(err(span, format!("closure captures capability `{name}`"), Some(&hint)));
         }
@@ -2802,11 +2956,9 @@ impl<'a> Checker<'a> {
                     .as_ref()
                     .map(|t| resolve(t, self.caps, self.structs, self.enums, self.home));
                 let declared = declared.transpose()?;
-                if let ExprKind::Name(from) = &init.kind {
-                    if let Some(Local { ty: Ty::Cap(_), .. }) = self.lookup(from, init.span)? {
-                        let msg = format!("capability `{from}` bound to local `{name}`");
-                        return Err(err(init.span, msg, Some(&format!("pass `{from}` directly instead"))));
-                    }
+                if let Some((from, _)) = self.cap_place(init)? {
+                    let msg = format!("capability `{from}` bound to local `{name}`");
+                    return Err(err(init.span, msg, Some(&format!("pass `{from}` directly instead"))));
                 }
                 if let (Some(d), Some(t)) = (&declared, ty) {
                     cap_type_ok(d, t.span, Place::Local)?;
@@ -2991,10 +3143,10 @@ impl<'a> Checker<'a> {
             ExprKind::Unit => Ok(Ty::Unit),
             ExprKind::Name(name) if builtin(name).is_some() => self.constructor(e, name, &[], expected),
             ExprKind::Name(name) => match self.lookup(name, e.span)? {
-                Some(Local { ty: Ty::Cap(_), .. }) => {
-                    let hint = "call methods on the parameter itself";
-                    Err(err(e.span, "capability used as a value".to_string(), Some(hint)))
-                }
+                Some(Local {
+                    ty: Ty::Cap(_) | Ty::Group(_),
+                    ..
+                }) => Err(cap_as_value(e.span)),
                 Some(local) => Ok(local.ty.clone()),
                 None => {
                     let k = key(self.home.module, name);
@@ -3030,14 +3182,9 @@ impl<'a> Checker<'a> {
                 if matches!(*op, "==" | "!=") {
                     // A capability name is not a value, so catch it before `expr` says so.
                     for x in [a, b] {
-                        if let ExprKind::Name(n) = &x.kind {
-                            if let Some(Local {
-                                ty: ty @ Ty::Cap(_), ..
-                            }) = self.lookup(n, x.span)?
-                            {
-                                let hint = Some("capabilities have no equality");
-                                return Err(err(e.span, format!("cannot compare `{ty}` values"), hint));
-                            }
+                        if let Some((_, ty)) = self.cap_place(x)? {
+                            let hint = Some("capabilities have no equality");
+                            return Err(err(e.span, format!("cannot compare `{ty}` values"), hint));
                         }
                     }
                 }
@@ -3066,7 +3213,16 @@ impl<'a> Checker<'a> {
             ExprKind::Call(callee, args) => self.call(e, callee, args, expected),
             ExprKind::Method(recv, name, args) => self.method_call(e, recv, name, args),
             ExprKind::Field(base, name) => {
-                let ty = self.expr(base, None)?;
+                // The base may be a capability (then "no field") or a capability struct, whose
+                // field read is a capability: a value only where `operand` allows one (rule 4).
+                let ty = self.operand(base, None)?;
+                if let Ty::Group(k) = &ty {
+                    let decl = &self.fields[k];
+                    return Err(match decl.iter().any(|(n, _)| n == name) {
+                        true => cap_as_value(e.span),
+                        false => no_field(e.span, name, k, decl),
+                    });
+                }
                 self.field(&ty, name, e.span)
             }
             ExprKind::Index(base, index) => {
@@ -3115,21 +3271,106 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Like `expr`, but a capability parameter is allowed: the one place rule 1 lets it appear.
+    /// Like `expr`, but a capability is allowed: a parameter, a capability struct parameter or
+    /// a field of one, or a capability struct literal; the places rule 1 lets one appear.
     fn operand(&mut self, e: &Expr, expected: Option<&Ty>) -> Result<Ty, Diag> {
-        if let ExprKind::Name(name) = &e.kind {
-            if builtin(name).is_none() {
-                if let Some(Local {
-                    ty: ty @ Ty::Cap(_), ..
-                }) = self.lookup(name, e.span)?
-                {
-                    let ty = ty.clone();
-                    self.types.insert(e.span, ty.clone());
-                    return Ok(ty);
+        if let Some((_, ty)) = self.cap_place(e)? {
+            if let ExprKind::Field(base, _) = &e.kind {
+                let group = self
+                    .lookup(&name_of(base), base.span)?
+                    .expect("a capability struct")
+                    .ty
+                    .clone();
+                self.types.insert(base.span, group);
+            }
+            self.types.insert(e.span, ty.clone());
+            return Ok(ty);
+        }
+        let (k, inits, base) = match &e.kind {
+            ExprKind::StructLit(name, inits, base) => (self.home.own(self.caps, name), inits, base),
+            ExprKind::Module(m, inner) => match &inner.kind {
+                ExprKind::StructLit(name, inits, base) => (self.home.member(m, name, e.span)?, inits, base),
+                _ => return self.expr(e, expected),
+            },
+            _ => return self.expr(e, expected),
+        };
+        if !self.home.groups.contains(&k) {
+            return self.expr(e, expected);
+        }
+        if let Some(s) = self.structs.get(&k) {
+            self.home.public(&k, s.public, "struct", e.span)?;
+        }
+        self.group_lit(e, &k, inits, base.as_deref())
+    }
+
+    /// The capability `e` names, if it is one, as its path (`d`, `env.db`) and type: a
+    /// parameter of capability or capability struct type, or a field of the latter. Nothing is
+    /// recorded; `None` for any other expression (`lookup` still refuses a closure's capture).
+    fn cap_place(&mut self, e: &Expr) -> Result<Option<(String, Ty)>, Diag> {
+        match &e.kind {
+            ExprKind::Name(name) if builtin(name).is_none() => match self.lookup(name, e.span)? {
+                Some(Local {
+                    ty: ty @ (Ty::Cap(_) | Ty::Group(_)),
+                    ..
+                }) => Ok(Some((name.clone(), ty.clone()))),
+                _ => Ok(None),
+            },
+            ExprKind::Field(base, field) => {
+                let ExprKind::Name(name) = &base.kind else {
+                    return Ok(None);
+                };
+                if builtin(name).is_some() {
+                    return Ok(None);
+                }
+                let Some(Local { ty: Ty::Group(k), .. }) = self.lookup(name, base.span)? else {
+                    return Ok(None);
+                };
+                let k = k.clone();
+                let decl = &self.fields[&k];
+                match decl.iter().find(|(n, _)| n == field) {
+                    Some((_, ty)) => Ok(Some((format!("{name}.{field}"), ty.clone()))),
+                    None => Err(no_field(e.span, field, &k, decl)),
                 }
             }
+            _ => Ok(None),
         }
-        self.expr(e, expected)
+    }
+
+    /// `Env { db: db, now: env.now }`, a capability struct `k` written as a whole argument (rule
+    /// 5): every field written from a capability parameter or a field of one (rule 6).
+    fn group_lit(&mut self, e: &Expr, k: &str, inits: &[(String, Expr)], base: Option<&Expr>) -> Result<Ty, Diag> {
+        if let Some(b) = base {
+            let msg = "no `..` in a capability struct literal".to_string();
+            return Err(err(b.span, msg, Some("name every field")));
+        }
+        let decl = &self.fields[k];
+        let mut seen = Vec::new();
+        for (f, x) in inits {
+            let Some((_, ty)) = decl.iter().find(|(n, _)| n == f) else {
+                return Err(no_field(x.span, f, k, decl));
+            };
+            if seen.contains(&f) {
+                return Err(err(
+                    x.span,
+                    format!("duplicate field `{f}`"),
+                    Some("remove one of them"),
+                ));
+            }
+            seen.push(f);
+            let found = self.operand(x, Some(ty))?;
+            if found != *ty {
+                let msg = format!("`{}.{f}` takes a `{ty}`, found `{found}`", bare(k));
+                let hint = format!("give a capability parameter or a field of one: `{f}: {f}`");
+                return Err(err(x.span, msg, Some(&hint)));
+            }
+        }
+        if let Some((missing, _)) = decl.iter().find(|(n, _)| !seen.contains(&n)) {
+            let msg = format!("missing field `{missing}` in `{k}`");
+            return Err(err(e.span, msg, Some(&format!("add `{missing}: ..`"))));
+        }
+        let ty = Ty::Group(k.to_string());
+        self.record(e, &ty);
+        Ok(ty)
     }
 
     /// The element type of list or bytes type `ty`, with `index` checked as an `Int`.
@@ -3900,6 +4141,11 @@ impl<'a> Checker<'a> {
             };
             return Err(err(e.span, format!("unknown struct `{name}`"), Some(&hint)));
         };
+        if self.home.groups.contains(name) {
+            let msg = format!("capability struct `{}` built outside an argument", bare(name));
+            let hint = format!("write it as the argument: `f({} {{ .. }}, ..)`", self.written(name));
+            return Err(err(e.span, msg, Some(&hint)));
+        }
         let generic = !self.tparams[name].is_empty();
         let mut seen = Vec::new();
         let mut params = Vec::new();
