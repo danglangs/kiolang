@@ -69,7 +69,7 @@ kio run prog.kio --dir input=/srv/jobs/42/in --dir out=/srv/jobs/42/out
 | Step | What happens | Where |
 |---|---|---|
 | 1 | Host reads the files, parses and checks them against the capability table. On reject it prints the diagnostics; nothing has run. | host, native |
-| 2 | Host lowers the program to IR (a capability struct parameter becomes one parameter per field, a field read the field's local, a literal its fields: below the checker nothing knows the struct existed), generates its Wasm, appends it to the runtime and compiles the module to native code with Cranelift, in memory: native code is never loaded from disk (open_questions #75) | host, native |
+| 2 | Host lowers the program to IR (a capability struct parameter becomes one parameter per field, a field read the field's local, a literal its fields: below the checker nothing knows the struct existed), generates its Wasm, appends it to the runtime and compiles the module to native code with Cranelift, in memory: native code is never loaded from disk (open_questions #75). The runtime's functions come compiled from the binary itself (host/src/runtime_cache.rs, C18 prototype), so Cranelift compiles the program's own | host, native |
 | 3 | Host opens each granted directory with cap-std and builds the handle table `{0: input, 1: out}` | host, native |
 | 4 | Host binds each grant to the `main` parameter of the same name (host/src/grants.rs): a missing, unknown, repeated or mistyped grant is an error and no code runs | host, native |
 | 5 | Host instantiates the module with fuel, memory, stack and epoch limits, binds its imports to the host functions, and calls `run([dir(0), dir(1)])`, the grants in parameter order | wall crossed, into the sandbox |

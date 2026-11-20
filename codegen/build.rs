@@ -33,11 +33,19 @@ fn main() {
         .arg(&target)
         // The outer cargo's flags are for the host, not the runtime. 128 KB of free heap in the
         // initial memory, which dlmalloc takes first: a small request never grows memory (C17).
-        .env("CARGO_ENCODED_RUSTFLAGS", "-Clink-arg=--initial-heap=131072");
+        // `--growable-table`: the table has no maximum, so Wasmtime bounds every `call_indirect`
+        // against the table's size at run time rather than a constant, and a runtime function's
+        // native code is the same whatever the program appends to the table (host/build.rs, C18).
+        .env(
+            "CARGO_ENCODED_RUSTFLAGS",
+            "-Clink-arg=--initial-heap=131072\u{1f}-Clink-arg=--growable-table",
+        );
     if env::var_os("KIO_TEST_HEAP").is_some_and(|v| !v.is_empty() && v != "0") {
         cargo.args(["--features", "test-heap"]);
     }
     assert!(cargo.status().unwrap().success(), "building the runtime failed");
     let wasm = target.join("wasm32-unknown-unknown/release/runtime.wasm");
-    std::fs::copy(wasm, out.join("runtime.wasm")).unwrap();
+    let runtime = out.join("runtime.wasm");
+    std::fs::copy(wasm, &runtime).unwrap();
+    println!("cargo:runtime_wasm={}", runtime.display());
 }

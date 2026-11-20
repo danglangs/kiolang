@@ -471,7 +471,9 @@ impl Kio {
     pub fn new(limits: Limits) -> Result<Self> {
         let mut config = config::compile_config();
         set_stack(&mut config, limits.stack);
-        let engine = Engine::new(&config)?;
+        // The runtime's native code comes from the binary when the engine matches the build's
+        // (runtime_cache.rs); the program's functions are compiled per run either way.
+        let (engine, _) = crate::runtime_cache::engine(config)?;
         let ticker = Arc::new(Ticker(spawn_ticker(&engine)));
         Ok(Kio::with(engine, ticker, limits))
     }
@@ -549,6 +551,13 @@ impl Kio {
         };
         let native = self.engine.precompile_component(&lowered.wasm.component)?;
         Ok((lowered.wasm.component, native))
+    }
+
+    /// Test only: lookups of the runtime's embedded native code so far, `(hits, misses)`, over
+    /// every engine of this process (runtime_cache.rs).
+    #[cfg(feature = "test-hooks")]
+    pub fn runtime_cache_stats() -> (u64, u64) {
+        crate::runtime_cache::stats()
     }
 
     /// The message for a run that hit one of its limits, or `None` for any other error.
@@ -1023,7 +1032,7 @@ fn pool_engine(limits: &Limits, needs: (u32, u32, u32), initial: usize) -> Resul
     // One thread compiles: a parallel compile's peak memory stays resident on macOS while the
     // server idles (W13d): 28 MB idle RSS against 48 MB, for startup in about 160 ms, not 30.
     config.parallel_compilation(false);
-    Engine::new(&config)
+    Ok(crate::runtime_cache::engine(config)?.0)
 }
 
 impl Server {

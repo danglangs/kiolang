@@ -620,3 +620,43 @@ fn json_methods_compile() {
         assert!(s.desc(&t) < fresh, "{t:?} came with the result type");
     }
 }
+
+/// The runtime's table has no maximum (`--growable-table`, codegen/build.rs), so Wasmtime bounds a
+/// `call_indirect` against the table's size at run time, and a runtime function compiles to the
+/// same native code whatever the program appends to the table: host/build.rs compiles the
+/// runtime alone and the host reuses that code (host/src/runtime_cache.rs). `Append` keeps the
+/// maximum absent.
+#[test]
+fn the_runtime_table_is_growable() {
+    let runtime_table = |wasm: &[u8]| {
+        for payload in Parser::new(0).parse_all(wasm) {
+            if let Payload::TableSection(s) = payload.unwrap() {
+                return s.into_iter().next().unwrap().unwrap().ty;
+            }
+        }
+        panic!("no table");
+    };
+    assert_eq!(runtime_table(RUNTIME).maximum, None);
+    let wasm = compile(&module("fn main() -> Int { let f = |x: Int| x + 1; f(1) }")).unwrap();
+    // The component holds the one module with a memory (ours) and wit-component's shim modules.
+    let mut modules = 0;
+    for payload in Parser::new(0).parse_all(&wasm.component) {
+        if let Payload::ModuleSection { unchecked_range, .. } = payload.unwrap() {
+            let bytes = &wasm.component[unchecked_range.start as usize..unchecked_range.end as usize];
+            let has_memory = Parser::new(0)
+                .parse_all(bytes)
+                .any(|p| matches!(p, Ok(Payload::MemorySection(_))));
+            if !has_memory {
+                continue;
+            }
+            let ty = runtime_table(bytes);
+            assert_eq!(ty.maximum, None);
+            assert!(
+                ty.initial > runtime_table(RUNTIME).initial,
+                "the program's entries were added"
+            );
+            modules += 1;
+        }
+    }
+    assert_eq!(modules, 1);
+}

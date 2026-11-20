@@ -1,6 +1,7 @@
 //! kio keeps no compiled code on disk (open question 75): every run compiles from the Wasm it
 //! just generated, and a `.cwasm` an earlier kio cached, or a program planted, is never loaded
-//! and never touched.
+//! and never touched. The runtime's native code is built into the binary (C18); no file is read
+//! for it either.
 use kio_host::{Kio, Limits};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -118,4 +119,37 @@ fn the_host_never_deserializes_native_code() {
             assert!(!text.contains("deserialize"), "{}", path.display());
         }
     }
+}
+
+/// The runtime's native code comes from the binary (host/src/runtime_cache.rs): compiling a
+/// program looks up every function in the embedded cache and finds the runtime's there, so only
+/// the program's own functions, the entry and the trampolines are compiled. Cranelift 0.137 keys
+/// a function partly on state a reused compile context carries over (`DataFlowGraph::clear` does
+/// not clear `exception_tables`), so a parallel compile misses some runtime functions; the
+/// floor here allows for it.
+#[test]
+fn the_runtime_is_served_from_the_binary() {
+    let (hits0, misses0) = Kio::runtime_cache_stats();
+    let mut kio = Kio::new(Limits::default()).unwrap();
+    assert_eq!(kio.run("fn main() -> Int { 3 }", vec![]).unwrap().unwrap().value, "3");
+    let (hits, misses) = Kio::runtime_cache_stats();
+    let (hits, misses) = (hits - hits0, misses - misses0);
+    println!("runtime cache: {hits} hits, {misses} misses");
+    assert!(hits > 500, "hits {hits}, misses {misses}");
+    assert!(hits * 100 >= (hits + misses) * 75, "hits {hits}, misses {misses}");
+}
+
+/// A `--listen` server's engine (the pooling allocator, one compile thread) builds the same
+/// native code as `kio run`'s, so it is served from the binary too.
+#[test]
+fn a_server_is_served_from_the_binary() {
+    let (hits0, _) = Kio::runtime_cache_stats();
+    let src = r#"fn main(req: Incoming, res: Outgoing) -> Result<(), WebErr> {
+        res.send(200, [], [], "ok".to_bytes())
+    }"#;
+    kio_host::Server::new(vec![("main.kio".into(), src.into())], Limits::web())
+        .unwrap()
+        .unwrap();
+    let (hits, _) = Kio::runtime_cache_stats();
+    assert!(hits - hits0 > 500, "hits {}", hits - hits0);
 }

@@ -22,7 +22,7 @@ Needs Rust, Python 3, `ab` (ApacheBench, on macOS by default) and a kio-web chec
 
 How times are taken:
 - Wall time of a whole process, best of `RUNS` (5) after one discarded run. Each column's startup (an empty program, `python3 -c pass`) is subtracted, so a time is the work alone.
-- `kio compiled` subtracts a run of an empty program, which compiles the runtime too (every `kio run` compiles; there is no cache since S3); `compile` is a run with `--fuel 1` (stops at once) minus a process's start: checking, codegen and compiling. Runs use `--fuel 10^15 --timeout 3600 --memory 4096`: no benchmark stops at a limit (the default `kio run` fuel is 10 billion).
+- `kio compiled` subtracts a run of an empty program, which compiles the program (every `kio run` compiles; there is no on-disk cache since S3, and from C18 the runtime's functions come compiled from the binary); `compile` is a run with `--fuel 1` (stops at once) minus a process's start: checking, codegen and compiling. Runs use `--fuel 10^15 --timeout 3600 --memory 4096`: no benchmark stops at a limit (the default `kio run` fuel is 10 billion).
 - `kio interpreted` is `lang::run` natively, without fuel or memory limits. A run over 10 s is timed once.
 - HTTP: `ab -k -c 12 -n 50000` against kio-web's hello example under `--listen`, a hyper server and a `http.server` one answering the same route.
 

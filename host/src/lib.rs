@@ -36,6 +36,7 @@ mod grants;
 #[cfg(feature = "test-hooks")]
 mod interp;
 pub mod kv;
+mod runtime_cache;
 pub use compiled::{Kio, Server, Shared};
 pub use config::{MAX_STACK, RUN_STACK};
 #[cfg(feature = "test-hooks")]

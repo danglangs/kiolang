@@ -45,3 +45,9 @@ tempfile = "3"
 tokio-tungstenite = { version = "0.30", features = ["connect"] }
 # Builds the core module the pool reset test runs (already in the tree through codegen).
 wasm-encoder = "0.261"
+
+# host/build.rs compiles the runtime's native code with the engine settings of src/config.rs and
+# embeds it (src/runtime_cache.rs). Same Wasmtime as above (one Cargo.lock), compile-only features.
+[build-dependencies]
+wasmtime = { version = "50", default-features = false, features = ["component-model", "cranelift", "incremental-cache", "runtime", "std"] }
+wit-component = "0.261"

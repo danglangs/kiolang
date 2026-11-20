@@ -3,6 +3,8 @@ name = "codegen"
 version = "0.1.0"
 edition = "2021"
 publish = false
+# Lets host/build.rs find runtime.wasm (`DEP_KIO_RUNTIME_RUNTIME_WASM`): the build script below prints it.
+links = "kio_runtime"
 
 # Versions match what Wasmtime 50 already uses, so there is one copy of each.
 [dependencies]
