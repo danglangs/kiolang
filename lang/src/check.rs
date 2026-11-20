@@ -1359,7 +1359,7 @@ fn cap_type_ok(ty: &Ty, span: Span, place: Place) -> Result<(), Diag> {
     let (msg, hint) = match place {
         Place::Param if matches!(ty, Ty::Cap(_) | Ty::Group(_)) => return Ok(()),
         Place::Param => nested,
-        Place::Local if !matches!(ty, Ty::Cap(_)) => nested,
+        Place::Local if !matches!(ty, Ty::Cap(_) | Ty::Group(_)) => nested,
         Place::Field => ("capability type in a field".to_string(), hint),
         Place::Payload => ("capability type in a payload".to_string(), hint),
         Place::Local => ("capability type in a local".to_string(), hint),
@@ -1456,7 +1456,11 @@ fn signature(
                     .map(|t| if let Ty::Group(g) = t { fields[g].len() } else { 1 })
                     .sum();
                 let what = format!("`{}` takes {total} parameters", f.name);
-                return Err(too_many_params(p.span, what));
+                let mut d = too_many_params(p.span, what);
+                if params.iter().any(|t| matches!(t, Ty::Group(_))) {
+                    d.hint = Some("the limit counts a capability struct's fields; take fewer".to_string());
+                }
+                return Err(d);
             }
         }
         // Rule 8: a test's entry names its leaves by short name, beside its data parameters, so

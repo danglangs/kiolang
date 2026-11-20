@@ -339,6 +339,23 @@ fn main(primary: Db) -> Result<Int, DbErr> { let _ = f(primary)?; g(primary) }";
             row("g", "d", &["main_db"], Some(&["primary"]))
         ]
     );
+    // A crossed rebinding under two renamed grants is not forced, so it is no rename: the `~`
+    // lines print (the grant lines exit 3 already).
+    let base = "fn f(d: Dir) -> Result<(), IoErr> { d.write(\"f\", \"\".to_bytes()) }
+fn g(d: Dir) -> Result<(), IoErr> { d.write(\"g\", \"\".to_bytes()) }
+fn main(x: Dir, y: Dir) -> Result<(), IoErr> { f(x)?; g(y) }";
+    let crossed = "fn f(d: Dir) -> Result<(), IoErr> { d.write(\"f\", \"\".to_bytes()) }
+fn g(d: Dir) -> Result<(), IoErr> { d.write(\"g\", \"\".to_bytes()) }
+fn main(p: Dir, q: Dir) -> Result<(), IoErr> { f(q)?; g(p) }";
+    let d = diff(base, crossed);
+    assert!(d.bindings.iter().all(|b| !b.renamed && b.adds), "{:?}", d.bindings);
+    assert_eq!(
+        d.text(false),
+        "+ p: Dir (write)\n+ q: Dir (write)\n- x: Dir (write)\n- y: Dir (write)\n\n~ f: d from q (was x)\n~ g: d from p (was y)\nauthority added (exit 3); --detail lists each function"
+    );
+    // Both grants renamed in step (`x` to `p`, `y` to `q`) is two pairs of one type too: shown.
+    let aligned = crossed.replace("f(q)?; g(p)", "f(p)?; g(q)");
+    assert!(diff(base, &aligned).bindings.iter().all(|b| !b.renamed));
     // A leaf rebound to a grant that is new in `main` is the grant line's `+`: its row is detail.
     let base = "fn f(d: Db) -> Result<Int, DbErr> { d.exec(\"f\", []) }
 fn main(primary: Db) -> Result<Int, DbErr> { f(primary) }";

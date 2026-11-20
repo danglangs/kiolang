@@ -141,6 +141,10 @@ fn rule3_a_group_is_a_capability_everywhere() {
                 "Option<Env>",
             ),
         ),
+        (
+            "fn h(env: Env) -> Int { 1 } fn f(env: Env) { let z: Env = h(env); } fn main() {}",
+            ("capability type in a local", only, "Env"),
+        ),
     ];
     for (src, (msg, hint, at)) in cases {
         assert_rejected(&format!("{ENV}{src}"), msg, hint, at);
@@ -373,7 +377,7 @@ fn rule9_the_parameter_limit_counts_fields() {
     assert_rejected(
         &src,
         "`t` takes 1000 parameters; at most 999",
-        "pass a struct instead",
+        "the limit counts a capability struct's fields; take fewer",
         "n: Int",
     );
     let ok = format!(

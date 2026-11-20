@@ -637,6 +637,8 @@ pub fn report_diff(old_p: &Program, new_p: &Program) -> AuthorityDiff {
     };
     let (new_grants, removed_grants) = (only_in(&new, &old), only_in(&old, &new));
     let (old_origins, new_origins) = (origins(old_p), origins(new_p));
+    // Rename candidates: the binding's index, its leaf's type and its (lost, gained) grants.
+    let mut candidates: Vec<(usize, String, (String, String))> = Vec::new();
     let none = Vec::new();
     let names: BTreeSet<&String> = old.funcs.keys().chain(new.funcs.keys()).collect();
     for name in names {
@@ -711,10 +713,14 @@ pub fn report_diff(old_p: &Program, new_p: &Program) -> AuthorityDiff {
                 None => (Vec::new(), Vec::new()),
             };
             let adds = gained.iter().any(|g| !new_grants.contains(*g));
-            let renamed = !gained.is_empty()
-                && gained.iter().all(|g| new_grants.contains(*g))
-                && !lost.is_empty()
-                && lost.iter().all(|g| removed_grants.contains(*g));
+            // A rename candidate: one grant removed from `main` for one added, of this leaf's
+            // type; decided below, over every leaf of that type.
+            if let ([lost], [gained]) = (lost.as_slice(), gained.as_slice()) {
+                if removed_grants.contains(*lost) && new_grants.contains(*gained) {
+                    let ty = param_ty(new_p, name, leaf).unwrap_or_default();
+                    candidates.push((diff.bindings.len(), ty, ((*lost).clone(), (*gained).clone())));
+                }
+            }
             diff.binding_added |= adds;
             diff.bindings.push(Binding {
                 function: name.clone(),
@@ -722,9 +728,22 @@ pub fn report_diff(old_p: &Program, new_p: &Program) -> AuthorityDiff {
                 from: from.iter().cloned().collect(),
                 was: was.map(|w| w.iter().cloned().collect()),
                 adds,
-                renamed,
+                renamed: false,
             });
         }
+    }
+    // The mapping is a rename only when it is forced: every candidate leaf of one type swaps the
+    // same (removed, added) pair. Two pairs of one type could as well be a crossed rebinding,
+    // which no line forces a reading of: those lines print, and count as an addition.
+    for (i, ty, _) in &candidates {
+        let pairs: BTreeSet<&(String, String)> = (candidates.iter())
+            .filter(|(_, t, _)| t == ty)
+            .map(|(_, _, p)| p)
+            .collect();
+        let forced = pairs.len() == 1;
+        diff.bindings[*i].renamed = forced;
+        diff.bindings[*i].adds |= !forced;
+        diff.binding_added |= !forced;
     }
     diff.added |= diff.binding_added;
     diff
