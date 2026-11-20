@@ -365,12 +365,73 @@ impl Drop for Ticker {
     }
 }
 
+/// An engine and its epoch ticker that the runs of one `kio test` or `kio review` share (T5),
+/// with Cranelift's incremental cache in memory: one case's component differs from the last in
+/// its entry and a few other functions (about 20 of 1,150 on A3's app), so a case compiles those
+/// and finds the rest compiled. Each run still gets its own store and instance. Nothing
+/// compiled is written to disk or read from it (open question 75).
+#[derive(Clone)]
+pub struct Shared {
+    engine: Engine,
+    stack: usize,
+    ticker: Arc<Ticker>,
+}
+
+impl Shared {
+    /// An engine for runs with a `stack`-byte stack limit (`Limits::stack`).
+    pub fn new(stack: usize) -> Result<Self> {
+        let mut config = config::compile_config();
+        set_stack(&mut config, stack);
+        config.enable_incremental_compilation(Arc::new(FunctionCache::default()))?;
+        let engine = Engine::new(&config)?;
+        let ticker = Arc::new(Ticker(spawn_ticker(&engine)));
+        Ok(Shared { engine, stack, ticker })
+    }
+}
+
+/// The most bytes of compiled functions a `Shared` engine keeps.
+const CACHE_MAX: usize = 32 << 20;
+
+/// Cranelift's compiled functions by key (a hash of the function and the compiler's settings),
+/// each as Cranelift serialized it in this process.
+#[derive(Debug, Default)]
+struct FunctionCache(Mutex<Functions>);
+
+#[derive(Debug, Default)]
+struct Functions {
+    by_key: std::collections::HashMap<Vec<u8>, Vec<u8>>,
+    bytes: usize,
+}
+
+impl wasmtime::CacheStore for FunctionCache {
+    fn get(&self, key: &[u8]) -> Option<std::borrow::Cow<'_, [u8]>> {
+        let cache = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        cache.by_key.get(key).map(|v| std::borrow::Cow::Owned(v.clone()))
+    }
+
+    fn insert(&self, key: &[u8], value: Vec<u8>) -> bool {
+        let mut cache = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if cache.by_key.contains_key(key) {
+            return false;
+        }
+        // Full: start over. Most entries are cases' own functions, never met again, and the
+        // functions every run shares come back on the next compile.
+        let bytes = key.len() + value.len();
+        if cache.bytes + bytes > CACHE_MAX {
+            *cache = Functions::default();
+        }
+        cache.bytes += bytes;
+        cache.by_key.insert(key.to_vec(), value);
+        true
+    }
+}
+
 /// Compiles and runs programs under `limits`, with grants and an audit log. Each run gets a
 /// fresh store, so its counters and deadline start over; compiling is not charged to it.
 pub struct Kio {
     engine: Engine,
     limits: Limits,
-    _ticker: Ticker,
+    _ticker: Arc<Ticker>,
     /// The audit log and the `(name, path)` of each `Dir` grant, for the next run.
     audit: Option<(Box<dyn Write + Send>, DirPaths)>,
     /// The dependencies the audit log's header names (PK1).
@@ -403,8 +464,21 @@ impl Kio {
         let mut config = config::compile_config();
         set_stack(&mut config, limits.stack);
         let engine = Engine::new(&config)?;
-        let ticker = Ticker(spawn_ticker(&engine));
-        Ok(Kio {
+        let ticker = Arc::new(Ticker(spawn_ticker(&engine)));
+        Ok(Kio::with(engine, ticker, limits))
+    }
+
+    /// Like `new`, on `shared`'s engine (T5): a function compiled for an earlier run on `shared`
+    /// is not compiled again. `limits.stack` must be the stack `shared` was made for.
+    pub fn sharing(shared: &Shared, limits: Limits) -> Result<Self> {
+        if shared.stack != limits.stack {
+            wasmtime::bail!("an engine for a {} B stack, not {} B", shared.stack, limits.stack);
+        }
+        Ok(Kio::with(shared.engine.clone(), shared.ticker.clone(), limits))
+    }
+
+    fn with(engine: Engine, ticker: Arc<Ticker>, limits: Limits) -> Self {
+        Kio {
             engine,
             limits,
             _ticker: ticker,
@@ -421,7 +495,7 @@ impl Kio {
             hidden: None,
             #[cfg(feature = "test-hooks")]
             fail_writes: false,
-        })
+        }
     }
 
     /// Write the audit log (H8) of the next run to `out`: a header, one line per host call, a

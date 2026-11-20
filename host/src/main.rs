@@ -5,7 +5,7 @@ mod review;
 use kio_host::fake::FakeFile;
 use kio_host::{
     listen, open_dir, ClockSpec, Diag, FileId, HmacKey, Kio, Limits, LogSink, Origin, RngSpec, SecretValue, Server,
-    Sources, Used, ValueText,
+    Shared, Sources, Used, ValueText,
 };
 use serde_json::json;
 use std::cell::RefCell;
@@ -703,6 +703,8 @@ struct TestRun<'a> {
     case: Option<(lang::prop::Case, bool)>,
     /// The grants file's fakes for this test's `Http` parameters (`Origin::fake`), by name.
     fakes: Vec<(String, Origin)>,
+    /// The engine every run of this `kio test` compiles on (`Tests::engine`).
+    engine: &'a Shared,
 }
 
 /// `run`'s work once the flags (`grants_file`'s first) and the program, as read, are known.
@@ -1222,7 +1224,11 @@ fn run_program(prog: &Program, flags: &[&str], grants_file: Option<&str>, dry: b
         let audit = audit.map(|path| (path, dir_paths));
         return serve(prog, dirs, https, kvs, sources, addr, limits, ws_origins, hosts, audit);
     }
-    let mut kio = match Kio::new(limits) {
+    let kio = match &test {
+        Some(t) => Kio::sharing(t.engine, limits),
+        None => Kio::new(limits),
+    };
+    let mut kio = match kio {
         Ok(k) => k,
         Err(e) => return internal(format!("{e:#}")),
     };
@@ -1356,6 +1362,9 @@ struct Tests {
     /// A mutant run (`kio review`, R1b1): a property stops at its first failing case, unshrunk,
     /// and the interpreter does not run it as the oracle.
     mutant: bool,
+    /// The engine every run compiles on, made for the flags' `--stack` (T5): a property's cases
+    /// and a mutant's runs compile only the functions an earlier run did not.
+    engine: Shared,
 }
 
 /// One test's result: its error as `--json` shows one, the time it took and its `Log` lines;
@@ -1611,6 +1620,7 @@ fn test_setup(path: &str, flags: &[&str], read: &FakeReads) -> Result<Tests, i32
     }
     // Checked once here, as `run_program` checks them, so a bad value is a usage error, not a
     // failure of every test.
+    let mut stack = Limits::default().stack;
     for pair in flags.chunks(2) {
         let [flag, n] = pair else { continue };
         if !LIMIT_FLAGS.contains(&flag.as_str()) && flag != "--kv-mb" && flag != "--db-mb" {
@@ -1621,6 +1631,10 @@ fn test_setup(path: &str, flags: &[&str], read: &FakeReads) -> Result<Tests, i32
         };
         if flag == "--stack" && v > (kio_host::MAX_STACK >> 10) as u64 {
             return Err(fail(format!("--stack {n}: at most {} KB", kio_host::MAX_STACK >> 10)));
+        }
+        // As `run_program` reads it; `Kio::sharing` refuses an engine for another stack.
+        if flag == "--stack" {
+            stack = (v as usize).saturating_mul(1 << 10);
         }
     }
     http_names(&flags).map_err(fail)?;
@@ -1651,6 +1665,7 @@ fn test_setup(path: &str, flags: &[&str], read: &FakeReads) -> Result<Tests, i32
             "no test matches `{filter}`\n  hint: a test runs when its name (`util::t` in a module) contains the filter"
         )));
     }
+    let engine = Shared::new(stack).map_err(|e| internal(format!("{e:#}")))?;
     Ok(Tests {
         prog,
         flags,
@@ -1663,6 +1678,7 @@ fn test_setup(path: &str, flags: &[&str], read: &FakeReads) -> Result<Tests, i32
         fakes,
         records,
         mutant: false,
+        engine,
     })
 }
 
@@ -1970,6 +1986,7 @@ fn run_once(tests: &Tests, t: &lang::TestFn, case: Option<(lang::prop::Case, boo
                 logs,
                 case,
                 fakes,
+                engine: &tests.engine,
             };
             let grants = tests.grants_file.as_deref();
             run_program(&tests.prog, &flags, grants, false, Some(run))

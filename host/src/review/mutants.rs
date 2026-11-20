@@ -442,6 +442,7 @@ impl Runner<'_> {
             fakes: base.fakes.clone(),
             records: base.records.clone(),
             mutant: true,
+            engine: base.engine.clone(),
         };
         // Examples first: the cheapest kill.
         let mut reaching: Vec<&TestResult> = (reaching.iter())

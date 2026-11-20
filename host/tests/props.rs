@@ -306,3 +306,62 @@ fn a_long_input_is_clipped() {
     let line = out.lines().find(|l| l.starts_with("  input: p = ")).unwrap();
     assert_eq!(line.len(), "  input: ".len() + 4099);
 }
+
+/// T5: every case runs in a fresh instance with fresh grants, though the cases share one engine
+/// and what it compiled. Each case and shrink run checks it finds no earlier case's file, key,
+/// table, draw, clock or log line, then leaves its own; any leak fails with another message.
+#[test]
+fn cases_share_no_state() {
+    let run = Case::new("fn main(r: Rng) -> Int { r.int(0, 1000000) }");
+    let out = Command::new(env!("CARGO_BIN_EXE_kio"))
+        .args(["run", &run.app, "--rng", "r=seed:1"])
+        .output()
+        .unwrap();
+    let first = String::from_utf8(out.stdout).unwrap();
+    let body = r#"
+  assert_eq(d.list("").map_err(|e| "dir")?, []);
+  d.create("a.txt", "x".to_bytes()).map_err(|e| "dir")?;
+  assert_eq(k.keys("").map_err(|e| "kv")?, []);
+  k.set("a", "1".to_bytes()).map_err(|e| "kv")?;
+  db.exec("CREATE TABLE t (x INTEGER)", []).map_err(|e| "db")?;
+  assert_eq(r.int(0, 1000000), FIRST);
+  assert_eq(now.now_ms(), 1767225600000);
+  let _ = log.write("case");
+"#
+    .replace("FIRST", first.trim());
+    let params = "d: Dir, k: Kv, db: Db, r: Rng, now: Clock, log: Log, n: Int";
+    let c = Case::new(&format!(
+        "#[test]\nfn fresh({params}) -> Result<(), Str> {{{body}  Ok(())\n}}\n#[test]\nfn until({params}) -> Result<(), Str> {{{body}  assert(n < 5, \"big\");\n  Ok(())\n}}\nfn main() {{}}"
+    ));
+    let (code, t) = c.json(&["--filter", "fresh", "--cases", "50"]);
+    assert_eq!((code, t["cases"].clone()), (0, 50.into()), "{t}");
+    let (code, t) = c.json(&["--filter", "until"]);
+    assert_eq!(code, 1, "{t}");
+    assert_eq!(t["error"]["message"], "assertion failed: big", "{t}");
+    assert_eq!(t["input"], serde_json::json!({"n": "5"}));
+    assert!(
+        t["cases"].as_u64().unwrap() > 1 && t["shrinks"].as_u64().unwrap() > 0,
+        "{t}"
+    );
+    assert_eq!(t["log"], "case\n");
+    assert_eq!(std::fs::read_dir(c.dir.path().join("tmp")).unwrap().count(), 0);
+}
+
+/// T5: a case compiled on a warm engine (every function already compiled) uses the fuel and
+/// memory it uses on a cold one: two copies of one property, alone and after each other.
+#[test]
+fn a_warm_engine_changes_no_figure() {
+    let prop = |name: &str| {
+        format!("#[test]\nfn {name}(xs: List<Int>, s: Str) {{\n  let mut t = 0;\n  for x in xs {{ t = t + x % 7; }}\n  assert(t >= 0 || s.len() >= 0, \"never\");\n}}\n")
+    };
+    let c = Case::new(&format!("{}{}fn main() {{}}", prop("a"), prop("b")));
+    let figures = |t: &serde_json::Value| (t["fuel"].clone(), t["peak_memory"].clone(), t["cases"].clone());
+    let (_, cold) = c.json(&["--filter", "b"]);
+    let (code, out, err) = c.kio(&["--json"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let all: serde_json::Value = serde_json::from_str(&out).unwrap();
+    // Tests run sorted by key: `b` after `a`.
+    assert_eq!(all["tests"][1]["name"], "b");
+    assert_eq!(figures(&cold), figures(&all["tests"][1]));
+    assert_eq!(figures(&cold), figures(&all["tests"][0]));
+}

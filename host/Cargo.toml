@@ -35,7 +35,7 @@ tokio-tungstenite = { version = "0.30", default-features = false, features = ["h
 ureq = "3"
 url = "2"
 wasmparser = "0.261"
-wasmtime = { version = "50", default-features = false, features = ["anyhow", "backtrace", "component-model", "cranelift", "demangle", "addr2line", "parallel-compilation", "pooling-allocator", "runtime", "std"] }
+wasmtime = { version = "50", default-features = false, features = ["anyhow", "backtrace", "component-model", "cranelift", "demangle", "incremental-cache", "addr2line", "parallel-compilation", "pooling-allocator", "runtime", "std"] }
 
 [dev-dependencies]
 kio = { path = ".", features = ["test-hooks"] }
