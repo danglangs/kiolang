@@ -366,10 +366,11 @@ impl Drop for Ticker {
 }
 
 /// An engine and its epoch ticker that the runs of one `kio test` or `kio review` share (T5),
-/// with Cranelift's incremental cache in memory: one case's component differs from the last in
-/// its entry and a few other functions (about 20 of 1,150 on A3's app), so a case compiles those
-/// and finds the rest compiled. Each run still gets its own store and instance. Nothing
-/// compiled is written to disk or read from it (open question 75).
+/// with Cranelift's incremental cache in memory behind the runtime's embedded code (C18): one
+/// case's component differs from the last in its entry and a few other functions (about 20 of
+/// 1,150 on A3's app), so a case compiles those and finds the rest compiled. Each run still gets
+/// its own store and instance. Nothing compiled is written to disk or read from it (open
+/// question 75).
 #[derive(Clone)]
 pub struct Shared {
     engine: Engine,
@@ -380,64 +381,20 @@ pub struct Shared {
 }
 
 impl Shared {
-    /// An engine for runs with a `stack`-byte stack limit (`Limits::stack`).
+    /// An engine for runs with a `stack`-byte stack limit (`Limits::stack`): the runtime's
+    /// functions from the binary, and what its runs compile kept in memory behind them
+    /// (`runtime_cache::engine` with `keep`).
     pub fn new(stack: usize) -> Result<Self> {
         let mut config = config::compile_config();
         set_stack(&mut config, stack);
-        config.enable_incremental_compilation(Arc::new(FunctionCache::default()))?;
-        let engine = Engine::new(&config)?;
+        let (engine, cached) = crate::runtime_cache::engine(config, true)?;
         let ticker = Arc::new(Ticker(spawn_ticker(&engine)));
         Ok(Shared {
             engine,
             stack,
             ticker,
-            cached: false,
+            cached,
         })
-    }
-}
-
-/// The most bytes of compiled functions a `Shared` engine keeps.
-const CACHE_MAX: usize = 32 << 20;
-
-/// Cranelift's compiled functions by key (a hash of the function and the compiler's settings),
-/// each as Cranelift serialized it in this process.
-#[derive(Debug, Default)]
-struct FunctionCache(Mutex<Functions>);
-
-#[derive(Debug, Default)]
-struct Functions {
-    by_key: std::collections::HashMap<Vec<u8>, Arc<[u8]>>,
-    bytes: usize,
-}
-
-impl wasmtime::CacheStore for FunctionCache {
-    fn get(&self, key: &[u8]) -> Option<std::borrow::Cow<'_, [u8]>> {
-        // `get` may borrow only from `self`, and an entry can go when the cache empties, so the
-        // bytes are copied; outside the lock, which holds only while the `Arc` is cloned.
-        let entry = self
-            .0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .by_key
-            .get(key)
-            .cloned();
-        entry.map(|v| std::borrow::Cow::Owned(v.to_vec()))
-    }
-
-    fn insert(&self, key: &[u8], value: Vec<u8>) -> bool {
-        let bytes = key.len() + value.len();
-        let mut cache = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        if bytes > CACHE_MAX || cache.by_key.contains_key(key) {
-            return false;
-        }
-        // Full: start over. Most entries are cases' own functions, never met again, and the
-        // functions every run shares come back on the next compile.
-        if cache.bytes + bytes > CACHE_MAX {
-            *cache = Functions::default();
-        }
-        cache.bytes += bytes;
-        cache.by_key.insert(key.to_vec(), value.into());
-        true
     }
 }
 
@@ -482,7 +439,7 @@ impl Kio {
         set_stack(&mut config, limits.stack);
         // The runtime's native code comes from the binary when the engine matches the build's
         // (runtime_cache.rs); the program's functions are compiled per run either way.
-        let (engine, cached) = crate::runtime_cache::engine(config)?;
+        let (engine, cached) = crate::runtime_cache::engine(config, false)?;
         let ticker = Arc::new(Ticker(spawn_ticker(&engine)));
         Ok(Kio::with(engine, ticker, limits, cached))
     }
@@ -509,7 +466,7 @@ impl Kio {
         set_stack(&mut config, limits.stack);
         config.parallel_compilation(parallel);
         let (engine, cached) = if cached {
-            crate::runtime_cache::engine(config)?
+            crate::runtime_cache::engine(config, false)?
         } else {
             (Engine::new(&config)?, false)
         };
@@ -1075,7 +1032,7 @@ fn pool_engine(limits: &Limits, needs: (u32, u32, u32), initial: usize) -> Resul
     // One thread compiles: a parallel compile's peak memory stays resident on macOS while the
     // server idles (W13d): 28 MB idle RSS against 48 MB, for startup in about 160 ms, not 30.
     config.parallel_compilation(false);
-    Ok(crate::runtime_cache::engine(config)?.0)
+    Ok(crate::runtime_cache::engine(config, false)?.0)
 }
 
 impl Server {

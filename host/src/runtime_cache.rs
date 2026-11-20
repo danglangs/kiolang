@@ -8,8 +8,9 @@
 //! What this trusts, and how each requirement of C18 holds:
 //! - Only bytes the build produced reach Cranelift: `SEED` is `include_bytes!` of the build
 //!   script's output. No file, environment variable, cache directory or other source is read
-//!   (host/tests/cache.rs checks this file's text), and nothing is ever written: `insert` keeps
-//!   nothing and returns false, so a run's compiled functions never enter the cache.
+//!   (host/tests/cache.rs checks this file's text), and nothing is ever written to the seed:
+//!   `insert` never touches it. A `Shared` engine (T5, `kio test` and `kio review`) keeps what
+//!   it compiles in a memory layer behind the seed, in this process only, as T5 did.
 //!   open_questions #75 stands: no native code enters from outside the binary, and no program
 //!   can plant any.
 //! - The engine is fixed at build time and checked at load: the seed carries the build engine's
@@ -31,8 +32,9 @@
 //!   to compile that function.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use wasmtime::{CacheStore, Config, Engine, Result};
 
 /// host/build.rs's output; its format is described there.
@@ -90,64 +92,112 @@ pub fn status() -> (bool, u64, u64) {
     (SERVED.load(Relaxed), HITS.load(Relaxed), MISSES.load(Relaxed))
 }
 
-/// The embedded seed as Cranelift's cache: read-only, and answering nothing until `armed`.
-struct Embedded {
+/// The most bytes of compiled functions the memory layer keeps (T5).
+const MEMORY_MAX: usize = 32 << 20;
+
+/// Cranelift's cache: the embedded seed, read-only and answering nothing until `armed`, and
+/// behind it, for a `Shared` engine (T5), what this process compiled, by key, as Cranelift
+/// serialized it. Only the memory layer takes inserts, and only of what the seed lacks.
+struct Store {
     seed: &'static Seed,
     armed: AtomicBool,
+    memory: Option<Mutex<Memory>>,
 }
 
-impl std::fmt::Debug for Embedded {
+#[derive(Default)]
+struct Memory {
+    by_key: HashMap<Vec<u8>, Arc<[u8]>>,
+    bytes: usize,
+}
+
+impl std::fmt::Debug for Store {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
             f,
-            "the runtime's embedded native code ({} functions)",
-            self.seed.entries.len()
+            "the runtime's embedded native code ({} functions){}",
+            self.seed.entries.len(),
+            if self.memory.is_some() {
+                ", and this process's compiles"
+            } else {
+                ""
+            }
         )
     }
 }
 
-impl CacheStore for Embedded {
+impl CacheStore for Store {
     fn get(&self, key: &[u8]) -> Option<Cow<'_, [u8]>> {
-        if !self.armed.load(Relaxed) {
-            return None;
-        }
-        match self.seed.entries.binary_search_by(|(k, _)| (*k).cmp(key)) {
-            Ok(i) => {
+        if self.armed.load(Relaxed) {
+            if let Ok(i) = self.seed.entries.binary_search_by(|(k, _)| (*k).cmp(key)) {
                 HITS.fetch_add(1, Relaxed);
-                Some(Cow::Borrowed(self.seed.entries[i].1))
+                return Some(Cow::Borrowed(self.seed.entries[i].1));
             }
-            Err(_) => {
+        }
+        // `get` may borrow only from `self`, and an entry can go when the memory empties, so the
+        // bytes are copied; outside the lock, which holds only while the `Arc` is cloned.
+        let kept = self.memory.as_ref().and_then(|m| {
+            m.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .by_key
+                .get(key)
+                .cloned()
+        });
+        match kept {
+            Some(code) => Some(Cow::Owned(code.to_vec())),
+            None => {
                 MISSES.fetch_add(1, Relaxed);
                 None
             }
         }
     }
 
-    /// Nothing a run compiles is kept: the cache is the build's and never grows.
-    fn insert(&self, _key: &[u8], _value: Vec<u8>) -> bool {
-        false
+    /// The seed never grows. A `Shared` engine keeps what it compiles in memory, up to
+    /// `MEMORY_MAX`; full, it starts over (most entries are cases' own functions, never met
+    /// again, and the functions every run shares come back on the next compile).
+    fn insert(&self, key: &[u8], value: Vec<u8>) -> bool {
+        let Some(memory) = &self.memory else {
+            return false;
+        };
+        let bytes = key.len() + value.len();
+        let mut memory = memory.lock().unwrap_or_else(PoisonError::into_inner);
+        if bytes > MEMORY_MAX || memory.by_key.contains_key(key) {
+            return false;
+        }
+        if memory.bytes + bytes > MEMORY_MAX {
+            *memory = Memory::default();
+        }
+        memory.bytes += bytes;
+        memory.by_key.insert(key.to_vec(), value.into());
+        true
     }
 }
 
 /// An engine for `config`, serving the runtime's embedded native code when `config` builds the
 /// engine the seed was made for (same fingerprint), and compiling everything from source
-/// otherwise. The second value says which. The store is attached before the engine exists and
-/// armed only once the engine's fingerprint is known to match; nothing compiles in between, and
-/// an unarmed store answers no lookup. An engine that does not match is made again without the
-/// store, so Cranelift does not serialize what it compiles for it.
-pub fn engine(mut config: Config) -> Result<(Engine, bool)> {
+/// otherwise. The second value says which. With `keep`, the engine also keeps what it compiles
+/// in memory (a `Shared` engine, T5), whether or not the seed fits it. The store is attached
+/// before the engine exists and the seed armed only once the engine's fingerprint is known to
+/// match; nothing compiles in between, and an unarmed seed answers no lookup. An engine the seed
+/// does not fit and that keeps nothing is made again without the store, so Cranelift does not
+/// serialize what it compiles for it.
+pub fn engine(mut config: Config, keep: bool) -> Result<(Engine, bool)> {
     let plain = config.clone();
     let Some(seed) = seed() else {
         return Ok((Engine::new(&plain)?, false));
     };
-    let store = Arc::new(Embedded {
+    let store = Arc::new(Store {
         seed,
         armed: AtomicBool::new(false),
+        memory: keep.then(Mutex::default),
     });
     config.enable_incremental_compilation(store.clone())?;
     let engine = Engine::new(&config)?;
     if crate::config::fingerprint(&engine) != seed.fingerprint {
-        return Ok((Engine::new(&plain)?, false));
+        return Ok(if keep {
+            (engine, false)
+        } else {
+            (Engine::new(&plain)?, false)
+        });
     }
     store.armed.store(true, Relaxed);
     SERVED.store(true, Relaxed);
@@ -167,12 +217,37 @@ mod tests {
 
     #[test]
     fn the_default_engine_is_served_and_another_is_not() {
-        let (_, served) = engine(crate::config::compile_config()).unwrap();
+        let (_, served) = engine(crate::config::compile_config(), false).unwrap();
         assert!(served);
         let mut other = crate::config::compile_config();
         other.consume_fuel(false);
-        let (_, served) = engine(other).unwrap();
+        let (_, served) = engine(other, false).unwrap();
         assert!(!served, "an engine with other settings compiles from source");
+    }
+
+    /// The seed answers first and never changes; the memory layer, when there is one, keeps what
+    /// the seed lacks; without one, nothing is kept.
+    #[test]
+    fn the_memory_layer_sits_behind_the_seed() {
+        let seed = seed().unwrap();
+        let (seeded_key, seeded_code) = seed.entries[0];
+        let unknown = [7u8; 32];
+        for keep in [false, true] {
+            let store = Store {
+                seed,
+                armed: AtomicBool::new(true),
+                memory: keep.then(Mutex::default),
+            };
+            assert_eq!(store.get(seeded_key).as_deref(), Some(seeded_code));
+            assert!(store.get(&unknown).is_none());
+            assert_eq!(store.insert(&unknown, vec![1, 2, 3]), keep);
+            assert_eq!(store.get(&unknown).as_deref(), keep.then_some(&[1u8, 2, 3][..]));
+            assert_eq!(store.get(seeded_key).as_deref(), Some(seeded_code));
+            // Unarmed (the fingerprint did not match), the seed answers nothing; memory still does.
+            store.armed.store(false, Relaxed);
+            assert!(store.get(seeded_key).is_none());
+            assert_eq!(store.get(&unknown).as_deref(), keep.then_some(&[1u8, 2, 3][..]));
+        }
     }
 
     #[test]

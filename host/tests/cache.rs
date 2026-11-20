@@ -251,3 +251,24 @@ fn misses_compile_from_source_and_are_never_kept() {
         "a second compile hits and misses exactly as the first"
     );
 }
+
+/// A `Shared` engine (T5) is served the seed too, and its runs are right. What it keeps in
+/// memory behind the seed is checked on the store itself (runtime_cache.rs's unit tests): the
+/// lookup counts of two compiles cannot be compared while Cranelift 0.137 keys some runtime
+/// functions on a reused compile context's history (`DataFlowGraph::clear` leaves
+/// `exception_tables`), which re-keys about a hundred functions per parallel compile.
+#[test]
+fn a_shared_engine_is_served_too() {
+    let _stats = STATS.lock().unwrap_or_else(|e| e.into_inner());
+    let src = r#"fn a(x: Int) -> Int { x + 1 }
+        fn b(s: Str) -> Str { s + "!" }
+        fn main() -> Str { b(a(1).to_str()) }"#;
+    let shared = kio_host::Shared::new(Limits::default().stack).unwrap();
+    let mut kio = Kio::sharing(&shared, Limits::default()).unwrap();
+    assert!(kio.runtime_cache_served());
+    for _ in 0..2 {
+        let (h0, _) = Kio::runtime_cache_stats();
+        assert_eq!(kio.run(src, vec![]).unwrap().unwrap().value, "2!");
+        assert!(Kio::runtime_cache_stats().0 - h0 > 500);
+    }
+}
