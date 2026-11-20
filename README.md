@@ -221,7 +221,7 @@ Given the language reference, Haiku, Sonnet and Opus 5.5 pass 42-43 of 45 backen
 
 ## Performance
 
-Compiled to native code through Wasm, steady execution runs at 1.1-2x Rust on most work and 2-5x where it allocates heavily; each `kio run` also pays a compile and startup cost (about 36 ms for an empty program, Apple M3 Max) that the [speed plan](docs/proposals/speed-plan.md) targets.
+Compiled to native code through Wasm, steady execution runs at 1.1-2x Rust on most work and 2-5x where it allocates heavily; each `kio run` also pays a compile and startup cost (about 26 ms for an empty program on an Apple M3 Max, with the runtime precompiled into the binary; [speed plan](docs/proposals/speed-plan.md)).
 
 ## Roadmap
 
