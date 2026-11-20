@@ -273,7 +273,8 @@ fn check_base(path: &str, base: &str, detail: bool) -> i32 {
         let deps: Vec<_> = (deps::changes(&old.deps, &new.deps).into_iter())
             .map(|(name, o, n)| json!({"name": name, "old": o, "new": n}))
             .collect();
-        let d = json!({"grants": diff.grants, "funcs": diff.funcs, "added": diff.added, "deps": deps});
+        let bindings = kio_host::bindings_json(&diff);
+        let d = json!({"grants": diff.grants, "funcs": diff.funcs, "bindings": bindings, "added": diff.added, "deps": deps});
         set_json(|o| o.diff = Some(d));
         return if diff.added { 3 } else { 0 };
     }

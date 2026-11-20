@@ -503,6 +503,20 @@ $ kio check app.kio --base old/app.kio
 no authority added
 ```
 
+A function's line names each capability it holds by its path: a parameter `db`, or a field `env.db` of a [capability struct](language.md#rules-the-checker-enforces) parameter. Between the base and the new program a function's leaves are matched by path, then, among those still unmatched, by short name and type when that pair is unique on each side: so `db: Db` becoming `env.db: Db` is one leaf (a pure grouping refactor, or a group parameter renamed, is `no change in authority`), while `a_db, b_db` becoming `a.db, b.db` is a removed and an added leaf, as a parameter rename is today.
+
+The diff also follows each leaf back to the `main` grants bound to it on some path (its origins), and prints a line when they change: `~ inspect: d from backup, primary (was primary)`. A leaf that gains an origin is added authority (exit 3), since the function now holds a grant it did not: swapping `f(x); g(y)` to `f(y); g(x)`, both `exec`, moves no grant line but exits 3. When no grant line adds, a header tells the rebinding apart from a grant-effect change; the lines print after the grant and function lines otherwise, an origin lost only under `--detail`, and a `main` grant renamed folds its lines under the grant's `-`/`+` pair as `  bindings follow the rename: f, g`. A rebinding is invisible only when every leaf already had, in the base, the origin it now has (`copy(a, b); copy(b, a)` reordered): a correctness change `kio review` lists under Not checked. Programs without capability structs see these lines too: the new exit 3s are the gain.
+
+```
+$ kio check app.kio --base old/app.kio
+derived  grants unchanged; capability binding changed: f, g
+~ f: d from y (was x)
+~ g: d from x (was y)
+authority added (exit 3)
+```
+
+`--json`'s `diff` gains `bindings`: `{function, leaf, from: [grants], was: [grants] | null}` per leaf whose origins changed or that is new in this version (`was` null).
+
 Exit 0: no authority added (`no change in authority`, `authority removed only`, or `no authority added` when every gain is covered). Exit 3: some added. Exit 1: a side does not check (the message names `base` or `new`). Exit 2: a file is missing.
 
 Each side's `mod NAME;` lines resolve to `NAME.kio` beside that side's entry (or where that side's `kio.deps` says), so an `old/app.kio` copied alone fails with `mod web: cannot read old/web.kio`: copy its modules beside it, or let `tools/authority-diff.sh` check the whole base out.

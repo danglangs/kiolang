@@ -204,7 +204,11 @@ fn main(api: Http) { let m: Map<Str, Int> = Map::new(); let _v = web::look(m); l
 fn diff(old: &[(&str, &str)], new: &[(&str, &str)]) -> lang::AuthorityDiff {
     let caps = common::caps();
     let p = |f: &[(&str, &str)]| lang::check_files(f, &caps).expect("program checks");
-    lang::report_diff(&p(old), &p(new))
+    let mut d = lang::report_diff(&p(old), &p(new));
+    // A leaf new in `new` has a `--json` binding row (L32, tested in groups.rs); these tests are
+    // about the lines, so only a changed binding counts here.
+    d.bindings.retain(|b| b.was.is_some());
+    d
 }
 
 /// The diff with these grant and function lines.
@@ -215,8 +219,10 @@ fn want(grants: &[&str], funcs: &[&str], added: bool) -> lang::AuthorityDiff {
     lang::AuthorityDiff {
         grants: own(grants),
         funcs: own(funcs),
+        bindings: Vec::new(),
         added,
         grant_added,
+        binding_added: false,
     }
 }
 

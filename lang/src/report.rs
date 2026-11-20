@@ -340,27 +340,109 @@ pub struct AuthorityDiff {
     /// of the same name and type; `- x: Dir (read)`. A grant whose type changed is one removed
     /// and one added.
     pub grants: Vec<String>,
-    /// Per function by name, the capability methods added (`+ handle: stripe verify`) and dropped
-    /// (`- ..`). A function on one side only counts in full; a parameter is matched by name.
+    /// Per function by name, the capability methods added (`+ handle: env.admin matches`) and
+    /// dropped (`- ..`), each leaf by its path. A function on one side only counts in full;
+    /// leaves are matched across the versions by `match_leaves`.
     pub funcs: Vec<String>,
+    /// Per leaf of each function `main` reaches, its origins (the `main` grants bound to it on
+    /// some path) where they changed, in `new`'s order (L32).
+    pub bindings: Vec<Binding>,
     /// Some line adds authority.
     pub added: bool,
     /// Some grant line adds authority.
     pub grant_added: bool,
+    /// Some binding adds authority: a leaf gained an origin no grant line shows as new.
+    pub binding_added: bool,
+}
+
+/// A leaf of a function whose origins changed, or a leaf new in this version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Binding {
+    pub function: String,
+    pub leaf: String,
+    /// The `main` grants bound to it now; never empty.
+    pub from: Vec<String>,
+    /// Those bound in the base; `None` for a leaf new in this version.
+    pub was: Option<Vec<String>>,
+    /// It gained an origin that is not a new grant (one a `+` grant line already shows).
+    pub adds: bool,
+    /// Its change is a `main` grant renamed: an origin removed from `main` for one added.
+    pub renamed: bool,
+}
+
+impl Binding {
+    /// `~ f: d from y (was x)`; nothing for a new leaf.
+    pub fn line(&self) -> Option<String> {
+        let was = self.was.as_ref()?;
+        Some(format!(
+            "~ {}: {} from {} (was {})",
+            self.function,
+            self.leaf,
+            self.from.join(", "),
+            was.join(", ")
+        ))
+    }
 }
 
 impl AuthorityDiff {
-    /// The lines `kio check --base` prints: one per changed grant; then, with `detail` or when
-    /// those lines do not show every addition, a blank line and one per changed function. And
-    /// whether the function lines are included.
+    /// The header over binding lines when they add and no grant line does: what tells a
+    /// rebinding apart from a grant-effect change.
+    pub fn binding_header(&self) -> Option<String> {
+        if !self.binding_added || self.grant_added {
+            return None;
+        }
+        let grants = if self.grants.is_empty() {
+            "grants unchanged"
+        } else {
+            "no grant added"
+        };
+        let mut names: Vec<&str> = (self.bindings.iter().filter(|b| b.adds))
+            .map(|b| b.function.as_str())
+            .collect();
+        names.dedup();
+        Some(format!("{grants}; capability binding changed: {}", names.join(", ")))
+    }
+
+    /// The functions whose binding lines are folded under a grant's `-`/`+` pair (a rename).
+    pub fn renamed(&self) -> Option<String> {
+        let mut names: Vec<&str> = (self.bindings.iter().filter(|b| b.renamed))
+            .map(|b| b.function.as_str())
+            .collect();
+        names.dedup();
+        (!names.is_empty()).then(|| format!("  bindings follow the rename: {}", names.join(", ")))
+    }
+
+    /// The binding lines shown: those that add always; the rest (an origin lost, a gain a `+`
+    /// grant line covers) with `detail` or when no grant line shows anything.
+    pub fn binding_lines(&self, detail: bool) -> Vec<String> {
+        let all = detail || self.grants.is_empty();
+        (self.bindings.iter())
+            .filter(|b| !b.renamed && (b.adds || all))
+            .filter_map(Binding::line)
+            .collect()
+    }
+
+    /// The lines `kio check --base` prints: one per changed grant (a rename's folded bindings
+    /// under them); then, with `detail` or when those lines do not show every addition, a blank
+    /// line and one per changed function; then the binding lines, under their header when they
+    /// add and no grant line does. And whether the function lines are included.
     pub fn lines(&self, detail: bool) -> (Vec<String>, bool) {
         let funcs = detail || (self.added && !self.grant_added) || self.grants.is_empty();
         let mut out = self.grants.clone();
-        if funcs {
+        out.extend(self.renamed());
+        if funcs && !self.funcs.is_empty() {
             if !out.is_empty() {
                 out.push(String::new());
             }
             out.extend(self.funcs.iter().cloned());
+        }
+        let bindings = self.binding_lines(detail);
+        if !bindings.is_empty() {
+            if !out.is_empty() {
+                out.push(String::new());
+            }
+            out.extend(self.binding_header().map(|h| format!("derived  {h}")));
+            out.extend(bindings);
         }
         (out, funcs)
     }
@@ -368,7 +450,7 @@ impl AuthorityDiff {
     /// What `kio check --base` prints on stdout: `lines`, then whether authority was added
     /// (exit 3), only removed, or covered.
     pub fn text(&self, detail: bool) -> String {
-        if self.grants.is_empty() && self.funcs.is_empty() {
+        if self.grants.is_empty() && self.funcs.is_empty() && self.bindings.iter().all(|b| b.was.is_none()) {
             return "no change in authority".into();
         }
         let (mut out, funcs) = self.lines(detail);
@@ -386,6 +468,38 @@ impl AuthorityDiff {
         out.push(last.into());
         out.join("\n")
     }
+}
+
+/// The leaves of one function matched across two versions: each leaf of `new` with the leaf of
+/// `old` it is, if any, in `new`'s order. First by identical path; then, among the leaves still
+/// unmatched on both sides, by (short name, type) when that pair is unique among the unmatched
+/// on each side. For a program without groups both passes reduce to the parameter name.
+pub fn match_leaves(old: &[(String, String)], new: &[(String, String)]) -> Vec<(String, Option<String>)> {
+    let short = |path: &str| path.rsplit('.').next().unwrap_or_default().to_string();
+    let mut old_left: Vec<&(String, String)> = old.iter().collect();
+    let mut out: Vec<(String, Option<String>)> = new.iter().map(|(n, _)| (n.clone(), None)).collect();
+    for (n, _) in new {
+        if let Some(i) = old_left.iter().position(|(o, _)| o == n) {
+            out.iter_mut().find(|(m, _)| m == n).unwrap().1 = Some(old_left.remove(i).0.clone());
+        }
+    }
+    let unmatched: Vec<&(String, String)> = (new.iter())
+        .filter(|(n, _)| out.iter().any(|(m, o)| m == n && o.is_none()))
+        .collect();
+    for (n, ty) in &unmatched {
+        let key = (short(n), ty);
+        if unmatched.iter().filter(|(m, t)| (short(m), t) == key).count() != 1 {
+            continue;
+        }
+        let olds: Vec<usize> = (old_left.iter().enumerate())
+            .filter(|(_, (o, t))| (short(o), t) == key)
+            .map(|(i, _)| i)
+            .collect();
+        if let [i] = olds[..] {
+            out.iter_mut().find(|(m, _)| m == n).unwrap().1 = Some(old_left.remove(i).0.clone());
+        }
+    }
+    out
 }
 
 /// Every capability method with the methods that cover it: a gained method that a covering
@@ -516,6 +630,13 @@ pub fn report_diff(old_p: &Program, new_p: &Program) -> AuthorityDiff {
     for (d, ty) in old.main.iter().filter(|g| !new.main.contains(g)) {
         diff.grants.push(format!("- {d}: {ty}{}", in_parens(reached(&old, d))));
     }
+    let only_in = |a: &Authority, b: &Authority| -> Vec<String> {
+        (a.main.iter().filter(|g| !b.main.contains(g)))
+            .map(|(d, _)| d.clone())
+            .collect()
+    };
+    let (new_grants, removed_grants) = (only_in(&new, &old), only_in(&old, &new));
+    let (old_origins, new_origins) = (origins(old_p), origins(new_p));
     let none = Vec::new();
     let names: BTreeSet<&String> = old.funcs.keys().chain(new.funcs.keys()).collect();
     for name in names {
@@ -523,10 +644,30 @@ pub fn report_diff(old_p: &Program, new_p: &Program) -> AuthorityDiff {
             old.funcs.get(name).unwrap_or(&none),
             new.funcs.get(name).unwrap_or(&none),
         );
+        let leaves = |p: &Program| match p.funcs.contains_key(name.as_str()) {
+            true => p.leaves(name),
+            false => Vec::new(),
+        };
+        let (ol, nl) = (leaves(old_p), leaves(new_p));
+        let matched = match_leaves(&ol, &nl);
+        // Each leaf of a side with the matching leaf of the other, in the side's order.
+        let partner = |sign: char, d: &str| -> Option<String> {
+            match sign {
+                '+' => matched.iter().find(|(m, _)| m == d)?.1.clone(),
+                _ => matched
+                    .iter()
+                    .find(|(_, o)| o.as_deref() == Some(d))
+                    .map(|(m, _)| m.clone()),
+            }
+        };
         for (sign, a, b) in [('+', n, o), ('-', o, n)] {
             let (mut only, mut notes, mut uncovered) = (Vec::new(), Vec::new(), false);
             for (d, ms) in a {
-                let theirs = b.iter().find(|(e, _)| e == d).map(|(_, t)| t);
+                let other = partner(sign, d);
+                let theirs = other
+                    .as_ref()
+                    .and_then(|e| b.iter().find(|(f, _)| f == e))
+                    .map(|(_, t)| t);
                 let ms: BTreeSet<String> = ms
                     .iter()
                     .filter(|m| !theirs.is_some_and(|t| t.contains(*m)))
@@ -536,8 +677,9 @@ pub fn report_diff(old_p: &Program, new_p: &Program) -> AuthorityDiff {
                     continue;
                 }
                 if sign == '+' {
-                    // Covered only by the base's methods on a parameter of the same type.
-                    let ty = param_ty(new_p, name, d).filter(|t| param_ty(old_p, name, d).as_ref() == Some(t));
+                    // Covered only by the base's methods on a leaf of the same type.
+                    let ty = param_ty(new_p, name, d)
+                        .filter(|t| other.as_ref().and_then(|e| param_ty(old_p, name, e)).as_ref() == Some(t));
                     let (u, n) = split_gains(ty.as_deref(), &ms, theirs.unwrap_or(&BTreeSet::new()));
                     uncovered |= u;
                     notes.extend(n);
@@ -550,8 +692,55 @@ pub fn report_diff(old_p: &Program, new_p: &Program) -> AuthorityDiff {
                     .push(format!("{sign} {name}: {}{}", uses_str(&only), notes_str(&notes)));
             }
         }
+        // (c) The origins of each leaf `main` reaches, against its matched leaf's in the base.
+        if name == "main" {
+            continue;
+        }
+        for (leaf, old_leaf) in &matched {
+            let Some(from) = new_origins.get(&(name.clone(), leaf.clone())) else {
+                continue;
+            };
+            let was = old_leaf
+                .as_ref()
+                .and_then(|o| old_origins.get(&(name.clone(), o.clone())));
+            if was.is_some_and(|w| w == from) {
+                continue;
+            }
+            let (gained, lost): (Vec<&String>, Vec<&String>) = match was {
+                Some(w) => (from.difference(w).collect(), w.difference(from).collect()),
+                None => (Vec::new(), Vec::new()),
+            };
+            let adds = gained.iter().any(|g| !new_grants.contains(*g));
+            let renamed = !gained.is_empty()
+                && gained.iter().all(|g| new_grants.contains(*g))
+                && !lost.is_empty()
+                && lost.iter().all(|g| removed_grants.contains(*g));
+            diff.binding_added |= adds;
+            diff.bindings.push(Binding {
+                function: name.clone(),
+                leaf: leaf.clone(),
+                from: from.iter().cloned().collect(),
+                was: was.map(|w| w.iter().cloned().collect()),
+                adds,
+                renamed,
+            });
+        }
     }
+    diff.added |= diff.binding_added;
     diff
+}
+
+/// The origins of each leaf of each function `main` reaches: the `main` grants bound to it on
+/// some path, read forward along the edge maps (`passed`); `main`'s own leaves are the grants.
+pub fn origins(p: &Program) -> BTreeMap<(String, String), BTreeSet<String>> {
+    let e = edges(p);
+    let mut out: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    for d in p.funcs.get("main").map_or(&[][..], |f| f.params.as_slice()) {
+        for leaf in passed_in(&e, &d.name) {
+            out.entry(leaf).or_default().insert(d.name.clone());
+        }
+    }
+    out
 }
 
 /// `authority` of the functions `main` reaches (P8).

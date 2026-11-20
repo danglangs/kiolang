@@ -220,7 +220,7 @@ fn check_base_has_the_diff_and_keeps_exit_3() {
     ]);
     let (code, v, err) = kio(t.path(), &["check", "new.kio", "--base", "old.kio", "--json"]);
     assert_eq!((code, err.as_str()), (3, ""));
-    let diff = json!({"grants": ["+ out: Dir (write)"], "funcs": ["+ main: out write"], "added": true, "deps": []});
+    let diff = json!({"grants": ["+ out: Dir (write)"], "funcs": ["+ main: out write"], "bindings": [], "added": true, "deps": []});
     assert_eq!((&v["ok"], &v["diff"]), (&json!(true), &diff));
     assert_eq!(v["report"], json!(["main : out write"]));
     let (code, v, _) = kio(
@@ -229,7 +229,10 @@ fn check_base_has_the_diff_and_keeps_exit_3() {
     );
     assert_eq!(
         (code, &v["diff"]),
-        (0, &json!({"grants": [], "funcs": [], "added": false, "deps": []}))
+        (
+            0,
+            &json!({"grants": [], "funcs": [], "bindings": [], "added": false, "deps": []})
+        )
     );
     // The base fails to check: its diagnostics, no diff.
     std::fs::write(t.path().join("old.kio"), "fn main() -> Int { x }\n").unwrap();

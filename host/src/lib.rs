@@ -181,6 +181,14 @@ pub fn diff_files(
     Ok(lang::report_diff(&old, &new))
 }
 
+/// `--json`'s `authority.bindings[]` (L32): a row per leaf whose origins changed or that is new,
+/// `{function, leaf, from, was}`, `was` null for a new leaf.
+pub fn bindings_json(diff: &lang::AuthorityDiff) -> Vec<serde_json::Value> {
+    (diff.bindings.iter())
+        .map(|b| serde_json::json!({"function": b.function, "leaf": b.leaf, "from": b.from, "was": b.was}))
+        .collect()
+}
+
 /// The most one `Dir.read` returns; a larger file is `too-large`.
 const READ_CAP: u64 = 10 << 20;
 

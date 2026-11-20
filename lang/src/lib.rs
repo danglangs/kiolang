@@ -19,8 +19,8 @@ pub mod sort;
 pub use check::{check, check_files, check_files_for_tests, CapTable, Program, TestFn};
 pub use eval::{run, run_entry, Caps, Key, RunErr, Value};
 pub use report::{
-    authority, entry_authority, entry_report, items_used, main_http_verbs, operators, reachable, report, report_diff,
-    shown, shown_report, users, Authority, AuthorityDiff, Shown, COVERS, HTTP_METHODS,
+    authority, entry_authority, entry_report, items_used, main_http_verbs, match_leaves, operators, origins, reachable,
+    report, report_diff, shown, shown_report, users, Authority, AuthorityDiff, Binding, Shown, COVERS, HTTP_METHODS,
 };
 
 /// Byte offsets `start..end` into source file number `file`; 0 is the root.
