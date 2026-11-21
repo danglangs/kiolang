@@ -688,7 +688,8 @@ pub unsafe extern "C" fn rt_map_remove(m: u32, k: i64) {
 
 // Unboxed `Option` results (C8c1): each `_u` operation is its boxed namesake without the
 // `Option` object, returning the tag and leaving the payload in `rt_scratch`'s word, so a hit
-// allocates nothing. The boxed exports stay.
+// allocates nothing. The boxed exports stay. A `Json` receiver comes unboxed too, as its variant and
+// payload, a valid `Json` borrowed for the call (C21).
 
 /// `m.get(k)`; `k` is an `Int` or a `Str` pointer.
 #[no_mangle]
@@ -813,26 +814,27 @@ pub extern "C" fn rt_float_to_int_u(x: f64) -> u32 {
     unboxed(float::to_int_opt(x))
 }
 
-/// `j.get(k)`.
+/// `j.get(k)`, the `Json` unboxed as its variant `v` and payload `x` (C21).
 #[no_mangle]
-pub unsafe extern "C" fn rt_json_get_u(j: u32, k: u32) -> u32 {
+pub unsafe extern "C" fn rt_json_get_u(v: u32, x: u64, k: u32) -> u32 {
     // SAFETY: the group's contract.
-    unboxed(unsafe { json::get_opt(ptr(j), ptr(k)) })
+    unboxed(unsafe { json::get_opt(v, x, ptr(k)) })
 }
 
-/// `j.at(i)`.
+/// `j.at(i)`, the `Json` as `rt_json_get_u`'s.
 #[no_mangle]
-pub unsafe extern "C" fn rt_json_at_u(j: u32, i: i64) -> u32 {
+pub unsafe extern "C" fn rt_json_at_u(v: u32, x: u64, i: i64) -> u32 {
     // SAFETY: the group's contract.
-    unboxed(unsafe { json::at_opt(ptr(j), i) })
+    unboxed(unsafe { json::at_opt(v, x, i) })
 }
 
+/// The `as_*` accessors, the `Json` as `rt_json_get_u`'s.
 macro_rules! json_as_u {
     ($($name:ident: $variant:ident),*) => {$(
         #[no_mangle]
-        pub unsafe extern "C" fn $name(j: u32) -> u32 {
+        pub unsafe extern "C" fn $name(v: u32, x: u64) -> u32 {
             // SAFETY: the group's contract.
-            unboxed(unsafe { json::as_variant_opt(ptr(j), json::$variant) })
+            unboxed(unsafe { json::as_variant_opt(v, x, json::$variant) })
         }
     )*};
 }

@@ -542,17 +542,20 @@ fn quote(out: &mut Vec<u8>, s: &[u8]) {
 /// The module's contract; `k` is a `Str`; `none` is null or a `None` of `opt`.
 pub unsafe fn get(t: &Table, opt: u32, none: *mut Header, j: *mut Header, k: *mut Header) -> *mut Header {
     // SAFETY: the caller's guarantee.
-    unsafe { obj::option(t, opt, none, get_opt(j, k)) }
-}
-
-/// `get`'s payload, a new reference, without the `Option` object (C8c1).
-///
-/// # Safety
-/// The module's contract; `k` is a `Str`.
-pub unsafe fn get_opt(j: *mut Header, k: *mut Header) -> Option<u64> {
-    // SAFETY: the caller's guarantee; `k` outlives the probe.
     unsafe {
         let (v, x) = parts(j);
+        obj::option(t, opt, none, get_opt(v, x, k))
+    }
+}
+
+/// `get`'s payload, a new reference, without the `Option` object (C8c1), on the `Json` as its
+/// variant `v` and payload `x`, unboxed (C21).
+///
+/// # Safety
+/// The module's contract for the `Json` that `v` and `x` are; `k` is a `Str`.
+pub unsafe fn get_opt(v: u32, x: u64, k: *mut Header) -> Option<u64> {
+    // SAFETY: the caller's guarantee; `k` outlives the probe.
+    unsafe {
         let found = match v {
             OBJ => (*obj::field::<Map>(from_slot(x), obj::HEADER))
                 .get(&*Key::probe(obj::bytes(k)))
@@ -569,17 +572,20 @@ pub unsafe fn get_opt(j: *mut Header, k: *mut Header) -> Option<u64> {
 /// The module's contract; `none` is null or a `None` of `opt`.
 pub unsafe fn at(t: &Table, opt: u32, none: *mut Header, j: *mut Header, i: i64) -> *mut Header {
     // SAFETY: the caller's guarantee.
-    unsafe { obj::option(t, opt, none, at_opt(j, i)) }
-}
-
-/// `at`'s payload, a new reference, without the `Option` object (C8c1).
-///
-/// # Safety
-/// The module's contract.
-pub unsafe fn at_opt(j: *mut Header, i: i64) -> Option<u64> {
-    // SAFETY: the caller's guarantee.
     unsafe {
         let (v, x) = parts(j);
+        obj::option(t, opt, none, at_opt(v, x, i))
+    }
+}
+
+/// `at`'s payload, a new reference, without the `Option` object (C8c1), on `v` and `x` as
+/// `get_opt`'s.
+///
+/// # Safety
+/// As `get_opt`.
+pub unsafe fn at_opt(v: u32, x: u64, i: i64) -> Option<u64> {
+    // SAFETY: the caller's guarantee.
+    unsafe {
         let found = match v {
             ARR => usize::try_from(i)
                 .ok()
@@ -600,18 +606,20 @@ pub unsafe fn at_opt(j: *mut Header, i: i64) -> Option<u64> {
 /// `None` of it.
 pub unsafe fn as_variant(t: &Table, opt: u32, none: *mut Header, j: *mut Header, want: u32) -> *mut Header {
     // SAFETY: the caller's guarantee.
-    unsafe { obj::option(t, opt, none, as_variant_opt(j, want)) }
+    unsafe {
+        let (v, x) = parts(j);
+        obj::option(t, opt, none, as_variant_opt(v, x, want))
+    }
 }
 
 /// `as_variant`'s payload (a new reference when it is an object) without the `Option` object
-/// (C8c1).
+/// (C8c1), on `v` and `x` as `get_opt`'s.
 ///
 /// # Safety
-/// The module's contract.
-pub unsafe fn as_variant_opt(j: *mut Header, want: u32) -> Option<u64> {
+/// As `get_opt`.
+pub unsafe fn as_variant_opt(v: u32, x: u64, want: u32) -> Option<u64> {
     // SAFETY: the caller's guarantee.
     unsafe {
-        let (v, x) = parts(j);
         match v {
             _ if v == want => {
                 if matches!(v, STR | ARR | OBJ) {

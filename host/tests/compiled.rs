@@ -2071,6 +2071,44 @@ fn mixed_payload_enums_drop_by_tag() {
     assert_eq!(value(&src2), "10");
 }
 
+/// C21: every `Json` accessor on an unboxed receiver, passed as its tag and payload: a local, a
+/// parameter, a field read, a list element, a match binding, a temporary (a call's result, a
+/// nested `get` chain, a variant written out), each variant as the receiver (a scalar payload
+/// is never a pointer), hits and misses. Each run checks no object is left.
+#[test]
+fn json_accessors_on_unboxed_receivers() {
+    let src = r#"struct Doc { j: Json, n: Int }
+        fn all(j: Json) -> Str {
+            j.get("a").is_some().to_str() + j.at(0).is_some().to_str()
+                + j.as_str().unwrap_or("-") + j.as_int().unwrap_or(-1).to_str()
+                + j.as_float().unwrap_or(-0.5).to_str() + j.as_bool().unwrap_or(false).to_str()
+                + j.as_list().unwrap_or([]).len().to_str() + j.as_map().unwrap_or(Map::new()).len().to_str() + "|"
+        }
+        fn doc() -> Json { "{\"a\": {\"b\": [1, \"two\", 3.5, true, null, {\"c\": \"deep\"}]}, \"k\": 7}".parse_json().unwrap_or(Json::Null) }
+        fn main() -> Str {
+            let j = doc();
+            let d = Doc { j: doc(), n: 1 };
+            let xs = [Json::Null, Json::Bool(true), Json::Num(5), Json::Float(2.5), Json::Str("s" + ""), Json::Arr([Json::Num(1)]), doc()];
+            let mut out = "";
+            for x in xs { out = out + all(x); }
+            out = out + all(xs[4]) + all(d.j) + all(j);
+            let chain = j.get("a").and_then(|a| a.get("b")).and_then(|b| b.at(5)).and_then(|c| c.get("c")).and_then(|s| s.as_str()).unwrap_or("?");
+            let direct = doc().get("a").unwrap_or(Json::Null).get("b").unwrap_or(Json::Null).at(1).unwrap_or(Json::Null).as_str().unwrap_or("?");
+            let k = match j.get("k") { Some(v) => v.as_int().unwrap_or(0) + v.as_float().unwrap_or(0.0).to_int().unwrap_or(0), None => -1 };
+            let miss = d.j.get("zz").is_none() && d.j.at(0).is_none() && d.j.get("a").unwrap_or(Json::Null).at(-1).is_none()
+                && d.j.get("a").unwrap_or(Json::Null).get("b").unwrap_or(Json::Null).at(99).is_none();
+            let lit = Json::Str("lit" + "").as_str().unwrap_or("-") + Json::Num(3).as_float().unwrap_or(0.0).to_str();
+            let field = d.j.get("k").unwrap_or(Json::Null).as_int().unwrap_or(0) + d.n;
+            out + chain + direct + k.to_str() + miss.to_str() + lit + field.to_str()
+        }"#;
+    assert_eq!(
+        value(src),
+        "falsefalse--1-0.5false00|falsefalse--1-0.5true00|falsefalse-55false00|falsefalse--12.5false00|\
+         falsefalses-1-0.5false00|falsetrue--1-0.5false10|truefalse--1-0.5false02|falsefalses-1-0.5false00|\
+         truefalse--1-0.5false02|truefalse--1-0.5false02|deeptwo14truelit38"
+    );
+}
+
 /// C8c1's review: `main` returning `Result<Option<Str>, Str>` stops at a `?` with unboxed
 /// locals live.
 #[test]

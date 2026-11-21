@@ -1765,7 +1765,7 @@ impl<'m> FuncGen<'_, 'm> {
 
     /// Calls runtime export `name` on `xs`, which it borrows, with `site` last if it can fail.
     fn rt_op(&mut self, name: &str, xs: &[&ir::Expr], site: Option<u32>) {
-        self.rt_op_slots(name, &[], xs, site.as_slice(), false)
+        self.rt_op_slots(name, &[], xs, site.as_slice(), false, false)
     }
 
     /// The constants a runtime operation with result type `t` takes first.
@@ -1778,16 +1778,27 @@ impl<'m> FuncGen<'_, 'm> {
 
     /// `rt_op` with constants `pre` first (the result's descriptor), and the operands after the
     /// first as slots if `slots`: a map key, a list element. An unboxed enum operand is boxed
-    /// for the call and the object dropped after it. An operation with two kinds of error takes
+    /// for the call and the object dropped after it, except the first if `unboxed_recv`: a `Json`
+    /// receiver, passed as its tag and payload (C21). An operation with two kinds of error takes
     /// two sites.
-    fn rt_op_slots(&mut self, name: &str, pre: &[u32], xs: &[&ir::Expr], sites: &[u32], slots: bool) {
+    fn rt_op_slots(
+        &mut self,
+        name: &str,
+        pre: &[u32],
+        xs: &[&ir::Expr],
+        sites: &[u32],
+        slots: bool,
+        unboxed_recv: bool,
+    ) {
         self.borrowing(xs, |g, temps, borrowed| {
             for &c in pre {
                 g.sink().i32_const(c as i32);
             }
             let mut boxes = Vec::new();
             for (i, (x, t)) in xs.iter().zip(temps).enumerate() {
-                if g.boxes(&x.ty) {
+                if i == 0 && unboxed_recv {
+                    g.get(x, *t);
+                } else if g.boxes(&x.ty) {
                     boxes.push(g.box_operand(x, *t, borrowed[i]));
                     if slots && i > 0 {
                         g.sink().i64_extend_i32_u();
@@ -2977,7 +2988,18 @@ impl<'m> FuncGen<'_, 'm> {
                 let xs: Vec<&ir::Expr> = std::iter::once(&**recv).chain(args).collect();
                 // These take their argument as a slot.
                 let slots = matches!(b, Builtin::MapGet | Builtin::ListContains);
-                self.rt_op_slots(name, &pre, &xs, &sites, slots);
+                let json = matches!(
+                    b,
+                    Builtin::JsonGet
+                        | Builtin::JsonAt
+                        | Builtin::JsonAsStr
+                        | Builtin::JsonAsInt
+                        | Builtin::JsonAsFloat
+                        | Builtin::JsonAsBool
+                        | Builtin::JsonAsList
+                        | Builtin::JsonAsMap
+                );
+                self.rt_op_slots(name, &pre, &xs, &sites, slots, json);
                 if name.ends_with("_u") {
                     self.scratch_payload();
                 } else if self.boxes(&e.ty) {
