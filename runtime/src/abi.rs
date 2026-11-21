@@ -769,6 +769,48 @@ pub unsafe extern "C" fn rt_str_url_encode(s: u32) -> u32 {
     addr(text::new_str(&conv::url_encode(unsafe { obj::bytes(ptr(s)) })))
 }
 
+/// `s.pad_start(width, fill)` (L31b). Errors: a negative `width` at `negative`, with it; an
+/// empty `fill` at `empty`; a cut inside a character at `cut`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_str_pad_start(s: u32, width: i64, fill: u32, negative: u32, empty: u32, cut: u32) -> u32 {
+    // SAFETY: the group's contract.
+    let (s, fill) = unsafe { (obj::bytes(ptr(s)), obj::bytes(ptr(fill))) };
+    match conv::pad_start(s, width, fill) {
+        Ok(b) => addr(obj::new_bytes(desc::STR, &b)),
+        Err(conv::PadErr::Width) => rt_trap(negative, width, 0),
+        Err(conv::PadErr::Fill) => rt_trap(empty, 0, 0),
+        Err(conv::PadErr::Cut) => rt_trap(cut, 0, 0),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_bytes_to_base64(b: u32) -> u32 {
+    // SAFETY: the group's contract.
+    addr(text::new_str(&conv::to_base64(unsafe { obj::bytes(ptr(b)) }, false)))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_bytes_to_base64url(b: u32) -> u32 {
+    // SAFETY: the group's contract.
+    addr(text::new_str(&conv::to_base64(unsafe { obj::bytes(ptr(b)) }, true)))
+}
+
+/// `s.from_base64()`: the payload is a new `Bytes`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_str_from_base64_u(s: u32) -> u32 {
+    // SAFETY: the group's contract.
+    let b = conv::from_base64(unsafe { obj::bytes(ptr(s)) }, false);
+    unboxed(b.map(|b| obj::to_slot(obj::new_bytes(desc::BYTES, &b))))
+}
+
+/// `s.from_base64url()`: the payload is a new `Bytes`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_str_from_base64url_u(s: u32) -> u32 {
+    // SAFETY: the group's contract.
+    let b = conv::from_base64(unsafe { obj::bytes(ptr(s)) }, true);
+    unboxed(b.map(|b| obj::to_slot(obj::new_bytes(desc::BYTES, &b))))
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rt_str_parse_iso_utc_u(s: u32) -> u32 {
     // SAFETY: the group's contract.

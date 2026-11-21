@@ -129,6 +129,7 @@ Compiled-only kio covers the whole language and every capability; speed work res
 | L32c | `kio review` labels binding lines `derived` (each entry's prefixed), Not checked lists each leaf bound to two grants of one type (`copy: src from a, b; which call uses which is behaviour (changed: main)`), mutants and `users` follow leaves through groups; guide.md "Capability structs" with the grouping guideline, language.md rule 1, design.md. A3's booking app refactored locally: `handle`/`route` take `Env`, 3 signatures and 1 literal change in the app, the tests take `env: booking::Env`; `--base` against stage 4: `no change in authority` (#341, #342) |
 | T5 | `kio test` runs share one engine with Cranelift's incremental cache in memory (32 MB): a property case recompiles ~2% of functions, still in a fresh instance with fresh grants; outputs and fuel identical. A3 33.8 s / 277 s CPU to 23.4 s / 108 s; flow review 84.5 to 55.9 s (#343, #344) |
 | L31a | Library batch two, first half: `SqlValue` `as_int`/`as_float`/`as_str`/`as_bytes`/`is_null`; `Json::obj()`, `with`, `get_str`/`get_int`/`get_float`/`get_bool`/`get_list`; `to_str` on `IoErr`, `HttpErr`, `WebErr`, `KvErr`, `DbErr` (#353, #354). Harness 625 both ways, 622 agreed, 0 leaked; primer.md uses them |
+| L31b | `Str.pad_start` (bytes; a cut inside a fill's character is a runtime error, #355), `Bytes.to_base64`/`to_base64url`, `Str.from_base64`/`from_base64url` (strict, #356). Harness 633 both ways, 630 agreed, 0 leaked; kiogen generates them, 2,000 programs agree |
 
 ## Next
 

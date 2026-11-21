@@ -1,4 +1,4 @@
-//! `Int.pow`, URL encoding and ISO dates (L29): one source for the interpreter and the compiled
+//! `Int.pow`, URL encoding and ISO dates (L29); error texts, `pad_start` and base64 (L31): one source for the interpreter and the compiled
 //! runtime, which includes this file by path. `core` and `alloc` only, no `unsafe`.
 
 use alloc::string::String;
@@ -186,4 +186,110 @@ pub fn err_to_str(e: usize, v: usize, payload: ErrPayload) -> Vec<u8> {
         }
     }
     out
+}
+
+/// Why `s.pad_start(width, fill)` stopped the run (L31b).
+#[derive(Debug, PartialEq)]
+pub enum PadErr {
+    /// `width` is negative.
+    Width,
+    /// `fill` is empty.
+    Fill,
+    /// The last repetition of `fill` would be cut inside a character.
+    Cut,
+}
+
+/// `pad_start`'s errors; `{a}` is the width.
+pub const PAD_WIDTH: &str = "Str.pad_start({a}, ..): the width must be 0 or more";
+pub const PAD_FILL: &str = "Str.pad_start: the fill must not be empty";
+pub const PAD_CUT: &str = "Str.pad_start: the fill would be cut inside a character";
+
+/// `s.pad_start(width, fill)` (L31b): `fill` repeated in front of `s` until the result is
+/// `width` bytes (`Str.len()`'s unit), the last repetition cut, as JavaScript's `padStart`; `s`
+/// when it is already that long. `fill` is UTF-8, so a cut is refused unless it falls on a
+/// character boundary.
+pub fn pad_start(s: &[u8], width: i64, fill: &[u8]) -> Result<Vec<u8>, PadErr> {
+    if width < 0 {
+        return Err(PadErr::Width);
+    }
+    if fill.is_empty() {
+        return Err(PadErr::Fill);
+    }
+    let Some(n) = usize::try_from(width).ok().and_then(|w| w.checked_sub(s.len())) else {
+        return Ok(s.to_vec());
+    };
+    // A UTF-8 continuation byte is `10xxxxxx`.
+    if fill.get(n % fill.len()).is_some_and(|&c| c & 0xC0 == 0x80) {
+        return Err(PadErr::Cut);
+    }
+    let mut out: Vec<u8> = fill.iter().copied().cycle().take(n).collect();
+    out.extend_from_slice(s);
+    Ok(out)
+}
+
+const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const BASE64_URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/// `b.to_base64()` (RFC 4648 section 4, padded) or, if `url`, `b.to_base64url()` (section 5,
+/// without padding).
+pub fn to_base64(b: &[u8], url: bool) -> String {
+    let abc = if url { BASE64_URL } else { BASE64 };
+    let mut out = String::with_capacity(b.len().div_ceil(3) * 4);
+    for chunk in b.chunks(3) {
+        let n = (chunk.iter().enumerate()).fold(0u32, |n, (i, &c)| n | (u32::from(c) << (16 - 8 * i)));
+        // One byte gives 2 characters, two give 3, three give 4.
+        for i in 0..=chunk.len() {
+            out.push(abc[((n >> (18 - 6 * i)) & 63) as usize] as char);
+        }
+        if !url {
+            for _ in chunk.len()..3 {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// `to_base64`'s inverse, strict: `None` on a character outside the alphabet (whitespace
+/// included), padding that is missing or wrong (`url`: any `=`), or non-zero bits after the
+/// last byte.
+pub fn from_base64(s: &[u8], url: bool) -> Option<Vec<u8>> {
+    let sextet = |c: u8| -> Option<u32> {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' if !url => 62,
+            b'/' if !url => 63,
+            b'-' if url => 62,
+            b'_' if url => 63,
+            _ => return None,
+        };
+        Some(u32::from(v))
+    };
+    let body = match url {
+        true => s,
+        false if !s.len().is_multiple_of(4) => return None,
+        false => {
+            let pad = s.iter().rev().take(2).take_while(|&&c| c == b'=').count();
+            &s[..s.len() - pad]
+        }
+    };
+    if body.len() % 4 == 1 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(body.len() / 4 * 3 + 2);
+    for chunk in body.chunks(4) {
+        let mut n = 0u32;
+        for (i, c) in chunk.iter().enumerate() {
+            n |= sextet(*c)? << (18 - 6 * i);
+        }
+        let bytes = chunk.len() - 1;
+        // The bits below the last whole byte must be zero.
+        if n & ((1 << (24 - 8 * bytes)) - 1) != 0 {
+            return None;
+        }
+        out.extend_from_slice(&n.to_be_bytes()[1..=bytes]);
+    }
+    Some(out)
 }

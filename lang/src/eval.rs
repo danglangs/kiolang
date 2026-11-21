@@ -1406,6 +1406,27 @@ fn builtin(recv: &Value, b: Builtin, (arg, arg2): Args, span: Span) -> Res {
                 None => none(),
             }
         }
+        (B::StrPadStart, Value::Str(s)) => {
+            let (Some(Value::Int(width)), Some(Value::Str(fill))) = (arg, arg2) else {
+                unreachable!("checked arguments")
+            };
+            use crate::conv::{PadErr, PAD_CUT, PAD_FILL, PAD_WIDTH};
+            match crate::conv::pad_start(s.as_bytes(), width, fill.as_bytes()) {
+                Ok(b) => Value::Str(String::from_utf8(b).expect("cut on a boundary").into()),
+                Err(PadErr::Width) => return Err(fail(span, &PAD_WIDTH.replace("{a}", &width.to_string()))),
+                Err(PadErr::Fill) => return Err(fail(span, PAD_FILL)),
+                Err(PadErr::Cut) => return Err(fail(span, PAD_CUT)),
+            }
+        }
+        (B::BytesToBase64 | B::BytesToBase64Url, Value::Bytes(v)) => {
+            Value::Str(crate::conv::to_base64(v, b == B::BytesToBase64Url).into())
+        }
+        (B::StrFromBase64 | B::StrFromBase64Url, Value::Str(s)) => {
+            match crate::conv::from_base64(s.as_bytes(), b == B::StrFromBase64Url) {
+                Some(v) => some(Value::Bytes(Rc::new(v))),
+                None => none(),
+            }
+        }
         (B::StrParseIsoUtc, Value::Str(s)) => match crate::conv::parse_iso_utc(s.as_bytes()) {
             Some(n) => some(Value::Int(n)),
             None => none(),

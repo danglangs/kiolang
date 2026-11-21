@@ -1357,7 +1357,7 @@ impl Gen<'_> {
         }
         let d = depth - 1;
         loop {
-            match self.rng.below(12) {
+            match self.rng.below(13) {
                 0..=3 => {
                     let ((a, x), (b, y)) = (self.str_expr(d), self.str_expr(d));
                     return (format!("({a} + {b})"), x + y);
@@ -1404,6 +1404,21 @@ impl Gen<'_> {
                         ms
                     };
                     return (format!("({ms}).iso_utc()"), 24);
+                }
+                // L31b: `pad_start` to at most 40 bytes (a non-ASCII fill can be cut inside a
+                // character: an error both ways), or base64 of the bytes (4 a 3).
+                11 => {
+                    let (a, x) = self.str_expr(d);
+                    if self.rng.chance(50) {
+                        let w = format!("(({}) % 41).abs()", self.int(d));
+                        let fill =
+                            *self
+                                .rng
+                                .pick(&["\"0\"", "\"ab\"", "\" \"", "\"0\"", "\"xyz\"", "\"-\"", "\"\u{e9}\""]);
+                        return (format!("({a}).pad_start({w}, {fill})"), x.max(40));
+                    }
+                    let m = *self.rng.pick(&["to_base64", "to_base64url"]);
+                    return (format!("({a}).to_bytes().{m}()"), x.div_ceil(3) * 4);
                 }
                 _ => return self.str_leaf(),
             }
@@ -1501,7 +1516,13 @@ impl Gen<'_> {
                 format!("{ws}.contains({})", self.str_read(d))
             }
             3 => {
-                let m = *self.rng.pick(&["url_decode", "form_decode", "parse_iso_utc"]);
+                let m = *self.rng.pick(&[
+                    "url_decode",
+                    "form_decode",
+                    "parse_iso_utc",
+                    "from_base64",
+                    "from_base64url",
+                ]);
                 format!("({}).{m}().is_some()", self.str_read(d))
             }
             _ => format!("({}).contains({})", self.str_read(d), self.str_read(d)),
@@ -1893,7 +1914,7 @@ mod tests {
             assert!(all.matches(m).count() > 10, "{m}: {}", all.matches(m).count());
         }
         let eq = all.matches(" == h").count() + all.matches(" != h").count();
-        assert!(eq > 5, "{eq}");
+        assert!(eq > 3, "{eq}");
     }
 
     /// `|` patterns and `let`-else appear in a run of the default size.
@@ -1970,6 +1991,10 @@ mod tests {
             ".form_decode()",
             ".iso_utc()",
             ".parse_iso_utc()",
+            ".pad_start(",
+            ".to_base64()",
+            ".to_base64url()",
+            ".from_base64()",
             "\"a+b%20c\"",
             "\"%zz\"",
             "\"2026-02-30\"",

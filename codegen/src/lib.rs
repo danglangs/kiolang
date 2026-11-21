@@ -3056,6 +3056,11 @@ impl<'m> FuncGen<'_, 'm> {
                     | Builtin::SqlAsBytes
                     | Builtin::SqlIsNull => unreachable!("inline on the tag"),
                     Builtin::JsonWith => unreachable!("json_with"),
+                    Builtin::StrPadStart => ("rt_str_pad_start", Nothing, Some(lang::conv::PAD_WIDTH)),
+                    Builtin::BytesToBase64 => ("rt_bytes_to_base64", Nothing, None),
+                    Builtin::BytesToBase64Url => ("rt_bytes_to_base64url", Nothing, None),
+                    Builtin::StrFromBase64 => ("rt_str_from_base64_u", Nothing, None),
+                    Builtin::StrFromBase64Url => ("rt_str_from_base64url_u", Nothing, None),
                     Builtin::ListSlice => ("rt_list_slice", Nothing, Some(SLICE_BOUNDS)),
                     Builtin::ListJoin => ("rt_list_join", Nothing, None),
                     Builtin::StrToLowercase => ("rt_str_to_lowercase", Nothing, None),
@@ -3114,6 +3119,10 @@ impl<'m> FuncGen<'_, 'm> {
                 }
                 if *b == Builtin::IntPow {
                     sites.push(self.site(e.span, OVERFLOW));
+                }
+                if *b == Builtin::StrPadStart {
+                    sites.push(self.site(e.span, lang::conv::PAD_FILL));
+                    sites.push(self.site(e.span, lang::conv::PAD_CUT));
                 }
                 let xs: Vec<&ir::Expr> = std::iter::once(&**recv).chain(args).collect();
                 // These take their argument as a slot.

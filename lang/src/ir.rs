@@ -388,6 +388,12 @@ pub enum Builtin {
     WebErrToStr,
     KvErrToStr,
     DbErrToStr,
+    /// L31b (lang/src/conv.rs).
+    StrPadStart,
+    BytesToBase64,
+    BytesToBase64Url,
+    StrFromBase64,
+    StrFromBase64Url,
 }
 
 /// Every built-in method that changes its receiver.

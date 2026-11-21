@@ -1076,3 +1076,114 @@ fn main() -> Str { describe(Err(DbErr::Busy)) + "; " + describe(Ok(2)) }"#;
     let (msg, _) = rejects("fn main() -> Str { WsErr::Closed.to_str() }");
     assert_eq!(msg, "no method `to_str` on WsErr");
 }
+
+/// L31b: `pad_start` in bytes, `Str.len()`'s unit, the last repetition cut; its errors.
+#[test]
+fn pad_start() {
+    let src = r#"
+fn main() -> List<Str> {
+    ["7".pad_start(0, "0"), "7".pad_start(1, "0"), "7".pad_start(3, "0"), "abc".pad_start(2, "-"),
+     "5".pad_start(6, "ab"), "5".pad_start(5, "ab"), "".pad_start(4, "xyz"), "é".pad_start(4, "0"),
+     "x".pad_start(5, "é"), "é".pad_start(2, "é"), (-3).to_str().pad_start(4, "0")]
+}"#;
+    assert_eq!(
+        shows(src),
+        r#"["7", "7", "007", "abc", "ababa5", "abab5", "xyzx", "00é", "ééx", "é", "00-3"]"#
+    );
+    let cases: [(&'static str, &str, &str); 4] = [
+        (
+            "fn main() -> Str { \"7\".pad_start(-1, \"0\") }",
+            "Str.pad_start(-1, ..): the width must be 0 or more",
+            "\"7\".pad_start(-1, \"0\")",
+        ),
+        (
+            "fn main() -> Str { let w = 3; \"7\".pad_start(w, \"\") }",
+            "Str.pad_start: the fill must not be empty",
+            "\"7\".pad_start(w, \"\")",
+        ),
+        (
+            "fn main() -> Str { \"long\".pad_start(2, \"\") }",
+            "Str.pad_start: the fill must not be empty",
+            "\"long\".pad_start(2, \"\")",
+        ),
+        (
+            "fn main() -> Str { \"x\".pad_start(4, \"é\") }",
+            "Str.pad_start: the fill would be cut inside a character",
+            "\"x\".pad_start(4, \"é\")",
+        ),
+    ];
+    for (src, msg, at) in cases {
+        assert_eq!(fails(src), (msg.to_string(), at.to_string()), "{src}");
+    }
+    let (msg, hint) = rejects("fn main() -> Str { \"7\".pad_start(\"0\", 3) }");
+    assert_eq!(msg, "expected Int, found Str");
+    assert!(hint.is_none_or(|h| !h.is_empty()));
+    let (msg, hint) = rejects("fn main() -> Str { \"7\".pad_start(3) }");
+    assert_eq!(msg, "`pad_start` takes 2 arguments, found 1");
+    assert_eq!(
+        hint.unwrap(),
+        "`Str.pad_start` is declared as `pad_start(Int, Str) -> Str`"
+    );
+}
+
+/// L31b: base64 and base64url, RFC 4648 section 10's vectors both ways, round trips of every
+/// length 0 to 64, and each rejection.
+#[test]
+fn base64() {
+    let src = r#"
+fn main() -> List<Str> {
+    let mut out: List<Str> = [];
+    for s in ["", "f", "fo", "foo", "foob", "fooba", "foobar"] {
+        let e = s.to_bytes().to_base64();
+        let u = s.to_bytes().to_base64url();
+        let back = e.from_base64().and_then(|b| b.try_to_str()).unwrap_or("?");
+        let back_url = u.from_base64url().and_then(|b| b.try_to_str()).unwrap_or("?");
+        out.push(e + " " + u + " " + back + " " + back_url);
+    }
+    let mut b = "".to_bytes();
+    out.push(b.to_base64() + "|" + b.to_base64url());
+    for i in 0..3 { b.push(251 + i); }
+    b.push(255);
+    out.push(b.to_base64() + " " + b.to_base64url());
+    out
+}"#;
+    assert_eq!(
+        shows(src),
+        r#"["   ", "Zg== Zg f f", "Zm8= Zm8 fo fo", "Zm9v Zm9v foo foo", "Zm9vYg== Zm9vYg foob foob", "Zm9vYmE= Zm9vYmE fooba fooba", "Zm9vYmFy Zm9vYmFy foobar foobar", "|", "+/z9/w== -_z9_w"]"#
+    );
+    let src = r#"
+fn main() -> Int {
+    let mut seed = 12345;
+    let mut ok = 0;
+    for n in 0..65 {
+        let mut b = "".to_bytes();
+        for _i in 0..n {
+            seed = (seed * 1103515245 + 12345) % 2147483648;
+            b.push(seed / 65536 % 256);
+        }
+        let e = b.to_base64();
+        let u = b.to_base64url();
+        if e.from_base64() == Some(b) && u.from_base64url() == Some(b) && e.len() == (n + 2) / 3 * 4
+            && !u.contains("=") && e.replace("+", "-").replace("/", "_").replace("=", "") == u {
+            ok += 1;
+        }
+    }
+    ok
+}"#;
+    assert_eq!(shows(src), "65");
+    let src = r#"
+fn main() -> List<Bool> {
+    [
+        "Zg=".from_base64().is_none(), "Zg".from_base64().is_none(), "Zg===".from_base64().is_none(),
+        "Z===".from_base64().is_none(), "====".from_base64().is_none(), "Zm9v Zg==".from_base64().is_none(),
+        "Zm9v\n".from_base64().is_none(), "Zh==".from_base64().is_none(), "Zm9=".from_base64().is_none(),
+        "Zm-v".from_base64().is_none(), "Zm_v".from_base64().is_none(), "Zg=a".from_base64().is_none(),
+        "Zg==".from_base64url().is_none(), "Zm9+".from_base64url().is_none(), "Zm9/".from_base64url().is_none(),
+        "Z".from_base64url().is_none(), "Zh".from_base64url().is_none(), "Zm9".from_base64url().is_none(),
+        "Zm9v ".from_base64url().is_none(), "Zé==".from_base64().is_none(),
+        "".from_base64() == Some("".to_bytes()), "".from_base64url() == Some("".to_bytes()),
+        "Zm8".from_base64url() == Some("fo".to_bytes()),
+    ]
+}"#;
+    assert_eq!(shows(src), format!("[{}]", ["true"; 23].join(", ")));
+}
