@@ -14,7 +14,8 @@ use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use std::sync::Arc;
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
@@ -105,6 +106,7 @@ struct Ctx {
     server: Server,
     dirs: Vec<(String, Dir)>,
     workers: Arc<Semaphore>,
+    pool: Pool,
     queue: Semaphore,
     body_deadline: Duration,
     ws_idle: Duration,
@@ -145,9 +147,8 @@ pub fn serve_with(
 ) -> Result<(), String> {
     // A full `send_all` per worker fits the HTTP pool: a live run never sees `busy` (#164).
     crate::size_http_pool(limits.workers);
-    // Requests run compiled code on the runtime's blocking threads (`with_permit`).
+    // Requests run compiled code on `Pool`'s threads (`with_permit`), which have `RUN_STACK`.
     let rt = tokio::runtime::Builder::new_multi_thread()
-        .thread_stack_size(crate::RUN_STACK)
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
@@ -167,6 +168,7 @@ pub fn serve_with(
             server,
             dirs,
             workers: Arc::new(Semaphore::new(limits.workers)),
+            pool: Pool::default(),
             queue: Semaphore::new(limits.queued),
             body_deadline: limits.body_deadline,
             ws_idle: limits.ws_idle,
@@ -321,12 +323,20 @@ async fn on_worker<T: Send + 'static>(
     work: impl FnOnce(&Server, Vec<(String, Dir)>) -> Result<T, String> + Send + 'static,
 ) -> Result<T, StatusCode> {
     let busy = StatusCode::SERVICE_UNAVAILABLE;
-    let waiting = ctx.queue.try_acquire().map_err(|_| busy)?;
-    let permit = tokio::time::timeout(QUEUE_WAIT, ctx.workers.clone().acquire_owned())
-        .await
-        .map_err(|_| busy)?
-        .map_err(|_| busy)?;
-    drop(waiting);
+    // A free worker is taken without a queue slot or a timer; the semaphore is fair, so this
+    // never passes a request already waiting.
+    let permit = match ctx.workers.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            let waiting = ctx.queue.try_acquire().map_err(|_| busy)?;
+            let permit = tokio::time::timeout(QUEUE_WAIT, ctx.workers.clone().acquire_owned())
+                .await
+                .map_err(|_| busy)?
+                .map_err(|_| busy)?;
+            drop(waiting);
+            permit
+        }
+    };
     with_permit(ctx, permit, work).await
 }
 
@@ -337,21 +347,70 @@ async fn with_permit<T: Send + 'static>(
     work: impl FnOnce(&Server, Vec<(String, Dir)>) -> Result<T, String> + Send + 'static,
 ) -> Result<T, StatusCode> {
     let busy = StatusCode::SERVICE_UNAVAILABLE;
-    let work = tokio::task::spawn_blocking(move || {
-        let dirs = ctx
+    let (done, out) = tokio::sync::oneshot::channel();
+    let c = ctx.clone();
+    let job = Box::new(move || {
+        let dirs = c
             .dirs
             .iter()
             .map(|(name, dir)| Ok((name.clone(), dir.try_clone()?)))
             .collect::<std::io::Result<Vec<_>>>()
-            .map_err(|e| e.to_string())?;
-        let out = work(&ctx.server, dirs);
-        drop(permit);
-        out
+            .map_err(|e| e.to_string());
+        let _ = done.send(dirs.and_then(|dirs| work(&c.server, dirs)));
     });
-    work.await.map_err(|_| busy)?.map_err(|e| {
+    if let Err(e) = ctx.pool.run(job, permit) {
+        eprintln!("request refused: {e}");
+        return Err(busy);
+    }
+    // A job that panicked dropped `done` unsent.
+    out.await.map_err(|_| busy)?.map_err(|e| {
         eprintln!("request refused: {e}");
         busy
     })
+}
+
+type Job = Box<dyn FnOnce() + Send>;
+/// How an idle thread is handed its next job.
+type Idle = mpsc::Sender<(Job, OwnedSemaphorePermit)>;
+
+/// The threads that run requests and WebSocket events, each with `RUN_STACK`. A job goes straight
+/// to an idle thread, or to a new one when none is idle. A thread holds its job's worker permit
+/// until it is idle again, so there are never more threads than `ListenLimits::workers`. Threads
+/// are kept for the server's life.
+#[derive(Default)]
+struct Pool {
+    idle: Arc<Mutex<Vec<Idle>>>,
+}
+
+impl Pool {
+    /// Run `job` on an idle thread or a new one; `Err` if no thread could be started.
+    fn run(&self, job: Job, permit: OwnedSemaphorePermit) -> Result<(), String> {
+        let mut job = (job, permit);
+        let idle = self.idle.lock().unwrap_or_else(PoisonError::into_inner).pop();
+        if let Some(thread) = idle {
+            // A thread keeps its own sender, so its channel stays open while it lives.
+            match thread.send(job) {
+                Ok(()) => return Ok(()),
+                Err(mpsc::SendError(j)) => job = j,
+            }
+        }
+        let (tx, rx) = mpsc::channel();
+        tx.send(job).map_err(|_| "the job was lost".to_string())?;
+        let idle = self.idle.clone();
+        std::thread::Builder::new()
+            .name("kio-worker".into())
+            .stack_size(crate::RUN_STACK)
+            .spawn(move || {
+                while let Ok((job, permit)) = rx.recv() {
+                    // A panic drops the job's result sender: its request is answered 503.
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+                    idle.lock().unwrap_or_else(PoisonError::into_inner).push(tx.clone());
+                    drop(permit);
+                }
+            })
+            .map(|_| ())
+            .map_err(|e| format!("cannot start a worker thread: {e}"))
+    }
 }
 
 fn respond(r: Response) -> hyper::Response<Full<Bytes>> {

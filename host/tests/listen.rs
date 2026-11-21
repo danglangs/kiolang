@@ -1104,3 +1104,100 @@ fn request_failures_are_escaped() {
     let _ = child.wait();
     assert_eq!(line, "request failed: assertion failed: x\\nok: forged\\r\\u{1b}[2J\n");
 }
+
+/// H41: requests run on the worker threads, a fresh instance each, under their own limits.
+/// `/spin` loops until a limit stops it; `/big` grows a string past 8 MB; others answer "ok".
+mod pool {
+    use kio_host::listen::{serve_with, ListenLimits};
+    use kio_host::{Limits, Server};
+
+    const APP: &str = r#"fn main(req: Incoming, res: Outgoing) -> Result<(), WebErr> {
+        let t = req.target();
+        let mut s = "ok";
+        if t == "/spin" { while true {} }
+        if t == "/big" { while s.len() < 16000000 { s = s + s; } }
+        res.send(200, [], [], s.slice(0, 2).to_bytes())
+    }"#;
+
+    /// `APP` in this process under `limits` with `workers` workers; returns the port.
+    pub fn serve(limits: Limits, workers: usize) -> u16 {
+        let server = Server::new(vec![("app.kio".into(), APP.into())], limits)
+            .unwrap()
+            .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let limits = ListenLimits {
+            workers,
+            ..Default::default()
+        };
+        std::thread::spawn(move || {
+            let _ = serve_with(server, vec![], "127.0.0.1:0".parse().unwrap(), limits, |a| {
+                tx.send(a.port()).unwrap()
+            });
+        });
+        rx.recv().unwrap()
+    }
+}
+
+/// Two of three workers spin until the 2 s deadline: four clients sending ten requests each, one
+/// connection a request, are answered by the third meanwhile, and each spin ends as a 500 at its
+/// deadline.
+#[test]
+fn spinning_handlers_hold_only_their_workers() {
+    use std::time::{Duration, Instant};
+    let limits = kio_host::Limits {
+        timeout_secs: 2,
+        fuel: 1_000_000_000_000,
+        ..kio_host::Limits::web()
+    };
+    let port = pool::serve(limits, 3);
+    let start = Instant::now();
+    let spins: Vec<_> = (0..2)
+        .map(|_| std::thread::spawn(move || send(port, "GET", "/spin", b"").0))
+        .collect();
+    std::thread::sleep(Duration::from_millis(300));
+    let clients: Vec<_> = (0..4)
+        .map(|_| {
+            std::thread::spawn(move || {
+                (0..10)
+                    .map(|_| {
+                        let t = Instant::now();
+                        (send(port, "GET", "/", b""), t.elapsed())
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    for c in clients {
+        for (got, took) in c.join().unwrap() {
+            assert_eq!(got, (200, b"ok".to_vec()));
+            assert!(took < Duration::from_millis(500), "{took:?}");
+        }
+    }
+    assert!(start.elapsed() < Duration::from_millis(1500), "{:?}", start.elapsed());
+    for s in spins {
+        assert_eq!(s.join().unwrap(), 500);
+    }
+    let took = start.elapsed();
+    assert!(
+        took >= Duration::from_millis(1800) && took < Duration::from_secs(4),
+        "{took:?}"
+    );
+}
+
+/// One worker runs every request in turn, each in a fresh instance with its own fuel and memory:
+/// a request out of fuel or over memory is a 500 and the next one works.
+#[test]
+fn one_worker_gives_each_request_its_own_limits() {
+    let limits = kio_host::Limits {
+        fuel: 10_000_000,
+        memory: 8 << 20,
+        ..kio_host::Limits::web()
+    };
+    let port = pool::serve(limits, 1);
+    for _ in 0..3 {
+        assert_eq!(send(port, "GET", "/spin", b""), (500, vec![]));
+        assert_eq!(send(port, "GET", "/", b""), (200, b"ok".to_vec()));
+        assert_eq!(send(port, "GET", "/big", b""), (500, vec![]));
+        assert_eq!(send(port, "GET", "/", b""), (200, b"ok".to_vec()));
+    }
+}
