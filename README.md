@@ -236,6 +236,7 @@ Where work stands: [docs/status.md](docs/status.md).
 - [docs/first-job.md](docs/first-job.md): download a release and run a first job, no Rust.
 - [docs/review-a-change.md](docs/review-a-change.md): review an agent's change with `kio review` and decide: accept, reject or ask for evidence.
 - [docs/guide.md](docs/guide.md): every grant, flag, limit and the audit log.
+- [docs/upgrading.md](docs/upgrading.md): what each release asks of a program, with a command that finds every place to change.
 - [docs/tour.md](docs/tour.md): walkthroughs: a helper that gains the network (report, `--base`, the audit log), replaying a run.
 - [docs/language.md](docs/language.md): the language and the rules the checker enforces.
 - [docs/design.md](docs/design.md): components, trust boundary, one run step by step; [docs/codegen.md](docs/codegen.md): how a checked program becomes Wasm.

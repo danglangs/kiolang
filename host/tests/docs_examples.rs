@@ -1,4 +1,4 @@
-//! D7, D8: guide.md's Db migration example and its "Fast forms" programs run as written, and
+//! D7, D8, D10: guide.md's Db migration example, its outbox example and its "Fast forms" programs run as written, and
 //! the fuel each fast-forms program states (and primer.md's table repeats) is what it uses.
 use std::path::Path;
 use std::process::Command;
@@ -128,4 +128,25 @@ fn fast_forms_use_the_fuel_shown() {
         .collect();
     let want: Vec<String> = stated.iter().map(|&n| millions(n)).collect();
     assert_eq!(table, want);
+}
+
+/// D10: guide.md's outbox program, its grants and fake host files, run as the session shows.
+#[test]
+fn outbox_runs_as_shown() {
+    let guide = doc("guide.md");
+    let b = blocks(section(&guide, "## The outbox pattern"));
+    assert_eq!(b.len(), 4, "program, t.grants, hook.http, session");
+    let dir = tempfile::tempdir().unwrap();
+    for (name, text) in [("outbox.kio", b[0]), ("t.grants", b[1]), ("hook.http", b[2])] {
+        std::fs::write(dir.path().join(name), text).unwrap();
+    }
+    let (cmd, want) = b[3].split_once('\n').unwrap();
+    assert_eq!(cmd, "$ kio test outbox.kio --grants t.grants");
+    let out = Command::new(env!("CARGO_BIN_EXE_kio"))
+        .args(["test", "outbox.kio", "--grants", "t.grants"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+    assert_eq!((out.status.code(), text.as_str()), (Some(0), want));
 }

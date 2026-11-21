@@ -218,6 +218,8 @@ A SQLite database (the bundled SQLite, in the host) that outlives runs and is sh
 
 `path:ro` is read-only: a program that can call `exec`, `exec_rows`, `transaction` or `transaction_rows` on it is refused at startup ("`totals` is granted read-only but `main` can call `totals exec_rows`", exit 2), and the host stops any of them that arrives.
 
+**Foreign keys are enforced.** The host sets `PRAGMA foreign_keys = ON` on every connection (file, `:ro` and `:memory:`, so tests too) before the program runs; the program can read it (`1`) but not turn it off (`Denied`). Each statement is checked as it runs, inside a `transaction` too: a child row whose parent does not exist yet, deleting a parent that rows still reference, or dropping its table is `Err(Constraint("FOREIGN KEY constraint failed"))`, unless the column says `ON DELETE CASCADE` or `SET NULL`, which then run. Insert parents first.
+
 The connection is fenced, since the SQL is the program's and SQLite runs outside the sandbox: `ATTACH`, `DETACH`, `VACUUM`, `BEGIN`/`COMMIT`/`ROLLBACK`/`SAVEPOINT` (use `transaction`), `load_extension` and every `PRAGMA` but a few reads (`table_info`, `index_list`, `foreign_keys`, ..) are `Denied`; the schema is protected (`SQLITE_DBCONFIG_DEFENSIVE`). Limits: one statement per call, 1 MB of SQL, 8 MB per value, 4,096 parameters, 1,000 statements per `transaction` or `transaction_rows`, 10,000 rows or 8 MB of rows per `query`, `exec_rows` or `transaction_rows` (else `TooLarge`; a write whose rows pass the limit is not applied); `--db-mb n` caps each database (64 MB by default, as `--kv-mb`; a write past it is `TooLarge` and changes nothing; a file already larger may not grow); a statement still running at the run's `--timeout` is interrupted and the run stops, inside `instr`, `replace`, `LIKE` and `GLOB` too (the host's versions, which give SQLite's results; `LIKE` does not use an index); SQLite's memory is capped at 256 MB per process; another process holding the file, or another request's statement holding the connection, for over 2 s is `Busy`. The database's path follows the `--kv` rules: not a symlink, not inside a granted `--dir`, not a store's or log's file, and not another grant's `-wal`, `-shm` or `-journal`.
 
 ```
@@ -304,6 +306,14 @@ A fourth step appended later runs once on each file: `ran 1`.
 
 **A server and a job on one file.** A `--listen` server and a `kio run` job may grant the same database: SQLite takes one write at a time across processes (WAL: reads go on during a write), and a statement that waits over 2 s is `Busy`, so keep each `transaction` short and retry a `Busy`. Grant a process that only reads with `:ro`. A job that makes many calls (an `Http` request per row) raises `--timeout` (10 s) and `--calls` (10,000) to fit ([Limits](#limits)).
 
+**Backing up and restoring.** kio cannot copy a database (`ATTACH` and `VACUUM INTO` are fenced); the operator does, outside kio. A file in WAL mode is up to three files: `app.db`, and while a process has it open `app.db-wal` (commits not yet copied into `app.db`) and `app.db-shm`; the last connection to close folds the WAL in and removes both. So:
+
+- With no kio process holding the file (the server and jobs stopped), copy `app.db`, and `app.db-wal` beside it if one is left: a process that was killed leaves its commits there.
+- While one runs, `sqlite3 app.db ".backup app-copy.db"` takes a consistent copy, WAL included. Copying `app.db` alone with `cp` can miss the last commits or tear a page.
+- To restore, stop every kio process that grants the file, delete `app.db-wal` and `app.db-shm` if present (they belong to the old file), put the copy at `app.db` (and its `-wal` at `app.db-wal`, if it has one), and start them again.
+
+A restored file is behind the world: whatever the program sent after the copy was taken (a webhook, an email) happened, and the file does not know it. [The outbox pattern](#the-outbox-pattern) keeps a record outside the database for that.
+
 ### --listen: HTTP and WebSockets
 
 A listening socket is a grant too. Each request runs in a fresh sandbox; `main` takes `req: Incoming, res: Outgoing` (any names) plus its other grants, `Http` included. `send` answers the client at once, and `main` may go on working under the request's limits (a webhook after the response, say).
@@ -385,18 +395,127 @@ Flags on the command line are added after the file's. A flag that takes one valu
 
 `kio check app.kio --grants app.grants` binds the file's grants to `main`'s parameters and prints the report, without running: missing, extra and wrong-kind grants, a `:ro` or `:verify` grant the program would write or sign with, and every flag's syntax are errors as under `kio run`. It opens no granted path and reads no secret (an `env:` or `file:` source is checked for its form only), so it runs in CI. A pull request then shows both halves of the authority: `kio check --base` for what the code calls on each grant, the grants file's diff for what each grant is.
 
+## The outbox pattern
+
+A change that must tell another system (a booking, then a webhook) writes its event in the same `transaction` as the change, and a delivery job sends it later: neither happens without the other, and a crash loses nothing. Four rules, none of which a tool checks:
+
+- **The body is frozen when the event is written**, and delivery sends those stored bytes. Built at send time from the current row, a retry after a later change (a reschedule) sends different content under the same id.
+- **The id is random** (`rng.bytes(16).to_hex()` under `--rng r`, the OS's randomness), not a row number: a restored database issues its row numbers again, and a receiver that drops repeats by id drops the new events. A `seed:` stream repeats every run: tests only.
+- **The job claims, sends, journals, marks**: it claims every event not marked sent, sends each with its id (`idempotency-key`), appends the id to the journal, then marks it sent. Delivery is at least once: a crash between the send and the journal sends that event again, and the receiver drops the repeat.
+- **The journal is outside the database**: an append-only file in a `Dir` (`--db` may not lie inside a granted `--dir`, so the two are apart by construction). A restore does not touch it, and an event it lists is marked sent without sending. `Dir.read` stops at 10 MB, about 300,000 ids.
+
+```
+// outbox.kio
+fn setup(db: Db) -> Result<(), DbErr> {
+  db.exec("CREATE TABLE IF NOT EXISTS bookings (id INTEGER PRIMARY KEY, guest TEXT NOT NULL)", [])?;
+  db.exec("CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, body BLOB NOT NULL,
+           state TEXT NOT NULL DEFAULT 'pending')", [])?;
+  Ok(())
+}
+
+// The change and its event, all or nothing; the id random, the body built now and stored.
+fn book(db: Db, rng: Rng, guest: Str) -> Result<Str, DbErr> {
+  let id = rng.bytes(16).to_hex();
+  let body = Json::obj().with("type", Json::Str("booked")).with("id", Json::Str(id))
+    .with("guest", Json::Str(guest)).to_json();
+  db.transaction(["INSERT INTO bookings (guest) VALUES (?)", "INSERT INTO outbox (id, body) VALUES (?, ?)"],
+                 [[SqlValue::Text(guest)], [SqlValue::Text(id), SqlValue::Blob(body.to_bytes())]])?;
+  Ok(id)
+}
+
+// Claim every event not marked sent; send each the journal does not list, journal it, mark it.
+fn deliver(db: Db, hook: Http, journal: Dir) -> Result<Int, Str> {
+  let done = match journal.read("sent.log") {
+    Ok(b) => b.to_str().lines(),
+    Err(IoErr::NotFound) => [],
+    Err(e) => return Err(e.to_str()),
+  };
+  let claimed = db.exec_rows("UPDATE outbox SET state = 'sending' WHERE state != 'sent' RETURNING id, body", [])
+    .map_err(|e| e.to_str())?;
+  let mut n = 0;
+  for row in claimed {
+    let id = row[0].as_str().unwrap_or("");
+    if !done.contains(id) {
+      let r = hook.send("POST", "/v1/events", ["content-type: application/json", "idempotency-key: " + id],
+                        row[1].as_bytes().unwrap_or("".to_bytes()), 2000).map_err(|e| e.to_str())?;
+      if r.status < 200 || r.status > 299 { return Err("status " + r.status.to_str()); }
+      journal.append("sent.log", (id + "\n").to_bytes()).map_err(|e| e.to_str())?;
+      n += 1;
+    }
+    db.exec("UPDATE outbox SET state = 'sent' WHERE id = ?", [SqlValue::Text(id)]).map_err(|e| e.to_str())?;
+  }
+  Ok(n)
+}
+
+#[test]
+fn each_event_is_sent_once(db: Db, rng: Rng, hook: Http, journal: Dir, sent: Dir) -> Result<(), Str> {
+  setup(db).map_err(|e| e.to_str())?;
+  book(db, rng, "ada").map_err(|e| e.to_str())?;
+  book(db, rng, "bob").map_err(|e| e.to_str())?;
+  assert_eq(deliver(db, hook, journal)?, 2);
+  assert_eq(deliver(db, hook, journal)?, 0);
+  assert_eq(sent.list("").map_err(|e| e.to_str())?.len(), 2);
+  Ok(())
+}
+
+#[test]
+fn a_restore_resends_nothing(db: Db, rng: Rng, hook: Http, journal: Dir, sent: Dir) -> Result<(), Str> {
+  setup(db).map_err(|e| e.to_str())?;
+  book(db, rng, "ada").map_err(|e| e.to_str())?;
+  assert_eq(deliver(db, hook, journal)?, 1);
+  // The restored copy was taken before ada's event was marked sent.
+  db.exec("UPDATE outbox SET state = 'pending'", []).map_err(|e| e.to_str())?;
+  book(db, rng, "bob").map_err(|e| e.to_str())?;
+  assert_eq(deliver(db, hook, journal)?, 1);
+  assert(sent.read("hook-2").map_err(|e| e.to_str())?.to_str().contains("\"guest\":\"bob\""), "bob's event");
+  Ok(())
+}
+```
+
+`t.grants`, `hook.http` and the run:
+
+```
+--http hook=fake:hook.http
+--http-methods hook=POST
+--http-record hook=sent
+```
+
+```
+POST /v1/events
+200
+```
+
+```
+$ kio test outbox.kio --grants t.grants
+ok   a_restore_resends_nothing
+ok   each_event_is_sent_once
+2 passed, 0 failed
+```
+
+Without the journal check, `a_restore_resends_nothing` fails: ada's event goes out twice. In production `book` runs in the server (`--db db=app.db --rng r`) and `deliver` from a job's `main` (`--db db=app.db --http hook=hooks.example --http-methods hook=POST --dir journal=/var/lib/app/journal`), one job at a time: the claim is a mark, not a lock, so two jobs at once need a lease (a `claimed_until` column set from a `Clock`).
+
+**After a crash** of the job (killed mid-batch): run it again. Rows left `sending` are claimed again; those the journal lists are marked without sending; the one sent but not yet journaled is sent again, and the receiver drops it by id.
+
+**After a restore** ([Backing up and restoring](#db)): stop the server and the job, restore the database, keep the journal as it is, start the job. Events written before the copy and sent after it are in the journal, so none is sent twice; new events get new ids, so none is dropped. Changes made after the copy are gone, but their events were sent: the journal's ids missing from `outbox` are exactly those, the list to reconcile with the receiver.
+
 ## Limits
 
-Every run is bounded; each limit's error names the flag that raises it. Under `--listen` the limits are per request, and the defaults are smaller: fuel 10,000,000, memory 64 MB, timeout 5 s, calls 1,000 (the flags override them). `kio test` uses the `kio run` defaults, 1,000 times a request's fuel, and notes a test that would not fit in a request ([Tests](#tests)).
+Every run is bounded; each limit's error names the flag that raises it. Under `--listen` the limits are per request (the flags override them there too). `kio test` uses the `kio run` defaults, 1,000 times a request's fuel, and notes a test that would not fit in a request ([Tests](#tests)). Every default, in one place:
 
-| Flag | Default |
-|---|---|
-| `--fuel n` | 10,000,000,000 (Wasmtime fuel) |
-| `--timeout secs` | 10 |
-| `--memory mb` | 256 |
-| `--stack kb` | 2,048 (at most 8 MB) |
-| `--calls n` | 10,000 host calls |
-| `--io mb` | 100 |
+| Limit | `kio run`, `kio test` | `--listen`, a request | Raised by |
+|---|---|---|---|
+| Fuel (Wasmtime fuel) | 10,000,000,000 | 10,000,000 | `--fuel n` |
+| Wall time | 10 s | 5 s | `--timeout secs` |
+| Memory | 256 MB | 64 MB | `--memory mb` |
+| Stack | 2,048 KB (at most 8 MB) | same | `--stack kb` |
+| Host calls (each capability call, each HTTP request and redirect) | 10,000 | 1,000 | `--calls n` |
+| Bytes read plus written | 100 MB | same | `--io mb` |
+| A `Kv` store, a `Db` file | 64 MB each | same | `--kv-mb n`, `--db-mb n` |
+| Rows from one `query`, `exec_rows` or `transaction_rows` | 10,000, or 8 MB | same | none: page with `LIMIT ?` |
+| One `Dir.read`; one `Dir.list` | 10 MB; 10,000 names | same | none |
+| An `Http` request body; response body | 8 MB; 10 MB | same | none |
+| A request body a server reads | | 1 MB | none |
+| A `Kv` value; a `Log` line; `Log` per run; WebSocket sends per event | 1 MB; 64 KB; 1 MB; 1 MB | same | none |
 
 ```
 $ kio run examples/tour/forever.kio
@@ -800,6 +919,8 @@ Identity
 - **Identity**: kio's version and commit, and the sha256 of every file each side loads (root, modules and dependencies, and a `dep NAME PATH sha256:..` line per dependency), of G and OLD's file beside it (`old grants`), of T and each fake FILE it names (`test fake hook.http sha256:..`, `identity.test_fakes`, escaped as on the grants line; read once, both sides' tests answered from the same bytes; a FILE `kio test` refuses has no line), of each `--entry-grants` (and OLD's), and of the requirements files; a module two entries share once. Each is read again at the end; one that changed while the review ran is an `error`.
 
 Exit 1: a side or entry does not check, G or an entry's grants do not bind, T cannot be applied, a side's tests do not run, a NEW test fails, the mutant runs did not finish, or a file changed during the review; 3: authority added, a dependency added or changed, or a test removed; 0 otherwise; 2: usage. `--json` gives one object with a field per section. `--base` takes a path: for a git revision, write each file out with `git show REV:app.kio > old/app.kio`, modules beside it.
+
+**What it compares.** Two source trees, OLD's and NEW's, each checked, tested and measured by the one `kio` binary that runs the review (its version is in Identity); never an old binary against a new one. So after a kio upgrade, review the change that adapts the code: OLD failing its own tests (`not checked  old: .. the base fails its own tests`) is the new binary refusing what the old one ran, NEW's passing shows the fix, and the fuel lines compare both trees under the new binary. Fuel under the old binary is that binary's to report (`kio test --verbose` with each).
 
 ## Compiling
 
