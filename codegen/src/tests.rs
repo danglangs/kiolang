@@ -705,6 +705,14 @@ fn main() -> Int {{ 0 }}"#
         "for i in 0..b.len() { n += b[i]; b.push(1); }",
         "let mut i = 0; while at(b, i - 1) != -1 { i += 1; }",
         "let mut i = 0; while i < b.len() || n > 0 { n += b[i]; i += 1; }",
+        // The condition, or the rest of the `&&` chain, writes `i` or `b` after the test.
+        r#"let mut i = 0; while i < b.len() && (if n == 0 { b = "".to_bytes(); true } else { true }) { n += b[i]; i = 9; }"#,
+        "let mut i = 0; while i < b.len() && (if n == 0 { i = 40; true } else { true }) { n += b[i]; i = 9; }",
+        "let mut i = 0; while i < b.len() && (match n { 0 => { i = 40; true } _ => true }) { n += b[i]; i = 9; }",
+        "let mut i = 0; while i < b.len() && { i = 40; true } { n += b[i]; i = 9; }",
+        "let mut i = 0; if i < b.len() && (if n == 0 { i = 40; true } else { true }) && b[i] == 97 { n = 1; }",
+        r#"let mut i = 0; if i < b.len() && (if n == 0 { b = "".to_bytes(); true } else { true }) { n = b[i]; }"#,
+        "let mut i = 0; if i < b.len() && (if n == 0 { i = 40; 0 } else { 0 }) + b[i] > 0 { n = 1; }",
     ] {
         assert_eq!(checks(body), 1, "{body}");
     }

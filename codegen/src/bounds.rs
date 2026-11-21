@@ -5,7 +5,8 @@
 //! right of `i < b.len() &&` (also as a conjunct of the condition), and in the body of
 //! `for i in a..b.len()` that does not write `b`; in each, `i` and `b` are locals. It holds
 //! until a statement that writes `i` or `b` (codegen drops it before generating that statement,
-//! wherever in it the write is), since only the function's own code can write a local, and a
+//! wherever in it the write is), and is not one at all if the condition or the `&&`'s right side
+//! may write either, since only the function's own code can write a local, and a
 //! `Bytes` object changes in place only through a write to its own local (a shared object is
 //! copied first; a borrowed local's source does not change while it is borrowed, moves.rs).
 //! `i >= 0` holds when every value written to `i` is not negative (`nonneg`).
@@ -49,13 +50,22 @@ pub(crate) fn nonneg_expr(e: &Expr, ok: &[bool]) -> bool {
     }
 }
 
-/// The pairs `(i, b)` for which `cond` being true means `0 <= i < b.len()`: `i < b.len()` or
-/// `b.len() > i` with `i` in `ok`, or either side of `&&`.
-pub(crate) fn facts(cond: &Expr, ok: &[bool], out: &mut Vec<(LocalId, LocalId)>) {
+/// The pairs `(i, b)` for which `cond` being true means `0 <= i < b.len()` when `cond` has
+/// run and then `rest` runs up to the read: `i < b.len()` or `b.len() > i` with `i` in `ok`,
+/// as `cond` or an operand of its `&&`s, unless `cond` or `rest` may write `i` or `b`
+/// anywhere (a later operand of the same `&&` chain could).
+pub(crate) fn facts(cond: &Expr, rest: &[&Expr], ok: &[bool], out: &mut Vec<(LocalId, LocalId)>) {
+    let mut found = Vec::new();
+    conjuncts(cond, ok, &mut found);
+    let kept = |&(i, b): &(LocalId, LocalId)| !expr_writes(cond, i, b) && !rest.iter().any(|e| expr_writes(e, i, b));
+    out.extend(found.into_iter().filter(kept));
+}
+
+fn conjuncts(cond: &Expr, ok: &[bool], out: &mut Vec<(LocalId, LocalId)>) {
     match &cond.kind {
         ExprKind::Binary(BinOp::And, a, b) => {
-            facts(a, ok, out);
-            facts(b, ok, out);
+            conjuncts(a, ok, out);
+            conjuncts(b, ok, out);
         }
         ExprKind::Binary(BinOp::Lt, i, len) | ExprKind::Binary(BinOp::Gt, len, i) => {
             if let (ExprKind::Local(i), Some(b)) = (&i.kind, len_of(len)) {

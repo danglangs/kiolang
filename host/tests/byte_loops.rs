@@ -114,6 +114,43 @@ fn near_misses_still_fail() {
         6,
         6,
     );
+    // The condition, or the rest of its `&&` chain, writes `i` or `b` after `i < b.len()`
+    // (adversarial review).
+    oob(
+        "let mut i = 0; while i < b.len() && (if n == 0 { b = \"\".to_bytes(); true } else { true }) { n += b[i]; i = 100; }",
+        0,
+        0,
+    );
+    oob(
+        "let mut i = 0; while i < b.len() && (if n == 0 { i = 40; true } else { true }) { n += b[i]; i = 100; }",
+        40,
+        6,
+    );
+    oob(
+        "let mut i = 0; while i < b.len() && (match n { 0 => { i = 40; true } _ => true }) { n += b[i]; i = 100; }",
+        40,
+        6,
+    );
+    oob(
+        "let mut i = 0; while i < b.len() && { i = 40; true } { n += b[i]; i = 100; }",
+        40,
+        6,
+    );
+    oob(
+        "let mut i = 2; if i < b.len() && (if n == 0 { i = 40; true } else { true }) && b[i] == 97 { n = 1; }",
+        40,
+        6,
+    );
+    oob(
+        "let mut i = 0; if i < b.len() && (if n == 0 { b = \"\".to_bytes(); true } else { true }) { n = b[i]; }",
+        0,
+        0,
+    );
+    oob(
+        "let mut i = 0; if i < b.len() && (if n == 0 { i = 40; 0 } else { 0 }) + b[i] > 0 { n = 1; }",
+        40,
+        6,
+    );
     // The inlined helper's own `b[i]` with a negative argument: `i < b.len()` holds, `i >= 0` not.
     let src = program("n = at(b, -2);");
     let (msg, start, end) = both(&src).unwrap_err();

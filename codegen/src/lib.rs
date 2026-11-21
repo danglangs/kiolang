@@ -2175,7 +2175,7 @@ impl<'m> FuncGen<'_, 'm> {
                 self.sink().i32_eqz();
                 self.br_if(brk);
                 let saved = self.bounded.clone();
-                bounds::facts(cond, &self.nonneg, &mut self.bounded);
+                bounds::facts(cond, &[], &self.nonneg, &mut self.bounded);
                 self.loop_body(body, brk, cont);
                 self.bounded = saved;
             }
@@ -2784,7 +2784,7 @@ impl<'m> FuncGen<'_, 'm> {
                 self.open(Open::If, BlockType::Result(ValType::I32));
                 if *op == BinOp::And {
                     let saved = self.bounded.clone();
-                    bounds::facts(a, &self.nonneg, &mut self.bounded);
+                    bounds::facts(a, &[b], &self.nonneg, &mut self.bounded);
                     self.expr(b);
                     self.bounded = saved;
                     self.sink().else_().i32_const(0);
@@ -2885,7 +2885,7 @@ impl<'m> FuncGen<'_, 'm> {
                 self.expr(cond);
                 self.open(Open::If, bt);
                 let saved = self.bounded.clone();
-                bounds::facts(cond, &self.nonneg, &mut self.bounded);
+                bounds::facts(cond, &[], &self.nonneg, &mut self.bounded);
                 self.block(then, want);
                 self.bounded = saved;
                 if let Some(els) = els {
