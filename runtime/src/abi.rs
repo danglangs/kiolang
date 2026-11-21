@@ -769,7 +769,7 @@ pub unsafe extern "C" fn rt_str_url_encode(s: u32) -> u32 {
     addr(text::new_str(&conv::url_encode(unsafe { obj::bytes(ptr(s)) })))
 }
 
-/// `s.pad_start(width, fill)` (L31b). Errors: a negative `width` at `negative`, with it; an
+/// `s.pad_start(width, fill)` (L31b). Errors: a `width` outside 0 to `PAD_MAX` at `negative`, with it; an
 /// empty `fill` at `empty`; a cut inside a character at `cut`.
 #[no_mangle]
 pub unsafe extern "C" fn rt_str_pad_start(s: u32, width: i64, fill: u32, negative: u32, empty: u32, cut: u32) -> u32 {

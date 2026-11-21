@@ -1093,7 +1093,7 @@ fn main() -> List<Str> {
     let cases: [(&'static str, &str, &str); 4] = [
         (
             "fn main() -> Str { \"7\".pad_start(-1, \"0\") }",
-            "Str.pad_start(-1, ..): the width must be 0 or more",
+            "Str.pad_start(-1, ..): the width must be 0 to 2147483647",
             "\"7\".pad_start(-1, \"0\")",
         ),
         (

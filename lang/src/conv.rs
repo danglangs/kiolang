@@ -200,7 +200,9 @@ pub enum PadErr {
 }
 
 /// `pad_start`'s errors; `{a}` is the width.
-pub const PAD_WIDTH: &str = "Str.pad_start({a}, ..): the width must be 0 or more";
+/// The largest width `pad_start` takes: the largest `Str` a 32-bit memory can hold.
+pub const PAD_MAX: i64 = i32::MAX as i64;
+pub const PAD_WIDTH: &str = "Str.pad_start({a}, ..): the width must be 0 to 2147483647";
 pub const PAD_FILL: &str = "Str.pad_start: the fill must not be empty";
 pub const PAD_CUT: &str = "Str.pad_start: the fill would be cut inside a character";
 
@@ -209,13 +211,13 @@ pub const PAD_CUT: &str = "Str.pad_start: the fill would be cut inside a charact
 /// when it is already that long. `fill` is UTF-8, so a cut is refused unless it falls on a
 /// character boundary.
 pub fn pad_start(s: &[u8], width: i64, fill: &[u8]) -> Result<Vec<u8>, PadErr> {
-    if width < 0 {
+    if !(0..=PAD_MAX).contains(&width) {
         return Err(PadErr::Width);
     }
     if fill.is_empty() {
         return Err(PadErr::Fill);
     }
-    let Some(n) = usize::try_from(width).ok().and_then(|w| w.checked_sub(s.len())) else {
+    let Some(n) = (width as usize).checked_sub(s.len()) else {
         return Ok(s.to_vec());
     };
     // A UTF-8 continuation byte is `10xxxxxx`.
