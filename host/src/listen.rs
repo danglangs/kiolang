@@ -370,16 +370,30 @@ async fn with_permit<T: Send + 'static>(
 }
 
 type Job = Box<dyn FnOnce() + Send>;
-/// How an idle thread is handed its next job.
-type Idle = mpsc::Sender<(Job, OwnedSemaphorePermit)>;
+/// How an idle thread is handed its next job, with the thread's number.
+type Idle = (u64, mpsc::Sender<(Job, OwnedSemaphorePermit)>);
+
+/// How long a thread waits idle before it exits, returning the stack pages a deep request touched.
+const THREAD_IDLE: Duration = Duration::from_secs(10);
 
 /// The threads that run requests and WebSocket events, each with `RUN_STACK`. A job goes straight
 /// to an idle thread, or to a new one when none is idle. A thread holds its job's worker permit
-/// until it is idle again, so there are never more threads than `ListenLimits::workers`. Threads
-/// are kept for the server's life.
-#[derive(Default)]
+/// until it is idle again, so there are never more threads than `ListenLimits::workers`. A thread
+/// idle for `THREAD_IDLE` exits.
 struct Pool {
     idle: Arc<Mutex<Vec<Idle>>>,
+    next: AtomicU64,
+    idle_for: Duration,
+}
+
+impl Default for Pool {
+    fn default() -> Self {
+        Pool {
+            idle: Arc::default(),
+            next: AtomicU64::new(0),
+            idle_for: THREAD_IDLE,
+        }
+    }
 }
 
 impl Pool {
@@ -387,8 +401,8 @@ impl Pool {
     fn run(&self, job: Job, permit: OwnedSemaphorePermit) -> Result<(), String> {
         let mut job = (job, permit);
         let idle = self.idle.lock().unwrap_or_else(PoisonError::into_inner).pop();
-        if let Some(thread) = idle {
-            // A thread keeps its own sender, so its channel stays open while it lives.
+        if let Some((_, thread)) = idle {
+            // A listed thread has not exited: it leaves only after taking itself off the list.
             match thread.send(job) {
                 Ok(()) => return Ok(()),
                 Err(mpsc::SendError(j)) => job = j,
@@ -397,16 +411,39 @@ impl Pool {
         let (tx, rx) = mpsc::channel();
         tx.send(job).map_err(|_| "the job was lost".to_string())?;
         let idle = self.idle.clone();
+        let id = self.next.fetch_add(1, Relaxed);
+        let idle_for = self.idle_for;
         std::thread::Builder::new()
             .name("kio-worker".into())
             .stack_size(crate::RUN_STACK)
-            .spawn(move || {
-                while let Ok((job, permit)) = rx.recv() {
-                    // A panic drops the job's result sender: its request is answered 503.
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
-                    idle.lock().unwrap_or_else(PoisonError::into_inner).push(tx.clone());
-                    drop(permit);
-                }
+            .spawn(move || loop {
+                let (job, permit) = match rx.recv_timeout(idle_for) {
+                    Ok(next) => next,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        let mut list = idle.lock().unwrap_or_else(PoisonError::into_inner);
+                        match list.iter().position(|(n, _)| *n == id) {
+                            Some(at) => {
+                                list.swap_remove(at);
+                                return;
+                            }
+                            // Taken off the list by `run`: a job is on its way.
+                            None => {
+                                drop(list);
+                                match rx.recv() {
+                                    Ok(next) => next,
+                                    Err(_) => return,
+                                }
+                            }
+                        }
+                    }
+                };
+                // A panic drops the job's result sender: its request is answered 503.
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+                idle.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push((id, tx.clone()));
+                drop(permit);
             })
             .map(|_| ())
             .map_err(|e| format!("cannot start a worker thread: {e}"))
@@ -790,5 +827,56 @@ mod tests {
         assert!(allowed(Some("App.Example:9"), &["app.example"]));
         assert!(allowed(Some("localhost"), &["app.example"]));
         assert!(!allowed(Some("evil.example"), &["app.example"]));
+    }
+}
+
+#[cfg(test)]
+mod pool_tests {
+    use super::*;
+
+    /// An idle thread leaves the list and exits; the next job starts a new thread.
+    #[test]
+    fn idle_threads_exit_and_are_replaced() {
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let permits = Arc::new(Semaphore::new(1));
+        let pool = Pool {
+            idle_for: Duration::from_millis(100),
+            ..Pool::default()
+        };
+        for round in 0..3 {
+            let (done, out) = mpsc::channel();
+            let permit = rt.block_on(permits.clone().acquire_owned()).unwrap();
+            pool.run(
+                Box::new(move || done.send(std::thread::current().id()).unwrap()),
+                permit,
+            )
+            .unwrap();
+            let thread = out.recv().unwrap();
+            std::thread::sleep(Duration::from_millis(400));
+            assert!(
+                pool.idle.lock().unwrap().is_empty(),
+                "round {round}: {thread:?} still listed"
+            );
+            assert_eq!(permits.available_permits(), 1);
+        }
+        assert_eq!(pool.next.load(Relaxed), 3);
+    }
+
+    /// Jobs handed over back to back, each as the previous thread's timeout falls due, all run.
+    #[test]
+    fn a_job_racing_the_timeout_is_not_lost() {
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let permits = Arc::new(Semaphore::new(1));
+        let pool = Pool {
+            idle_for: Duration::from_millis(20),
+            ..Pool::default()
+        };
+        for i in 0..200u64 {
+            let (done, out) = mpsc::channel();
+            let permit = rt.block_on(permits.clone().acquire_owned()).unwrap();
+            pool.run(Box::new(move || done.send(i).unwrap()), permit).unwrap();
+            assert_eq!(out.recv_timeout(Duration::from_secs(5)).unwrap(), i);
+            std::thread::sleep(Duration::from_micros(19_000 + (i % 3) * 1_000));
+        }
     }
 }

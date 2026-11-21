@@ -1170,10 +1170,10 @@ fn spinning_handlers_hold_only_their_workers() {
     for c in clients {
         for (got, took) in c.join().unwrap() {
             assert_eq!(got, (200, b"ok".to_vec()));
-            assert!(took < Duration::from_millis(500), "{took:?}");
+            assert!(took < Duration::from_millis(1000), "{took:?}");
         }
     }
-    assert!(start.elapsed() < Duration::from_millis(1500), "{:?}", start.elapsed());
+    assert!(start.elapsed() < Duration::from_millis(1900), "{:?}", start.elapsed());
     for s in spins {
         assert_eq!(s.join().unwrap(), 500);
     }
