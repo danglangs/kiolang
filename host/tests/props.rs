@@ -125,6 +125,26 @@ fn a_failing_property_shrinks() {
     assert_eq!(t["cases"], t["compiled"]);
 }
 
+/// L30: the rerun line repeats every flag given, so pasting it reproduces the run.
+#[test]
+fn the_rerun_line_repeats_every_flag() {
+    let c = Case::new(PROPS);
+    let g = c.file("t.grants", "--rng r=seed:2\n");
+    let args = [
+        "--filter", "small", "--grants", &g, "--seed", "3", "--fuel", "90000000", "--cases", "50",
+    ];
+    let (code, out, _) = c.kio(&args);
+    assert_eq!(code, 1, "{out}");
+    let rerun = out.lines().find(|l| l.starts_with("  rerun: ")).unwrap();
+    let want = format!(
+        "  rerun: kio test {} --filter small --seed 3 --cases 50 --grants {g} --fuel 90000000",
+        c.app
+    );
+    assert_eq!(rerun, want);
+    let again: Vec<&str> = rerun.split(' ').skip(6).collect();
+    assert_eq!(c.kio(&again).1, out);
+}
+
 #[test]
 fn runs_are_reproducible_and_seeded() {
     let c = Case::new(PROPS);

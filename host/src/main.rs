@@ -1360,6 +1360,8 @@ struct Tests {
     filter: String,
     /// The program's path as given, for a property's rerun line.
     path: String,
+    /// The command line's `--grants` and limit flags as given, repeated by the rerun line.
+    given: Vec<String>,
     /// Cases per property (`--cases`) and the seed they are generated from (`--seed`).
     cases: usize,
     seed: u64,
@@ -1570,8 +1572,9 @@ fn result_lines(tests: &Tests, r: &TestResult) -> Vec<String> {
             format!(" --cases {}", tests.cases)
         };
         let (file, name) = (shell_word(&tests.path), shell_word(&r.name));
+        let given: String = tests.given.iter().map(|f| format!(" {}", shell_word(f))).collect();
         out.push(format!(
-            "  rerun: kio test {file} --filter {name} --seed {}{cases}",
+            "  rerun: kio test {file} --filter {name} --seed {}{cases}{given}",
             p.seed
         ));
     }
@@ -1698,6 +1701,7 @@ fn test_setup(path: &str, flags: &[&str], read: &FakeReads) -> Result<Tests, i32
         program,
         filter,
         path: path.to_string(),
+        given: rest.iter().map(|f| f.to_string()).collect(),
         cases,
         seed,
         fakes,
@@ -1887,6 +1891,15 @@ fn run_test(tests: &Tests, t: &lang::TestFn) -> TestResult {
     }
 }
 
+/// The hint for a test parameter no grant names: the flag that grants its type, where it goes.
+fn grant_hint(tests: &Tests, name: &str, ty: &str) -> String {
+    let flag = NAMED.iter().find(|(_, t)| *t == ty).map_or("--grant", |(f, _)| *f);
+    match &tests.grants_file {
+        Some(file) => format!("add `{flag} {name}=..` to {file}"),
+        None => format!("name it in a --grants file: `{flag} {name}=..`"),
+    }
+}
+
 /// One run of a test: its exit code, its error as `--json` shows one, its `Log` lines, and what
 /// it used.
 struct Once {
@@ -1962,14 +1975,14 @@ fn run_once(tests: &Tests, t: &lang::TestFn, case: Option<(lang::prop::Case, boo
             }
             "Http" | "Hmac" | "Secret" | "Value" => {
                 let msg = format!("test `{}` needs `{name}: {ty}`", t.name);
-                missing = Some(("grant", msg, Some("name it in a --grants file")));
+                missing = Some(("grant", msg, Some(grant_hint(tests, name, ty))));
                 break;
             }
             _ => {
                 let msg = format!("test `{}` needs `{name}: {ty}`", t.name);
                 let hint =
                     "only `kio run --listen` grants a server's capabilities; test the handler's logic in a function";
-                missing = Some(("grant", msg, Some(hint)));
+                missing = Some(("grant", msg, Some(hint.to_string())));
                 break;
             }
         };
@@ -2000,7 +2013,7 @@ fn run_once(tests: &Tests, t: &lang::TestFn, case: Option<(lang::prop::Case, boo
     let watched = fakes.clone();
     let (code, out) = captured(true, || match missing {
         Some((kind, msg, hint)) => {
-            push_error(kind, &msg, hint, None);
+            push_error(kind, &msg, hint.as_deref(), None);
             1
         }
         None => {

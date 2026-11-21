@@ -437,6 +437,7 @@ impl Runner<'_> {
             program,
             filter: String::new(),
             path: path.to_string(),
+            given: base.given.clone(),
             cases: base.cases,
             seed: base.seed,
             fakes: base.fakes.clone(),

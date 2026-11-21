@@ -972,6 +972,39 @@ fn for_tuple_at_the_end_of_input() {
     );
 }
 
+/// L30: Rust's `()` pattern is the unit value, over the `()`, with the variant's fix.
+#[test]
+fn l30_unit_pattern_teaches() {
+    let cases = [
+        (
+            "fn f() { match r { Ok(()) => 1, Err(_) => 2 } }",
+            "Ok((",
+            "write `Ok(_)`",
+        ),
+        (
+            "fn f() { match r { Ok(_) => 1, Err(()) => 2 } }",
+            "Err((",
+            "write `Err(_)`",
+        ),
+        ("fn f() { if let Some(()) = o { } }", "Some((", "write `Some(_)`"),
+        (
+            "fn f() { match o { Some(Ok(())) => 1, _ => 2 } }",
+            "Ok((",
+            "write `Ok(_)`",
+        ),
+        ("fn f() { match e { E::V(()) => 1 } }", "V((", "write `E::V(_)`"),
+        ("fn f() { match e { V(a, ()) => 1 } }", ", (", "write `_`"),
+        ("fn f() { let () = g(); }", "let (", "write `_`"),
+    ];
+    for (src, before, hint) in cases {
+        let d = fail(src);
+        let start = src.find(before).unwrap() + before.len() - 1;
+        assert_eq!((d.span.start, d.span.end), (start, start + 2), "{src}");
+        assert_eq!(d.msg, "`()` is the unit value, not a pattern", "{src}");
+        assert_eq!(d.hint.as_deref(), Some(hint), "{src}");
+    }
+}
+
 /// L20: Rust's tuple pattern, in `let`, nested, in a match arm, and cut off at the end.
 #[test]
 fn l20_tuple_pattern_teaches() {

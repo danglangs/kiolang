@@ -390,7 +390,7 @@ $ kio run spin.kio --fuel 1000 --json
 | `Clock` | fixed at 2026-01-01T00:00:00Z |
 | `Rng` | `seed:1` |
 | `Log` | a buffer, printed when the test fails |
-| `Http`, `Hmac`, `Secret`, `Value` | none (an `Http` can be a [fake](#a-fake-host)): the test fails with "test `t` needs `api: Http`", hint "name it in a --grants file" |
+| `Http`, `Hmac`, `Secret`, `Value` | none (an `Http` can be a [fake](#a-fake-host)): the test fails with "test `t` needs `api: Http`", hint "name it in a --grants file: `--http api=..`" (with a grants file: "add `--http api=..` to t.grants") |
 | `Incoming`, `Outgoing`, `WsMessage`, `WsSend` | never (a grants file's `--listen` is refused): "test `t` needs `req: Incoming`", hint "only `kio run --listen` grants a server's capabilities; test the handler's logic in a function" |
 
 A test fails on a failed `assert` or `assert_eq`, an `Err` return (shown as `Err("..")`), a runtime error, a limit or a refused grant. Exit 0 when every test passes (a file with no tests prints `0 passed, 0 failed`), 1 when any fails, 2 for a check error or a usage error: a bad limit, or a `--filter` no test name contains ("no test matches `x`"). A failure's message and hint are printed with control characters escaped as `Log` lines are (`\n`, `\u{1b}`); `--json` carries them as they are. `--audit`, `--listen`, `--ws-origin` and `--host` are refused, and grants go in the file, not on the command line.
@@ -489,6 +489,8 @@ FAIL small  (4 cases compiled; seed 1)
   rerun: kio test app.kio --filter small --seed 1
 1 passed, 1 failed
 ```
+
+The rerun line repeats the `--grants` and limit flags given (`--grants t.grants --fuel 90000000`), so pasting it reproduces the failure.
 
 `--json` adds to a property's entry `cases`, `compiled`, `seed`, `discarded`, `shrinks` and `input` (each parameter's literal, or `null` when it passed). Each case still checks and lowers the program and compiles what changed, so its cost grows with the program: measured on an Apple M3 Max, release build, about 16 ms a case for a 24-line file, 27-33 ms for kio-web's flow (515 lines and its library), 32-42 ms for a 1,100-line app; 100 cases take 1.5-4 s, a shrink that hits the cap up to 200 cases more. Tests run one after another; use `--filter` while editing.
 

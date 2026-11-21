@@ -311,6 +311,33 @@ fn grants_file_checks_still_apply() {
     assert!(err.contains("`--listen` is not for kio test"), "{err}");
 }
 
+/// L30: a test needing a grant the file lacks is told the flag that grants its type.
+#[test]
+fn a_missing_grant_names_its_flag() {
+    let c = Case::new(
+        "#[test]\nfn a(api: Http) {}\n#[test]\nfn b(key: Hmac) {}\n#[test]\nfn c(admin: Secret) {}\n#[test]\nfn d(hours: Value) {}\n",
+    );
+    let hints = |args: &[&str]| {
+        let (code, j) = c.json(args);
+        assert_eq!(code, 1);
+        (0..4)
+            .map(|i| j["tests"][i]["error"]["hint"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    let none = "name it in a --grants file: ";
+    assert_eq!(
+        hints(&[]),
+        [
+            format!("{none}`--http api=..`"),
+            format!("{none}`--hmac key=..`"),
+            format!("{none}`--secret admin=..`"),
+            format!("{none}`--value hours=..`"),
+        ]
+    );
+    let g = c.file("t.grants", "--rng r=seed:2\n");
+    assert_eq!(hints(&["--grants", &g])[2], format!("add `--secret admin=..` to {g}"));
+}
+
 #[test]
 fn http_and_hmac_only_from_the_grants_file() {
     let c = Case::new(
@@ -321,7 +348,10 @@ fn http_and_hmac_only_from_the_grants_file() {
     let e = |i: usize| &j["tests"][i]["error"];
     assert_eq!(
         (e(0)["message"].as_str(), e(0)["hint"].as_str()),
-        (Some("test `h` needs `key: Hmac`"), Some("name it in a --grants file"))
+        (
+            Some("test `h` needs `key: Hmac`"),
+            Some("name it in a --grants file: `--hmac key=..`")
+        )
     );
     assert_eq!(e(1)["message"], "test `s` needs `req: Incoming`");
     assert_eq!(
@@ -498,7 +528,8 @@ fn ungranted(api: Http) {}
         "FAIL heavy_fails\n  {app}:5:64: assertion failed: late\n{}",
         note("heavy_fails", fails.0)
     );
-    let ungranted = "FAIL ungranted\n  test `ungranted` needs `api: Http`\n  hint: name it in a --grants file\n";
+    let ungranted =
+        "FAIL ungranted\n  test `ungranted` needs `api: Http`\n  hint: name it in a --grants file: `--http api=..`\n";
     let (code, out, _) = c.kio(&["--cases", "3"]);
     assert_eq!(code, 1);
     let want = format!(

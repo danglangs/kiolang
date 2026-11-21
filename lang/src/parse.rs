@@ -184,7 +184,10 @@ pub fn parse_all(src: &str, file: u32) -> Parsed {
 fn rust_form(d: &Diag) -> bool {
     matches!(
         d.msg.as_str(),
-        "macros are not supported" | "kio has no tuples" | "kio has no tuple types"
+        "macros are not supported"
+            | "kio has no tuples"
+            | "kio has no tuple types"
+            | "`()` is the unit value, not a pattern"
     ) || d.msg.ends_with("` is not supported in kio")
 }
 
@@ -1436,6 +1439,13 @@ impl Parser {
                 }
             }
             Some(Kind::Sym("..")) => return Err(self.dotdot()),
+            // `Ok(())`: Rust's unit pattern.
+            Some(Kind::Sym("(")) if matches!(self.kind_at(self.pos + 1), Some(Kind::Sym(")"))) => {
+                self.pos += 2;
+                let hint = format!("write `{}`", self.unit_fix());
+                let msg = "`()` is the unit value, not a pattern";
+                return Err(err(self.since(start), msg, Some(&hint)));
+            }
             // `let (a, b) = ..`: Rust's tuple pattern, reported over the parentheses.
             Some(Kind::Sym("(")) => {
                 let mut depth = 0;
@@ -1467,6 +1477,31 @@ impl Parser {
             return Ok(Vec::new());
         }
         self.list(")", Self::pat)
+    }
+
+    fn kind_at(&self, i: usize) -> Option<&Kind> {
+        self.toks.get(i).map(|t| &t.kind)
+    }
+
+    /// The fix for a `()` pattern just consumed: `Ok(_)` when it is a variant's only payload
+    /// (`Ok(())`, `E::V(())`), else `_`.
+    fn unit_fix(&self) -> String {
+        let sym = |i: Option<usize>, s: &str| matches!(i.and_then(|i| self.kind_at(i)), Some(Kind::Sym(t)) if *t == s);
+        let ident = |i: Option<usize>| match i.and_then(|i| self.kind_at(i)) {
+            Some(Kind::Ident(n)) => Some(n.clone()),
+            _ => None,
+        };
+        let back = |n: usize| self.pos.checked_sub(n);
+        let Some(variant) = ident(back(4)) else {
+            return "_".to_string();
+        };
+        if !sym(back(3), "(") || !sym(Some(self.pos), ")") {
+            return "_".to_string();
+        }
+        match ident(back(6)) {
+            Some(e) if sym(back(5), "::") => format!("{e}::{variant}(_)"),
+            _ => format!("{variant}(_)"),
+        }
     }
 
     fn dotdot(&self) -> Diag {

@@ -130,6 +130,7 @@ Compiled-only kio covers the whole language and every capability; speed work res
 | T5 | `kio test` runs share one engine with Cranelift's incremental cache in memory (32 MB): a property case recompiles ~2% of functions, still in a fresh instance with fresh grants; outputs and fuel identical. A3 33.8 s / 277 s CPU to 23.4 s / 108 s; flow review 84.5 to 55.9 s (#343, #344) |
 | L31a | Library batch two, first half: `SqlValue` `as_int`/`as_float`/`as_str`/`as_bytes`/`is_null`; `Json::obj()`, `with`, `get_str`/`get_int`/`get_float`/`get_bool`/`get_list`; `to_str` on `IoErr`, `HttpErr`, `WebErr`, `KvErr`, `DbErr` (#353, #354). Harness 625 both ways, 622 agreed, 0 leaked; primer.md uses them |
 | L31b | `Str.pad_start` (bytes; a cut inside a fill's character is a runtime error, #355), `Bytes.to_base64`/`to_base64url`, `Str.from_base64`/`from_base64url` (strict, #356). Harness 633 both ways, 630 agreed, 0 leaked; kiogen generates them, 2,000 programs agree |
+| L30 | A3's diagnostics: `Ok(())` as a pattern is "`()` is the unit value, not a pattern", hint "write `Ok(_)`"; a property's rerun line repeats `--grants` and the limit flags; a missing test grant's hint names its flag ("add `--secret admin=..` to t.grants") (#357) |
 
 ## Next
 

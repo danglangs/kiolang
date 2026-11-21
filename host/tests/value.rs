@@ -211,7 +211,8 @@ fn reads(hours: Value) { assert_eq(hours.get(), "24"); }
     let text = String::from_utf8(out.stdout).unwrap();
     assert_eq!(out.status.code(), Some(1), "{text}");
     assert!(
-        text.contains("test `reads` needs `hours: Value`") && text.contains("name it in a --grants file"),
+        text.contains("test `reads` needs `hours: Value`")
+            && text.contains("hint: name it in a --grants file: `--value hours=..`"),
         "{text}"
     );
     let g = write(t.path(), "t.grants", "--value hours=24\n");

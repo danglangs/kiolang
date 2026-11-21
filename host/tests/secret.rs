@@ -291,7 +291,8 @@ fn checks(tok: Secret) {{ assert(tok.matches("{TOKEN}"), "matches"); assert(!tok
     let text = String::from_utf8(out.stdout).unwrap();
     assert_eq!(out.status.code(), Some(1), "{text}");
     assert!(
-        text.contains("test `checks` needs `tok: Secret`") && text.contains("name it in a --grants file"),
+        text.contains("test `checks` needs `tok: Secret`")
+            && text.contains("hint: name it in a --grants file: `--secret tok=..`"),
         "{text}"
     );
     let g = write(t.path(), "t.grants", "--secret tok=env:H33_TOKEN\n");
