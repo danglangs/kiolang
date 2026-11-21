@@ -2066,6 +2066,66 @@ const METHODS: &[&str] = &[
     "with",
 ];
 
+/// L34: whether SQL written as a literal plainly writes: its first keyword, after comments and
+/// whitespace, is a write; or it starts `WITH` and the first keyword right after a top-level `)`
+/// is `INSERT`, `UPDATE`, `DELETE` or `REPLACE` (the statement after the CTE list). A
+/// convenience: the host refuses every write under `query` itself (H37).
+fn sql_writes(sql: &str) -> bool {
+    const WRITES: [&str; 7] = ["INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "DROP", "ALTER"];
+    let is = |t: &str, ws: &[&str]| ws.iter().any(|w| t.eq_ignore_ascii_case(w));
+    let mut tokens = sql_tokens(sql);
+    match tokens.next() {
+        Some(t) if is(t, &WRITES) => return true,
+        Some(t) if is(t, &["WITH"]) => {}
+        _ => return false,
+    }
+    let (mut depth, mut after_close) = (0usize, false);
+    for t in tokens {
+        if after_close && is(t, &WRITES[..4]) {
+            return true;
+        }
+        if after_close && is(t, &["SELECT", "VALUES"]) {
+            return false;
+        }
+        after_close = false;
+        if t == "(" {
+            depth += 1;
+        } else if t == ")" {
+            depth = depth.saturating_sub(1);
+            after_close = depth == 0;
+        }
+    }
+    false
+}
+
+/// SQL's tokens, coarsely: a word, or a string or quoted name (`'..'`, `".."`, `` `..` ``,
+/// `[..]`), as one token; any other character alone; comments and whitespace skipped.
+fn sql_tokens(sql: &str) -> impl Iterator<Item = &str> {
+    let b = sql.as_bytes();
+    let past = move |from: usize, close: &str| sql[from..].find(close).map_or(b.len(), |k| from + k + close.len());
+    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80;
+    let mut i = 0;
+    std::iter::from_fn(move || loop {
+        let start = i;
+        let c = *b.get(i)?;
+        let next = b.get(i + 1).copied();
+        i = match c {
+            _ if c.is_ascii_whitespace() => i + 1,
+            b'-' if next == Some(b'-') => past(i, "\n"),
+            b'/' if next == Some(b'*') => past(i + 2, "*/"),
+            b'\'' => past(i + 1, "'"),
+            b'"' => past(i + 1, "\""),
+            b'`' => past(i + 1, "`"),
+            b'[' => past(i + 1, "]"),
+            _ if word(c) => i + b[i..].iter().take_while(|&&c| word(c)).count(),
+            _ => i + 1,
+        };
+        if !(c.is_ascii_whitespace() || matches!((c, next), (b'-', Some(b'-')) | (b'/', Some(b'*')))) {
+            return Some(&sql[start..i]);
+        }
+    })
+}
+
 fn cap_methods<'a>(caps: &'a CapTable, name: &str) -> &'a [(String, Vec<Ty>, Ty)] {
     caps.caps.iter().find(|c| c.name == name).map_or(&[], |c| &c.methods)
 }
@@ -3567,6 +3627,14 @@ impl<'a> Checker<'a> {
             };
             if let Some(hint) = hint {
                 return Err(err(e.span, format!("cannot sort {recv_ty}"), Some(&hint)));
+            }
+        }
+        if let (Ty::Cap(c), "query", Some(a)) = (&recv_ty, name, args.first()) {
+            if let ExprKind::Str(sql) = &a.kind {
+                if c == "Db" && sql_writes(sql) {
+                    let msg = "`query` only reads; this statement writes".to_string();
+                    return Err(err(a.span, msg, Some("use `exec`, or `exec_rows` for `RETURNING`")));
+                }
             }
         }
         for (a, param) in args.iter().zip(&params) {

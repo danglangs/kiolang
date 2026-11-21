@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Shows results as text: `show` a count or error, `rows` a result set (`;` between rows, `,`
-/// between columns, text quoted, blobs in hex).
+/// between columns, text quoted, blobs in hex). `ask` runs `query` on SQL that is not a literal,
+/// so a write reaches the host's refusal (H37) past the checker's (L34).
 const SHOW: &str = r#"
 fn err(e: DbErr) -> Str {
   match e {
@@ -35,6 +36,7 @@ fn cell(v: SqlValue) -> Str {
 fn rows(r: Result<List<List<SqlValue>>, DbErr>) -> Str {
   match r { Ok(rs) => rs.map(|row| row.map(cell).join(",")).join(";"), Err(e) => err(e) }
 }
+fn ask(db: Db, sql: Str) -> Result<List<List<SqlValue>>, DbErr> { db.query(sql, []) }
 "#;
 
 fn memory() -> Sources {
@@ -140,7 +142,7 @@ fn accessors_and_error_texts_on_real_rows() {
         + r[3].as_bytes().map(|b| b.to_hex()).unwrap_or("-") + "," + r[0].as_str().unwrap_or("-")).join(";");
       let dup = match db.exec("INSERT INTO t (n) VALUES ('a')", []) { Ok(_) => "ok", Err(e) => e.to_str() };
       let bad = match db.query("SELEC 1", []) { Ok(_) => "ok", Err(e) => e.to_str() };
-      let denied = match db.query("DELETE FROM t", []) { Ok(_) => "ok", Err(e) => e.to_str() };
+      let denied = match ask(db, "DELETE FROM t") { Ok(_) => "ok", Err(e) => e.to_str() };
       cells + " [" + dup + "] [" + bad + "] [" + denied + "]"
     }"#;
     assert_eq!(
@@ -304,9 +306,9 @@ fn query_refuses_writes() {
     let main = r#"fn main(db: Db) -> Str {
       let a = show(db.exec("CREATE TABLE t (n TEXT)", []));
       let b = show(db.exec("INSERT INTO t VALUES ('v1')", []));
-      let w = [rows(db.query("INSERT INTO t VALUES ('v2')", [])), rows(db.query("INSERT INTO t VALUES ('v2') RETURNING n", [])),
-        rows(db.query("UPDATE t SET n = 'x'", [])), rows(db.query("DELETE FROM t", [])), rows(db.query("CREATE TABLE u (x)", [])),
-        rows(db.query("WITH c AS (SELECT 1) INSERT INTO t SELECT * FROM c", [])), rows(db.query("DROP TABLE t", [])),
+      let w = [rows(ask(db, "INSERT INTO t VALUES ('v2')")), rows(ask(db, "INSERT INTO t VALUES ('v2') RETURNING n")),
+        rows(ask(db, "UPDATE t SET n = 'x'")), rows(ask(db, "DELETE FROM t")), rows(ask(db, "CREATE TABLE u (x)")),
+        rows(ask(db, "WITH c AS (SELECT 1) INSERT INTO t SELECT * FROM c")), rows(ask(db, "DROP TABLE t")),
         rows(db.query("ATTACH 'x' AS x", [])), rows(db.query("SAVEPOINT s", [])), rows(db.query("PRAGMA journal_mode = DELETE", []))];
       let r = [rows(db.query("SELECT n FROM t", [])), rows(db.query("PRAGMA table_info(t)", [])),
         rows(db.query("WITH c(x) AS (SELECT 2) SELECT x FROM c", [])), rows(db.query("SELECT count(*) FROM pragma_table_info('t')", []))];
@@ -786,8 +788,8 @@ fn read_only_grant_refusals() {
         "sneak.kio",
         &format!(
             "{SHOW}fn main(db: Db) -> Str {{
-      rows(db.query(\"INSERT INTO t VALUES ('v2') RETURNING n\", [])) + \" \" + rows(db.query(\"DELETE FROM t RETURNING n\", []))
-        + \" \" + rows(db.query(\"CREATE TABLE u (x)\", [])) + \" \" + rows(db.query(\"SELECT n FROM t\", []))
+      rows(ask(db, \"INSERT INTO t VALUES ('v2') RETURNING n\")) + \" \" + rows(ask(db, \"DELETE FROM t RETURNING n\"))
+        + \" \" + rows(ask(db, \"CREATE TABLE u (x)\")) + \" \" + rows(db.query(\"SELECT n FROM t\", []))
     }}"
         ),
     );

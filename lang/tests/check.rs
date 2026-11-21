@@ -2350,3 +2350,60 @@ fn l28_none_in_a_list_takes_a_later_elements_type() {
     let (msg, at) = reject("fn main() { let xs: List<Int> = [None, Some(1)]; }");
     assert_eq!((msg.as_str(), at.as_str()), ("expected Int, found an Option", "None"));
 }
+
+/// L34: a literal statement under `Db.query` that plainly writes is refused at the literal.
+#[test]
+fn query_with_a_writing_literal_is_refused() {
+    let refused = |sql: &str| {
+        let lit = format!("{sql:?}");
+        let src = format!("fn main(db: Db) -> Result<Int, DbErr> {{ let r = db.query({lit}, [])?; Ok(r.len()) }}");
+        let Err(d) = check(&src, &caps()) else { return false };
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].msg, "`query` only reads; this statement writes");
+        assert_eq!(d[0].hint.as_deref(), Some("use `exec`, or `exec_rows` for `RETURNING`"));
+        assert_eq!(src[d[0].span.start..d[0].span.end], lit);
+        true
+    };
+    for sql in [
+        "INSERT INTO t VALUES (1) RETURNING id",
+        "UPDATE t SET n = 1",
+        "DELETE FROM t",
+        "REPLACE INTO t VALUES (1)",
+        "CREATE TABLE t (n INTEGER)",
+        "DROP TABLE t",
+        "ALTER TABLE t ADD COLUMN m",
+        "insert into t values (1)",
+        "Update t set n = 1",
+        "  \n\t delete from t",
+        "-- add one\ninsert into t values (1)",
+        "/* add\n one */ /**/ INSERT INTO t VALUES (1)",
+        "WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x",
+        "with x(a) as (select ')'), y as materialized (select (1)) delete from t where n in (select a from x)",
+    ] {
+        assert!(refused(sql), "{sql}");
+    }
+    for sql in [
+        "SELECT n FROM t",
+        "PRAGMA table_info(t)",
+        "WITH x AS (SELECT 1) SELECT * FROM x",
+        "WITH x AS (SELECT 'delete') SELECT replace(a, 'b', 'c') FROM x",
+        "VALUES (1)",
+        "-- insert\nSELECT 1",
+        "/* delete */ SELECT 'update'",
+        "selected",
+        "",
+    ] {
+        assert!(!refused(sql), "{sql}");
+    }
+    // A statement that is not a literal is the host's to refuse (H37); so is one under `exec`.
+    let src = r#"fn f(db: Db, s: Str) -> Result<Int, DbErr> { let r = db.query(s, [])?; let _ = db.exec("INSERT INTO t VALUES (1)", [])?; Ok(r.len()) }
+fn main(db: Db) -> Result<Int, DbErr> { f(db, "DELETE FROM t") }"#;
+    check(src, &caps()).unwrap_or_else(|d| panic!("{d:?}"));
+    // Through a capability struct's field.
+    let src = r#"struct Env { db: Db }
+fn f(env: Env) -> Result<Int, DbErr> { let r = env.db.query("DELETE FROM t", [])?; Ok(r.len()) }
+fn main(db: Db) -> Result<Int, DbErr> { f(Env { db: db }) }"#;
+    let d = &check(src, &caps()).expect_err("a write")[0];
+    assert_eq!(d.msg, "`query` only reads; this statement writes");
+    assert_eq!(&src[d.span.start..d.span.end], "\"DELETE FROM t\"");
+}
