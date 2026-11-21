@@ -108,8 +108,14 @@ impl core::ops::Deref for StrKey {
 
 impl Drop for StrKey {
     fn drop(&mut self) {
-        // SAFETY: a `StrKey` that drops was made by `from`, from a `Box`; a probe never drops.
-        drop(unsafe { Box::from_raw(self.bytes.as_ptr()) });
+        // The `Box`'s free, through `heap::dealloc` rather than the global allocator's symbol,
+        // which LLVM may leave uninlined (C27). An empty `Box<[u8]>` holds no allocation.
+        let n = self.bytes.len();
+        if n != 0 {
+            // SAFETY: a `StrKey` that drops was made by `from`, from a `Box<[u8]>` of `n` bytes,
+            // whose layout this is; a probe never drops.
+            unsafe { heap::dealloc(self.bytes.as_ptr().cast(), Layout::from_size_align_unchecked(n, 1)) };
+        }
     }
 }
 

@@ -180,6 +180,29 @@ impl<A: GlobalAlloc> Heap<A> {
         }
     }
 
+    /// `inner`'s allocation of a layout no class holds. Out of line and taking `l` by value:
+    /// inlined into `alloc` with `inner_alloc`'s closure left out of line, every allocation
+    /// stored `l` to the stack before the class test, small ones too (C27).
+    #[inline(never)]
+    unsafe fn alloc_big(&self, l: Layout) -> *mut u8 {
+        // SAFETY: the caller's contract for `l`.
+        unsafe { self.inner_alloc(|| self.inner.alloc(l)) }
+    }
+
+    /// `alloc_big`, zeroed.
+    #[inline(never)]
+    unsafe fn alloc_big_zeroed(&self, l: Layout) -> *mut u8 {
+        // SAFETY: the caller's contract for `l`.
+        unsafe { self.inner_alloc(|| self.inner.alloc_zeroed(l)) }
+    }
+
+    /// `inner`'s realloc of `p` (layout `l`), both sizes outside every class.
+    #[inline(never)]
+    unsafe fn realloc_big(&self, p: *mut u8, l: Layout, size: usize) -> *mut u8 {
+        // SAFETY: the caller's contract.
+        unsafe { self.inner_alloc(|| self.inner.realloc(p, l, size)) }
+    }
+
     /// Hands back to `inner` every chunk whose carved blocks are all listed, unlinking those
     /// blocks; true if there was one.
     ///
@@ -310,7 +333,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Heap<A> {
         unsafe {
             match class(l) {
                 Some(c) => self.take(c),
-                None => self.inner_alloc(|| self.inner.alloc(l)),
+                None => self.alloc_big(l),
             }
         }
     }
@@ -342,7 +365,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Heap<A> {
                     }
                     p
                 }
-                None => self.inner_alloc(|| self.inner.alloc_zeroed(l)),
+                None => self.alloc_big_zeroed(l),
             }
         }
     }
@@ -354,7 +377,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Heap<A> {
             let new = Layout::from_size_align_unchecked(size, l.align());
             match (class(l), class(new)) {
                 (Some(a), Some(b)) if a == b => p,
-                (None, None) => self.inner_alloc(|| self.inner.realloc(p, l, size)),
+                (None, None) => self.realloc_big(p, l, size),
                 _ => {
                     let q = self.alloc(new);
                     if !q.is_null() {
