@@ -275,3 +275,14 @@ fn main(input: Dir) -> Result<Str, IoErr> {
   Ok(digits.to_str() + " " + depth.to_str())
 }
 ```
+
+## Fast forms
+
+Fuel for a whole run over a 113 KB log or 19 KB of JSON ([guide.md](guide.md#fast-forms) has the programs):
+
+| Slow | Fast | Fuel |
+|---|---|---|
+| `for c in line.chars()` building a word with `+` | `line.split(" ")` with `strip_prefix("ms=")`; `line.find(" ms=")` with `slice` | 17.9M → 8.3M → 4.6M |
+| a hand-written JSON scanner | `text.parse_json()`, `get_int("qty")` | 4.5M → 3.0M |
+| `Map` for counts | `HashMap` when key order does not matter | 16.9M → 9.2M |
+| `for c in s.chars()` for an ASCII test | `let b = s.to_bytes();` then `while i < b.len() { b[i] .. }`; `for i in 0..b.len()` | 23.1M → 6.4M → 4.2M |

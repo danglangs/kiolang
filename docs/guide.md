@@ -240,6 +240,70 @@ The audit log has a line per call with the SQL (cut at 256 characters), the para
 {"event":"call","seq":4,"cap":"totals","kind":"Db","method":"query","arg":"SELECT name, amount FROM totals ORDER BY amount DESC LIMIT ?","bytes":49,"result":"ok","params":1,"rows":3,"ms":0.1}
 ```
 
+**Schema changes.** A change to an existing table is `ALTER TABLE` (`ADD COLUMN`, `RENAME COLUMN`, `DROP COLUMN`, `RENAME TO`); `SELECT name FROM pragma_table_info(?)` reads a table's columns. A program whose schema changes over time keeps a list of steps, only ever appended to, and a table of how many have run on this file; it runs the rest and the new count in one `transaction`, so a step that fails leaves the file as it was. Two processes that start on an old file both try: the second's first step fails (`table bookings already exists`) and changes nothing. **Rows from a write** come from `exec_rows` (`INSERT .. RETURNING id`) and `transaction_rows` (here a read after the write, in the same transaction):
+
+```
+// Each step runs once, in order; `schema_version` holds how many have run on this file.
+fn steps() -> List<Str> {
+  [
+    "CREATE TABLE bookings (id INTEGER PRIMARY KEY, guest TEXT NOT NULL)",
+    "ALTER TABLE bookings ADD COLUMN nights INTEGER NOT NULL DEFAULT 1",
+    "CREATE INDEX bookings_guest ON bookings (guest)",
+  ]
+}
+
+fn migrate(db: Db) -> Result<Int, DbErr> {
+  db.exec("CREATE TABLE IF NOT EXISTS schema_version (n INTEGER NOT NULL)", [])?;
+  let rows = db.query("SELECT n FROM schema_version", [])?;
+  let done = if rows.len() == 0 { 0 } else { rows[0][0].as_int().unwrap_or(0) };
+  let all = steps();
+  if done == all.len() { return Ok(0); }
+  let mut sqls: List<Str> = [];
+  let mut params: List<List<SqlValue>> = [];
+  for s in all.slice(done, all.len()) { sqls.push(s); params.push([]); }
+  sqls.push("DELETE FROM schema_version");
+  params.push([]);
+  sqls.push("INSERT INTO schema_version VALUES (?)");
+  params.push([SqlValue::Int(all.len())]);
+  db.transaction(sqls, params)?;                     // the steps and the new count, or nothing
+  Ok(all.len() - done)
+}
+
+fn main(db: Db) -> Result<Str, DbErr> {
+  let ran = migrate(db)?;
+  let cols = db.query("SELECT name FROM pragma_table_info(?)", [SqlValue::Text("bookings")])?;
+  let row = db.exec_rows("INSERT INTO bookings (guest, nights) VALUES (?, ?) RETURNING id",
+                         [SqlValue::Text("ada"), SqlValue::Int(3)])?;
+  let id = row[0][0];
+  let totals = db.transaction_rows(
+    ["UPDATE bookings SET nights = nights + 1 WHERE id = ?", "SELECT count(*), sum(nights) FROM bookings"],
+    [[id], []])?;
+  Ok("ran " + ran.to_str() + "; columns " + cols.map(|r| r[0].as_str().unwrap_or("")).join(",")
+     + "; booking " + id.as_int().unwrap_or(0).to_str()
+     + "; " + totals[0][0].as_int().unwrap_or(0).to_str() + " bookings, "
+     + totals[0][1].as_int().unwrap_or(0).to_str() + " nights")
+}
+```
+
+```
+$ kio run bookings.kio --db db=/tmp/bookings.db
+main    : db exec exec_rows query transaction transaction_rows
+migrate : db exec query transaction
+
+1 more uses no capability; --all lists every function
+Ok("ran 3; columns id,guest,nights; booking 1; 1 bookings, 4 nights")
+$ kio run bookings.kio --db db=/tmp/bookings.db
+main    : db exec exec_rows query transaction transaction_rows
+migrate : db exec query transaction
+
+1 more uses no capability; --all lists every function
+Ok("ran 0; columns id,guest,nights; booking 2; 2 bookings, 8 nights")
+```
+
+A fourth step appended later runs once on each file: `ran 1`.
+
+**A server and a job on one file.** A `--listen` server and a `kio run` job may grant the same database: SQLite takes one write at a time across processes (WAL: reads go on during a write), and a statement that waits over 2 s is `Busy`, so keep each `transaction` short and retry a `Busy`. Grant a process that only reads with `:ro`. A job that makes many calls (an `Http` request per row) raises `--timeout` (10 s) and `--calls` (10,000) to fit ([Limits](#limits)).
+
 ### --listen: HTTP and WebSockets
 
 A listening socket is a grant too. Each request runs in a fresh sandbox; `main` takes `req: Incoming, res: Outgoing` (any names) plus its other grants, `Http` included. `send` answers the client at once, and `main` may go on working under the request's limits (a webhook after the response, say).
@@ -337,6 +401,122 @@ Every run is bounded; each limit's error names the flag that raises it. Under `-
 ```
 $ kio run examples/tour/forever.kio
 out of fuel (limit 10000000000; raise it with --fuel)
+```
+
+### Fast forms
+
+Fuel counts instructions, so the form of a loop sets the cost. Each program below runs in CI (host/tests/docs_examples.rs) on a 2,000-line access log (113 KB, lines like `2026-11-20T10:00:07 GET /api/items/7 status=200 ms=49`) or 500 orders as JSON (19 KB); its first line has the whole run's fuel with `main` calling each function, and the test fails when a number drifts 5% from it. A loop over `s.chars()` that builds a `Str` with `+` is the slow shape; a built-in that does the scanning is the fast one.
+
+```
+// The total of `ms=` over the log. Fuel: slow 17,918,946; words 8,314,762; fast 4,601,583.
+fn slow(text: Str) -> Int {
+  let mut total = 0;
+  for line in text.lines() {
+    let mut word = "";
+    for c in line.chars() { if c == " " { word = ""; } else { word = word + c; } }
+    total += word.strip_prefix("ms=").unwrap_or("0").parse_int().unwrap_or(0);
+  }
+  total
+}
+
+fn words(text: Str) -> Int {
+  let mut total = 0;
+  for line in text.lines() {
+    for w in line.split(" ") { if let Some(v) = w.strip_prefix("ms=") { total += v.parse_int().unwrap_or(0); } }
+  }
+  total
+}
+
+fn fast(text: Str) -> Int {
+  let mut total = 0;
+  for line in text.lines() {
+    let Some(i) = line.find(" ms=") else { continue; };
+    total += line.slice(i + 4, line.len()).parse_int().unwrap_or(0);
+  }
+  total
+}
+
+fn main(input: Dir) -> Result<Int, IoErr> { Ok(fast(input.read("access.log")?.to_str())) }
+```
+
+`parse_json` over a hand-written scanner, which is also wrong on the first escaped quote:
+
+```
+// The total of qty * price over the orders. Fuel: slow 4,534,617; fast 2,965,506.
+fn slow(text: Str) -> Int {
+  let mut total = 0;
+  let mut qty = 0;
+  let mut key = "";
+  let mut num = "";
+  let mut in_str = false;
+  for c in text.chars() {
+    if in_str { if c == "\"" { in_str = false; } else { key = key + c; } }
+    else if c == "\"" { in_str = true; key = ""; }
+    else if c >= "0" && c <= "9" { num = num + c; }
+    else if num != "" {
+      let n = num.parse_int().unwrap_or(0);
+      if key == "qty" { qty = n; } else if key == "price" { total += qty * n; }
+      num = "";
+    }
+  }
+  total
+}
+
+fn fast(text: Str) -> Int {
+  let Ok(doc) = text.parse_json() else { return 0; };
+  let mut total = 0;
+  for o in doc.as_list().unwrap_or([]) { total += o.get_int("qty").unwrap_or(0) * o.get_int("price").unwrap_or(0); }
+  total
+}
+
+fn main(input: Dir) -> Result<Int, IoErr> { Ok(fast(input.read("orders.json")?.to_str())) }
+```
+
+`HashMap` when key order does not matter (500 distinct paths):
+
+```
+// The number of distinct paths. Fuel: slow 16,928,989; fast 9,193,381.
+fn slow(text: Str) -> Int {
+  let mut hits: Map<Str, Int> = Map::new();
+  for line in text.lines() { let p = line.split(" ")[2]; hits.insert(p, hits.get(p).unwrap_or(0) + 1); }
+  hits.keys().len()
+}
+
+fn fast(text: Str) -> Int {
+  let mut hits: HashMap<Str, Int> = HashMap::new();
+  for line in text.lines() { let p = line.split(" ")[2]; hits.insert(p, hits.get(p).unwrap_or(0) + 1); }
+  hits.keys().len()
+}
+
+fn main(input: Dir) -> Result<Int, IoErr> { Ok(fast(input.read("access.log")?.to_str())) }
+```
+
+Bytes for an ASCII test. `b[i]` has no bounds check under `while i < b.len()` or `for i in 0..b.len()` when `i` starts at a literal and only grows; the `for` form is cheaper still:
+
+```
+// The number of digits in the log. Fuel: slow 23,136,987; scan 6,359,660; fast 4,216,079.
+fn slow(text: Str) -> Int {
+  let mut n = 0;
+  for c in text.chars() { if c >= "0" && c <= "9" { n += 1; } }
+  n
+}
+
+fn scan(text: Str) -> Int {
+  let b = text.to_bytes();
+  let mut n = 0;
+  let mut i = 0;
+  while i < b.len() { let c = b[i]; if c >= 48 && c <= 57 { n += 1; } i += 1; }
+  n
+}
+
+fn fast(text: Str) -> Int {
+  let b = text.to_bytes();
+  let mut n = 0;
+  for i in 0..b.len() { let c = b[i]; if c >= 48 && c <= 57 { n += 1; } }
+  n
+}
+
+fn main(input: Dir) -> Result<Int, IoErr> { Ok(fast(input.read("access.log")?.to_str())) }
 ```
 
 ## Audit log
