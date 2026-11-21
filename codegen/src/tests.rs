@@ -660,3 +660,52 @@ fn the_runtime_table_is_growable() {
     }
     assert_eq!(modules, 1);
 }
+
+/// `b[i]` on `Bytes` has no bounds check where `0 <= i < b.len()` is known (C25), and keeps
+/// it in every near miss: `i` or `b` written before the read, `<=`, a start that may be
+/// negative, `-=`, another index or another `Bytes`, the `else` branch, a nested loop writing
+/// `i`, `||`, an inlined helper given an argument that may be negative (its own body keeps one).
+#[test]
+fn byte_reads_known_in_bounds_have_no_check() {
+    let checks = |body: &str| {
+        let src = format!(
+            r#"fn at(b: Bytes, i: Int) -> Int {{ if i < b.len() {{ b[i] }} else {{ -1 }} }}
+fn f(k: Int) -> Int {{ let mut b = "abc".to_bytes(); let c = b; let mut n = 0; {body} n }}
+fn main() -> Int {{ 0 }}"#
+        );
+        let sites = compile(&module(&src)).unwrap().sites;
+        // `at`'s own body keeps its check: its parameter may be negative.
+        sites.iter().filter(|s| s.template == OUT_OF_BOUNDS).count() - 1
+    };
+    for body in [
+        "let mut i = 0; while i < b.len() { n += b[i]; i += 1; }",
+        "let mut i = 0; while b.len() > i { n += b[i]; i += 1; }",
+        "let mut i = 0; while i < b.len() && b[i] != 32 { i += 1; }",
+        "let mut i = 1; if i < b.len() && n == 0 { n = b[i]; }",
+        "for i in 0..b.len() { n += b[i]; }",
+        "for i in 1..b.len() { let mut j = i; while j < b.len() { n += b[j] + b[i]; j += 2; } }",
+        "let mut i = 0; while i < b.len() { let mut q = 0; while q < 2 { n += b[i]; q += 1; } i += 1; }",
+        "let mut i = 0; while at(b, i) != -1 { n += at(b, i); i += 1; }",
+        "let i = c.len(); if i < b.len() { n = b[i]; }",
+    ] {
+        assert_eq!(checks(body), 0, "{body}");
+    }
+    for body in [
+        "let mut i = 0; while i < b.len() { i += 1; n += b[i]; }",
+        r#"let mut i = 0; while i < b.len() { b = "x".to_bytes(); n += b[i]; i += 1; }"#,
+        "let mut i = 0; while i < b.len() { b.push(1); n += b[i]; i += 1; }",
+        "let mut i = 0; while i <= b.len() { n += b[i]; i += 1; }",
+        "let mut i = -1; while i < b.len() { n += b[i]; i += 1; }",
+        "let mut i = k; while i < b.len() { n += b[i]; i += 1; }",
+        "let mut i = 2; while i < b.len() { n += b[i]; i -= 1; }",
+        "let mut i = 0; while i < b.len() { n += b[i + 1]; i += 1; }",
+        "let mut i = 0; while i < c.len() { n += b[i]; i += 1; }",
+        "let mut i = 0; if i < b.len() { n = 1; } else { n = b[i]; }",
+        "let mut i = 0; while i < b.len() { let mut q = 0; while q < 2 { n += b[i]; i += 1; q += 1; } }",
+        "for i in 0..b.len() { n += b[i]; b.push(1); }",
+        "let mut i = 0; while at(b, i - 1) != -1 { i += 1; }",
+        "let mut i = 0; while i < b.len() || n > 0 { n += b[i]; i += 1; }",
+    ] {
+        assert_eq!(checks(body), 1, "{body}");
+    }
+}

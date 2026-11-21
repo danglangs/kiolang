@@ -6,6 +6,7 @@
 //! entry functions keep their indexes and get new bodies. wit-component then wraps the one
 //! module as a component.
 
+mod bounds;
 mod data;
 mod inline;
 mod moves;
@@ -606,6 +607,17 @@ fn folded(e: &ir::Expr) -> Option<i64> {
     }
 }
 
+/// Whether `e` is `==`, `!=`, `<`, `<=`, `>` or `>=` on two `Int` locals or literals.
+fn plain_test(e: &ir::Expr) -> bool {
+    let leaf = |x: &ir::Expr| matches!(x.kind, ExprKind::Local(_) | ExprKind::Int(_)) && x.ty == Ty::Int;
+    match &e.kind {
+        ExprKind::Binary(BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge, a, b) => {
+            leaf(a) && leaf(b)
+        }
+        _ => false,
+    }
+}
+
 fn snake(name: &str) -> String {
     let mut s = String::new();
     for (i, c) in name.chars().enumerate() {
@@ -909,6 +921,8 @@ fn func<'m>(
         budget: inline::BUDGET,
         depth: 0,
         loops: Vec::new(),
+        nonneg: bounds::nonneg(f, &[]),
+        bounded: Vec::new(),
         code: Vec::new(),
     };
     // The owned parameters are the call's, as if bound by `let` around the body; the borrowed
@@ -983,6 +997,10 @@ struct FuncGen<'a, 'm> {
     /// For each enclosing kio loop, innermost last: the depth of its `break` and `continue`
     /// targets, and the length of `owned` outside it.
     loops: Vec<(u32, u32, usize)>,
+    /// The function's locals that are never negative, and the pairs `(i, b)` for which
+    /// `0 <= i < b.len()` holds here (bounds.rs, C25).
+    nonneg: Vec<bool>,
+    bounded: Vec<(ir::LocalId, ir::LocalId)>,
     code: Vec<u8>,
 }
 
@@ -1078,7 +1096,8 @@ impl<'m> FuncGen<'_, 'm> {
 
     /// `rt_list_get` of list `l` at index `i` (locals), inline when `i` is in bounds: pushes the
     /// element as a slot, borrowed (the caller's `slot_out(.., true)` takes a reference). Out
-    /// of bounds, the runtime reports the error at `site`.
+    /// of bounds, the runtime reports the error at `site` and does not return (`unreachable`
+    /// tells Cranelift so: nothing need survive the call, C25).
     fn list_get(&mut self, l: u32, i: u32, site: u32) {
         let f = self.rt.export("rt_list_get");
         let mut s = self.sink();
@@ -1096,11 +1115,17 @@ impl<'m> FuncGen<'_, 'm> {
             .i32_shl()
             .i32_add();
         s.i64_load(SLOT);
-        s.else_().local_get(l).local_get(i).i32_const(site as i32).call(f).end();
+        s.else_()
+            .local_get(l)
+            .local_get(i)
+            .i32_const(site as i32)
+            .call(f)
+            .unreachable()
+            .end();
     }
 
     /// `rt_bytes_get` of `Bytes` `b` at index `i` (locals), inline when `i` is in bounds: pushes
-    /// the byte. Out of bounds, the runtime reports the error at `site`.
+    /// the byte. Out of bounds, the runtime reports the error at `site` and does not return.
     fn bytes_get(&mut self, b: u32, i: u32, site: u32) {
         let f = self.rt.export("rt_bytes_get");
         let mut s = self.sink();
@@ -1115,7 +1140,21 @@ impl<'m> FuncGen<'_, 'm> {
             .i32_wrap_i64()
             .i32_add()
             .i64_load8_u(BYTES_DATA);
-        s.else_().local_get(b).local_get(i).i32_const(site as i32).call(f).end();
+        s.else_()
+            .local_get(b)
+            .local_get(i)
+            .i32_const(site as i32)
+            .call(f)
+            .unreachable()
+            .end();
+    }
+
+    /// Whether `b` and `i` are locals for which `0 <= i < b.len()` holds here (C25).
+    fn in_bounds(&self, b: &ir::Expr, i: &ir::Expr) -> bool {
+        match (&b.kind, &i.kind) {
+            (ExprKind::Local(b), ExprKind::Local(i)) => self.bounded.contains(&(*i, *b)),
+            _ => false,
+        }
     }
 
     /// `rt_bytes_push` of the unique `Bytes` and the `Int` on the stack, inline when the `Int` is
@@ -2008,9 +2047,11 @@ impl<'m> FuncGen<'_, 'm> {
     fn block(&mut self, b: &ir::Block, want: bool) {
         let mark = self.owned.len();
         for s in &b.stmts {
+            self.bounded.retain(|&(i, b)| !bounds::stmt_writes(s, i, b));
             self.stmt(s);
         }
         if let Some(e) = &b.tail {
+            self.bounded.retain(|&(i, b)| !bounds::expr_writes(e, i, b));
             self.expr(e);
         }
         self.end_scope(mark);
@@ -2102,27 +2143,63 @@ impl<'m> FuncGen<'_, 'm> {
                 self.exit();
             }
             StmtKind::While(cond, body) => {
+                // `while i < b.len()` with a body that does not write `b`: `b.len()` once, before
+                // the first pass (C25).
+                let hoisted = match &cond.kind {
+                    ExprKind::Binary(BinOp::Lt, i, len) => match (&i.kind, bounds::len_of(len)) {
+                        (ExprKind::Local(i), Some(b)) if !bounds::body_writes(body, b, b) => Some((*i, b)),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let hoisted = hoisted.map(|(i, b)| {
+                    let (Val::One(i), Val::One(b)) = (self.local(i), self.local(b)) else {
+                        unreachable!("an Int and a Bytes local")
+                    };
+                    let n = self.temp(ValType::I64);
+                    self.sink()
+                        .local_get(b)
+                        .i32_load(BYTES_LEN)
+                        .i64_extend_i32_u()
+                        .local_set(n);
+                    (i, n)
+                });
                 let brk = self.open(Open::Block, BlockType::Empty);
                 let cont = self.open(Open::Loop, BlockType::Empty);
-                self.expr(cond);
+                match hoisted {
+                    Some((i, n)) => {
+                        self.sink().local_get(i).local_get(n).i64_lt_s();
+                    }
+                    None => self.expr(cond),
+                }
                 self.sink().i32_eqz();
                 self.br_if(brk);
+                let saved = self.bounded.clone();
+                bounds::facts(cond, &self.nonneg, &mut self.bounded);
                 self.loop_body(body, brk, cont);
+                self.bounded = saved;
             }
             StmtKind::Loop(body) => {
                 let brk = self.open(Open::Block, BlockType::Empty);
                 let cont = self.open(Open::Loop, BlockType::Empty);
                 self.loop_body(body, brk, cont);
             }
-            StmtKind::ForRange(i, a, b, body) => {
+            StmtKind::ForRange(id, a, b, body) => {
                 // Both bounds once, before the first pass; `i` is not `mut`, so it counts.
-                let Val::One(i) = self.local(*i) else {
+                let Val::One(i) = self.local(*id) else {
                     unreachable!("an Int local")
                 };
                 let end = self.temp(ValType::I64);
                 self.expr(a);
                 self.expr(b);
                 self.sink().local_set(end).local_set(i);
+                // `for i in 0..b.len()` with a body that does not write `b`: `b[i]` is in bounds.
+                let saved = self.bounded.clone();
+                if let Some(b) = bounds::len_of(b) {
+                    if self.nonneg[id.0 as usize] && !bounds::body_writes(body, *id, b) {
+                        self.bounded.push((*id, b));
+                    }
+                }
                 let brk = self.open(Open::Block, BlockType::Empty);
                 let top = self.open(Open::Loop, BlockType::Empty);
                 self.sink().local_get(i).local_get(end).i64_ge_s();
@@ -2137,6 +2214,7 @@ impl<'m> FuncGen<'_, 'm> {
                 self.br(top);
                 self.close();
                 self.close();
+                self.bounded = saved;
             }
             StmtKind::ForList(x, xs, body) => match &xs.kind {
                 ExprKind::Builtin(ir::Builtin::StrChars, recv, _) => self.for_chars(*x, recv, body),
@@ -2689,12 +2767,26 @@ impl<'m> FuncGen<'_, 'm> {
                 self.trap_if(e.span, OVERFLOW, a, a);
                 self.sink().i64_const(0).local_get(a).i64_sub();
             }
+            // A right side that cannot trap or write runs always: no branch, and no constant
+            // for Cranelift to keep in a register across a loop (C25).
+            ExprKind::Binary(op @ (BinOp::And | BinOp::Or), a, b) if plain_test(b) => {
+                self.expr(a);
+                self.expr(b);
+                if *op == BinOp::And {
+                    self.sink().i32_and();
+                } else {
+                    self.sink().i32_or();
+                }
+            }
             ExprKind::Binary(op @ (BinOp::And | BinOp::Or), a, b) => {
                 // The right side runs only when the left does not decide.
                 self.expr(a);
                 self.open(Open::If, BlockType::Result(ValType::I32));
                 if *op == BinOp::And {
+                    let saved = self.bounded.clone();
+                    bounds::facts(a, &self.nonneg, &mut self.bounded);
                     self.expr(b);
+                    self.bounded = saved;
                     self.sink().else_().i32_const(0);
                 } else {
                     self.sink().i32_const(1).else_();
@@ -2792,7 +2884,10 @@ impl<'m> FuncGen<'_, 'm> {
                 let bt = self.block_type(&e.ty);
                 self.expr(cond);
                 self.open(Open::If, bt);
+                let saved = self.bounded.clone();
+                bounds::facts(cond, &self.nonneg, &mut self.bounded);
                 self.block(then, want);
+                self.bounded = saved;
                 if let Some(els) = els {
                     self.sink().else_();
                     self.expr(els);
@@ -3006,6 +3101,19 @@ impl<'m> FuncGen<'_, 'm> {
                     self.unbox_owned_top(&e.ty);
                 }
             }
+            ExprKind::Index(base, i) if base.ty == Ty::Bytes && self.in_bounds(base, i) => {
+                self.borrowing(&[&**base, &**i], |g, temps, _| {
+                    let [Val::One(b), Val::One(i)] = temps else {
+                        unreachable!("two locals")
+                    };
+                    g.sink()
+                        .local_get(*b)
+                        .local_get(*i)
+                        .i32_wrap_i64()
+                        .i32_add()
+                        .i64_load8_u(BYTES_DATA);
+                });
+            }
             ExprKind::Index(base, i) if base.ty == Ty::Bytes => {
                 let site = self.site(e.span, OUT_OF_BOUNDS);
                 self.borrowing(&[&**base, &**i], |g, temps, _| match temps {
@@ -3181,7 +3289,8 @@ impl<'m> FuncGen<'_, 'm> {
             }
         }
         self.owned.truncate(mark);
-        self.call_direct(f);
+        let nonneg: Vec<bool> = args.iter().map(|x| bounds::nonneg_expr(x, &self.nonneg)).collect();
+        self.call_direct(f, &nonneg);
         // Only the call ran since the arguments: it returned (or trapped).
         for (((x, t), &here), &lent) in args.iter().zip(&temps).zip(&in_place).zip(lent) {
             match (here, *t) {
@@ -3196,8 +3305,9 @@ impl<'m> FuncGen<'_, 'm> {
         }
     }
 
-    /// Calls `f` on the arguments on the stack, or inlines it (C8c3) within the budget.
-    fn call_direct(&mut self, f: ir::FuncId) {
+    /// Calls `f` on the arguments on the stack, or inlines it (C8c3) within the budget;
+    /// `nonneg` says which arguments are known not to be negative.
+    fn call_direct(&mut self, f: ir::FuncId, nonneg: &[bool]) {
         let outer = self.exit.is_none();
         let size = match self.inlined[f.0 as usize] {
             inline::Inline::Yes(n) => Some(n),
@@ -3209,7 +3319,7 @@ impl<'m> FuncGen<'_, 'm> {
             if outer {
                 self.budget -= n;
             }
-            self.inline(f);
+            self.inline(f, nonneg);
         } else {
             let index = self.rt.funcs + f.0;
             self.sink().call(index);
@@ -3221,7 +3331,7 @@ impl<'m> FuncGen<'_, 'm> {
     /// inlined scope, a borrowed one the caller's), then the body runs as `f`'s own code, with
     /// `f`'s moves and borrowed locals, in a block that `return` and `?` branch out of. It
     /// cannot reach the caller's locals, as a call cannot.
-    fn inline(&mut self, f: ir::FuncId) {
+    fn inline(&mut self, f: ir::FuncId, nonneg: &[bool]) {
         let m = self.m;
         let callee = &m.funcs[f.0 as usize];
         let locals: Vec<Val> = callee.locals.iter().map(|l| self.temp_val(&l.ty)).collect();
@@ -3237,6 +3347,8 @@ impl<'m> FuncGen<'_, 'm> {
             std::mem::replace(&mut self.moves, moves::moves(callee, &|t| sh.owns(t))),
             std::mem::replace(&mut self.own_lent, &all[f.0 as usize]),
             self.exit,
+            std::mem::replace(&mut self.nonneg, bounds::nonneg(callee, nonneg)),
+            std::mem::take(&mut self.bounded),
         );
         let mark = self.owned.len();
         for (i, l) in callee.locals[..callee.params as usize].iter().enumerate() {
@@ -3250,7 +3362,16 @@ impl<'m> FuncGen<'_, 'm> {
         self.block(&callee.body, sh.rep(&callee.ret) != Rep::None);
         self.end_scope(mark);
         self.close();
-        (self.f, self.ret, self.locals, self.moves, self.own_lent, self.exit) = saved;
+        (
+            self.f,
+            self.ret,
+            self.locals,
+            self.moves,
+            self.own_lent,
+            self.exit,
+            self.nonneg,
+            self.bounded,
+        ) = saved;
     }
 
     /// Leaves the function, its result on the stack, releasing every owned reference; in an
@@ -3550,7 +3671,7 @@ impl<'m> FuncGen<'_, 'm> {
         match c {
             Callee::Value(c) => self.call_through(c, params, ret),
             Callee::Direct(f, _) => {
-                self.call_direct(f);
+                self.call_direct(f, &[]);
                 if *ret == Ty::Never {
                     self.sink().unreachable();
                 }
