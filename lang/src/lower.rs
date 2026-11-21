@@ -780,6 +780,17 @@ impl<'a> Lowerer<'a> {
             ExprKind::Name(name) if self.local(name).is_none() => key(self.module, name).into_owned(),
             ExprKind::Turbofish(name, _) => key(self.module, name).into_owned(),
             ExprKind::Path(en, _) if en == "Map" || en == "HashMap" => return ir::ExprKind::MapNew,
+            // An empty `Json::Obj`.
+            ExprKind::Path(en, v) if en == "Json" && v == "obj" => {
+                let m = check::Ty::Map(Box::new(check::Ty::Str), Box::new(ty.clone()));
+                let map = ir::Expr {
+                    kind: ir::ExprKind::MapNew,
+                    ty: self.ids.ty(&m),
+                    span: callee.span,
+                };
+                let (en, i) = self.variant(ty, "Obj").expect("Json's Obj");
+                return ir::ExprKind::Variant(en, i, vec![map]);
+            }
             ExprKind::Path(_, v) => return self.variant_value(ty, v, args),
             ExprKind::Module(m, inner) => match &inner.kind {
                 ExprKind::Name(name) | ExprKind::Turbofish(name, _) => format!("{m}::{name}"),
@@ -1021,6 +1032,25 @@ impl<'a> Lowerer<'a> {
                     (T::List(_), "any") => Builtin::ListAny,
                     (T::List(_), "all") => Builtin::ListAll,
                     (T::Str, "parse_json") => Builtin::StrParseJson,
+                    (T::Enum(k, _), "as_int") if k == "SqlValue" => Builtin::SqlAsInt,
+                    (T::Enum(k, _), "as_float") if k == "SqlValue" => Builtin::SqlAsFloat,
+                    (T::Enum(k, _), "as_str") if k == "SqlValue" => Builtin::SqlAsStr,
+                    (T::Enum(k, _), "as_bytes") if k == "SqlValue" => Builtin::SqlAsBytes,
+                    (T::Enum(k, _), "is_null") if k == "SqlValue" => Builtin::SqlIsNull,
+                    (T::Enum(k, _), "to_str") => match k.as_str() {
+                        "IoErr" => Builtin::IoErrToStr,
+                        "HttpErr" => Builtin::HttpErrToStr,
+                        "WebErr" => Builtin::WebErrToStr,
+                        "KvErr" => Builtin::KvErrToStr,
+                        "DbErr" => Builtin::DbErrToStr,
+                        _ => unreachable!("checked error enum"),
+                    },
+                    (T::Enum(..), "with") => Builtin::JsonWith,
+                    (T::Enum(..), "get_str") => Builtin::JsonGetStr,
+                    (T::Enum(..), "get_int") => Builtin::JsonGetInt,
+                    (T::Enum(..), "get_float") => Builtin::JsonGetFloat,
+                    (T::Enum(..), "get_bool") => Builtin::JsonGetBool,
+                    (T::Enum(..), "get_list") => Builtin::JsonGetList,
                     (T::Enum(..), "to_json") => Builtin::JsonToJson,
                     (T::Enum(..), "get") => Builtin::JsonGet,
                     (T::Enum(..), "at") => Builtin::JsonAt,

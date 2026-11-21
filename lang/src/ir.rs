@@ -370,6 +370,24 @@ pub enum Builtin {
     OptionExpect,
     ResultUnwrap,
     ResultExpect,
+    /// L31a. `SqlValue`'s accessors; `Json::obj()` is a `Variant` of a `MapNew`.
+    SqlAsInt,
+    SqlAsFloat,
+    SqlAsStr,
+    SqlAsBytes,
+    SqlIsNull,
+    JsonWith,
+    JsonGetStr,
+    JsonGetInt,
+    JsonGetFloat,
+    JsonGetBool,
+    JsonGetList,
+    /// `to_str` on a capability error enum (lang/src/conv.rs's texts).
+    IoErrToStr,
+    HttpErrToStr,
+    WebErrToStr,
+    KvErrToStr,
+    DbErrToStr,
 }
 
 /// Every built-in method that changes its receiver.

@@ -132,7 +132,9 @@ Everything else is rejected with a message that names the kio alternative, for e
 | `List<T>` | `xs[i]`, `len() -> Int`, `push(T)`, `pop() -> Option<T>`, `contains(T) -> Bool`, `sort()` (`List<Int>` and `List<Str>`, bytes order, stable), `map(fn(T) -> U) -> List<U>`, `filter(fn(T) -> Bool) -> List<T>`, `any(fn(T) -> Bool) -> Bool`, `all(fn(T) -> Bool) -> Bool`, `sort_by(fn(T, T) -> Bool)` (`less(a, b)`: `a` goes first; stable), `sort_by_key(fn(T) -> K)` (`K` `Int` or `Str`; stable), `reverse()`, `slice(Int, Int) -> List<T>` (as `Str.slice`), `join(Str) -> Str` (`List<Str>` only) |
 | `Map<K, V>` | `Map::new()`, `len() -> Int`, `get(K) -> Option<V>`, `insert(K, V)`, `remove(K)`, `keys() -> List<K>` |
 | `HashMap<K, V>` | as `Map`, with `HashMap::new()`; `keys()` in insertion order |
-| `Json` | `get(Str) -> Option<Json>` (an `Obj`'s field), `at(Int) -> Option<Json>` (an `Arr`'s element), `as_str() -> Option<Str>`, `as_int() -> Option<Int>`, `as_float() -> Option<Float>` (a `Float`, or a `Num` converted), `as_bool() -> Option<Bool>`, `as_list() -> Option<List<Json>>`, `as_map() -> Option<Map<Str, Json>>`, each `None` for another variant; `to_json() -> Str` |
+| `Json` | `get(Str) -> Option<Json>` (an `Obj`'s field), `at(Int) -> Option<Json>` (an `Arr`'s element), `as_str() -> Option<Str>`, `as_int() -> Option<Int>`, `as_float() -> Option<Float>` (a `Float`, or a `Num` converted), `as_bool() -> Option<Bool>`, `as_list() -> Option<List<Json>>`, `as_map() -> Option<Map<Str, Json>>`, each `None` for another variant; `get_str(Str) -> Option<Str>`, `get_int`, `get_float`, `get_bool`, `get_list` (`j.get(k).and_then(\|x\| x.as_*())` in one call: `None` for a missing key, another variant or a `j` that is not an `Obj`); `Json::obj() -> Json` (an empty `Obj`), `with(Str, Json) -> Json` (a copy with the key set, replaced if present; on a `Json` that is not an `Obj` a runtime error naming its variant); `to_json() -> Str` |
+| `SqlValue` | `as_int() -> Option<Int>`, `as_float() -> Option<Float>`, `as_str() -> Option<Str>` (a `Text`), `as_bytes() -> Option<Bytes>` (a `Blob`), each `None` for another variant (no conversion: `SqlValue::Int(3).as_float()` is `None`); `is_null() -> Bool` |
+| `IoErr`, `HttpErr`, `WebErr`, `KvErr`, `DbErr` | `to_str() -> Str`: the texts below |
 
 The methods taking `fn(..)` take any function value: a name (`json::as_str`), a closure or a local. A closure written as the argument gets its parameter type from the receiver and its return type from its body: `xs.filter(|x| x > 0).map(|x| x * 2)`. In one given to `and_then`, `?` returns the closure's `None` or `Err`, and `Ok(x)` takes the receiver's error type; `None` or `Err(e)` alone need a typed closure (`let f: fn(Str) -> Option<Int> = |s| ..`). The receiver is evaluated, then the function, then each call in list order; `any` and `all` stop at the first value that decides, as Rust's; `unwrap_or_else` calls only on `None` or `Err`. `sort_by_key` calls its function once per element, in order, then sorts by the keys. `sort_by` is a merge sort that takes the right run's element only when `less(right, left)`: a `less` that is no order (`<=`, or one that is random) still gives a permutation, the same on every run. `push`, `pop`, `sort`, `sort_by`, `sort_by_key`, `reverse` and `extend` change a `let mut` place (`xs`, `s.items[i]`).
 
@@ -144,10 +146,21 @@ The methods taking `fn(..)` take any function value: a name (`json::as_str`), a 
 
 ```
 let doc = "{\"name\": \"kio\", \"tags\": [\"a\", \"b\"]}".parse_json()?;
-let name = doc.get("name").and_then(|j| j.as_str()).unwrap_or("?");
-let tags = doc.get("tags").and_then(|j| j.as_list()).unwrap_or([]);
+let name = doc.get_str("name").unwrap_or("?");
+let tags = doc.get_list("tags").unwrap_or([]);
 let out = Json::Arr([Json::Num(1), Json::Float(2.5), Json::Null]).to_json();   // [1,2.5,null]
+let reply = Json::obj().with("id", Json::Num(7)).with("ok", Json::Bool(true)).to_json();   // {"id":7,"ok":true}
 ```
+
+**Error texts.** `to_str` on a capability error is short, lowercase and stable; a payload follows (`status 404`, `invalid: near "SELEC": syntax error`).
+
+| Enum | Variant: text |
+|---|---|
+| `IoErr` | `NotFound`: not found, `Denied`: denied, `TooLarge`: too large, `InvalidPath`: invalid path, `Exists`: already exists |
+| `HttpErr` | `Denied`: denied, `Timeout`: timed out, `TooLarge`: too large, `Status(n)`: status *n*, `Invalid`: invalid request, `Unreachable`: unreachable |
+| `WebErr` | `AlreadySent`: already sent, `Invalid`: invalid response |
+| `KvErr` | `TooLarge`: too large, `Full`: store full, `NotInt`: not an integer, `Overflow`: overflow |
+| `DbErr` | `Invalid(m)`: invalid: *m*, `Denied`: denied, `Busy`: busy, `TooLarge`: too large, `Constraint(m)`: constraint: *m* |
 
 ## Tests
 

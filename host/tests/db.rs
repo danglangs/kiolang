@@ -126,6 +126,30 @@ fn errors_teach_and_agree_both_ways() {
     );
 }
 
+/// L31: a row's columns through `SqlValue`'s accessors, and `DbErr.to_str` on the host's own
+/// errors, both ways.
+#[test]
+fn accessors_and_error_texts_on_real_rows() {
+    let main = r#"fn main(db: Db) -> Str {
+      let _made = db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, n TEXT UNIQUE, f REAL, b BLOB)", []);
+      let _one = db.exec("INSERT INTO t (n, f, b) VALUES ('a', 1.5, x'00ff')", []);
+      let _two = db.exec("INSERT INTO t (n) VALUES (NULL)", []);
+      let Ok(rs) = db.query("SELECT id, n, f, b FROM t ORDER BY id", []) else { return "no rows"; };
+      let cells = rs.map(|r| r[0].as_int().unwrap_or(-1).to_str() + "," + r[1].as_str().unwrap_or("-") + ","
+        + r[1].is_null().to_str() + "," + r[2].as_float().map(|x| x.to_str()).unwrap_or("-") + ","
+        + r[3].as_bytes().map(|b| b.to_hex()).unwrap_or("-") + "," + r[0].as_str().unwrap_or("-")).join(";");
+      let dup = match db.exec("INSERT INTO t (n) VALUES ('a')", []) { Ok(_) => "ok", Err(e) => e.to_str() };
+      let bad = match db.query("SELEC 1", []) { Ok(_) => "ok", Err(e) => e.to_str() };
+      let denied = match db.query("DELETE FROM t", []) { Ok(_) => "ok", Err(e) => e.to_str() };
+      cells + " [" + dup + "] [" + bad + "] [" + denied + "]"
+    }"#;
+    assert_eq!(
+        both(main),
+        "1,a,false,1.5,00ff,-;2,-,true,-,-,- [constraint: UNIQUE constraint failed: t.n] \
+         [invalid: near \"SELEC\": syntax error at byte 0] [denied]"
+    );
+}
+
 /// Containment: every statement that could reach another file, change the connection, run code
 /// or escape `transaction` is `denied`, and leaves nothing behind. The allowed read-only pragmas
 /// still work.

@@ -88,9 +88,9 @@ fn main(input: Dir, state: Kv) -> Result<Str, Failed> {
 ```
 fn total(order: Json) -> Int {
   let mut t = 0;
-  for item in order.get("items").and_then(|v| v.as_list()).unwrap_or([]) {
-    let qty = item.get("qty").and_then(|v| v.as_int()).unwrap_or(0);
-    let price = item.get("price").and_then(|v| v.as_int()).unwrap_or(0);
+  for item in order.get_list("items").unwrap_or([]) {
+    let qty = item.get_int("qty").unwrap_or(0);
+    let price = item.get_int("price").unwrap_or(0);
     t += qty * price;
   }
   t
@@ -101,10 +101,7 @@ fn main(input: Dir) -> Result<Str, IoErr> {
   let Ok(doc) = text.parse_json() else { return Ok("bad json"); };
   let mut out: List<Json> = [];
   for order in doc.as_list().unwrap_or([]) {
-    let mut m: Map<Str, Json> = Map::new();
-    m.insert("id", order.get("id").unwrap_or(Json::Null));
-    m.insert("total", Json::Num(total(order)));
-    out.push(Json::Obj(m));
+    out.push(Json::obj().with("id", order.get("id").unwrap_or(Json::Null)).with("total", Json::Num(total(order))));
   }
   Ok(Json::Arr(out).to_json())
 }
@@ -133,10 +130,9 @@ enum Failed { Http(HttpErr), Json(Str), Status(Int) }
 fn main(api: Http) -> Result<Str, Failed> {
   let body = api.get("/items?page=1").map_err(|e| Failed::Http(e))?.to_str();
   let items = body.parse_json().map_err(|e| Failed::Json(e))?.as_list().unwrap_or([]);
-  let mut m: Map<Str, Json> = Map::new();
-  m.insert("count", Json::Num(items.len()));
+  let summary = Json::obj().with("count", Json::Num(items.len()));
   let r = api.send("POST", "/summary", ["content-type: application/json"],
-                   Json::Obj(m).to_json().to_bytes(), 0).map_err(|e| Failed::Http(e))?;
+                   summary.to_json().to_bytes(), 0).map_err(|e| Failed::Http(e))?;
   if r.status != 200 && r.status != 201 { return Err(Failed::Status(r.status)); }
   Ok("posted " + items.len().to_str())
 }
@@ -162,15 +158,12 @@ fn main(input: Dir, store: Kv) -> Result<Str, KvErr> {
 ## Db: schema, parameters, reading columns
 
 ```
-fn text(row: List<SqlValue>, i: Int) -> Str { match row[i] { SqlValue::Text(s) => s, _ => "" } }
-fn int(row: List<SqlValue>, i: Int) -> Int { match row[i] { SqlValue::Int(n) => n, _ => 0 } }
-
 fn main(db: Db) -> Result<Str, DbErr> {
   db.exec("CREATE TABLE IF NOT EXISTS items (name TEXT PRIMARY KEY, qty INTEGER NOT NULL)", [])?;
   db.exec("INSERT INTO items (name, qty) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET qty = qty + excluded.qty",
           [SqlValue::Text("apple"), SqlValue::Int(3)])?;
   let rows = db.query("SELECT name, qty FROM items WHERE qty > ? ORDER BY name", [SqlValue::Int(0)])?;
-  Ok(rows.map(|r| text(r, 0) + " " + int(r, 1).to_str()).join("\n"))
+  Ok(rows.map(|r| r[0].as_str().unwrap_or("") + " " + r[1].as_int().unwrap_or(0).to_str()).join("\n"))
 }
 ```
 
@@ -198,9 +191,7 @@ fn query(target: Str, key: Str) -> Option<Str> {
 }
 
 fn error(status: Int, msg: Str) -> Reply {
-  let mut m: Map<Str, Json> = Map::new();
-  m.insert("error", Json::Str(msg));
-  Reply { status: status, body: Json::Obj(m) }
+  Reply { status: status, body: Json::obj().with("error", Json::Str(msg)) }
 }
 
 fn route(req: Incoming, store: Kv) -> Result<Reply, KvErr> {
@@ -210,10 +201,7 @@ fn route(req: Incoming, store: Kv) -> Result<Reply, KvErr> {
     "GET" => if path == "/count" {
       let n = store.add("hits", 1)?;
       let who = query(req.target(), "who").unwrap_or("anon");
-      let mut m: Map<Str, Json> = Map::new();
-      m.insert("hits", Json::Num(n));
-      m.insert("who", Json::Str(who));
-      Ok(Reply { status: 200, body: Json::Obj(m) })
+      Ok(Reply { status: 200, body: Json::obj().with("hits", Json::Num(n)).with("who", Json::Str(who)) })
     } else { Ok(error(404, "not found")) },
     "POST" => if parts.len() == 3 && parts[1] == "notes" {
       let Some(id) = parts[2].parse_int() else { return Ok(error(404, "not found")); };

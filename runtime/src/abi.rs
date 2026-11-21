@@ -848,6 +848,51 @@ json_as_u!(
     rt_json_as_map_u: OBJ
 );
 
+/// The `get_*` accessors (L31), the `Json` as `rt_json_get_u`'s.
+macro_rules! json_get_as_u {
+    ($($name:ident: $variant:ident),*) => {$(
+        #[no_mangle]
+        pub unsafe extern "C" fn $name(v: u32, x: u64, k: u32) -> u32 {
+            // SAFETY: the group's contract.
+            unboxed(unsafe { json::get_as_opt(v, x, ptr(k), json::$variant) })
+        }
+    )*};
+}
+
+json_get_as_u!(
+    rt_json_get_str_u: STR,
+    rt_json_get_int_u: NUM,
+    rt_json_get_float_u: FLOAT,
+    rt_json_get_bool_u: BOOL,
+    rt_json_get_list_u: ARR
+);
+
+/// `j.with(k, val)` (L31): the `Json` as `rt_json_get_u`'s but owned, and `val` an owned `Json`
+/// object; returns the `Obj`'s map, which takes both references. Error: `j` is not an `Obj`, at
+/// `site` with the variant's name.
+#[no_mangle]
+pub unsafe extern "C" fn rt_json_with(v: u32, x: u64, k: u32, val: u64, site: u32) -> u32 {
+    // SAFETY: the group's contract.
+    match unsafe { json::with(table(), v, x, ptr(k), val) } {
+        Some(m) => addr(m),
+        None => trap_texts(site, &[json::NAMES[v as usize].as_bytes()]),
+    }
+}
+
+/// `e.to_str()` on variant `v` of capability error enum `e` (`conv::ERR_ENUMS`' index), its
+/// payload `x` borrowed (L31).
+#[no_mangle]
+pub unsafe extern "C" fn rt_err_to_str(e: u32, v: u32, x: u64) -> u32 {
+    let (e, v) = (e as usize, v as usize);
+    let payload = match conv::err_payload_kind(e, v) {
+        1 => conv::ErrPayload::Int(x as i64),
+        // SAFETY: the group's contract: the payload is a `Str`.
+        2 => conv::ErrPayload::Str(unsafe { obj::bytes(obj::from_slot(x)) }),
+        _ => conv::ErrPayload::None,
+    };
+    addr(obj::new_bytes(desc::STR, &conv::err_to_str(e, v, payload)))
+}
+
 fn index_trap(site: u32, e: coll::Error) -> ! {
     let coll::Error::Index { index, len } = e;
     rt_trap(site, index, len as i64)

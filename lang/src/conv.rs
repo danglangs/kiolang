@@ -136,3 +136,54 @@ pub fn parse_iso_utc(s: &[u8]) -> Option<i64> {
     }
     Some(day + ((h * 60 + min) * 60 + sec) * 1000 + ms)
 }
+
+/// The capability error enums with `to_str` (L31); the runtime numbers them in this order.
+pub const ERR_ENUMS: [&str; 5] = ["IoErr", "HttpErr", "WebErr", "KvErr", "DbErr"];
+
+/// Each enum's variant texts, in declaration order (caps.wit); language.md lists them.
+const ERR_TEXTS: [&[&str]; 5] = [
+    &["not found", "denied", "too large", "invalid path", "already exists"],
+    &[
+        "denied",
+        "timed out",
+        "too large",
+        "status",
+        "invalid request",
+        "unreachable",
+    ],
+    &["already sent", "invalid response"],
+    &["too large", "store full", "not an integer", "overflow"],
+    &["invalid", "denied", "busy", "too large", "constraint"],
+];
+
+/// A payload, as `err_to_str` shows it.
+pub enum ErrPayload<'a> {
+    None,
+    Int(i64),
+    Str(&'a [u8]),
+}
+
+/// What variant `v` of enum `e` (`ERR_ENUMS`' index) holds: 1 for `HttpErr::Status`'s `Int`,
+/// 2 for `DbErr::Invalid`'s and `Constraint`'s message, else 0.
+pub fn err_payload_kind(e: usize, v: usize) -> u8 {
+    match (e, v) {
+        (1, 3) => 1,
+        (4, 0 | 4) => 2,
+        _ => 0,
+    }
+}
+
+/// `to_str` of variant `v` of enum `e`: its text, then an `Int` payload after a space or a
+/// message after `: ` (`status 404`, `constraint: UNIQUE constraint failed: t.id`).
+pub fn err_to_str(e: usize, v: usize, payload: ErrPayload) -> Vec<u8> {
+    let mut out = ERR_TEXTS[e][v].as_bytes().to_vec();
+    match payload {
+        ErrPayload::None => {}
+        ErrPayload::Int(n) => out.extend_from_slice(alloc::format!(" {n}").as_bytes()),
+        ErrPayload::Str(s) => {
+            out.extend_from_slice(b": ");
+            out.extend_from_slice(s);
+        }
+    }
+    out
+}

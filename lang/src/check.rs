@@ -1870,11 +1870,29 @@ fn method(caps: &CapTable, recv: &Ty, name: &str) -> Option<(Vec<Ty>, Ty)> {
         (Ty::Bytes, "ct_eq") => Some((vec![Ty::Bytes], Ty::Bool)),
         (Ty::Str, "ct_eq") => Some((vec![Ty::Str], Ty::Bool)),
         (Ty::Str, "parse_json") => Some((vec![], Ty::Result(Box::new(json()), Box::new(Ty::Str)))),
+        (Ty::Enum(k, _), "to_str") if crate::conv::ERR_ENUMS.contains(&k.as_str()) => Some((vec![], Ty::Str)),
+        (Ty::Enum(k, _), _) if k == "SqlValue" => {
+            let opt = |t: Ty| Ty::Option(Box::new(t));
+            match name {
+                "as_int" => Some((vec![], opt(Ty::Int))),
+                "as_float" => Some((vec![], opt(Ty::Float))),
+                "as_str" => Some((vec![], opt(Ty::Str))),
+                "as_bytes" => Some((vec![], opt(Ty::Bytes))),
+                "is_null" => Some((vec![], Ty::Bool)),
+                _ => None,
+            }
+        }
         (Ty::Enum(k, _), _) if k == "Json" => {
             let opt = |t: Ty| Ty::Option(Box::new(t));
             match name {
                 "to_json" => Some((vec![], Ty::Str)),
                 "get" => Some((vec![Ty::Str], opt(json()))),
+                "with" => Some((vec![Ty::Str, json()], json())),
+                "get_str" => Some((vec![Ty::Str], opt(Ty::Str))),
+                "get_int" => Some((vec![Ty::Str], opt(Ty::Int))),
+                "get_float" => Some((vec![Ty::Str], opt(Ty::Float))),
+                "get_bool" => Some((vec![Ty::Str], opt(Ty::Bool))),
+                "get_list" => Some((vec![Ty::Str], opt(Ty::List(Box::new(json()))))),
                 "at" => Some((vec![Ty::Int], opt(json()))),
                 "as_str" => Some((vec![], opt(Ty::Str))),
                 "as_int" => Some((vec![], opt(Ty::Int))),
@@ -1947,6 +1965,7 @@ const METHODS: &[&str] = &[
     "and_then",
     "any",
     "as_bool",
+    "as_bytes",
     "as_float",
     "as_int",
     "as_list",
@@ -1973,12 +1992,18 @@ const METHODS: &[&str] = &[
     "form_decode",
     "from_hex",
     "get",
+    "get_bool",
+    "get_float",
+    "get_int",
+    "get_list",
+    "get_str",
     "insert",
     "is_err",
     "is_finite",
     "is_infinite",
     "is_nan",
     "is_none",
+    "is_null",
     "is_ok",
     "is_some",
     "iso_utc",
@@ -2030,6 +2055,7 @@ const METHODS: &[&str] = &[
     "unwrap_or_else",
     "url_decode",
     "url_encode",
+    "with",
 ];
 
 fn cap_methods<'a>(caps: &'a CapTable, name: &str) -> &'a [(String, Vec<Ty>, Ty)] {
@@ -2892,6 +2918,7 @@ impl<'a> Checker<'a> {
             ("Option", _) => suggest(v, &["None", "Some"], "variants"),
             ("Result", _) => suggest(v, &["Ok", "Err"], "variants"),
             ("Map" | "HashMap", _) => format!("the only {en} function is `{en}::new()`"),
+            ("Json", _) if v == "obj" => "`Json::obj` is a function: write `Json::obj()`".to_string(),
             (_, Some(vs)) => suggest(v, &vs.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), "variants"),
             _ if !self.home.module.is_empty() && self.enums.contains_key(bare(en)) => ROOT_ITEM.to_string(),
             _ => suggest(bare(en), &sorted_names(self.enums, module_of(en)), "enums"),
@@ -4296,6 +4323,14 @@ impl<'a> Checker<'a> {
             ExprKind::Turbofish(name, tys) => (name, None, Some(tys.as_slice())),
             ExprKind::Path(en, v) if (en == "Map" || en == "HashMap") && v == "new" => {
                 return self.map_new(e, en, args, expected)
+            }
+            ExprKind::Path(en, v) if en == "Json" && v == "obj" => {
+                if !args.is_empty() {
+                    let msg = format!("`Json::obj` takes 0 arguments, found {}", args.len());
+                    let hint = "write `Json::obj()`, then add keys with `.with(key, value)`";
+                    return Err(err(e.span, msg, Some(hint)));
+                }
+                return Ok(json());
             }
             ExprKind::Path(en, v) => return self.variant_value(e, &self.enum_key(en), v, args, expected),
             ExprKind::Module(m, inner) => match &inner.kind {

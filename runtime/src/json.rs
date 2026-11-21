@@ -612,6 +612,46 @@ pub unsafe fn as_variant(t: &Table, opt: u32, none: *mut Header, j: *mut Header,
     }
 }
 
+/// `j.get(k).and_then(|x| x.as_*())` (L31), on `v` and `x` as `get_opt`'s: the payload of
+/// variant `want` of the value at `k`, as `as_variant_opt`'s.
+///
+/// # Safety
+/// As `get_opt`.
+pub unsafe fn get_as_opt(v: u32, x: u64, k: *mut Header, want: u32) -> Option<u64> {
+    if v != OBJ {
+        return None;
+    }
+    // SAFETY: the caller's guarantee; `k` outlives the probe, and the value found outlives
+    // this call.
+    unsafe {
+        let found = (*obj::field::<Map>(from_slot(x), obj::HEADER)).get(&*Key::probe(obj::bytes(k)))?;
+        let (fv, fx) = parts(from_slot(found.get()));
+        as_variant_opt(fv, fx, want)
+    }
+}
+
+/// The variants' names, for `with`'s error.
+pub const NAMES: [&str; 7] = ["Null", "Bool", "Num", "Float", "Str", "Arr", "Obj"];
+
+/// `j.with(k, val)` (L31) on `v` and `x` as `get_opt`'s, taking `x`'s reference and `val`'s
+/// (a `Json` object): the `Obj`'s map, made unique, with `k` set to `val`. `None` if `j` is not
+/// an `Obj`, the references untouched.
+///
+/// # Safety
+/// As `get_opt`; `k` is a `Str`; `val` is a `Json` object.
+pub unsafe fn with(t: &Table, v: u32, x: u64, k: *mut Header, val: u64) -> Option<*mut Header> {
+    if v != OBJ {
+        return None;
+    }
+    // SAFETY: the caller's guarantee; `unique` takes `x`'s reference and returns a map no one
+    // else holds, which then owns `val`.
+    unsafe {
+        let m = obj::unique(t, from_slot(x));
+        crate::coll::map_insert(t, m, to_slot(k), val);
+        Some(m)
+    }
+}
+
 /// `as_variant`'s payload (a new reference when it is an object) without the `Option` object
 /// (C8c1), on `v` and `x` as `get_opt`'s.
 ///

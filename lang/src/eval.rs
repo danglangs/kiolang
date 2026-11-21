@@ -808,6 +808,26 @@ impl<'a> Interp<'a> {
                 Err(e) => Value::Enum(EnumRef::Result, 1, vec![Value::Str(e.into())]),
             });
         }
+        if b == Builtin::JsonWith {
+            let Value::Enum(en, i, mut p) = self.expr(recv)? else {
+                unreachable!("checked Json");
+            };
+            let (Some(Value::Str(k)), Some(v)) = self.arg(args)? else {
+                unreachable!("checked arguments");
+            };
+            if i != crate::json::OBJ {
+                let name = &self.m.enums[self.m.json().0 as usize].variants[i].0;
+                return Err(fail(
+                    span,
+                    &format!("`with` on a Json that is not an object: Json::{name}"),
+                ));
+            }
+            let Some(Value::Map(m)) = p.first_mut() else {
+                unreachable!("Obj's map");
+            };
+            Rc::make_mut(m).insert(Key::Str(k.to_string()), v);
+            return Ok(Value::Enum(en, i, p));
+        }
         if let Builtin::OptionUnwrap | Builtin::OptionExpect | Builtin::ResultUnwrap | Builtin::ResultExpect = b {
             let Value::Enum(en, i, payload) = self.expr(recv)? else {
                 unreachable!("checked Option or Result");
@@ -1425,14 +1445,7 @@ fn builtin(recv: &Value, b: Builtin, (arg, arg2): Args, span: Span) -> Res {
             }
             _ => none(),
         },
-        (B::JsonAsFloat, Value::Enum(_, crate::json::NUM, p)) => match p[..] {
-            [Value::Int(n)] => some(Value::Float(n as f64)),
-            _ => unreachable!("checked Json"),
-        },
-        (
-            B::JsonAsStr | B::JsonAsInt | B::JsonAsFloat | B::JsonAsBool | B::JsonAsList | B::JsonAsMap,
-            Value::Enum(_, i, p),
-        ) => {
+        (B::JsonAsStr | B::JsonAsInt | B::JsonAsFloat | B::JsonAsBool | B::JsonAsList | B::JsonAsMap, j) => {
             let want = match b {
                 B::JsonAsStr => crate::json::STR,
                 B::JsonAsInt => crate::json::NUM,
@@ -1441,13 +1454,73 @@ fn builtin(recv: &Value, b: Builtin, (arg, arg2): Args, span: Span) -> Res {
                 B::JsonAsList => crate::json::ARR,
                 _ => crate::json::OBJ,
             };
+            json_as(j, want)
+        }
+        // `j.get(k).and_then(|x| x.as_*())`.
+        (B::JsonGetStr | B::JsonGetInt | B::JsonGetFloat | B::JsonGetBool | B::JsonGetList, Value::Enum(_, i, p)) => {
+            let want = match b {
+                B::JsonGetStr => crate::json::STR,
+                B::JsonGetInt => crate::json::NUM,
+                B::JsonGetFloat => crate::json::FLOAT,
+                B::JsonGetBool => crate::json::BOOL,
+                _ => crate::json::ARR,
+            };
+            match (*i, &p[..]) {
+                (crate::json::OBJ, [Value::Map(m)]) => match m.get(&Key::Str(str_arg(arg).to_string())) {
+                    Some(v) => json_as(v, want),
+                    None => none(),
+                },
+                _ => none(),
+            }
+        }
+        // `SqlValue`: `Null`, `Int`, `Float`, `Text`, `Blob`; no coercion.
+        (B::SqlIsNull, Value::Enum(_, i, _)) => Value::Bool(*i == 0),
+        (B::SqlAsInt | B::SqlAsFloat | B::SqlAsStr | B::SqlAsBytes, Value::Enum(_, i, p)) => {
+            let want = match b {
+                B::SqlAsInt => 1,
+                B::SqlAsFloat => 2,
+                B::SqlAsStr => 3,
+                _ => 4,
+            };
             match *i == want {
                 true => some(p[0].clone()),
                 false => none(),
             }
         }
+        (B::IoErrToStr | B::HttpErrToStr | B::WebErrToStr | B::KvErrToStr | B::DbErrToStr, Value::Enum(_, v, p)) => {
+            use crate::conv::ErrPayload;
+            let e = [
+                B::IoErrToStr,
+                B::HttpErrToStr,
+                B::WebErrToStr,
+                B::KvErrToStr,
+                B::DbErrToStr,
+            ]
+            .iter()
+            .position(|&x| x == b)
+            .expect("an error enum");
+            let payload = match p.first() {
+                Some(Value::Int(n)) => ErrPayload::Int(*n),
+                Some(Value::Str(s)) => ErrPayload::Str(s.as_bytes()),
+                _ => ErrPayload::None,
+            };
+            let text = crate::conv::err_to_str(e, *v, payload);
+            Value::Str(String::from_utf8(text).expect("UTF-8 texts").into())
+        }
         _ => unreachable!("checked method"),
     })
+}
+
+/// `j.as_*()` for variant `want` of `Json` `j`; `as_float` also takes a `Num`.
+fn json_as(j: &Value, want: usize) -> Value {
+    match j {
+        Value::Enum(_, i, p) if *i == want => some(p[0].clone()),
+        Value::Enum(_, crate::json::NUM, p) if want == crate::json::FLOAT => match p[..] {
+            [Value::Int(n)] => some(Value::Float(n as f64)),
+            _ => unreachable!("checked Json"),
+        },
+        _ => none(),
+    }
 }
 
 fn unary(op: UnOp, v: Value, span: Span) -> Res {

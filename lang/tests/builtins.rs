@@ -923,3 +923,156 @@ fn f0(p0: Int, p1: Int, p2: Int) -> Float {
 }
 fn main() -> Float { f0(16, 2, 3) }
 "#;
+
+/// L31: each `SqlValue` variant through each accessor; `Some` only for its own variant.
+#[test]
+fn sql_value_accessors() {
+    let src = r#"
+fn main() -> List<Str> {
+    let vs = [SqlValue::Null, SqlValue::Int(3), SqlValue::Float(2.5), SqlValue::Text("t"),
+              SqlValue::Blob("b".to_bytes()), SqlValue::Int(-9223372036854775807 - 1), SqlValue::Text("")];
+    let mut out: List<Str> = [];
+    for v in vs {
+        out.push(v.is_null().to_str() + " " + v.as_int().map(|n| n.to_str()).unwrap_or("-") + " "
+            + v.as_float().map(|f| f.to_str()).unwrap_or("-") + " " + v.as_str().unwrap_or("-") + " "
+            + v.as_bytes().map(|b| b.to_hex()).unwrap_or("-"));
+    }
+    out
+}"#;
+    assert_eq!(
+        shows(src),
+        r#"["true - - - -", "false 3 - - -", "false - 2.5 - -", "false - - t -", "false - - - 62", "false -9223372036854775808 - - -", "false - -  -"]"#
+    );
+    let src = r#"
+fn main() -> List<Option<Float>> {
+    [SqlValue::Int(3).as_float(), SqlValue::Float(3.0).as_float(), SqlValue::Text("3").as_float()]
+}"#;
+    assert_eq!(shows(src), "[None, Some(3), None]");
+    let (msg, hint) = rejects("fn main() -> Bool { SqlValue::Null.is_null(1) }");
+    assert_eq!(msg, "`is_null` takes 0 arguments, found 1");
+    assert_eq!(hint.unwrap(), "`SqlValue.is_null` is declared as `is_null() -> Bool`");
+    let (msg, hint) = rejects("fn main() -> Option<Int> { 3.as_int() }");
+    assert_eq!(msg, "no method `as_int` on Int");
+    assert!(!hint.unwrap().contains("as_int"));
+}
+
+/// L31: `Json::obj()` and `with`, chained, a key replaced; the receiver is not changed.
+#[test]
+fn json_builder() {
+    let src = r#"
+fn main() -> List<Str> {
+    let j = Json::obj().with("id", Json::Num(7)).with("ok", Json::Bool(true));
+    let k = j.with("id", Json::Str("x")).with("a", Json::Arr([Json::Null, Json::obj()]));
+    let mut c = Json::obj();
+    for i in 0..20 {
+        c = c.with("k" + (i % 7).to_str(), Json::Num(i));
+    }
+    let mut d = Json::obj();
+    for i in 0..20 {
+        d = d.with("k" + i.to_str(), c);
+    }
+    [Json::obj().to_json(), j.to_json(), k.to_json(), c.to_json(), d.get("k19").unwrap_or(Json::Null).to_json(),
+     d.as_map().unwrap_or(Map::new()).len().to_str()]
+}"#;
+    assert_eq!(
+        shows(src),
+        r#"["{}", "{\"id\":7,\"ok\":true}", "{\"a\":[null,{}],\"id\":\"x\",\"ok\":true}", "{\"k0\":14,\"k1\":15,\"k2\":16,\"k3\":17,\"k4\":18,\"k5\":19,\"k6\":13}", "{\"k0\":14,\"k1\":15,\"k2\":16,\"k3\":17,\"k4\":18,\"k5\":19,\"k6\":13}", "20"]"#
+    );
+}
+
+/// L31: `with` on a `Json` that is not an object stops the run at the call, naming the variant.
+#[test]
+fn json_with_on_a_non_object() {
+    let cases: [(&'static str, &str); 6] = [
+        ("fn main() -> Json { Json::Null.with(\"a\", Json::Null) }", "Null"),
+        ("fn main() -> Json { Json::Bool(true).with(\"a\", Json::Null) }", "Bool"),
+        ("fn main() -> Json { Json::Num(1).with(\"a\", Json::Null) }", "Num"),
+        ("fn main() -> Json { Json::Float(1.5).with(\"a\", Json::Null) }", "Float"),
+        ("fn main() -> Json { Json::Str(\"s\").with(\"a\", Json::Null) }", "Str"),
+        (
+            "fn main() -> Json { let j = Json::obj().with(\"a\", Json::Arr([])); j.get(\"a\").unwrap_or(Json::Null).with(\"b\", j) }",
+            "Arr",
+        ),
+    ];
+    for (src, variant) in cases {
+        let (msg, at) = fails(src);
+        assert_eq!(msg, format!("`with` on a Json that is not an object: Json::{variant}"));
+        assert!(
+            at.ends_with(".with(\"a\", Json::Null)") || at.ends_with(".with(\"b\", j)"),
+            "{at}"
+        );
+        assert!(at.starts_with("Json::") || at.starts_with("j.get"), "{at}");
+    }
+    let (msg, hint) = rejects("fn main() -> Int { 1.with(\"a\", Json::Null) }");
+    assert_eq!(msg, "no method `with` on Int");
+    assert!(!hint.unwrap().contains("with"));
+    let (msg, hint) = rejects("fn main() -> Json { Json::obj().with(1, Json::Null) }");
+    assert_eq!(msg, "expected Str, found Int");
+    assert!(hint.is_none_or(|h| !h.is_empty()));
+    let (msg, _) = rejects("fn main() -> Json { Json::obj().with(\"a\", 1) }");
+    assert_eq!(msg, "expected Json, found Int");
+    let (msg, hint) = rejects("fn main() -> Json { Json::obj(1) }");
+    assert_eq!(msg, "`Json::obj` takes 0 arguments, found 1");
+    assert_eq!(
+        hint.unwrap(),
+        "write `Json::obj()`, then add keys with `.with(key, value)`"
+    );
+    let (msg, hint) = rejects("fn main() -> Json { Json::obj }");
+    assert_eq!(msg, "unknown variant `Json::obj`");
+    assert_eq!(hint.unwrap(), "`Json::obj` is a function: write `Json::obj()`");
+}
+
+/// L31: each getter on a hit, a missing key, the wrong variant and a non-object.
+#[test]
+fn json_getters() {
+    let src = r#"
+fn main() -> List<Str> {
+    let j = "{\"s\":\"x\",\"n\":3,\"f\":1.5,\"b\":false,\"l\":[1,{}],\"z\":null}".parse_json().unwrap_or(Json::Null);
+    let mut out: List<Str> = [];
+    for o in [j, Json::Arr([j]), Json::Null, Json::Str("s")] {
+        for k in ["s", "n", "f", "b", "l", "z", "missing"] {
+            out.push(k + ":" + o.get_str(k).unwrap_or("-") + "," + o.get_int(k).map(|n| n.to_str()).unwrap_or("-")
+                + "," + o.get_float(k).map(|n| n.to_str()).unwrap_or("-")
+                + "," + o.get_bool(k).map(|n| n.to_str()).unwrap_or("-")
+                + "," + o.get_list(k).map(|n| Json::Arr(n).to_json()).unwrap_or("-"));
+        }
+    }
+    out
+}"#;
+    let hit = r#""s:x,-,-,-,-", "n:-,3,3,-,-", "f:-,-,1.5,-,-", "b:-,-,-,false,-", "l:-,-,-,-,[1,{}]", "z:-,-,-,-,-", "missing:-,-,-,-,-""#;
+    let miss = r#""s:-,-,-,-,-", "n:-,-,-,-,-", "f:-,-,-,-,-", "b:-,-,-,-,-", "l:-,-,-,-,-", "z:-,-,-,-,-", "missing:-,-,-,-,-""#;
+    assert_eq!(shows(src), format!("[{hit}, {miss}, {miss}, {miss}]"));
+    let (msg, hint) = rejects("fn main() -> Option<Str> { Json::Null.get_str(1) }");
+    assert_eq!(msg, "expected Str, found Int");
+    assert!(hint.is_none_or(|h| !h.is_empty()));
+    let (msg, _) = rejects("fn main() -> Option<Int> { Json::Null.get_str(\"a\") }");
+    assert_eq!(msg, "expected Option<Int>, found Option<Str>");
+}
+
+/// L31: `to_str` on every variant of the capability error enums.
+#[test]
+fn error_enums_to_str() {
+    let src = r#"
+fn main() -> List<Str> {
+    [IoErr::NotFound.to_str(), IoErr::Denied.to_str(), IoErr::TooLarge.to_str(), IoErr::InvalidPath.to_str(),
+     IoErr::Exists.to_str(),
+     HttpErr::Denied.to_str(), HttpErr::Timeout.to_str(), HttpErr::TooLarge.to_str(), HttpErr::Status(404).to_str(),
+     HttpErr::Status(-1).to_str(), HttpErr::Invalid.to_str(), HttpErr::Unreachable.to_str(),
+     WebErr::AlreadySent.to_str(), WebErr::Invalid.to_str(),
+     KvErr::TooLarge.to_str(), KvErr::Full.to_str(), KvErr::NotInt.to_str(), KvErr::Overflow.to_str(),
+     DbErr::Invalid("near \"SELEC\": syntax error").to_str(), DbErr::Denied.to_str(), DbErr::Busy.to_str(),
+     DbErr::TooLarge.to_str(), DbErr::Constraint("UNIQUE constraint failed: t.id").to_str(), DbErr::Invalid("").to_str()]
+}"#;
+    assert_eq!(
+        shows(src),
+        r#"["not found", "denied", "too large", "invalid path", "already exists", "denied", "timed out", "too large", "status 404", "status -1", "invalid request", "unreachable", "already sent", "invalid response", "too large", "store full", "not an integer", "overflow", "invalid: near \"SELEC\": syntax error", "denied", "busy", "too large", "constraint: UNIQUE constraint failed: t.id", "invalid: "]"#
+    );
+    let src = r#"
+fn describe(r: Result<Int, DbErr>) -> Str {
+    match r { Ok(n) => n.to_str(), Err(e) => "db: " + e.to_str() }
+}
+fn main() -> Str { describe(Err(DbErr::Busy)) + "; " + describe(Ok(2)) }"#;
+    assert_eq!(shows(src), "db: busy; 2");
+    let (msg, _) = rejects("fn main() -> Str { WsErr::Closed.to_str() }");
+    assert_eq!(msg, "no method `to_str` on WsErr");
+}

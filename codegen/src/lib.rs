@@ -1041,6 +1041,8 @@ const POW_NEGATIVE: &str = "Int.pow({a}): the exponent must be 0 or more";
 const SHL_COUNT: &str = "Int.shl({a}): the count must be 0 to 63";
 const SHR_COUNT: &str = "Int.shr({a}): the count must be 0 to 63";
 const ISO_RANGE: &str = "iso_utc of {a}: outside years 0000 to 9999";
+/// L31's; the text is `lang::eval`'s.
+const WITH_NOT_OBJECT: &str = "`with` on a Json that is not an object: Json::{s0}";
 
 impl<'m> FuncGen<'_, 'm> {
     fn sink(&mut self) -> InstructionSink<'_> {
@@ -2949,6 +2951,13 @@ impl<'m> FuncGen<'_, 'm> {
             ExprKind::Builtin(Builtin::OptionIsNone | Builtin::ResultIsOk, recv, _) => self.is_variant(recv, 0),
             ExprKind::Builtin(Builtin::OptionIsSome | Builtin::ResultIsErr, recv, _) => self.is_variant(recv, 1),
             ExprKind::Builtin(Builtin::ResultOk, recv, _) => self.result_variant(recv, 0, &e.ty),
+            // `SqlValue`'s accessors (L31): `Null`, `Int`, `Float`, `Text`, `Blob`.
+            ExprKind::Builtin(Builtin::SqlIsNull, recv, _) => self.is_variant(recv, 0),
+            ExprKind::Builtin(Builtin::SqlAsInt, recv, _) => self.result_variant(recv, 1, &e.ty),
+            ExprKind::Builtin(Builtin::SqlAsFloat, recv, _) => self.result_variant(recv, 2, &e.ty),
+            ExprKind::Builtin(Builtin::SqlAsStr, recv, _) => self.result_variant(recv, 3, &e.ty),
+            ExprKind::Builtin(Builtin::SqlAsBytes, recv, _) => self.result_variant(recv, 4, &e.ty),
+            ExprKind::Builtin(Builtin::JsonWith, recv, args) => self.json_with(recv, args, e.span),
             ExprKind::Builtin(Builtin::ResultErr, recv, _) => self.result_variant(recv, 1, &e.ty),
             ExprKind::Builtin(Builtin::OptionOkOr, recv, args) => self.ok_or(recv, &args[0], &e.ty),
             // A conversion takes an operand that holds a reference of its own (a last use, a
@@ -3031,6 +3040,22 @@ impl<'m> FuncGen<'_, 'm> {
                     Builtin::JsonAsBool => ("rt_json_as_bool_u", Nothing, None),
                     Builtin::JsonAsList => ("rt_json_as_list_u", Nothing, None),
                     Builtin::JsonAsMap => ("rt_json_as_map_u", Nothing, None),
+                    Builtin::JsonGetStr => ("rt_json_get_str_u", Nothing, None),
+                    Builtin::JsonGetInt => ("rt_json_get_int_u", Nothing, None),
+                    Builtin::JsonGetFloat => ("rt_json_get_float_u", Nothing, None),
+                    Builtin::JsonGetBool => ("rt_json_get_bool_u", Nothing, None),
+                    Builtin::JsonGetList => ("rt_json_get_list_u", Nothing, None),
+                    Builtin::IoErrToStr
+                    | Builtin::HttpErrToStr
+                    | Builtin::WebErrToStr
+                    | Builtin::KvErrToStr
+                    | Builtin::DbErrToStr => ("rt_err_to_str", Nothing, None),
+                    Builtin::SqlAsInt
+                    | Builtin::SqlAsFloat
+                    | Builtin::SqlAsStr
+                    | Builtin::SqlAsBytes
+                    | Builtin::SqlIsNull => unreachable!("inline on the tag"),
+                    Builtin::JsonWith => unreachable!("json_with"),
                     Builtin::ListSlice => ("rt_list_slice", Nothing, Some(SLICE_BOUNDS)),
                     Builtin::ListJoin => ("rt_list_join", Nothing, None),
                     Builtin::StrToLowercase => ("rt_str_to_lowercase", Nothing, None),
@@ -3072,7 +3097,17 @@ impl<'m> FuncGen<'_, 'm> {
                     | Builtin::OptionUnwrapOrElse
                     | Builtin::ResultUnwrapOrElse => unreachable!("with_fn"),
                 };
-                let pre = self.pre(pre, &e.ty);
+                let mut pre = self.pre(pre, &e.ty);
+                // `rt_err_to_str` takes the enum, numbered as `lang::conv::ERR_ENUMS`.
+                let errs = [
+                    Builtin::IoErrToStr,
+                    Builtin::HttpErrToStr,
+                    Builtin::WebErrToStr,
+                    Builtin::KvErrToStr,
+                    Builtin::DbErrToStr,
+                ];
+                let err_enum = errs.iter().position(|x| x == b);
+                pre.extend(err_enum.map(|i| i as u32));
                 let mut sites: Vec<u32> = error.map(|t| self.site(e.span, t)).into_iter().collect();
                 if *b == Builtin::StrSlice {
                     sites.push(self.site(e.span, "slice {a}..{b} is not on a character boundary"));
@@ -3093,7 +3128,12 @@ impl<'m> FuncGen<'_, 'm> {
                         | Builtin::JsonAsBool
                         | Builtin::JsonAsList
                         | Builtin::JsonAsMap
-                );
+                        | Builtin::JsonGetStr
+                        | Builtin::JsonGetInt
+                        | Builtin::JsonGetFloat
+                        | Builtin::JsonGetBool
+                        | Builtin::JsonGetList
+                ) || err_enum.is_some();
                 self.rt_op_slots(name, &pre, &xs, &sites, slots, json);
                 if name.ends_with("_u") {
                     self.scratch_payload();
@@ -3716,8 +3756,8 @@ impl<'m> FuncGen<'_, 'm> {
         });
     }
 
-    /// `r.ok()` (`v` 0) or `r.err()` (`v` 1) as the `Option` type `ty`: `Some` of the payload
-    /// (+1) when `r` is variant `v`, else `None`.
+    /// `r.ok()` (`v` 0) or `r.err()` (`v` 1), or a `SqlValue`'s `as_*` (`v` its variant), as the
+    /// `Option` type `ty`: `Some` of the payload (+1) when `r` is variant `v`, else `None`.
     fn result_variant(&mut self, recv: &ir::Expr, v: i32, ty: &Ty) {
         self.borrowing(&[recv], |g, temps, _| {
             let Val::Two(tag, pay) = temps[0] else {
@@ -3733,6 +3773,31 @@ impl<'m> FuncGen<'_, 'm> {
             g.sink().else_().i32_const(0).i64_const(0);
             g.close();
         });
+    }
+
+    /// `j.with(k, x)` (L31): `rt_json_with` takes the receiver's payload and `x` as an object (a
+    /// slot) and returns the `Obj`'s map; the key is borrowed.
+    fn json_with(&mut self, recv: &ir::Expr, args: &[ir::Expr], span: Span) {
+        let xs = [recv, &args[0], &args[1]];
+        let (mark, temps, borrowed) = self.operands_slotting(&xs, |i| i == 1, |i| i == 2);
+        let Val::Two(tag, pay) = temps[0] else {
+            self.sink().unreachable();
+            self.owned.truncate(mark);
+            return;
+        };
+        self.sink().local_get(tag).local_get(pay);
+        self.get(&args[0], temps[1]);
+        self.get(&args[1], temps[2]);
+        let site = self.site(span, WITH_NOT_OBJECT);
+        self.sink().i32_const(site as i32);
+        self.call_rt("rt_json_with");
+        if !borrowed[1] {
+            self.drop_val(temps[1], &args[0].ty);
+        }
+        self.owned.truncate(mark);
+        let m = self.temp(ValType::I32);
+        let obj = lang::json::OBJ as i32;
+        self.sink().local_set(m).i32_const(obj).local_get(m).i64_extend_i32_u();
     }
 
     /// `o.ok_or(e)` as the `Result` type `ty`: `Ok` of the payload (+1) with `e` dropped, or
