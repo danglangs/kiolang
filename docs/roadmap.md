@@ -107,6 +107,19 @@ Most-used Rust crates, and kio's answer to each:
 
 The two that blocked a real backend first, an HTTP client beyond GET (H16) and SQL (H17), are built. `Http` under `--listen` (H19) is built too. What is left, in order: typed JSON decode, streaming bodies, a server database.
 
+## Order of work toward general purpose (2026-11-21)
+
+Feature decisions follow evidence from applications, not other languages' feature lists.
+
+1. Dependable application development: recurring library gaps and helper bugs; predictable tests, failures, diagnostics and deployment.
+2. Outside maintenance: someone else builds a useful application and then changes it, through an upgrade and a recovery from failure (W1, A4).
+3. Reusable libraries: pinned retrieval, documentation, compatibility expectations, internal structure where needed. A public registry later.
+4. Production integrations: Postgres, object storage or messaging, chosen from concrete target applications (H42 explores Postgres). A service reachable through `Http` needs a library wrapper, not a capability.
+5. Long-lived and concurrent execution: cancellation, deadlines, streaming and state ownership defined before syntax (concurrency.md).
+6. Abstraction: the smallest mechanism several real examples justify (L33 collects them first).
+7. Platforms and tools: Linux arm64, formatting, editor diagnostics, whichever blocks a user.
+8. Measured bottlenecks on realistic workloads, gated, without weakening isolation.
+
 ## A target app
 
 A CRUD app over a `Dir` (W9a) proves the language. A target app proves the ecosystem: a small, real web service that an agent writes and an operator runs with exactly its grants. It is kio-web's links app (examples/links): a link shortener with a JSON API, a `Kv` store, a bearer token stored hashed, redirects that count hits, random slugs, expiring links, a log and HTML pages. Each piece it lacked became a task, as kio-web did for `--listen`: L11-L17, H12-H15, K2 and W14.
