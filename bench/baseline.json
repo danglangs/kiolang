@@ -1,5 +1,5 @@
 {
-  "kio": "kio 0.1.7 (cf8d0fe)",
+  "kio": "kio 0.1.8 (39b9bec)",
   "rows": {
     "startup": {
       "value": "0",
@@ -18,32 +18,32 @@
     },
     "strings": {
       "value": "588890",
-      "fuel": 60131215,
-      "peak_memory": 3473408
+      "fuel": 60132095,
+      "peak_memory": 3670016
     },
     "list": {
       "value": "1577147139",
-      "fuel": 958729342,
+      "fuel": 958733364,
       "peak_memory": 18415616
     },
     "map": {
       "value": "4770177159354",
-      "fuel": 340065450,
+      "fuel": 339905895,
       "peak_memory": 4718592
     },
     "hashmap": {
       "value": "4770177159354",
-      "fuel": 244383195,
+      "fuel": 244383966,
       "peak_memory": 5373952
     },
     "tree": {
       "value": "523822424596",
-      "fuel": 1305556687,
+      "fuel": 1305556716,
       "peak_memory": 93913088
     },
     "closures": {
       "value": "333334000000",
-      "fuel": 199821308,
+      "fuel": 199830779,
       "peak_memory": 26542080
     },
     "mandel": {
@@ -53,27 +53,27 @@
     },
     "json": {
       "value": "1048619",
-      "fuel": 621937778,
+      "fuel": 621870508,
       "peak_memory": 15007744
     },
     "json_builtin": {
       "value": "1048619",
-      "fuel": 180733461,
-      "peak_memory": 16252928
+      "fuel": 180787838,
+      "peak_memory": 16384000
     },
     "csv": {
       "value": "657846262417",
-      "fuel": 185854158,
+      "fuel": 185834597,
       "peak_memory": 8388608
     },
     "logscan": {
       "value": "476232435",
-      "fuel": 254934859,
+      "fuel": 254921929,
       "peak_memory": 3932160
     },
     "records": {
       "value": "4374326005253",
-      "fuel": 171834946,
+      "fuel": 171785753,
       "peak_memory": 12189696
     },
     "chars": {
