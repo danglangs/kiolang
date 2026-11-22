@@ -1065,20 +1065,35 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
     page.tests.push(("tested", line));
     let seed = inputs.seed.to_string();
     let setup: Vec<&str> = flags.iter().copied().chain(["--seed", &seed]).collect();
-    let side = |path: &str| {
-        let (tests, out) = captured(true, || test_setup(path, &setup, &inputs.fake_files));
-        tests.map(|t| (run_tests(&t), t)).map_err(|_| out.errors)
+    let fakes = &inputs.fake_files;
+    let set_up = |path: &str| {
+        let (tests, out) = captured(true, || test_setup(path, &setup, fakes));
+        let mut t = tests.map_err(|_| out.errors)?;
+        t.jobs = jobs(&t.flags);
+        Ok::<_, Vec<serde_json::Value>>(t)
     };
-    let (old, new) = (side(&inputs.old.0), side(&inputs.new.0));
+    let old_side = || set_up(&inputs.old.0).map(|t| run_tests(&t));
+    // Both sides' tests at once when no test can see another's effects (`jobs`, T7); OLD's set
+    // up on a thread of its own, as a checked program stays on its thread.
+    let (old, new) = match set_up(&inputs.new.0) {
+        Ok(t) if t.jobs > 1 => std::thread::scope(|s| {
+            let thread = std::thread::Builder::new().stack_size(kio_host::RUN_STACK);
+            let old = thread.spawn_scoped(s, old_side).expect("cannot start a thread");
+            let new = Ok((run_tests(&t), t));
+            (old.join().unwrap_or_else(|p| std::panic::resume_unwind(p)), new)
+        }),
+        new => (old_side(), new.map(|t| (run_tests(&t), t))),
+    };
     let mut sides = json!({});
-    for (name, s) in [("old", &old), ("new", &new)] {
+    let new_results = new.as_ref().map(|(r, _)| r);
+    for (name, s) in [("old", old.as_ref()), ("new", new_results)] {
         sides[name] = match s {
             // A side that predates tests has none: 0 tests, not a failure.
-            Ok((results, _)) if results.is_empty() => {
+            Ok(results) if results.is_empty() => {
                 page.tests.push(("tested", format!("{name}: 0 tests")));
                 json!({"passed": 0, "failed": 0, "errors": []})
             }
-            Ok((results, _)) => {
+            Ok(results) => {
                 let failed = results.iter().filter(|r| r.error.is_some()).count();
                 let mut line = format!("{name}: {} passed, {failed} failed", results.len() - failed);
                 // OLD's failures back nothing; NEW's are the `error` lines below.
@@ -1101,7 +1116,7 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
     }
     // Compared only when both sides ran: a side that did not run has no tests to compare.
     let (old_r, new_r): (&[TestResult], &[TestResult]) = match (&old, &new) {
-        (Ok((o, _)), Ok((n, _))) => (o, n),
+        (Ok(o), Ok((n, _))) => (o, n),
         _ => (&[], &[]),
     };
     let find = |rs: &'_ [TestResult], name: &str| rs.iter().position(|r| r.name == name);
@@ -1194,7 +1209,7 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
             failures.push(result_json(r));
         }
     }
-    let old_failed: Vec<&str> = (old.as_ref().map_or(&[][..], |(r, _)| r).iter())
+    let old_failed: Vec<&str> = (old.as_ref().map_or(&[][..], |r| r).iter())
         .filter(|r| r.error.is_some())
         .map(|r| r.name.as_str())
         .collect();

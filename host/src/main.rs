@@ -151,6 +151,7 @@ const HELP: &str = "kio --version\n       kio deps pin [<prog.kio>]\n       kio 
 /// A program as read: its `(name, source)` files, root first, named as `lang` takes them
 /// (`web.kio` for `mod web;`); the path each was read from and its identity, then `kio.deps`'s
 /// when there is one; and the dependencies `kio.deps` loaded (PK1).
+#[derive(Clone)]
 struct Program {
     files: Vec<(String, String)>,
     paths: Vec<std::path::PathBuf>,
@@ -1352,11 +1353,18 @@ const TEST_CLOCK: &str = "fixed:2026-01-01T00:00:00Z";
 
 /// A checked program and the flags each of its tests is run with.
 struct Tests {
+    program: lang::Program,
+    setup: Setup,
+}
+
+/// All of `Tests` but the checked program, which holds `Rc`s: a thread running tests (`ordered`)
+/// checks its own (`Setup::tests`).
+#[derive(Clone)]
+struct Setup {
     prog: Program,
     /// The grants file's flags, then the command line's limits.
     flags: Vec<String>,
     grants_file: Option<String>,
-    program: lang::Program,
     filter: String,
     /// The program's path as given, for a property's rerun line.
     path: String,
@@ -1375,6 +1383,36 @@ struct Tests {
     /// The engine every run compiles on, made for the flags' `--stack` (T5): a property's cases
     /// and a mutant's runs compile only the functions an earlier run did not.
     engine: Shared,
+    /// Threads the runs may take at once (`ordered`); 1 runs every test in key order, as
+    /// `kio test` does. `kio review` sets it (T7).
+    jobs: usize,
+}
+
+impl std::ops::Deref for Tests {
+    type Target = Setup;
+    fn deref(&self) -> &Setup {
+        &self.setup
+    }
+}
+
+impl std::ops::DerefMut for Tests {
+    fn deref_mut(&mut self) -> &mut Setup {
+        &mut self.setup
+    }
+}
+
+impl Setup {
+    /// These tests with their program checked again, for another thread; it checked before.
+    fn tests(&self) -> Tests {
+        let files: Vec<(&str, &str)> = (self.prog.files.iter())
+            .map(|(n, s)| (n.as_str(), s.as_str()))
+            .collect();
+        let program = lang::check_files_for_tests(&files, &lang::CapTable::v0()).expect("the program checked before");
+        Tests {
+            program,
+            setup: self.clone(),
+        }
+    }
 }
 
 /// One test's result: its error as `--json` shows one, the time it took and its `Log` lines;
@@ -1504,13 +1542,175 @@ fn result_json(r: &TestResult) -> serde_json::Value {
     row
 }
 
-/// Runs every test of `tests` whose name contains its filter, sorted by key.
+/// Runs every test of `tests` whose name contains its filter, sorted by key. With `jobs` above
+/// 1 the example tests run first, on that many threads, then each property, its cases on them.
 fn run_tests(tests: &Tests) -> Vec<TestResult> {
-    let all = tests.program.tests();
-    all.iter()
+    let all: Vec<lang::TestFn> = (tests.program.tests().into_iter())
         .filter(|t| t.name.contains(&tests.filter))
-        .map(|t| run_test(tests, t))
+        .collect();
+    if tests.jobs <= 1 {
+        return all.iter().map(|t| run_test(tests, t)).collect();
+    }
+    let examples: Vec<&str> = (all.iter().filter(|t| t.inputs.is_empty()))
+        .map(|t| t.name.as_str())
+        .collect();
+    let setup = &tests.setup;
+    let mut done = Vec::new();
+    ordered(
+        tests.jobs,
+        examples.len(),
+        || {
+            let local = setup.tests();
+            let fns = local.program.tests();
+            (local, fns)
+        },
+        |(local, fns), i| run_test(local, test_fn(fns, examples[i])),
+        |r| {
+            done.push(r);
+            true
+        },
+    );
+    let mut done = done.into_iter();
+    (all.iter())
+        .map(|t| match t.inputs.is_empty() {
+            true => done.next().expect("every example ran"),
+            false => run_test(tests, t),
+        })
         .collect()
+}
+
+/// Test `name` of `fns`, which has it.
+fn test_fn<'a>(fns: &'a [lang::TestFn], name: &str) -> &'a lang::TestFn {
+    fns.iter().find(|t| t.name == name).expect("the program has the test")
+}
+
+/// The most runs one `kio review` has at once: the HTTP worker pool holds 16 runs each sending a
+/// full batch (`kio_host::MAX_HTTP_WORKERS`).
+const MAX_JOBS: usize = 16;
+
+/// Runs a test may take at once (`Setup::jobs`) when no test can see another's effects: each
+/// grant of `flags` is read-only (a `:ro` `Dir`, a key, a secret, a value), fresh per run
+/// (`:memory:`) or fixed (a seeded `Rng`, a fixed `Clock`), and its fakes are its own. Any other
+/// grant (a writable file or directory, a real host, a `Log`) runs every test in key order, as
+/// `kio test` does.
+fn jobs(flags: &[String]) -> usize {
+    #[cfg(feature = "test-hooks")]
+    if std::env::var_os("KIO_TEST_SERIAL").is_some() {
+        return 1;
+    }
+    let independent = flags.chunks(2).all(|p| {
+        let target = p[1].split_once('=').map_or("", |(_, t)| t);
+        match p[0].as_str() {
+            "--hmac" | "--secret" | "--value" | "--http-methods" | "--http-header" | "--kv-mb" | "--db-mb" => true,
+            "--dir" => target.ends_with(":ro"),
+            "--kv" | "--db" => target == ":memory:",
+            "--clock" => target.starts_with("fixed:"),
+            "--rng" => target.starts_with("seed:"),
+            f => LIMIT_FLAGS.contains(&f),
+        }
+    });
+    match independent {
+        true => std::thread::available_parallelism().map_or(1, |n| n.get().min(MAX_JOBS)),
+        false => 1,
+    }
+}
+
+/// A place among the `MAX_JOBS` test runs a process has at once, given back when dropped: both
+/// sides of a review run their tests together.
+struct RunPlace;
+
+static RUNS: (std::sync::Mutex<usize>, std::sync::Condvar) = (std::sync::Mutex::new(0), std::sync::Condvar::new());
+
+impl RunPlace {
+    fn take() -> RunPlace {
+        let mut live = RUNS.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *live >= MAX_JOBS {
+            live = RUNS.1.wait(live).unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        *live += 1;
+        RunPlace
+    }
+}
+
+impl Drop for RunPlace {
+    fn drop(&mut self) {
+        *RUNS.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) -= 1;
+        RUNS.1.notify_one();
+    }
+}
+
+/// Runs `f(state, i)` for each `i` in `0..n` and hands each result to `take` on this thread, in
+/// order of `i`; once `take` returns false no later `i` starts. With `jobs` above 1, up to `jobs`
+/// threads run `f`, each on a state of its own from `init`; `take` sees what it would with one.
+fn ordered<S, R: Send>(
+    jobs: usize,
+    n: usize,
+    init: impl Fn() -> S + Sync,
+    f: impl Fn(&mut S, usize) -> R + Sync,
+    mut take: impl FnMut(R) -> bool,
+) {
+    use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
+    use std::sync::{Condvar, Mutex, PoisonError};
+    if n == 0 {
+        return;
+    }
+    if jobs <= 1 {
+        let mut state = init();
+        for i in 0..n {
+            if !take(f(&mut state, i)) {
+                return;
+            }
+        }
+        return;
+    }
+    let (next, stop) = (AtomicUsize::new(0), AtomicBool::new(false));
+    let done: (Mutex<Vec<Option<std::thread::Result<R>>>>, Condvar) =
+        (Mutex::new((0..n).map(|_| None).collect()), Condvar::new());
+    std::thread::scope(|scope| {
+        for _ in 0..jobs.min(n) {
+            let work = || {
+                let mut state = None;
+                while !stop.load(Relaxed) {
+                    let i = next.fetch_add(1, Relaxed);
+                    if i >= n {
+                        break;
+                    }
+                    let r = catch_unwind(AssertUnwindSafe(|| f(state.get_or_insert_with(&init), i)));
+                    let failed = r.is_err();
+                    done.0.lock().unwrap_or_else(PoisonError::into_inner)[i] = Some(r);
+                    done.1.notify_all();
+                    if failed {
+                        break;
+                    }
+                }
+            };
+            // Checking and lowering run natively, as on `main`'s thread.
+            let t = std::thread::Builder::new().stack_size(kio_host::RUN_STACK);
+            t.spawn_scoped(scope, work).expect("cannot start a thread");
+        }
+        for i in 0..n {
+            let mut slots = done.0.lock().unwrap_or_else(PoisonError::into_inner);
+            let r = loop {
+                match slots[i].take() {
+                    Some(r) => break r,
+                    None => slots = done.1.wait(slots).unwrap_or_else(PoisonError::into_inner),
+                }
+            };
+            drop(slots);
+            let more = match r {
+                Ok(r) => take(r),
+                Err(panic) => {
+                    stop.store(true, Relaxed);
+                    resume_unwind(panic)
+                }
+            };
+            if !more {
+                stop.store(true, Relaxed);
+                break;
+            }
+        }
+    });
 }
 
 /// `result_lines`, with `verbose` the fuel and peak memory `r` used on its first line, and a note
@@ -1695,19 +1895,22 @@ fn test_setup(path: &str, flags: &[&str], read: &FakeReads) -> Result<Tests, i32
     }
     let engine = Shared::new(stack).map_err(|e| internal(format!("{e:#}")))?;
     Ok(Tests {
-        prog,
-        flags,
-        grants_file,
         program,
-        filter,
-        path: path.to_string(),
-        given: rest.iter().map(|f| f.to_string()).collect(),
-        cases,
-        seed,
-        fakes,
-        records,
-        mutant: false,
-        engine,
+        setup: Setup {
+            prog,
+            flags,
+            grants_file,
+            filter,
+            path: path.to_string(),
+            given: rest.iter().map(|f| f.to_string()).collect(),
+            cases,
+            seed,
+            fakes,
+            records,
+            mutant: false,
+            engine,
+            jobs: 1,
+        },
     })
 }
 
@@ -1915,6 +2118,7 @@ struct Once {
 /// and `Db`, `Clock` at `TEST_CLOCK`, `Rng` seed 1, a `Log` into a buffer), all bound and checked
 /// by `run_program` as `kio run` binds and checks `main`'s.
 fn run_once(tests: &Tests, t: &lang::TestFn, case: Option<(lang::prop::Case, bool)>) -> Once {
+    let _place = RunPlace::take();
     // A grant to a parameter of another test, or of another type, is not this test's: one file
     // can grant `k: Kv` to one test and `k: Hmac` to another.
     let mut flags: Vec<String> = Vec::new();
@@ -2192,30 +2396,53 @@ fn run_property(tests: &Tests, t: &lang::TestFn) -> (Option<serde_json::Value>, 
         }
         each
     };
-    for i in 0..tests.cases {
-        let mut rng = lang::prop::Rng::for_case(tests.seed, i as u64);
+    // Case `i`'s values: the same from any lowering of the program.
+    let seed = tests.seed;
+    let case = |m: &lang::ir::Module, tys: &[lang::ir::Ty], i: usize| -> Vec<lang::Value> {
+        let mut rng = lang::prop::Rng::for_case(seed, i as u64);
         let size = lang::prop::size_of_case(i);
-        let values: Vec<lang::Value> = tys
-            .iter()
-            .map(|ty| lang::prop::generate(&m, ty, &mut rng, size))
-            .collect();
-        info.compiled += 1;
-        let (verdict, log, used) = run_case(tests, t, &values);
-        info.used = info.used.zip(used).map(|(a, b)| Used {
-            fuel: a.fuel + b.fuel,
-            calls: a.calls + b.calls,
-            io: a.io + b.io,
-            peak_memory: a.peak_memory.max(b.peak_memory),
-            ms: a.ms + b.ms,
-        });
-        let error = match verdict {
-            Verdict::Pass => continue,
-            Verdict::Discard => {
-                info.discarded += 1;
-                continue;
+        tys.iter()
+            .map(|ty| lang::prop::generate(m, ty, &mut rng, size))
+            .collect()
+    };
+    // The cases in order until one fails, on `jobs` threads (`ordered`).
+    let (setup, name) = (&tests.setup, t.name.as_str());
+    let mut failed = None;
+    ordered(
+        tests.jobs,
+        tests.cases,
+        || {
+            let local = setup.tests();
+            let m = lang::lower::lower_entry(&local.program, &lang::CapTable::v0(), name);
+            let tys: Vec<lang::ir::Ty> = lang::prop::inputs(&m).into_iter().map(|(_, ty)| ty).collect();
+            let t = test_fn(&local.program.tests(), name).clone();
+            (local, t, m, tys)
+        },
+        |(local, t, m, tys), i| run_case(local, t, &case(m, tys, i)),
+        |(verdict, log, used)| {
+            info.compiled += 1;
+            info.used = info.used.zip(used).map(|(a, b)| Used {
+                fuel: a.fuel + b.fuel,
+                calls: a.calls + b.calls,
+                io: a.io + b.io,
+                peak_memory: a.peak_memory.max(b.peak_memory),
+                ms: a.ms + b.ms,
+            });
+            match verdict {
+                Verdict::Pass => true,
+                Verdict::Discard => {
+                    info.discarded += 1;
+                    true
+                }
+                Verdict::Fail(e) => {
+                    failed = Some((info.compiled - 1, e, log));
+                    false
+                }
             }
-            Verdict::Fail(e) => e,
-        };
+        },
+    );
+    if let Some((i, error, log)) = failed {
+        let values = case(&m, &tys, i);
         if Verdict::Fail(error.clone()).unchecked() || error["kind"] == "internal" || tests.mutant {
             info.input = Some((shown(&values), false));
             return (Some(error), log, info);

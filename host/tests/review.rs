@@ -2302,3 +2302,89 @@ fn test_grants_over_new_sources_are_refused() {
         )
     );
 }
+
+// T7: a side's example tests, a property's cases and a mutant's examples run on several threads
+// when no test can see another's effects; the page is the one a single thread gives.
+
+const CLAMP_OLD: &str = r#"fn clamp(n: Int) -> Int { if n < 0 { 0 } else if n > 100 { 100 } else { n } }
+
+fn count(n: Int) -> Int { let mut i = 0; let mut s = 0; while i < n { s += i; i += 1; } s }
+
+fn main() -> Int { clamp(count(3)) }
+
+#[test]
+fn high() { assert_eq(clamp(500), 99); }
+
+#[test]
+fn low() { assert_eq(clamp(-5), 0); }
+
+#[test]
+fn in_range(n: Int) { assert(clamp(n) >= 0 && clamp(n) <= 100, "range"); }
+"#;
+
+/// CLAMP_OLD capped at 99, with more examples, a property that discards, and one that fails.
+const CLAMP_NEW: &str = r#"fn clamp(n: Int) -> Int { if n < 0 { 0 } else if n > 99 { 99 } else { n } }
+
+fn count(n: Int) -> Int { let mut i = 0; let mut s = 0; while i < n { s += i; i += 1; } s }
+
+fn main() -> Int { clamp(count(3)) }
+
+#[test]
+fn zero_stays() { assert_eq(clamp(0), 0); }
+
+#[test]
+fn high() { assert_eq(clamp(500), 99); }
+
+#[test]
+fn low() { assert_eq(clamp(-5), 0); }
+
+#[test]
+fn mid() { assert_eq(clamp(50), 50); }
+
+#[test]
+fn counts() { assert_eq(count(100), 4950); }
+
+#[test]
+fn in_range(n: Int) { assert(clamp(n) >= 0 && clamp(n) <= 99, "range"); }
+
+#[test]
+fn odd_ones(n: Int) { assume(n % 2 == 1); assert(clamp(n) <= 99, "odd"); }
+
+#[test]
+fn never_capped(n: Int) { assert(clamp(n) != 99, "capped"); }
+"#;
+
+/// `kio review` of `s`, on one thread when `serial` (`KIO_TEST_SERIAL`).
+fn review_threads(s: &Sides, serial: bool) -> (i32, String) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_kio"));
+    cmd.args(["review", &s.new, "--base", &s.old]);
+    cmd.env("TMPDIR", s.dir.path().join("tmp"));
+    if serial {
+        cmd.env("KIO_TEST_SERIAL", "1");
+    }
+    let out = cmd.output().unwrap();
+    (
+        out.status.code().unwrap(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    )
+}
+
+#[test]
+fn threads_give_the_page_one_thread_gives() {
+    let s = Sides::new(CLAMP_OLD, CLAMP_NEW);
+    let (code, out) = review_threads(&s, false);
+    assert_eq!(code, 1, "{out}");
+    let tests = Sides::section(&out, "Tests");
+    for line in [
+        "  not checked  old: 2 passed, 1 failed; the base fails its own tests",
+        "  tested       new: 7 passed, 1 failed",
+        "  error        FAIL never_capped  (4 cases compiled; seed 1)",
+        "  not checked  failed in old: high",
+    ] {
+        assert!(tests.contains(&line.to_string()), "{line}\n{out}");
+    }
+    assert!(out.contains("odd_ones: 100 cases compiled; seed 1; "), "{out}");
+    assert!(out.contains("  minimal input: n = 99"), "{out}");
+    assert!(out.contains("killed by: "), "{out}");
+    assert_eq!(review_threads(&s, true), (code, out));
+}

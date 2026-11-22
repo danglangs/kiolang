@@ -123,7 +123,7 @@ pub(super) fn run(
     let order = draw(&sites, &groups, inputs.seed, inputs.mutants);
     let fuel_t = limit(&base.flags, "--fuel");
     let runner = Runner {
-        base,
+        base: &base.setup,
         fuel_t,
         fuel_max: fuel_t.unwrap_or(Limits::default().fuel),
         start: std::time::Instant::now(),
@@ -205,30 +205,68 @@ pub(super) fn run(
             }
         }
     }
-    for &i in order.iter().take_while(|_| unfinished.is_none()) {
-        let s = &sites[i];
-        match runner.run(new, &inputs.new.0, s, &root_reach) {
-            Ok(Ran::DidNotCheck(_)) => did_not_check += 1,
-            Ok(Ran::Ran(end, tests_run, fuel)) => {
-                ran += 1;
-                let (from, (n, col, around)) = shown_site(&new.files[s.file].1, s);
-                let to = shown_text(&s.to);
-                let description = match to.is_empty() {
-                    true => format!("`{from}` dropped in `{around}`"),
-                    false => format!("`{from}` -> `{to}` in `{around}`"),
-                };
-                let source = json!({"source": "generated", "written": false});
-                out.push(row(
-                    source,
-                    s,
-                    json_path(new, s.file),
-                    ((n, col), from, to, description),
-                    &end,
-                    (tests_run, fuel),
-                ));
+    // The written mutants ran to the end; then each generated one's outcome, false once the
+    // runs stop.
+    let go = unfinished.is_none();
+    let mut record = |s: &Site, r: Result<Ran, Stop>| match r {
+        Ok(Ran::DidNotCheck(_)) => {
+            did_not_check += 1;
+            true
+        }
+        Ok(Ran::Ran(end, tests_run, fuel)) => {
+            ran += 1;
+            let (from, (n, col, around)) = shown_site(&new.files[s.file].1, s);
+            let to = shown_text(&s.to);
+            let description = match to.is_empty() {
+                true => format!("`{from}` dropped in `{around}`"),
+                false => format!("`{from}` -> `{to}` in `{around}`"),
+            };
+            let source = json!({"source": "generated", "written": false});
+            out.push(row(
+                source,
+                s,
+                json_path(new, s.file),
+                ((n, col), from, to, description),
+                &end,
+                (tests_run, fuel),
+            ));
+            true
+        }
+        Err(stop) => {
+            unfinished = Some(stop.line(ran, total));
+            false
+        }
+    };
+    let path = &inputs.new.0;
+    if go && runner.base.jobs > 1 {
+        // Every mutant's examples first, a mutant to a thread (`ordered`), then in order the
+        // properties of each that no example killed, their cases on the threads.
+        let mut firsts = Vec::new();
+        let examples = |_: &mut (), k: usize| runner.examples(new, path, &sites[order[k]], &root_reach);
+        ordered(
+            runner.base.jobs,
+            order.len(),
+            || (),
+            examples,
+            |r| {
+                let more = r.is_ok();
+                firsts.push(r);
+                more
+            },
+        );
+        for (k, first) in firsts.into_iter().enumerate() {
+            let s = &sites[order[k]];
+            let r = first.and_then(|f| match f {
+                Err(why) => Ok(Ran::DidNotCheck(why)),
+                Ok(runs) => runner.properties(new, path, s, &root_reach, runs),
+            });
+            if !record(s, r) {
+                break;
             }
-            Err(stop) => {
-                unfinished = Some(stop.line(ran, total));
+        }
+    } else if go {
+        for &i in &order {
+            if !record(&sites[i], runner.run(new, path, &sites[i], &root_reach)) {
                 break;
             }
         }
@@ -369,7 +407,7 @@ fn place(
 /// What runs each mutant: T's tests as set up (`base`), T's own `--fuel` and `--timeout`, the
 /// most fuel a test may have, and when the runs began (the budget is shared).
 struct Runner<'a> {
-    base: &'a Tests,
+    base: &'a Setup,
     fuel_t: Option<u64>,
     fuel_max: u64,
     start: std::time::Instant,
@@ -401,6 +439,15 @@ impl Stop {
     }
 }
 
+/// A mutant's runs so far: how they ended, the tests run, their fuel, and whether one killed it.
+#[derive(Default)]
+struct Runs {
+    end: End,
+    tests_run: usize,
+    fuel: u64,
+    killed: bool,
+}
+
 impl Runner<'_> {
     /// `prog` (at `path`) with edit `s`, checked, then run on the tests of `reaching` that reach
     /// its function, examples first, until one fails.
@@ -411,85 +458,153 @@ impl Runner<'_> {
         s: &Site,
         reaching: &[(&TestResult, BTreeSet<String>)],
     ) -> Result<Ran, Stop> {
-        let over = || self.start.elapsed().as_secs() >= BUDGET_SECS;
-        if over() {
-            return Err(Stop::Budget);
+        match self.examples(prog, path, s, reaching)? {
+            Err(why) => Ok(Ran::DidNotCheck(why)),
+            Ok(runs) => self.properties(prog, path, s, reaching, runs),
         }
+    }
+
+    fn over(&self) -> bool {
+        self.start.elapsed().as_secs() >= BUDGET_SECS
+    }
+
+    /// `prog` (at `path`) with edit `s`, as tests to run, or the first error if it does not check.
+    fn mutant(&self, prog: &Program, path: &str, s: &Site) -> Result<Tests, String> {
         let mut files = prog.files.clone();
         files[s.file].1.replace_range(s.start..s.end, &s.to);
         let program = match kio_host::check_program(&files) {
             Ok(p) => p,
             Err(diags) => {
                 let first = diags.first().map_or(String::new(), |d| d.message.clone());
-                return Ok(Ran::DidNotCheck(ascii_chars(&cut(&one_line(&first), 120))));
+                return Err(ascii_chars(&cut(&one_line(&first), 120)));
             }
         };
-        let base = self.base;
-        let mut run = Tests {
-            prog: Program {
-                files,
-                paths: prog.paths.clone(),
-                ids: prog.ids.clone(),
-                deps: prog.deps.clone(),
-            },
-            flags: Vec::new(),
-            grants_file: base.grants_file.clone(),
+        Ok(Tests {
             program,
-            filter: String::new(),
-            path: path.to_string(),
-            given: base.given.clone(),
-            cases: base.cases,
-            seed: base.seed,
-            fakes: base.fakes.clone(),
-            records: base.records.clone(),
-            mutant: true,
-            engine: base.engine.clone(),
-        };
-        // Examples first: the cheapest kill.
-        let mut reaching: Vec<&TestResult> = (reaching.iter())
-            .filter(|(_, r)| r.contains(&s.func))
+            setup: Setup {
+                prog: Program {
+                    files,
+                    paths: prog.paths.clone(),
+                    ids: prog.ids.clone(),
+                    deps: prog.deps.clone(),
+                },
+                flags: Vec::new(),
+                filter: String::new(),
+                path: path.to_string(),
+                mutant: true,
+                ..self.base.clone()
+            },
+        })
+    }
+
+    /// The tests of `reaching` that reach `s`'s function and that `run` has, examples first:
+    /// the cheapest kill.
+    fn reaching<'r>(s: &Site, reaching: &[(&'r TestResult, BTreeSet<String>)], run: &Tests) -> Vec<&'r TestResult> {
+        let all = run.program.tests();
+        let mut tests: Vec<&TestResult> = (reaching.iter())
+            .filter(|(t, r)| r.contains(&s.func) && all.iter().any(|x| x.name == t.name))
             .map(|(t, _)| *t)
             .collect();
-        reaching.sort_by_key(|t| (t.prop.is_some(), t.name.as_str()));
-        let all = run.program.tests();
-        let (mut end, mut tests_run, mut fuel) = (End::default(), 0, 0);
-        for t in reaching {
-            let Some(tf) = all.iter().find(|x| x.name == t.name) else {
-                continue;
-            };
+        tests.sort_by_key(|t| (t.prop.is_some(), t.name.as_str()));
+        tests
+    }
+
+    /// The mutant's example tests, one at a time until one kills it, or the first error if it
+    /// does not check. Runs on any thread (`ordered`).
+    fn examples(
+        &self,
+        prog: &Program,
+        path: &str,
+        s: &Site,
+        reaching: &[(&TestResult, BTreeSet<String>)],
+    ) -> Result<Result<Runs, String>, Stop> {
+        if self.over() {
+            return Err(Stop::Budget);
+        }
+        let mut run = match self.mutant(prog, path, s) {
+            Ok(run) => run,
+            Err(why) => return Ok(Err(why)),
+        };
+        let mut runs = Runs::default();
+        for t in Self::reaching(s, reaching, &run)
+            .into_iter()
+            .filter(|t| t.prop.is_none())
+        {
+            if runs.killed {
+                break;
+            }
             // A mutant cut short is not counted as run.
-            if over() {
+            if self.over() {
                 return Err(Stop::Budget);
             }
-            let ten = t.used.map_or(u64::MAX, |u| u.fuel.saturating_mul(FUEL_FACTOR));
-            let cap = ten.clamp(1, self.fuel_max);
-            run.flags = base.flags.clone();
-            run.flags.extend(["--fuel".to_string(), cap.to_string()]);
-            let r = run_test(&run, tf);
-            tests_run += 1;
-            fuel += r.used.map_or(0, |u| u.fuel);
-            let Some(e) = &r.error else { continue };
-            let name = t.name.clone();
-            // T's own limit, not ten times the test's fuel, stopped it: not a kill.
-            let t_limit = match e["kind"].as_str().unwrap_or_default() {
-                "discard" => {
-                    end.discarded.get_or_insert(name);
-                    continue;
-                }
-                "fuel" if self.fuel_t == Some(cap) && cap < ten => Some(format!("--fuel {cap}")),
-                k @ ("timeout" | "memory" | "stack" | "calls" | "io") => {
-                    limit(&base.flags, &format!("--{k}")).map(|n| format!("--{k} {n}"))
-                }
-                _ => None,
-            };
-            if let Some(l) = t_limit {
-                end.stopped.get_or_insert((name, format!("stopped by T's {l}")));
-                continue;
-            }
-            end.killed = Some((name, how(e).map_err(Stop::Internal)?));
-            break;
+            runs.killed = self.one(&mut run, t, &mut runs)?;
         }
-        Ok(Ran::Ran(end, tests_run, fuel))
+        Ok(Ok(runs))
+    }
+
+    /// Then, unless an example killed it, the mutant's properties, each its cases on `jobs`
+    /// threads, until one kills it.
+    fn properties(
+        &self,
+        prog: &Program,
+        path: &str,
+        s: &Site,
+        reaching: &[(&TestResult, BTreeSet<String>)],
+        mut runs: Runs,
+    ) -> Result<Ran, Stop> {
+        let any = reaching.iter().any(|(t, r)| t.prop.is_some() && r.contains(&s.func));
+        if !runs.killed && any {
+            let mut run = match self.mutant(prog, path, s) {
+                Ok(run) => run,
+                Err(why) => return Ok(Ran::DidNotCheck(why)),
+            };
+            for t in Self::reaching(s, reaching, &run)
+                .into_iter()
+                .filter(|t| t.prop.is_some())
+            {
+                if runs.killed {
+                    break;
+                }
+                if self.over() {
+                    return Err(Stop::Budget);
+                }
+                runs.killed = self.one(&mut run, t, &mut runs)?;
+            }
+        }
+        Ok(Ran::Ran(runs.end, runs.tests_run, runs.fuel))
+    }
+
+    /// Runs test `t` on mutant `run`, at ten times the fuel it used on NEW (at most T's), and
+    /// counts it in `runs`: whether it killed the mutant.
+    fn one(&self, run: &mut Tests, t: &TestResult, runs: &mut Runs) -> Result<bool, Stop> {
+        let ten = t.used.map_or(u64::MAX, |u| u.fuel.saturating_mul(FUEL_FACTOR));
+        let cap = ten.clamp(1, self.fuel_max);
+        run.flags = self.base.flags.clone();
+        run.flags.extend(["--fuel".to_string(), cap.to_string()]);
+        let all = run.program.tests();
+        let r = run_test(run, test_fn(&all, &t.name));
+        runs.tests_run += 1;
+        runs.fuel += r.used.map_or(0, |u| u.fuel);
+        let Some(e) = &r.error else { return Ok(false) };
+        let name = t.name.clone();
+        // T's own limit, not ten times the test's fuel, stopped it: not a kill.
+        let t_limit = match e["kind"].as_str().unwrap_or_default() {
+            "discard" => {
+                runs.end.discarded.get_or_insert(name);
+                return Ok(false);
+            }
+            "fuel" if self.fuel_t == Some(cap) && cap < ten => Some(format!("--fuel {cap}")),
+            k @ ("timeout" | "memory" | "stack" | "calls" | "io") => {
+                limit(&self.base.flags, &format!("--{k}")).map(|n| format!("--{k} {n}"))
+            }
+            _ => None,
+        };
+        if let Some(l) = t_limit {
+            runs.end.stopped.get_or_insert((name, format!("stopped by T's {l}")));
+            return Ok(false);
+        }
+        runs.end.killed = Some((name, how(e).map_err(Stop::Internal)?));
+        Ok(true)
     }
 }
 

@@ -40,6 +40,12 @@ url = "2"
 wasmparser = "0.261"
 wasmtime = { version = "50", default-features = false, features = ["anyhow", "backtrace", "component-model", "cranelift", "demangle", "incremental-cache", "addr2line", "parallel-compilation", "pooling-allocator", "runtime", "std"] }
 
+# The Armv8 SHA-256 instructions instead of sha2's portable code on Apple silicon (x86-64 uses
+# SHA-NI without a feature): Cranelift keys every function of every compile by a SHA-256, a
+# third of `kio review`'s CPU on A4's app with the portable code (T7, open question 359).
+[target.'cfg(all(target_arch = "aarch64", target_vendor = "apple"))'.dependencies]
+sha2 = { version = "0.10", features = ["asm"] }
+
 [dev-dependencies]
 kio = { path = ".", features = ["test-hooks"] }
 kiogen = { path = "../tools/kiogen" }
