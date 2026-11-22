@@ -2354,10 +2354,10 @@ fn odd_ones(n: Int) { assume(n % 2 == 1); assert(clamp(n) <= 99, "odd"); }
 fn never_capped(n: Int) { assert(clamp(n) != 99, "capped"); }
 "#;
 
-/// `kio review` of `s`, on one thread when `serial` (`KIO_TEST_SERIAL`).
-fn review_threads(s: &Sides, serial: bool) -> (i32, String) {
+/// `kio review` of `s` with `args`, on one thread when `serial` (`KIO_TEST_SERIAL`).
+fn review_threads(s: &Sides, args: &[&str], serial: bool) -> (i32, String) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_kio"));
-    cmd.args(["review", &s.new, "--base", &s.old]);
+    cmd.args(["review", &s.new, "--base", &s.old]).args(args);
     cmd.env("TMPDIR", s.dir.path().join("tmp"));
     if serial {
         cmd.env("KIO_TEST_SERIAL", "1");
@@ -2372,7 +2372,7 @@ fn review_threads(s: &Sides, serial: bool) -> (i32, String) {
 #[test]
 fn threads_give_the_page_one_thread_gives() {
     let s = Sides::new(CLAMP_OLD, CLAMP_NEW);
-    let (code, out) = review_threads(&s, false);
+    let (code, out) = review_threads(&s, &[], false);
     assert_eq!(code, 1, "{out}");
     let tests = Sides::section(&out, "Tests");
     for line in [
@@ -2386,5 +2386,30 @@ fn threads_give_the_page_one_thread_gives() {
     assert!(out.contains("odd_ones: 100 cases compiled; seed 1; "), "{out}");
     assert!(out.contains("  minimal input: n = 99"), "{out}");
     assert!(out.contains("killed by: "), "{out}");
-    assert_eq!(review_threads(&s, true), (code, out));
+    assert_eq!(review_threads(&s, &[], true), (code, out));
+}
+
+/// Each test fills a `Db` with 120 MB; SQLite's heap (256 MB) is the process's, so at
+/// `--db-mb 200` only one run may hold a `Db` at a time, and every test passes as alone.
+#[test]
+fn runs_with_a_db_fit_sqlites_heap() {
+    let fill = "fn fill(db: Db) -> Result<Int, DbErr> { db.exec(\"CREATE TABLE t (b BLOB)\", [])?; let mut i = 0; while i < 120 { db.exec(\"INSERT INTO t VALUES (randomblob(1000000))\", [])?; i += 1; } Ok(i) }\n\nfn main() -> Int { 1 }\n";
+    let tests: String = (1..=4)
+        .map(|i| format!("\n#[test]\nfn fill{i}(db: Db) {{ assert_eq(fill(db), Ok(120)); }}\n"))
+        .collect();
+    let src = format!("{fill}{tests}");
+    let s = Sides::new(&src, &src);
+    let t = write(s.dir.path(), "t.grants", "--db-mb 200\n");
+    let (code, out) = review_threads(&s, &["--test-grants", &t], false);
+    assert_eq!(code, 0, "{out}");
+    let tests = Sides::section(&out, "Tests");
+    assert!(
+        tests.contains(&"  tested       new: 4 passed, 0 failed".to_string()),
+        "{out}"
+    );
+    assert!(
+        tests.contains(&"  tested       old: 4 passed, 0 failed".to_string()),
+        "{out}"
+    );
+    assert_eq!(review_threads(&s, &["--test-grants", &t], true), (code, out));
 }

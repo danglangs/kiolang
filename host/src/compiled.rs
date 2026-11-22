@@ -386,12 +386,24 @@ impl Shared {
         self.cached
     }
 
+    /// An engine like this one, for its stack, that compiles on the calling thread alone.
+    pub fn one_thread(&self) -> Result<Self> {
+        Self::compiling(self.stack, false)
+    }
+
     /// An engine for runs with a `stack`-byte stack limit (`Limits::stack`): the runtime's
     /// functions from the binary, and what its runs compile kept in memory behind them
     /// (`runtime_cache::engine` with `keep`).
     pub fn new(stack: usize) -> Result<Self> {
+        Self::compiling(stack, true)
+    }
+
+    /// `new`, compiling each program on the calling thread alone unless `parallel` (T7: runs
+    /// already on threads of their own add no more).
+    pub fn compiling(stack: usize, parallel: bool) -> Result<Self> {
         let mut config = config::compile_config();
         set_stack(&mut config, stack);
+        config.parallel_compilation(parallel);
         let (engine, cached) = crate::runtime_cache::engine(config, true)?;
         let ticker = Arc::new(Ticker(spawn_ticker(&engine)));
         Ok(Shared {

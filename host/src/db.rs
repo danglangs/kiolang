@@ -43,7 +43,7 @@ const LOCK_POLL: Duration = Duration::from_micros(100);
 const PROGRESS_OPS: i32 = 1_000;
 /// The most memory SQLite may hold in this process, all connections together: temp tables and
 /// sorts live there (`temp_store=MEMORY`), so a runaway statement fails with `too-large`.
-const HEAP_MAX: i64 = 256 << 20;
+pub const HEAP_MAX: i64 = 256 << 20;
 /// The largest database, in MB, without `--db-mb`: the `--kv-mb` default.
 pub const DB_MB: u64 = 64;
 /// Bytes a host string function scans between checks of the run's deadline.

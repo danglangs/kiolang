@@ -1592,8 +1592,9 @@ const MAX_JOBS: usize = 16;
 /// grant of `flags` is read-only (a `:ro` `Dir`, a key, a secret, a value), fresh per run
 /// (`:memory:`) or fixed (a seeded `Rng`, a fixed `Clock`), and its fakes are its own. Any other
 /// grant (a writable file or directory, a real host, a `Log`) runs every test in key order, as
-/// `kio test` does.
-fn jobs(flags: &[String]) -> usize {
+/// `kio test` does. When a test takes a `Db` (`db`), as many as SQLite's heap, shared by the
+/// process (`db::HEAP_MAX`), holds at `--db-mb` each, so no run is refused for another's rows.
+fn jobs(flags: &[String], db: bool) -> usize {
     #[cfg(feature = "test-hooks")]
     if std::env::var_os("KIO_TEST_SERIAL").is_some() {
         return 1;
@@ -1609,22 +1610,43 @@ fn jobs(flags: &[String]) -> usize {
             f => LIMIT_FLAGS.contains(&f),
         }
     });
-    match independent {
-        true => std::thread::available_parallelism().map_or(1, |n| n.get().min(MAX_JOBS)),
-        false => 1,
+    if !independent {
+        return 1;
+    }
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get().min(MAX_JOBS));
+    let db_mb = (flags.chunks(2).rev())
+        .find(|p| p[0] == "--db-mb")
+        .and_then(|p| p[1].parse::<u64>().ok())
+        .unwrap_or(kio_host::db::DB_MB);
+    let fit = (kio_host::db::HEAP_MAX as u64 >> 20) / db_mb.max(1);
+    match db {
+        true => cores.min(fit as usize).max(1),
+        false => cores,
     }
 }
 
-/// A place among the `MAX_JOBS` test runs a process has at once, given back when dropped: both
-/// sides of a review run their tests together.
+/// Whether a test of `program` takes a `Db`.
+fn opens_db(program: &lang::Program) -> bool {
+    program
+        .tests()
+        .iter()
+        .any(|t| t.params.iter().any(|(_, ty)| ty == "Db"))
+}
+
+/// A place among the test runs a process has at once (`RUN_LIMIT`), given back when dropped:
+/// both sides of a review run their tests together.
 struct RunPlace;
 
 static RUNS: (std::sync::Mutex<usize>, std::sync::Condvar) = (std::sync::Mutex::new(0), std::sync::Condvar::new());
 
+/// The most test runs at once in this process: `MAX_JOBS`, or what `kio review` sets (`jobs`).
+static RUN_LIMIT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(MAX_JOBS);
+
 impl RunPlace {
     fn take() -> RunPlace {
+        let limit = RUN_LIMIT.load(std::sync::atomic::Ordering::Relaxed).max(1);
         let mut live = RUNS.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        while *live >= MAX_JOBS {
+        while *live >= limit {
             live = RUNS.1.wait(live).unwrap_or_else(std::sync::PoisonError::into_inner);
         }
         *live += 1;

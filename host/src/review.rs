@@ -1066,16 +1066,37 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
     let seed = inputs.seed.to_string();
     let setup: Vec<&str> = flags.iter().copied().chain(["--seed", &seed]).collect();
     let fakes = &inputs.fake_files;
-    let set_up = |path: &str| {
-        let (tests, out) = captured(true, || test_setup(path, &setup, fakes));
-        let mut t = tests.map_err(|_| out.errors)?;
-        t.jobs = jobs(&t.flags);
-        Ok::<_, Vec<serde_json::Value>>(t)
+    // Threads for the runs (`jobs`, T7), at most that many runs at once on both sides together.
+    let new_t = captured(true, || test_setup(&inputs.new.0, &setup, fakes));
+    let pairs: Vec<(&str, &str)> = (inputs.old.1.files.iter())
+        .map(|(n, s)| (n.as_str(), s.as_str()))
+        .collect();
+    let old_db = lang::check_files_for_tests(&pairs, &lang::CapTable::v0()).is_ok_and(|p| opens_db(&p));
+    let n = match &new_t.0 {
+        Ok(t) => jobs(&t.flags, old_db || opens_db(&t.program)),
+        Err(_) => 1,
     };
-    let old_side = || set_up(&inputs.old.0).map(|t| run_tests(&t));
-    // Both sides' tests at once when no test can see another's effects (`jobs`, T7); OLD's set
-    // up on a thread of its own, as a checked program stays on its thread.
-    let (old, new) = match set_up(&inputs.new.0) {
+    RUN_LIMIT.store(n, std::sync::atomic::Ordering::Relaxed);
+    let threaded = |mut t: Tests| -> Result<Tests, Vec<serde_json::Value>> {
+        t.jobs = n;
+        // Runs on more than half the cores compile each on its own thread: Wasmtime's threads
+        // would come on top of them, and a run near its --timeout could cross it.
+        let cores = std::thread::available_parallelism().map_or(1, |c| c.get());
+        if n > 1 && n * 2 > cores {
+            t.engine = t.engine.one_thread().map_err(|e| {
+                vec![json!({"kind": "internal", "message": format!("{e:#}"), "hint": null, "file": null, "line": null, "col": null})]
+            })?;
+        }
+        Ok(t)
+    };
+    let old_side = || {
+        let (tests, out) = captured(true, || test_setup(&inputs.old.0, &setup, fakes));
+        tests.map_err(|_| out.errors).and_then(threaded).map(|t| run_tests(&t))
+    };
+    let (tests, out) = new_t;
+    // Both sides' tests at once when no test can see another's effects; OLD's set up on a
+    // thread of its own, as a checked program stays on its thread.
+    let (old, new) = match tests.map_err(|_| out.errors).and_then(threaded) {
         Ok(t) if t.jobs > 1 => std::thread::scope(|s| {
             let thread = std::thread::Builder::new().stack_size(kio_host::RUN_STACK);
             let old = thread.spawn_scoped(s, old_side).expect("cannot start a thread");
