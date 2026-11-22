@@ -227,7 +227,6 @@ Compiled to native code through Wasm, steady execution runs at 1.1-2x Rust on mo
 
 - **Available today:** everything under [What works](#what-works), in the [latest release](https://github.com/danglangs/kiolang/releases/latest).
 - **Being evaluated:** a deterministic gate that rejects changes with no reader, generator and reviewer agents against Python at equal evidence, and outside developers reviewing real changes (tasks G1, G2 and W1 in [product-todo](docs/product-todo.md)).
-- **In the next release:** what maintaining an app across releases asked for ([A4](docs/proposals/a4-findings.md)): an [upgrade guide](docs/upgrading.md), a check that refuses a write passed to `query`, and a faster `kio review`.
 
 Where work stands: [docs/status.md](docs/status.md).
 
