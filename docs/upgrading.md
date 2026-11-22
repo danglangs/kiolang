@@ -2,6 +2,11 @@
 
 What a program, a grants file or a script must change for each release, newest first, with a command that finds each place to look. Run them from the program's directory. To see what an upgrade changed in a program's tests and authority, `kio review new/app.kio --base old/app.kio` under the new binary compares the two trees ([guide](guide.md#reviewing-a-change)); an old tree failing its own tests there is the upgrade's doing.
 
+## 0.1.9
+
+- **`kio check` refuses a literal write passed to `Db.query`** (L34): `db.query("INSERT ..")` (also `UPDATE`, `DELETE`, `REPLACE`, `CREATE`, `DROP`, `ALTER`, and `WITH .. INSERT|UPDATE|DELETE|REPLACE`) is a check error at the SQL, "`query` only reads; this statement writes". Such a call has been refused at run time since 0.1.6; it now fails before running. Find them: `grep -rnE 'query\([[:space:]]*"[[:space:]]*(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|WITH)' --include='*.kio' .` (misses SQL split over lines or held in a variable, which the host still refuses at run time). Fix: `exec`, or `exec_rows` for `RETURNING`.
+- Fuel is back to 0.1.7's on most programs (C27): 0.1 to 1.1% less than 0.1.8; no action.
+
 ## 0.1.8
 
 None breaking.
