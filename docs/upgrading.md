@@ -2,6 +2,10 @@
 
 What a program, a grants file or a script must change for each release, newest first, with a command that finds each place to look. Run them from the program's directory. To see what an upgrade changed in a program's tests and authority, `kio review new/app.kio --base old/app.kio` under the new binary compares the two trees ([guide](guide.md#reviewing-a-change)); an old tree failing its own tests there is the upgrade's doing.
 
+## 0.1.10
+
+- **`kio review`'s page reads differently** (R1c): a caret line (unlabelled, `^` under the edited token) follows each generated survivor; Not checked grant lines lose their `(changed: f, g)` suffix, and each changed function is named once on its own line, `f, g: grant1, grant2 (changed)` (`(new entry)` for an `--entry` the base lacks); a Resources row whose test reaches no changed function ends `; unchanged code`. Scripts that parse the text page: `grep -rn 'kio review' --exclude='*.kio' .`; read `--json` instead, whose Not checked and Resources rows are unchanged (mutant rows gain `caret`).
+
 ## 0.1.9
 
 - **`kio check` refuses a literal write passed to `Db.query`** (L34): `db.query("INSERT ..")` (also `UPDATE`, `DELETE`, `REPLACE`, `CREATE`, `DROP`, `ALTER`, and `WITH .. INSERT|UPDATE|DELETE|REPLACE`) is a check error at the SQL, "`query` only reads; this statement writes". Such a call has been refused at run time since 0.1.6; it now fails before running. Find them: `grep -rnE 'query\([[:space:]]*"[[:space:]]*(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|WITH)' --include='*.kio' .` (misses SQL split over lines or held in a variable, which the host still refuses at run time). Fix: `exec`, or `exec_rows` for `RETURNING`.

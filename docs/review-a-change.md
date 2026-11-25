@@ -2,11 +2,11 @@
 
 An agent hands you a change to a kio program. This walkthrough gets the two versions side by side, runs `kio review` on them, reads the page it prints, and ends in one of three decisions. Every flag and line format is in the reference, [guide.md, Reviewing a change](guide.md#reviewing-a-change); this page is the workflow.
 
-All output below is from real runs: section 7's pages of kio 0.1.9 with R1c's page changes, the rest of kio 0.1.5; the commit in each `Identity` is elided.
+All output below is from real runs: section 7's pages of kio 0.1.10, the rest of kio 0.1.5; the commit in each `Identity` is elided.
 
 ## 1. What you need
 
-- kio 0.1.5 or later (`kio --version`). No Rust: download a release as in [first-job.md](first-job.md#1-download), e.g. `https://github.com/danglangs/kiolang/releases/latest/download/kio-aarch64-apple-darwin.tar.gz`.
+- kio 0.1.10 or later (`kio --version`); 0.1.5-0.1.9 print the same sections without the survivor carets and with `(changed: ..)` on each grant line. No Rust: download a release as in [first-job.md](first-job.md#1-download), e.g. `https://github.com/danglangs/kiolang/releases/latest/download/kio-aarch64-apple-darwin.tar.gz`.
 - For the worked example in section 7a, a checkout of [kio-web](https://github.com/danglangs/kio-web).
 
 ## 2. Get the change as two directories
@@ -221,7 +221,7 @@ Not checked
   not checked  worker.kio: flow::backoff_ms, flow::claim, flow::finish, flow::init, flow::int_of, flow::text_of, flow::try_claim: db (new entry)
   not checked  tests and properties were written by the same author as the code unless stated
 Identity
-  kio 0.1.9 (<commit>)
+  kio 0.1.10 (<commit>)
   old ../../../flow-old/examples/flow/api.kio sha256:889e267b...
   ...
   test seed 1
