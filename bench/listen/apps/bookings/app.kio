@@ -1,0 +1,45 @@
+// POST /bookings: parse a JSON body, validate it, answer 201 with a JSON object (booking.kio's shape).
+struct Resp { status: Int, body: Json }
+
+fn err(status: Int, msg: Str) -> Resp {
+    let mut m: Map<Str, Json> = Map::new();
+    m.insert("error", Json::Str(msg));
+    Resp { status: status, body: Json::Obj(m) }
+}
+
+fn valid_email(e: Str) -> Bool {
+    if e.len() < 3 || e.len() > 254 { return false; }
+    let parts = e.split("@");
+    if parts.len() != 2 || parts[0] == "" || parts[1] == "" { return false; }
+    if !parts[1].contains(".") || parts[1].starts_with(".") || parts[1].ends_with(".") { return false; }
+    for c in e.to_bytes() { if c <= 32 || c == 127 { return false; } }
+    true
+}
+
+fn handle(method: Str, target: Str, body: Bytes) -> Resp {
+    if method != "POST" || target != "/bookings" { return err(404, "no such route"); }
+    let Some(text) = body.try_to_str() else { return err(400, "body is not UTF-8"); };
+    let Ok(doc) = text.parse_json() else { return err(400, "body is not valid JSON"); };
+    let Some(m) = doc.as_map() else { return err(400, "body must be a JSON object"); };
+    let email = match m.get("email") { Some(Json::Str(s)) => s, _ => return err(400, "`email` must be a string") };
+    let name = match m.get("name") { Some(Json::Str(s)) => s.trim(), _ => return err(400, "`name` must be a string") };
+    let slot = match m.get("slot") { Some(Json::Num(n)) => n, _ => return err(400, "`slot` must be an integer") };
+    let tags = match m.get("tags") { Some(Json::Arr(t)) => t, _ => return err(400, "`tags` must be a list") };
+    if !valid_email(email) { return err(400, "`email` is not an address"); }
+    if name == "" || name.len() > 100 { return err(400, "`name` must be 1-100 bytes"); }
+    if slot < 1 || slot > 10000 { return err(400, "`slot` out of range"); }
+    if tags.len() > 10 { return err(400, "at most 10 tags"); }
+    for t in tags { if t.as_str().is_none() { return err(400, "tags are strings"); } }
+    let mut out: Map<Str, Json> = Map::new();
+    out.insert("id", Json::Num(slot * 7));
+    out.insert("email", Json::Str(email.to_lowercase()));
+    out.insert("name", Json::Str(name));
+    out.insert("tags", Json::Num(tags.len()));
+    out.insert("status", Json::Str("booked"));
+    Resp { status: 201, body: Json::Obj(out) }
+}
+
+fn main(req: Incoming, res: Outgoing) -> Result<(), WebErr> {
+    let r = handle(req.method(), req.target(), req.body());
+    res.send(r.status, ["content-type"], ["application/json"], r.body.to_json().to_bytes())
+}

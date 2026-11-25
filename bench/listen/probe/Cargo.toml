@@ -1,0 +1,17 @@
+# The C23 in-process probe: `Server::handle` in a loop on N threads, no sockets, hyper or tokio.
+# Outside the workspace (as bench/interp); its Cargo.lock starts from the workspace's, so the
+# host builds with the same Wasmtime.
+[package]
+name = "kio-listen-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+kio = { path = "../../../host" }
+libc = "0.2"
+
+[profile.release]
+opt-level = 3

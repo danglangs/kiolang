@@ -1,0 +1,43 @@
+name: listen-bench
+# C24: `--listen` per request on Linux x86-64 (bench/listen/run.sh). Run by hand only.
+on:
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: interleaved kio/Rust rounds
+        default: '5'
+      requests:
+        description: measured requests per run
+        default: '50000'
+permissions:
+  contents: read
+jobs:
+  listen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.100.0 # as rust-toolchain.toml
+          targets: wasm32-unknown-unknown
+      - run: cargo install oha --version 1.17.0 --locked
+      # perf for the running kernel (an Azure one); if its package is missing, any packaged perf.
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y linux-tools-common "linux-tools-$(uname -r)" || sudo apt-get install -y linux-tools-common linux-tools-azure linux-tools-generic
+          perf --version || sudo ln -sf "$(ls /usr/lib/linux-tools/*/perf | head -1)" /usr/local/bin/perf
+          perf --version
+          sudo sysctl kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
+      - run: bench/listen/run.sh
+        env:
+          OUT: ${{ runner.temp }}/listen-out
+          ROUNDS: ${{ inputs.rounds }}
+          N: ${{ inputs.requests }}
+      - run: cat "$RUNNER_TEMP/listen-out/report.md" >> "$GITHUB_STEP_SUMMARY"
+        if: always()
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: listen-bench
+          path: ${{ runner.temp }}/listen-out
