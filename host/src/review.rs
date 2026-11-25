@@ -1048,7 +1048,7 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
             e.lines()
                 .map(|l| ("", format!("  {}", kio_host::escape_line(l.trim_start())))),
         );
-        resources(&[], &[], page);
+        resources(&[], &[], &[], page);
         return (
             json!({"grants": shown, "fakes": fakes_json(inputs), "setup_error": e, "mutants": null}),
             false,
@@ -1244,7 +1244,7 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
         Ok((results, t)) => mutants::run(inputs, &changes, t, results, &mut page.tests),
         Err(_) => (json!(null), false, false),
     };
-    resources(old_r, new_r, page);
+    resources(old_r, new_r, &changed, page);
     let failed = new.is_err() || old.is_err() || !failures.is_empty() || unfinished;
     let value = json!({
         "grants": inputs.test_grants.as_ref().map(|(t, _)| t), "fakes": fakes_json(inputs),
@@ -1370,8 +1370,9 @@ fn unreadable_secret(flags: &[&str]) -> Option<String> {
 
 /// The Resources section: per test on both sides, fuel and peak memory old -> new when either
 /// changed by more than 2%; then over every such test the total fuel and the largest peak. A test
-/// that failed on either side stopped early: it is left out, and counted.
-fn resources(old: &[TestResult], new: &[TestResult], page: &mut Page) {
+/// that failed on either side stopped early: it is left out, and counted. A row for a test not in
+/// `changed_tests` (it reaches no changed function) says so.
+fn resources(old: &[TestResult], new: &[TestResult], changed_tests: &[&str], page: &mut Page) {
     // Every test that failed in NEW, and those on both sides that failed in OLD only.
     let failed = new.iter().filter(|n| n.error.is_some()).count();
     let mut failed_old = 0;
@@ -1417,7 +1418,11 @@ fn resources(old: &[TestResult], new: &[TestResult], page: &mut Page) {
     let mut rows = Vec::new();
     for (name, o, n) in &pairs {
         if changed(o.fuel, n.fuel) || changed(o.peak_memory as u64, n.peak_memory as u64) {
-            page.resources.push(row(name, "peak memory", o, n));
+            let mut line = row(name, "peak memory", o, n);
+            if !changed_tests.contains(name) {
+                line += "; unchanged code";
+            }
+            page.resources.push(line);
             rows.push(as_json(name, o, n));
         }
     }
@@ -1481,12 +1486,16 @@ fn percent(old: u64, new: u64) -> String {
 fn not_checked(inputs: &Inputs, page: &mut Page) {
     let mut rows = Vec::new();
     let none = no_program();
-    let entries =
-        (inputs.entries.iter()).map(|e| (Some(e.name.as_str()), e.old.as_ref().map_or(&none, |o| &o.1), &e.new.1));
-    for (entry, old, prog) in [(None, &inputs.old.1, &inputs.new.1)].into_iter().chain(entries) {
+    let entries = (inputs.entries.iter()).map(|e| {
+        let old = e.old.as_ref().map_or(&none, |o| &o.1);
+        (Some(e.name.as_str()), old, &e.new.1, e.old.is_none())
+    });
+    for (entry, old, prog, added) in [(None, &inputs.old.1, &inputs.new.1, false)].into_iter().chain(entries) {
         let Ok(p) = kio_host::check_program(&prog.files) else {
             continue;
         };
+        // Each changed function marked below, and the grants it is marked under.
+        let mut marked: BTreeMap<String, Vec<&str>> = BTreeMap::new();
         let changes = Changes::of(old, prog);
         let prefix = entry.map_or(String::new(), |e| format!("{e}: "));
         let a = lang::authority(&p);
@@ -1510,15 +1519,28 @@ fn not_checked(inputs: &Inputs, page: &mut Page) {
                 users.retain(|f| f != "main");
             }
             let users = changes.reached(&users.iter().map(String::as_str).collect::<Vec<_>>());
-            let mark = match users.is_empty() {
-                true => String::new(),
-                false => format!(" (changed: {})", users.join(", ")),
-            };
+            for f in &users {
+                marked.entry(f.clone()).or_default().push(param);
+            }
             page.not_checked
-                .push(format!("{prefix}{param}: {ty} {}: {what}{mark}", reached.join(", ")));
+                .push(format!("{prefix}{param}: {ty} {}: {what}", reached.join(", ")));
             rows.push(
                 json!({"entry": entry, "grant": param, "type": ty, "methods": reached, "what": what, "changed": users}),
             );
+        }
+        // Each changed function once, not once per grant (R1c): those marked under the same
+        // grants share a line.
+        let mut groups: Vec<(Vec<&str>, &Vec<&str>)> = Vec::new();
+        for (f, grants) in &marked {
+            match groups.iter_mut().find(|(_, g)| *g == grants) {
+                Some((fs, _)) => fs.push(f),
+                None => groups.push((vec![f], grants)),
+            }
+        }
+        let why = if added { "new entry" } else { "changed" };
+        for (fs, grants) in groups {
+            page.not_checked
+                .push(format!("{prefix}{}: {} ({why})", fs.join(", "), grants.join(", ")));
         }
         // A leaf bound to two or more grants of one type (L32): which call site binds which is
         // behaviour, which no line shows; a reordering of those calls moves nothing above.

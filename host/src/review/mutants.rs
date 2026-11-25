@@ -181,7 +181,7 @@ pub(super) fn run(
                         format!("raise T's {limit} (the limit named) so the mutant can finish"),
                     ));
                 }
-                let (from, (n, col, _)) = shown_site(&prog.files[site.file].1, &site);
+                let (from, (n, col, _, _)) = shown_site(&prog.files[site.file].1, &site);
                 let shown = (
                     (n, col),
                     from,
@@ -215,13 +215,16 @@ pub(super) fn run(
         }
         Ok(Ran::Ran(end, tests_run, fuel)) => {
             ran += 1;
-            let (from, (n, col, around)) = shown_site(&new.files[s.file].1, s);
+            let (from, (n, col, around, at)) = shown_site(&new.files[s.file].1, s);
             let to = shown_text(&s.to);
-            let description = match to.is_empty() {
-                true => format!("`{from}` dropped in `{around}`"),
-                false => format!("`{from}` -> `{to}` in `{around}`"),
+            let edit = match to.is_empty() {
+                true => format!("`{from}` dropped in `"),
+                false => format!("`{from}` -> `{to}` in `"),
             };
-            let source = json!({"source": "generated", "written": false});
+            let description = format!("{edit}{around}`");
+            // The edited token's offset in `description`, in characters.
+            let caret = edit.chars().count() + at;
+            let source = json!({"source": "generated", "written": false, "caret": caret});
             out.push(row(
                 source,
                 s,
@@ -785,12 +788,20 @@ fn lines(
                 (format!("{}:{}: {at}", text(m, "source"), m["entry"]), f, d)
             }
         };
-        let line = match (m["stopped_by"].as_str(), m["discarded_by"].as_str()) {
-            (Some(t), _) => format!("{} in {t}: {source}: {f}: {d}", text(m, "how")),
-            (_, Some(p)) => format!("survived: {source}: {f}: {d} ({p} discarded every case)"),
-            _ => format!("survived: {source}: {f}: {d}"),
+        let lead = match m["stopped_by"].as_str() {
+            Some(t) => format!("{} in {t}: {source}: {f}: ", text(m, "how")),
+            None => format!("survived: {source}: {f}: "),
+        };
+        let line = match m["discarded_by"].as_str() {
+            Some(p) => format!("{lead}{d} ({p} discarded every case)"),
+            None => format!("{lead}{d}"),
         };
         rows.push(("not checked", line));
+        // A caret under the edited token in the snippet, as a diagnostic marks a span.
+        if let Some(c) = m["caret"].as_u64() {
+            let pad = " ".repeat(lead.chars().count() + c as usize);
+            rows.push(("", format!("{pad}{}", "^".repeat(text(m, "from").chars().count()))));
+        }
     }
 }
 
@@ -962,10 +973,10 @@ fn how(e: &serde_json::Value) -> Result<String, String> {
 /// Characters of the site's line shown on each side of it.
 const AROUND: usize = 24;
 
-/// The site's text, its 1-based line and column (`lang::line_col`), and the site with up to
-/// `AROUND` characters of its line on each side: each one line, cut, and ASCII as the binds line
-/// shows a grant.
-fn shown_site(text: &str, s: &Site) -> (String, (usize, usize, String)) {
+/// The site's text, its 1-based line and column (`lang::line_col`), the site with up to
+/// `AROUND` characters of its line on each side, and the site's offset in that, in characters:
+/// each one line, cut, and ASCII as the binds line shows a grant.
+fn shown_site(text: &str, s: &Site) -> (String, (usize, usize, String, usize)) {
     let (n, col) = lang::line_col(text, s.start);
     let before = &text[text[..s.start].rfind('\n').map_or(0, |i| i + 1)..s.start];
     let after = &text[s.end..text[s.end..].find('\n').map_or(text.len(), |i| s.end + i)];
@@ -973,13 +984,17 @@ fn shown_site(text: &str, s: &Site) -> (String, (usize, usize, String)) {
     let a = after.char_indices().nth(AROUND).map_or(after.len(), |(i, _)| i);
     let from = cut(&one_line(&text[s.start..s.end]), 60);
     let mut around = shown_text(&format!("{}{from}{}", &before[b..], &after[..a]));
+    // What precedes the site once runs of whitespace are one space.
+    let lead = shown_text(&before[b..]);
+    let mut at = lead.chars().count() + usize::from(!lead.is_empty() && before.ends_with(char::is_whitespace));
     if b > 0 {
         around = format!("...{around}");
+        at += 3;
     }
     if a < after.len() {
         around += "...";
     }
-    (ascii_chars(&from), (n, col, around))
+    (ascii_chars(&from), (n, col, around, at))
 }
 
 /// `t` on one line, runs of whitespace one space.

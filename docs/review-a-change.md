@@ -2,7 +2,7 @@
 
 An agent hands you a change to a kio program. This walkthrough gets the two versions side by side, runs `kio review` on them, reads the page it prints, and ends in one of three decisions. Every flag and line format is in the reference, [guide.md, Reviewing a change](guide.md#reviewing-a-change); this page is the workflow.
 
-All output below is from real runs of kio 0.1.5; the commit in each `Identity` is elided.
+All output below is from real runs: section 7's pages of kio 0.1.9 with R1c's page changes, the rest of kio 0.1.5; the commit in each `Identity` is elided.
 
 ## 1. What you need
 
@@ -79,7 +79,7 @@ Every line carries a label; a line under a labelled one shares it. The label say
 | `not checked` | nothing | nothing | look at it, or accept it knowingly |
 | `error` | a failure | nothing | stop: fix it, or reject |
 
-The sections, in order: **Requirements** (the requirement file's diff), **Authority** (`kio check --base`'s lines, and whether `--grants` binds and what it binds: `db=var/inv.db:ro, hook=http://127.0.0.1:9099 (POST)`, a secret by its source, `env:NAME`), **Tests** (both sides' counts, tests added and removed, changed functions no test reaches, each property's cases, each NEW failure, then the mutants: how many the tests killed, which test killed them, and each survivor), **Resources** (per-test fuel and peak memory changes over 2%, each added test's, then totals), **Not checked** (what the host never looks at for each method `main` reaches), **Identity** (sha256 of every file that went into the page).
+The sections, in order: **Requirements** (the requirement file's diff), **Authority** (`kio check --base`'s lines, and whether `--grants` binds and what it binds: `db=var/inv.db:ro, hook=http://127.0.0.1:9099 (POST)`, a secret by its source, `env:NAME`), **Tests** (both sides' counts, tests added and removed, changed functions no test reaches, each property's cases, each NEW failure, then the mutants: how many the tests killed, which test killed them, and each survivor with a caret under the edited token), **Resources** (per-test fuel and peak memory changes over 2%, `; unchanged code` on a test that reaches no changed function, each added test's, then totals), **Not checked** (what the host never looks at for each method `main` reaches, then each changed function that uses those methods once, with its grants: `cents, total: out (changed)`, `(new entry)` for an entry the base lacks), **Identity** (sha256 of every file that went into the page).
 
 A test grants file may answer an `Http` grant from a file instead of a server (`--http hook=fake:hook.http`, a [fake host](guide.md#a-fake-host)). The page then says so three times:
 
@@ -111,8 +111,8 @@ Checklist:
 1. Any `error`? Reject, or ask for a fix.
 2. Authority: for each `+` or `~` line, does the requirement diff ask for it? A `~` method on an existing grant is authority added like a `+` grant: the requirement must ask for it. If not, reject. The `derived` line under it names where to read. Do the same for each grants-file line (`app.grants: + --dir ..`).
 3. Tests: is any test `removed:`, or a property running fewer cases? Find out why before accepting.
-4. Do the added tests cover what the requirement diff claims? A `changed:` test (its own code or a function it reaches changed) is read like an added one: it tests something else now. Name tests are a claim too: read the one or two that matter. A `changed, reached by no test:` function ran in no test: read it, or ask for a test that calls it. The converse is weaker: reach is static, so a function named on a test's call path counts as reached even if that path never runs (`if false { risky(d) }`). Mutants: each `survived:` line is an edit to changed code that no test noticed. Read the snippet: if the edit changes behaviour the requirement cares about, ask for a test that fails on it; if it changes nothing (an equivalent mutant), move on. One test doing all the killing (`killed by:`) is the test to read. `no mutant drawn: F` and `mutants skipped T` say where the sample did not look: raise `--mutants`, or give T a fake host. To ask for evidence of one behaviour, write it as a mutant in a `--mutations` file: the next review kills it (a test now catches it) or shows it `survived:` with exit 3.
-5. Resources: any change you would not accept in production?
+4. Do the added tests cover what the requirement diff claims? A `changed:` test (its own code or a function it reaches changed) is read like an added one: it tests something else now. Name tests are a claim too: read the one or two that matter. A `changed, reached by no test:` function ran in no test: read it, or ask for a test that calls it. The converse is weaker: reach is static, so a function named on a test's call path counts as reached even if that path never runs (`if false { risky(d) }`). Mutants: each `survived:` line is an edit to changed code that no test noticed. Read the snippet (the caret marks the edited token): if the edit changes behaviour the requirement cares about, ask for a test that fails on it; if it changes nothing (an equivalent mutant), move on. One test doing all the killing (`killed by:`) is the test to read. `no mutant drawn: F` and `mutants skipped T` say where the sample did not look: raise `--mutants`, or give T a fake host. To ask for evidence of one behaviour, write it as a mutant in a `--mutations` file: the next review kills it (a test now catches it) or shows it `survived:` with exit 3.
+5. Resources: any change you would not accept in production? A row ending `unchanged code` moved on a test that runs no changed function: the program's setup cost moved (a new type `main` uses), not that test's code.
 6. Not checked: for each line, is it covered by a test you trust, or by a function you read? Otherwise ask.
 7. Identity: is this the commit you meant to review?
 
@@ -198,24 +198,30 @@ Tests
   tested       mutants: 15 of 18 killed (generated at seed 1: 20 drawn of 43 sites, 2 did not check)
   tested       killed by: tests::a_claim_needs_the_job_still_due_and_unchanged 7, tests::failure_retries_with_doubling_backoff_then_dies 4, tests::every_attempt_carries_the_event_id_as_the_key 2, tests::expired_lease_is_reclaimed_and_the_old_worker_changes_nothing 2
   not checked  survived: generated: flow.kio:28:31: flow::store: `"database error"` -> `""` in `...!init(db) { return Err("database error"); }`
+                                                                                                                          ^^^^^^^^^^^^^^^^
   not checked  survived: generated: flow.kio:49:43: flow::int_of: `0` -> `1` in `...alue::Int(n) => n, _ => 0 }`
+                                                                                                            ^
   not checked  survived: generated: flow.kio:70:6: flow::headers: `"Content-Type: application/json"` -> `""` in `["Content-Type: application/json", "Idempotency-Key: " +...`
+                                                                                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Resources
-  measured     tests::any_signed_bytes_get_an_answer: fuel 3583775 -> 3854875 (+7.57%), peak memory 2112 KB -> 2112 KB (+0.00%)
-  measured     tests::bad_signature_beats_bad_json: fuel 25665 -> 28376 (+10.57%), peak memory 1920 KB -> 1920 KB (+0.00%)
+  measured     tests::any_signed_bytes_get_an_answer: fuel 3458446 -> 3693046 (+6.79%), peak memory 1280 KB -> 1280 KB (+0.00%)
+  measured     tests::bad_signature_beats_bad_json: fuel 24594 -> 26940 (+9.54%), peak memory 1280 KB -> 1280 KB (+0.00%)
   ...
-  measured     added: tests::db_equals_model_and_nothing_is_stranded: fuel 158162112, peak memory 2496 KB
+  measured     added: tests::db_equals_model_and_nothing_is_stranded: fuel 153936773, peak memory 1280 KB
   ...
-  measured     added: tests::stale_completion_changes_nothing: fuel 8760567, peak memory 1920 KB
-  measured     total over 10 tests on both sides: fuel 70183276 -> 71570664 (+1.98%), largest peak memory 2112 KB -> 2112 KB (+0.00%)
+  measured     added: tests::stale_completion_changes_nothing: fuel 8491549, peak memory 1280 KB
+  measured     total over 10 tests on both sides: fuel 66629671 -> 67905004 (+1.92%), largest peak memory 1280 KB -> 1280 KB (+0.00%)
 Not checked
   not checked  res: Outgoing send: what the client receives
-  not checked  db: Db exec: the SQL text and what it changes (changed: flow::init, flow::store)
-  not checked  worker.kio: db: Db exec, query: the SQL text and what it changes (changed: flow::backoff_ms, flow::claim, flow::finish, flow::init, flow::int_of, flow::text_of, flow::try_claim)
-  not checked  worker.kio: dest: Http send POST: the paths, headers and bodies sent (changed: deliver, flow::headers)
+  not checked  db: Db exec: the SQL text and what it changes
+  not checked  flow::init, flow::store: db (changed)
+  not checked  worker.kio: db: Db exec, query: the SQL text and what it changes
+  not checked  worker.kio: dest: Http send POST: the paths, headers and bodies sent
+  not checked  worker.kio: deliver, flow::headers: dest (new entry)
+  not checked  worker.kio: flow::backoff_ms, flow::claim, flow::finish, flow::init, flow::int_of, flow::text_of, flow::try_claim: db (new entry)
   not checked  tests and properties were written by the same author as the code unless stated
 Identity
-  kio 0.1.5 (<commit>)
+  kio 0.1.9 (<commit>)
   old ../../../flow-old/examples/flow/api.kio sha256:889e267b...
   ...
   test seed 1
@@ -229,8 +235,8 @@ Reading it:
 - **Authority, `worker.kio`**: a new program, so every grant is `+`: the database (`exec query`, to claim and finish jobs), the clock, and `POST` to one destination, whose key the host adds (the binds line: `dest=https://dest.example (POST; Authorization:env:DEST_AUTH)`, the key named by its source, never its value). That is what the F1.2 requirement describes. The `derived` lines under each grant name the functions that make each call: `deliver` posts, `flow::claim` and `flow::try_claim` query.
 - **Tests**: 10 to 18, nothing removed; the 8 added are the worker's transitions and two properties against a model. The F1.1 properties still run 100 cases. But `changed, reached by no test: worker.kio: deliver, main`: the tests call the worker's `flow::` steps, never its loop or its delivery, so those two ran in no test.
 - **Mutants**: 20 of the 43 edits kio can make in the changed functions the tests reach (the worker's `flow::` steps among them), at least one in each of the 8 functions; 2 did not check, 15 of the other 18 failed a test. Three survived: `store`'s error message emptied (no test reads it: harmless), `int_of`'s fallback `0` made `1` (a non-integer column never reaches it in the tests), and the `Content-Type` header emptied: no test checks what `deliver` sends besides the key. That one is worth asking for. No mutant touches `deliver` or the worker's `main`: no test reaches them (the line above).
-- **Resources**: +3% to +10% fuel on the ingest tests, +1.98% in total, memory flat. Every ingest now runs `init`, a longer `CREATE TABLE` and a wider `INSERT`; acceptable. The added model property costs 158M fuel, the rest under 9M.
-- **Not checked**: `db exec: the SQL text`. The table gains three columns, and the requirement diff says "An F1.1 database made before F1.2 has no migration": `CREATE TABLE IF NOT EXISTS` leaves an old table as it is, and the new `INSERT` names `next_ms`. The worker's lines add its SQL and the bodies it posts: the tests cover the claims and completions against a model, and `every_attempt_carries_the_event_id_as_the_key` the delivery key.
+- **Resources**: +3% to +10% fuel on the ingest tests, +1.92% in total, memory flat. None ends `unchanged code`: every ingest test reaches `init`, and now runs a longer `CREATE TABLE` and a wider `INSERT`; acceptable. The added model property costs 154M fuel, the rest under 9M.
+- **Not checked**: `db exec: the SQL text`, used by the changed `flow::init` and `flow::store` (the line under it). The table gains three columns, and the requirement diff says "An F1.1 database made before F1.2 has no migration": `CREATE TABLE IF NOT EXISTS` leaves an old table as it is, and the new `INSERT` names `next_ms`. The worker's lines add its SQL and the bodies it posts (every function `(new entry)`, as the worker is new): the tests cover the claims and completions against a model, and `every_attempt_carries_the_event_id_as_the_key` the delivery key.
 
 **Decision: accept**, after reading `deliver` and the worker's `main` (what no test ran), if no F1.1 database is deployed; the missing migration is a known, stated gap. If one is deployed, **ask for evidence**: a migration and a test that runs it on an F1.1 table.
 
@@ -299,22 +305,25 @@ Tests
   tested       mutants: 2 of 4 killed (generated at seed 1: 4 drawn of 4 sites, 0 did not check)
   tested       killed by: counts_rows 2
   not checked  survived: generated: b/tally.kio:16:11: rows: `0` -> `1` in `if n == 0 { 0 } else { n - 1 }`
+                                                                                    ^
   not checked  survived: generated: b/tally.kio:16:15: rows: `0` -> `1` in `if n == 0 { 0 } else { n - 1 }`
+                                                                                        ^
 Resources
-  measured     skips_bad_rows: fuel 16475 -> 17525 (+6.38%), peak memory 1600 KB -> 1600 KB (+0.00%)
-  measured     sums_the_cents_column: fuel 15228 -> 16278 (+6.90%), peak memory 1600 KB -> 1600 KB (+0.00%)
-  measured     added: counts_rows: fuel 12367, peak memory 1600 KB
-  measured     total over 2 tests on both sides: fuel 31703 -> 33803 (+6.63%), largest peak memory 1600 KB -> 1600 KB (+0.00%)
+  measured     skips_bad_rows: fuel 16241 -> 16715 (+2.92%), peak memory 1280 KB -> 1280 KB (+0.00%); unchanged code
+  measured     sums_the_cents_column: fuel 15013 -> 15487 (+3.16%), peak memory 1280 KB -> 1280 KB (+0.00%); unchanged code
+  measured     added: counts_rows: fuel 11639, peak memory 1280 KB
+  measured     total over 2 tests on both sides: fuel 31254 -> 32202 (+3.04%), largest peak memory 1280 KB -> 1280 KB (+0.00%)
 Not checked
-  not checked  out: Dir write: what is written or removed (changed: main, rows)
-  not checked  stats: Http send POST: the paths, headers and bodies sent (changed: main, rows)
+  not checked  out: Dir write: what is written or removed
+  not checked  stats: Http send POST: the paths, headers and bodies sent
+  not checked  main, rows: out, stats (changed)
   not checked  tests and properties were written by the same author as the code unless stated
 ...
 $ echo $?
 1
 ```
 
-**Decision: reject.** `+ stats: Http (send POST)` is a new grant the requirement does not mention, carrying the whole CSV; the grants file does not give it (`error`); and the only test of `main` was removed, so the changed `main` is `reached by no test` (and gets no mutants). You decided this from the Authority and Tests sections, without reading the diff. (Without `--grants` the page is the same minus the grants lines and the `error`, and exits 3.) Resources moved +6% on tests that never call `main`: each run first sets up every type the program uses, and `stats.send` brings `HttpResponse` and `HttpErr` (about 1,000 fuel a run; [guide, Resources](guide.md#reviewing-a-change)).
+**Decision: reject.** `+ stats: Http (send POST)` is a new grant the requirement does not mention, carrying the whole CSV; the grants file does not give it (`error`); and the only test of `main` was removed, so the changed `main` is `reached by no test` (and gets no mutants). You decided this from the Authority and Tests sections, without reading the diff. (Without `--grants` the page is the same minus the grants lines and the `error`, and exits 3.) Resources moved +3% on tests that never call `main`, and the page says so (`unchanged code`): each run first sets up every type the program uses, and `stats.send` brings `HttpResponse` and `HttpErr` (about 500 fuel a run; [guide, Resources](guide.md#reviewing-a-change)).
 
 ### c. A change that stays inside its authority and is wrong
 
@@ -361,19 +370,22 @@ Tests
   tested       mutants: 8 of 10 killed (generated at seed 1: 11 drawn of 11 sites, 1 did not check)
   tested       killed by: main_writes_the_total 8
   not checked  survived: generated: c/tally.kio:7:8: cents: `>` -> `>=` in `if c > 0 { Some(c) } else { No...`
+                                                                                 ^
   not checked  survived: generated: c/tally.kio:7:10: cents: `0` -> `1` in `if c > 0 { Some(c) } else { None...`
+                                                                                   ^
 Resources
   measured     no test changed by more than 2%
-  measured     total over 3 tests on both sides: fuel 55651 -> 55753 (+0.19%), largest peak memory 1728 KB -> 1728 KB (+0.00%)
+  measured     total over 3 tests on both sides: fuel 54384 -> 54486 (+0.19%), largest peak memory 1280 KB -> 1280 KB (+0.00%)
 Not checked
-  not checked  out: Dir write: what is written or removed (changed: cents, total)
+  not checked  out: Dir write: what is written or removed
+  not checked  cents, total: out (changed)
   not checked  tests and properties were written by the same author as the code unless stated
 ...
 $ echo $?
 0
 ```
 
-Exit 0 and a clean page, but `if c > 0` now drops refunds (negative cents) from the total. kio cannot see that: the authority is the same, and no test has a negative row. The page does tell you where to look: the one effect is `out: Dir write: what is written`, marked `(changed: cents, total)`, and the three tests are listed as `changed` because they reach `cents`, passing but not checked against the change; none has a refund. And both survivors sit on the line: `c > 0` can become `c >= 0` or `c > 1` and no test notices, so no test pins which amounts count.
+Exit 0 and a clean page, but `if c > 0` now drops refunds (negative cents) from the total. kio cannot see that: the authority is the same, and no test has a negative row. The page does tell you where to look: the one effect is `out: Dir write: what is written`, used by the changed `cents` and `total` (`cents, total: out (changed)`), and the three tests are listed as `changed` because they reach `cents`, passing but not checked against the change; none has a refund. And both survivors sit on the line, their carets under `>` and `0`: `c > 0` can become `c >= 0` or `c > 1` and no test notices, so no test pins which amounts count.
 
 **Decision: ask for evidence.** Either read `cents` (6 lines), or ask for a test of the requirement's edge: a row with a negative and a zero amount. Here the author adds it, and the next review answers:
 

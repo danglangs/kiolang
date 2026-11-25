@@ -52,7 +52,9 @@ Tests
   tested       mutants: 8 of 10 killed (generated at seed 1: 11 drawn of 11 sites, 1 did not check)
   tested       killed by: main_writes_the_total 8
   not checked  survived: generated: c/tally.kio:7:8: cents: `>` -> `>=` in `if c > 0 { Some(c) } else { No...`
+                                                                                 ^
   not checked  survived: generated: c/tally.kio:7:10: cents: `0` -> `1` in `if c > 0 { Some(c) } else { None...`
+                                                                                   ^
 ...
 $ echo $?
 0

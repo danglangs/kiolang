@@ -132,7 +132,8 @@ fn a_change_on_one_page() {
     assert_eq!(
         Sides::section(&out, "Not checked"),
         [
-            "  not checked  d: Dir write: what is written or removed (changed: main)",
+            "  not checked  d: Dir write: what is written or removed",
+            "  not checked  main: d (changed)",
             SAME_AUTHOR
         ]
     );
@@ -651,10 +652,13 @@ fn an_entry_gaining_a_grant() {
             "  derived      ./worker.kio:   get in main",
         ]
     );
-    assert!(
-        Sides::section(&out, "Not checked").contains(
-            &"  not checked  ./worker.kio: h: Http get: the paths, headers and bodies sent (changed: main)".to_string()
-        ),
+    assert_eq!(
+        Sides::section(&out, "Not checked")[..3],
+        [
+            "  not checked  d: Dir write: what is written or removed",
+            "  not checked  ./worker.kio: h: Http get: the paths, headers and bodies sent",
+            "  not checked  ./worker.kio: main: h (changed)",
+        ],
         "{out}"
     );
     // The same entry on both sides: no line but "no change".
@@ -768,7 +772,8 @@ fn where_a_gained_method_is_used() {
     assert_eq!(
         Sides::section(&out, "Not checked"),
         [
-            "  not checked  d: Dir write: what is written or removed (changed: save)",
+            "  not checked  d: Dir write: what is written or removed",
+            "  not checked  save: d (changed)",
             SAME_AUTHOR
         ]
     );
@@ -1021,8 +1026,11 @@ fn a_changed_path_function_marks_the_writer() {
     let (code, out, err) = s.review(&[]);
     assert_eq!(code, 0, "{out}{err}");
     assert_eq!(
-        Sides::section(&out, "Not checked")[0],
-        "  not checked  d: Dir write: what is written or removed (changed: target)",
+        Sides::section(&out, "Not checked")[..2],
+        [
+            "  not checked  d: Dir write: what is written or removed",
+            "  not checked  target: d (changed)",
+        ],
         "{out}"
     );
 }
@@ -1046,10 +1054,11 @@ fn main(a: Dir, b: Dir) -> Result<(), IoErr> { wa(a)?; wb(b) }
         "{out}"
     );
     assert_eq!(
-        Sides::section(&out, "Not checked")[..2],
+        Sides::section(&out, "Not checked")[..3],
         [
-            "  not checked  a: Dir write: what is written or removed (changed: wa)",
+            "  not checked  a: Dir write: what is written or removed",
             "  not checked  b: Dir write: what is written or removed",
+            "  not checked  wa: a (changed)",
         ],
         "{out}"
     );
@@ -1544,6 +1553,13 @@ fn mutant_rows(v: &serde_json::Value) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// The caret line under `token` in page line `line`: at `token`'s first place in `context`, at
+/// the last place `context` occurs in `line` (the snippet ends the line).
+fn caret(line: &str, context: &str, token: &str) -> String {
+    let at = line.rfind(context).unwrap() + context.find(token).unwrap();
+    format!("{}{}", " ".repeat(at), "^".repeat(token.chars().count()))
+}
+
 /// A comparison the tests pin is killed, the killer named; one they do not survives with its
 /// snippet, and the exit code stays 0. No mutant is made in `main` (no test reaches it) or in a
 /// test.
@@ -1554,14 +1570,20 @@ fn mutants_killed_and_survived() {
     assert_eq!(code, 0, "{out}{err}");
     let tests = Sides::section(&out, "Tests");
     let at = |l: &str| l.replace("{new}", &s.new);
+    let flipped =
+        at("  not checked  survived: generated: {new}:3:28: big: `>=` -> `>` in `...big(n: Int) -> Bool { n >= 100 }`");
+    let raised =
+        at("  not checked  survived: generated: {new}:3:31: big: `100` -> `101` in `...(n: Int) -> Bool { n >= 100 }`");
     assert_eq!(
         tests[5..],
         [
             "  not checked  changed, reached by no test: main",
             "  tested       mutants: 2 of 4 killed (generated at seed 1: 4 drawn of 4 sites, 0 did not check)",
             "  tested       killed by: pins_small 2",
-            &at("  not checked  survived: generated: {new}:3:28: big: `>=` -> `>` in `...big(n: Int) -> Bool { n >= 100 }`"),
-            &at("  not checked  survived: generated: {new}:3:31: big: `100` -> `101` in `...(n: Int) -> Bool { n >= 100 }`"),
+            &flipped,
+            &caret(&flipped, "n >= 100 }", ">="),
+            &raised,
+            &caret(&raised, ">= 100 }", "100"),
         ],
         "{out}"
     );
@@ -1576,9 +1598,10 @@ fn mutants_killed_and_survived() {
             "skipped": [], "constants": [], "mutations": null})
     );
     let row = |func: &str, (line, col): (u32, u32), from: &str, to: &str, around: &str, killed: Option<&str>| {
+        let edit = format!("`{from}` -> `{to}` in `");
         serde_json::json!({
             "source": "generated", "written": false, "function": func, "file": s.new, "line": line, "col": col,
-            "from": from, "to": to, "description": format!("`{from}` -> `{to}` in `{around}`"),
+            "from": from, "to": to, "description": format!("{edit}{around}`"), "caret": edit.len() + around.rfind(from).unwrap(),
             "killed_by": killed, "stopped_by": null, "discarded_by": null, "how": killed.map(|_| "failed"),
             "tests_run": 1,
         })
@@ -1625,12 +1648,14 @@ fn a_mutant_that_loops_runs_out_of_fuel() {
     assert_eq!(code, 0, "{out}{err}");
     let tests = Sides::section(&out, "Tests");
     let at = |l: &str| l.replace("{new}", &s.new);
+    let survived = at("  not checked  survived: generated: {new}:1:39: count: `0` -> `1` in `...t) -> Int { let mut i = 0; let mut s = 0; while i...`");
     assert_eq!(
         tests[5..],
         [
             "  tested       mutants: 5 of 6 killed (generated at seed 1: 6 drawn of 6 sites, 0 did not check)",
             "  tested       killed by: counts 5 (1 out of fuel)",
-            &at("  not checked  survived: generated: {new}:1:39: count: `0` -> `1` in `...t) -> Int { let mut i = 0; let mut s = 0; while i...`"),
+            &survived,
+            &caret(&survived, "i = 0; let mut s", "0"),
         ],
         "{out}"
     );
@@ -1660,12 +1685,14 @@ fn mutants_are_drawn_by_the_seed() {
         let tests = Sides::section(out, "Tests");
         tests.into_iter().skip_while(|l| !l.contains("mutants:")).collect()
     };
+    let survived = at("  not checked  survived: generated: {new}:1:39: count: `0` -> `1` in `...t) -> Int { let mut i = 0; let mut s = 0; while i...`");
     assert_eq!(
         mutants(&one),
         [
             "  tested       mutants: 1 of 2 killed (generated at seed 1: 2 drawn of 6 sites, 0 did not check)",
             "  tested       killed by: counts 1",
-            &at("  not checked  survived: generated: {new}:1:39: count: `0` -> `1` in `...t) -> Int { let mut i = 0; let mut s = 0; while i...`"),
+            &survived,
+            &caret(&survived, "i = 0; let mut s", "0"),
         ],
         "{one}"
     );
@@ -1775,13 +1802,20 @@ fn padding_does_not_dilute_the_draw() {
     let (code, out, err) = s.review(&["--mutants", "4"]);
     assert_eq!(code, 0, "{out}{err}");
     let at = |l: &str| l.replace("{new}", &s.new);
+    let flipped = at(
+        "  not checked  survived: generated: {new}:3:34: sensitive: `>` -> `>=` in `...ive(n: Int) -> Bool { n > 5 }`",
+    );
+    let raised =
+        at("  not checked  survived: generated: {new}:3:36: sensitive: `5` -> `6` in `...e(n: Int) -> Bool { n > 5 }`");
     assert_eq!(
         mutant_lines(&out),
         [
             "  tested       mutants: 2 of 4 killed (generated at seed 1: 4 drawn of 82 sites, 0 did not check)",
             "  tested       killed by: pads 2",
-            &at("  not checked  survived: generated: {new}:3:34: sensitive: `>` -> `>=` in `...ive(n: Int) -> Bool { n > 5 }`"),
-            &at("  not checked  survived: generated: {new}:3:36: sensitive: `5` -> `6` in `...e(n: Int) -> Bool { n > 5 }`"),
+            &flipped,
+            &caret(&flipped, "n > 5 }", ">"),
+            &raised,
+            &caret(&raised, "> 5 }", "5"),
         ],
         "{out}"
     );
@@ -1847,13 +1881,17 @@ fn a_stop_at_ts_own_fuel_is_not_a_kill() {
     let (code, out, err) = s.review(&["--test-grants", &t]);
     assert_eq!(code, 0, "{out}{err}");
     let at = |l: &str| l.replace("{fuel}", &fuel.to_string()).replace("{new}", &s.new);
+    let survived = at("  not checked  survived: generated: {new}:1:39: count: `0` -> `1` in `...t) -> Int { let mut i = 0; let mut s = 0; while i...`");
+    let stopped = at("  not checked  stopped by T's --fuel {fuel} in counts: generated: {new}:1:79: count: `i += 1;` dropped in `...; while i < n { s += i; i += 1; } s }`");
     assert_eq!(
         mutant_lines(&out),
         [
             "  tested       mutants: 4 of 6 killed, 1 stopped by T's limits (generated at seed 1: 6 drawn of 6 sites, 0 did not check)",
             "  tested       killed by: counts 4",
-            &at("  not checked  survived: generated: {new}:1:39: count: `0` -> `1` in `...t) -> Int { let mut i = 0; let mut s = 0; while i...`"),
-            &at("  not checked  stopped by T's --fuel {fuel} in counts: generated: {new}:1:79: count: `i += 1;` dropped in `...; while i < n { s += i; i += 1; } s }`"),
+            &survived,
+            &caret(&survived, "i = 0; let mut s", "0"),
+            &stopped,
+            &caret(&stopped, "i += 1; } s }", "i += 1;"),
         ],
         "{out}"
     );
@@ -1868,15 +1906,95 @@ fn a_comparison_after_a_constant_is_flipped() {
     let (code, out, err) = s.review(&[]);
     assert_eq!(code, 0, "{out}{err}");
     let at = |l: &str| l.replace("{new}", &s.new);
+    let survived =
+        at("  not checked  survived: generated: {new}:3:33: over: `>` -> `>=` in `...n: Int) -> Bool { LIMIT > n }`");
     assert_eq!(
         mutant_lines(&out),
         [
             "  tested       mutants: 0 of 1 killed (generated at seed 1: 1 drawn of 1 sites, 0 did not check)",
-            &at("  not checked  survived: generated: {new}:3:33: over: `>` -> `>=` in `...n: Int) -> Bool { LIMIT > n }`"),
+            &survived,
+            &caret(&survived, "LIMIT > n }", ">"),
             "  not checked  constants are not mutated: LIMIT used by over",
         ],
         "{out}"
     );
+}
+
+/// R1c: the caret is under the edited token as the snippet shows it: tabs one space, a
+/// non-ASCII character escaped, counted in characters.
+#[test]
+fn the_caret_marks_the_edited_token() {
+    let new = "fn tag(n: Int) -> Str {\tlet s = \"\u{e9}\";\t\tif n > 5 { s } else { \"\" } }\n\nfn main() -> Str { tag(1) }\n\n#[test]\nfn big() { assert_eq(tag(100), \"\u{e9}\"); }\n";
+    let s = Sides::new(BARE, new);
+    let (code, out, err) = s.review(&[]);
+    assert_eq!(code, 0, "{out}{err}");
+    let at = |l: &str| l.replace("{new}", &s.new);
+    let flipped = at("  not checked  survived: generated: {new}:1:44: tag: `>` -> `>=` in `...tr { let s = \"\\u{e9}\"; if n > 5 { s } else { \"\" } }`");
+    let raised = at("  not checked  survived: generated: {new}:1:46: tag: `5` -> `6` in `...{ let s = \"\\u{e9}\"; if n > 5 { s } else { \"\" } }`");
+    assert_eq!(
+        mutant_lines(&out),
+        [
+            "  tested       mutants: 1 of 3 killed (generated at seed 1: 3 drawn of 3 sites, 0 did not check)",
+            "  tested       killed by: big 1",
+            &flipped,
+            &caret(&flipped, "n > 5 {", ">"),
+            &raised,
+            &caret(&raised, "> 5 {", "5"),
+        ],
+        "{out}"
+    );
+}
+
+/// R1c: a changed function is named once in Not checked, with every grant it is marked under;
+/// those marked under the same grants share a line. An entry the base lacks says so.
+#[test]
+fn a_changed_function_is_listed_once() {
+    let old = r#"fn save(out: Dir, hook: Http) -> Result<(), Str> { out.write("a", "x".to_bytes()).map_err(|_| "out")?; let _ = hook.send("POST", "/", [], "x".to_bytes(), 0); Ok(()) }
+
+fn note(out: Dir) -> Result<(), Str> { out.write("n", "n".to_bytes()).map_err(|_| "out") }
+
+fn main(out: Dir, hook: Http) -> Result<(), Str> { save(out, hook)?; note(out) }
+"#;
+    let new = old.replace("\"x\"", "\"y\"").replace("\"n\".to", "\"m\".to");
+    let s = Sides::new(old, &new);
+    write(s.dir.path(), "new/worker.kio", &new);
+    let (code, out, err) = s.review(&["--entry", "worker.kio"]);
+    assert_eq!(code, 3, "{out}{err}");
+    assert_eq!(
+        Sides::section(&out, "Not checked"),
+        [
+            "  not checked  out: Dir write: what is written or removed",
+            "  not checked  hook: Http send POST: the paths, headers and bodies sent",
+            "  not checked  note: out (changed)",
+            "  not checked  save: out, hook (changed)",
+            "  not checked  worker.kio: out: Dir write: what is written or removed",
+            "  not checked  worker.kio: hook: Http send POST: the paths, headers and bodies sent",
+            "  not checked  worker.kio: note: out (new entry)",
+            "  not checked  worker.kio: save: out, hook (new entry)",
+            SAME_AUTHOR,
+        ],
+        "{out}"
+    );
+}
+
+/// R1c: a Resources row of a test that reaches no changed function says so: what moved it is
+/// not the code it runs (here the type table `h: Http` brings).
+#[test]
+fn resources_on_unchanged_code() {
+    let old = "fn f() -> Int { 1 }\n\nfn main() -> Int { f() }\n\n#[test]\nfn same() { assert_eq(1, 1); }\n\n#[test]\nfn calls() { assert_eq(f(), 1); }\n";
+    let new = old.replace("{ 1 }", "{ 0 + 1 }").replace(
+        "main() -> Int { f()",
+        "main(h: Http) -> Int { let _ = h.get(\"/\"); f()",
+    );
+    let s = Sides::new(old, &new);
+    let (code, out, err) = s.review(&["--mutants", "0"]);
+    assert_eq!(code, 3, "{out}{err}");
+    let resources = Sides::section(&out, "Resources");
+    assert_eq!(resources.len(), 3, "{out}");
+    assert!(resources[0].starts_with("  measured     calls: fuel "), "{out}");
+    assert!(resources[0].ends_with(" KB (+0.00%)"), "{out}");
+    assert!(resources[1].starts_with("  measured     same: fuel "), "{out}");
+    assert!(resources[1].ends_with(" KB (+0.00%); unchanged code"), "{out}");
 }
 
 /// A mutant under which a property discards every case is not killed: it survives, discarded.
@@ -1887,11 +2005,13 @@ fn a_property_that_discards_every_case_kills_nothing() {
     let (code, out, err) = s.review(&[]);
     assert_eq!(code, 0, "{out}{err}");
     let at = |l: &str| l.replace("{new}", &s.new);
+    let survived = at("  not checked  survived: generated: {new}:1:27: keep: `true` -> `false` in `...keep(n: Int) -> Bool { true }` (kept discarded every case)");
     assert_eq!(
         mutant_lines(&out),
         [
             "  tested       mutants: 0 of 1 killed (generated at seed 1: 1 drawn of 1 sites, 0 did not check)",
-            &at("  not checked  survived: generated: {new}:1:27: keep: `true` -> `false` in `...keep(n: Int) -> Bool { true }` (kept discarded every case)"),
+            &survived,
+            &caret(&survived, "{ true }", "true"),
         ],
         "{out}"
     );
