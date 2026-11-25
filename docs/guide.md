@@ -304,6 +304,8 @@ Ok("ran 0; columns id,guest,nights; booking 2; 2 bookings, 8 nights")
 
 A fourth step appended later runs once on each file: `ran 1`.
 
+**Migrating a server's file.** `--listen` has no startup step. Run the migration as a job before starting or restarting the server, `kio run migrate.kio --db db=app.db`, with `migrate` as above; a second run finds nothing to do (`ran 0`). The server then assumes the schema; with migrations kept in their own program, the server's grant can be the same file with no `CREATE` or `ALTER` in its code.
+
 **A server and a job on one file.** A `--listen` server and a `kio run` job may grant the same database: SQLite takes one write at a time across processes (WAL: reads go on during a write), and a statement that waits over 2 s is `Busy`, so keep each `transaction` short and retry a `Busy`. Grant a process that only reads with `:ro`. A job that makes many calls (an `Http` request per row) raises `--timeout` (10 s) and `--calls` (10,000) to fit ([Limits](#limits)).
 
 **Backing up and restoring.** kio cannot copy a database (`ATTACH` and `VACUUM INTO` are fenced); the operator does, outside kio. A file in WAL mode is up to three files: `app.db`, and while a process has it open `app.db-wal` (commits not yet copied into `app.db`) and `app.db-shm`; the last connection to close folds the WAL in and removes both. So:

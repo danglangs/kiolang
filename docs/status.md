@@ -138,23 +138,25 @@ Compiled-only kio covers the whole language and every capability; speed work res
 
 ## Next
 
-Order ([product-todo.md](product-todo.md) Direction B; the 2026-11-14 order's 0.1.3, W1a, E3c and R1b are done): W1 with outside developers on a sealed change set (the milestone; recruiting); a release with T4 and R1b; F1.3/F1.4 (flow's API and CLI); SITE C. Follow-up: two mutants at one snippet print identical survivor lines (product-todo R1b).
+Order ([roadmap.md](roadmap.md) "Order of work toward general purpose", set 2026-11-21):
 
-Direction B (adopted 2026-11-12, [product-todo.md](product-todo.md)): a general-purpose language for generated software; T1 (`kio test`) and T2 (property tests) done; F1.1 and F1.2 done (F1.2: leases, fenced completions, at-least-once delivery keyed by event id, #259); R1a done (`kio review`: one labelled page of authority, tests, resources, blind spots and hashes; adversarially reviewed); PG1 done (CI fails on fuel or peak memory growth over 2%; fuel is now the same on every OS, Rust pinned); PK1 done (`kio.deps`: local dependencies pinned by sha256, `kio deps pin`; kio-web copies nothing); SITE A live (danglangs.github.io/kiolang); SITE B live (the playground: `kio check` and `--base` in the browser, lang compiled to Wasm). Pilot phase: D1 done (`v0.1.0` published 2026-11-12: macOS arm64 and Linux archives, docs/first-job.md); D1b done (`v0.1.1` published 2026-11-13: `kio --version`, `kio test`, property tests, `Bytes.try_to_str`); `v0.1.2` published 2026-11-16 (`kio review`, `kio.deps`, P8, fuel the same on every OS); `v0.1.3` published 2026-11-17 (R1a2, R1a3, H30-H32, the review walkthrough); `v0.1.4` published 2026-11-18 (R1a4, R1a5, L28, T3, D6, P9 in part, `Secret`, `Dir.append`); `v0.1.5` published 2026-11-19 (T4 fake host, R1b mutants, P9 `chars()` 51 fuel a character); `v0.1.6` published 2026-11-19 (Value, sleep_ms, exec_rows with `query` read-only, HttpErr::Unreachable, L29 library, C16 fix, C17/C19/C20 speed); `v0.1.7` published 2026-11-19 (L32 capability groups, T5 faster property tests, C18 runtime precompiled into the binary); `v0.1.8` published 2026-11-21 (L31, C21, C25, H41); `v0.1.9` published 2026-11-21 (L34, T7, L30, C27, D7-D10); docs/review-a-change.md is the reviewer's walkthrough; D2 and D3 done; D5 done: the agent demo (tools/agent-demo/) passes 11/11 jobs on claude-sonnet-5-5 for $0.33; W1a and E3c done, W1 with outside developers next. Direction A is done through P7 and E4. Open: P7b (fewer `send_all *`, pinned) and C8c2b (C8c2 review follow-ups, pinned).
+1. W1 with outside developers on the sealed change set (the milestone). The participant packet is prepared outside the repo; recruiting is the maintainer's.
+2. C24: `--listen` per request on Linux, before choosing another speed task.
+3. R1c: review page readability (what W1 participants read).
+4. C26: profile `obj::dec`; a change only if the profile names a worthwhile gain.
 
-P9 done: a `chars()` loop 617 -> 51 fuel a character (compiled `for c in s.chars()` builds no list), a new `Int` `Map.insert` 2,046 -> 1,227. Allocation speed is paused after C8c3 (inlining, done) for the pilot phase; next when a pilot needs it: C8c9 (per-loop fuel, approved), C8c5 (inline list buffers), C8c6 (branchless counts). Tuples if the evals show models still reach for them. Pinned, not started: L18 `par_map` and L19 `scope`/`spawn` (concurrency stages 2 and 3, when a program needs them).
+Open, pinned: T7's 30 s target (38 s with a Db; no higher SQLite heap without a measured review memory budget, #361), P7b (fewer `send_all *`), C8c2b (C8c2 review follow-ups), F1.3/F1.4 (flow's API and CLI), L18/L19 (concurrency stages 2 and 3, when a program needs them). Not taken: C8c9 (per-loop fuel), C8c5, C8c6. Tuples stay a hint (L20) unless an eval shows models reach for them.
+
+Releases: v0.1.0 to v0.1.9, 2026-11-12 to 2026-11-21; each release's contents in its GitHub notes, breaking changes in [upgrading.md](upgrading.md).
 
 ## Waiting on the maintainer
 
-C18 prototype (branch, measured, not merged; compiler-todo C18, open_questions #345): the runtime's native code compiled at build time into Cranelift's incremental cache and embedded in the binary; `kio run` of an empty program 38 to 27 ms (-29%; -46% with a one-line Cranelift fix, `DataFlowGraph::clear` not clearing `exception_tables`, which needs an upstream patch), every row the same gain, steady execution matched on fuel and outputs (cached against uncached: host/tests/cache_differential.rs), the flow test suite -14%, `kio review` 326 to 240 ms (-26%), no change per `--listen` request. Merge needs the adversarial review of runtime_cache.rs and a decision on the Cranelift fix.
+| Item | Recommendation |
+|---|---|
+| W1 participants | recruit; the packet needs no further setup |
+| A `--listen` startup step for migrations | wait for a second app; guide.md documents running migrations separately |
+| Signing the macOS binary (#232) | needs an Apple account |
 
-Signing the macOS binary needs an Apple account (#232). Tuples stay deferred (today a hint, L20) unless an eval shows models still reach for them. Approved: L21-L26, H22, H23 (a caps.wit change), P4 (the grants file), E3, E3b (2026-11-11) and C8c9 (per-loop fuel, after C8c4 and C8c3, with a security review); C8c9 stays waiting on its turn in the queue.
+## Speed
 
-## Speed (C8b5 with C8b6, C8b7, C8c1, C8c2, C8c8, C8c4 and C8c3 marked, 2026-11-09, release, run time; all in [roadmap.md](roadmap.md))
-
-| | fib(35) | 30 M loop | tree | JSON 1 MB | 100 k concatenations |
-|---|---|---|---|---|---|
-| Rust | 23 ms | 97 ms | 33 ms | 8.0 ms | 4.6 ms |
-| kio compiled (plus 20-25 ms compile per run) | 53-57 ms (C8c3: 36-39) | 106 ms | 98 ms (C8b6: 101; C8b7: 90; C8c1: 92; C8c2: 71; C8c8: 68) | 66 ms (json.kio; C8b7: 64; C8c1: 58; C8c2: 57; C8c4: 52; C8c3: 40-45); built-in JSON 13 ms (C8b6) | 5.2 ms (C8b6: 4.8; C8b7: 4.5) |
-| Python 3.13 | 704 ms | 933 ms | 2.87 s | 17 ms | 7.2 ms |
-| kio interpreter (the test oracle) | 1.54 s | 1.27 s | 1.03 s | 812 ms | 1.57 s |
+Current numbers: [roadmap.md](roadmap.md) "Speed today" and [perf.md](perf.md); per task results in compiler-todo.md (C16-C27). `--listen` CPU a request on macOS depends on load (C23); Linux is C24.
