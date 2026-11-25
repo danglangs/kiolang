@@ -43,7 +43,7 @@ The absolute figures below depend on load: CPU a request falls as load rises on 
 - macOS: Wasmtime resets a slot's memory by mapping fresh zero pages over it whatever `linear_memory_keep_resident` says (the option is Linux-only), so the memory option does nothing here; the speed plan's -30% from it was `table_keep_resident`, set in the same scratch build. Less memory touched is what saves the `mmap` at drop and the page faults.
 - Idle RSS of the JSON server (`ps`, 2 s after the last request; two runs each): after one request 39-41 MB before and after; after 20 k requests at `-c 12` 42-45 MB both; then 20 k at `-c 64` 48-51 MB both. On Linux each slot a burst used keeps up to the initial memory resident (1.25 MB; slots used are at most the 2-per-core workers), so up to about 40 MB more on 16 cores: measured with the Linux numbers.
 - A handler whose first allocation is over about 150 KB forfeits the donated 128 KB (dlmalloc's `try_donate_preexisting` is one-shot) and grows memory at once, as before C17; no safety impact.
-- Linux (CPU per request, RSS, `pagemap_scan` on and off) is the next step: there memory reset is `memset` of the kept 1.25 MB instead of `madvise` (#322, #323).
+- Linux, measured (C24, 4 vCPU runner): memory reset (`reset_with_pagemap`, copying the dirty pages of the kept 1.25 MB back) is 32 µs of a 160-165 µs request and instantiation 26-29 µs; peak RSS 51-53 MB. Tuning both is C28 (#322, #323).
 
 ## Regression gate
 

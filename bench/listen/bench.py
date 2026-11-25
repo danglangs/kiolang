@@ -171,7 +171,7 @@ def probe(route, threads):
 # Wasmtime's code memory is anonymous, so its frames have no symbol or file. A frame is
 # "sym (dso)"; the request path is told apart by kio's and Wasmtime's frames (handle_sending
 # may be inlined into listen's closure).
-JIT = re.compile(r"\((\[unknown\]|//anon|\[anon[^)]*\]|memfd:[^)]*)\)$")
+JIT = re.compile(r"\((\[unknown\]|//anon|\[anon[^)]*\]|memfd:[^)]*|/tmp/perf-\d+\.map)\)$")
 KERNEL = "[kernel.kallsyms]"
 
 
