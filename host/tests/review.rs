@@ -1613,7 +1613,7 @@ fn mutants_killed_and_survived() {
             "source": "generated", "written": false, "function": func, "file": s.new, "line": line, "col": col,
             "from": from, "to": to, "description": format!("{edit}{around}`"), "caret": edit.len() + around.rfind(from).unwrap(),
             "killed_by": killed, "stopped_by": null, "discarded_by": null, "how": killed.map(|_| "failed"),
-            "tests_run": 1,
+            "tests_run": 1, "did_not_check_in": [],
         })
     };
     assert_eq!(
@@ -2886,6 +2886,98 @@ fn a_shared_test_that_moves_suites_is_the_same_test() {
             "  not checked  changed, reached by no test: main",
         ],
         "{out}"
+    );
+}
+
+/// R1e2: a shared test paired across suites is named one way, `failed in old:` too.
+#[test]
+fn a_paired_test_that_fails_in_old_is_named_as_paired() {
+    let feed = "pub fn ok(s: Int) -> Bool { s == 200 }\n#[test]\nfn ok_t() { assert(ok(201), \"ok\"); }\n";
+    let digest = "mod feed;\nfn main() -> Int { if feed::ok(200) { 1 } else { 0 } }\n#[test]\nfn d_t() { assert(feed::ok(200), \"x\"); }\n";
+    let t = tree(&[
+        ("old/feed.kio", feed),
+        ("old/digest.kio", digest),
+        ("old/fetch.kio", "fn main() -> Int { 1 }\n#[test]\nfn root_t() { assert_eq(1, 1); }\n"),
+        ("new/feed.kio", feed),
+        ("new/digest.kio", digest),
+        (
+            "new/fetch.kio",
+            "mod feed;\nfn main() -> Int { if feed::ok(200) { 1 } else { 0 } }\n#[test]\nfn root_t() { assert_eq(1, 1); }\n",
+        ),
+    ]);
+    let args = [
+        "new/fetch.kio",
+        "--base",
+        "old/fetch.kio",
+        "--entry",
+        "digest.kio",
+        "--mutants",
+        "0",
+    ];
+    let (code, out, err) = review_in(t.path(), &args, false);
+    assert_eq!(code, 1, "{out}{err}");
+    // OLD runs FEED's test in DIGEST's suite, NEW in the root's: one name on every line.
+    assert_eq!(
+        Sides::section(&out, "Tests"),
+        [
+            DEFAULT_GRANTS,
+            "  not checked  old: 2 passed, 1 failed; the base fails its own tests",
+            "  tested       new: 2 passed, 1 failed",
+            "  not checked  changed, reached by no test: main",
+            "  error        FAIL feed::ok_t",
+            "                 new/feed.kio:3:13: assertion failed: ok",
+            "  not checked  failed in old: feed::ok_t",
+        ],
+        "{out}"
+    );
+}
+
+/// R1e3: a written mutant of a shared module that does not check in an entry's program (it
+/// calls a module only the root declares) says that entry's tests did not run.
+#[test]
+fn a_mutant_that_does_not_check_in_an_entry_is_said() {
+    let feed = "pub fn size(n: Int) -> Int { n + 1 }\n";
+    let root = "mod feed;\nmod extra;\nfn main() -> Int { feed::size(1) }\n#[test]\nfn r_t() { assert(feed::size(1) > 0, \"positive\"); }\n";
+    let digest = "mod feed;\nfn main() -> Int { feed::size(2) }\n#[test]\nfn d_t() { assert_eq(feed::size(2), 3); }\n";
+    let extra = "pub fn one() -> Int { 1 }\n";
+    let t = tree(&[
+        ("old/feed.kio", feed),
+        ("old/extra.kio", extra),
+        ("old/fetch.kio", root),
+        ("old/digest.kio", digest),
+        ("new/feed.kio", feed),
+        ("new/extra.kio", extra),
+        ("new/fetch.kio", root),
+        ("new/digest.kio", digest),
+        ("s.mutants", "feed::size: off by one\n- n + 1\n+ n + extra::one() + 1\n"),
+    ]);
+    let args = [
+        "new/fetch.kio",
+        "--base",
+        "old/fetch.kio",
+        "--entry",
+        "digest.kio",
+        "--mutants",
+        "0",
+        "--mutations",
+        "s.mutants",
+    ];
+    let (code, out, err) = review_in(t.path(), &args, false);
+    assert_eq!(code, 3, "{out}{err}");
+    assert_eq!(
+        Sides::section(&out, "Tests")[3..],
+        [
+            "  tested       mutants: 0 of 1 killed (s.mutants 0 of 1)",
+            "  not checked  survived: s.mutants:1: new/feed.kio:1:30: feed::size: `n + 1` -> `n + extra::one() + 1`, ran 1 test: \"off by one\"",
+            "  not checked  mutants: s.mutants:1: new/feed.kio:1:30: feed::size: does not check in digest.kio's program, so 1 test there did not run: unknown module `extra`",
+        ],
+        "{out}"
+    );
+    let (_, out, _) = review_in(t.path(), &[&args[..], &["--json"]].concat(), false);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        v["tests"]["mutants"]["rows"][0]["did_not_check_in"],
+        serde_json::json!([{"program": "digest.kio", "tests": 1, "error": "unknown module `extra`"}])
     );
 }
 

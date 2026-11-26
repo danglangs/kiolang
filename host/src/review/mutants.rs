@@ -31,13 +31,15 @@ struct Site {
 }
 
 /// How a mutant's runs ended: the test that failed and how, the first test a limit of T's own
-/// stopped (not a kill: the unmutated run sat at that limit), and the first property whose every
-/// case was discarded (not a kill either).
+/// stopped (not a kill: the unmutated run sat at that limit), the first property whose every
+/// case was discarded (not a kill either), and each other program the mutant does not check in
+/// (`(program, tests not run there, the first error)`).
 #[derive(Default)]
 struct End {
     killed: Option<(String, String)>,
     stopped: Option<(String, String)>,
     discarded: Option<String>,
+    unchecked: Vec<(String, usize, String)>,
 }
 
 /// A suite whose NEW tests ran (R1d3): its index in the review's suites, its tests as set up and
@@ -479,6 +481,7 @@ fn row(
         "stopped_by": end.stopped.as_ref().filter(|_| end.killed.is_none()).map(|s| &s.0),
         "discarded_by": end.discarded.as_ref().filter(|_| end.killed.is_none() && end.stopped.is_none()),
         "how": how, "tests_run": tests_run, "fuel": fuel,
+        "did_not_check_in": end.unchecked.iter().map(|(p, n, why)| json!({"program": p, "tests": n, "error": why})).collect::<Vec<_>>(),
     });
     if let (Some(r), Some(src)) = (row.as_object_mut(), source.as_object()) {
         r.extend(src.clone());
@@ -647,9 +650,10 @@ impl Runner<'_> {
     }
 
     /// Runs `tests` on the mutant, each in its run's program, until one kills it; `Err` with the
-    /// first error when the mutant of `s`'s own program does not check.
+    /// first error when the mutant of `s`'s own program does not check. A test of another program
+    /// the mutant does not check in is counted there (`End::unchecked`), not run.
     fn each(&self, s: &Site, tests: &[Reach], runs: &mut Runs) -> Result<Result<(), String>, Stop> {
-        let mut built: Option<(usize, Option<Tests>)> = None;
+        let mut built: Option<(usize, Result<Tests, String>)> = None;
         for &(t, j) in tests {
             if runs.killed {
                 break;
@@ -659,15 +663,25 @@ impl Runner<'_> {
                 return Err(Stop::Budget);
             }
             if built.as_ref().is_none_or(|(at, _)| *at != j) {
-                let m = match self.mutant(s, j) {
-                    Ok(m) => Some(m),
+                match self.mutant(s, j) {
                     Err(why) if j == s.run => return Ok(Err(why)),
-                    Err(_) => None,
-                };
-                built = Some((j, m));
+                    m => built = Some((j, m)),
+                }
             }
-            if let Some((_, Some(m))) = &mut built {
-                runs.killed = self.one(m, t, j, runs)?;
+            match &mut built {
+                Some((_, Ok(m))) => runs.killed = self.one(m, t, j, runs)?,
+                Some((_, Err(why))) => {
+                    let p = match self.prefixes[j].strip_suffix(": ") {
+                        Some(e) => e.to_string(),
+                        None => "the root".to_string(),
+                    };
+                    let u = &mut runs.end.unchecked;
+                    match u.iter_mut().find(|(q, _, _)| *q == p) {
+                        Some(row) => row.1 += 1,
+                        None => u.push((p, 1, why.clone())),
+                    }
+                }
+                None => {}
             }
         }
         Ok(Ok(()))
@@ -895,23 +909,33 @@ fn lines(
         rows.push(("tested", format!("killed by: {}", each.join(", "))));
     }
     let text = |m: &serde_json::Value, k: &str| m[k].as_str().unwrap_or_default().to_string();
+    // Where a mutant came from and its function: the edit's place in NEW, so two mutants with
+    // one snippet are told apart; a written one's place in the file too, and its program.
+    let source = |m: &serde_json::Value| {
+        let (f, at) = (
+            text(m, "function"),
+            format!("{}:{}:{}", ascii(&text(m, "file")), m["line"], m["col"]),
+        );
+        match is_generated(&m) {
+            true => (format!("generated: {at}"), f),
+            false => (
+                format!("{}:{}: {at}", text(m, "source"), m["entry"]),
+                m["program"].as_str().map_or(f.clone(), |p| format!("{p}: {f}")),
+            ),
+        }
+    };
     // A written mutant stopped by T's limit is an `error` line of its own.
     let shown = |m: &&serde_json::Value| m["killed_by"].is_null() && (is_generated(m) || m["stopped_by"].is_null());
     for m in out.iter().filter(shown) {
-        let (f, d) = (text(m, "function"), text(m, "description"));
-        // The edit's place in NEW, so two mutants with one snippet are told apart.
-        let at = format!("{}:{}:{}", ascii(&text(m, "file")), m["line"], m["col"]);
-        // A written mutant: where it is in the file, its program, its edit, then what it breaks,
-        // quoted so it cannot pass for the edit.
-        let (source, f, d) = match is_generated(&m) {
-            true => (format!("generated: {at}"), f, d),
+        let ((source, f), d) = (source(m), text(m, "description"));
+        // A written mutant: its edit, then what it breaks, quoted so it cannot pass for the edit.
+        let d = match is_generated(&m) {
+            true => d,
             false => {
-                let f = m["program"].as_str().map_or(f.clone(), |p| format!("{p}: {f}"));
                 let n = m["tests_run"].as_u64().unwrap_or_default();
                 let tests = if n == 1 { "test" } else { "tests" };
                 let (from, to, d) = (text(m, "from"), text(m, "to"), d.replace('"', "\\\""));
-                let d = format!("`{from}` -> `{to}`, ran {n} {tests}: \"{d}\"");
-                (format!("{}:{}: {at}", text(m, "source"), m["entry"]), f, d)
+                format!("`{from}` -> `{to}`, ran {n} {tests}: \"{d}\"")
             }
         };
         let lead = match m["stopped_by"].as_str() {
@@ -927,6 +951,18 @@ fn lines(
         if let Some(c) = m["caret"].as_u64() {
             let pad = " ".repeat(lead.chars().count() + c as usize);
             rows.push(("", format!("{pad}{}", "^".repeat(text(m, "from").chars().count()))));
+        }
+    }
+    // Tests of another program with the mutant's function that did not run: it does not check there.
+    for m in out {
+        for u in m["did_not_check_in"].as_array().into_iter().flatten() {
+            let ((source, f), n) = (source(m), u["tests"].as_u64().unwrap_or_default());
+            let tests = if n == 1 { "test" } else { "tests" };
+            let (p, why) = (text(u, "program"), text(u, "error"));
+            let line = format!(
+                "mutants: {source}: {f}: does not check in {p}'s program, so {n} {tests} there did not run: {why}"
+            );
+            rows.push(("not checked", line));
         }
     }
 }

@@ -145,13 +145,13 @@ Compiled-only kio covers the whole language and every capability; speed work res
 | L35 | A5's library gaps: `parse_iso_utc` reads no fraction, 1-9 fraction digits and `+HH:MM`/`-HH:MM` offsets; `HttpResponse.header(name)` and `Incoming.header(name)` (case-insensitive, built in over caps.wit's methods); `kio check` of a module says how to check and test it. Harness 638 both ways, 635 agreed; gate fuel +0.0% (#365, #366) |
 | T8 | A5's test-grant and hint gaps: `--http-record` binds per test (one test grants file serves two entries); a `main` or test capability parameter hiding a function says to rename the function; guide.md says `Dir` never creates parents (#367) |
 | R1d | `kio review` of a new entry (OLD's directory's modules under an empty `main`) and of a change across entries (each entry's tests run and merge, a shared module's once; grants per run after `--grants`; OLD's tests run without a record only NEW's tests take; unmutated, fake, limit and `:ro` lines); review-a-change.md 7d, 7e (#368-#372) |
+| R1e | R1d's review follow-ups: the static fallback for OLD's tests (no trigger: after the retry OLD sets up unless its program does not check) deleted, review.rs -22 lines; a paired shared test one name on every line (`failed in old:`); a mutant that does not check in another program a `not checked` line (#372) |
 
 ## Next
 
 Order ([roadmap.md](roadmap.md) "Order of work toward general purpose", set 2026-11-21):
 
 1. W1 with outside developers on the sealed change set (the milestone). The participant packet is prepared outside the repo (kio 0.1.10, with R1c); recruiting is the maintainer's.
-2. R1e: R1d's review follow-ups (an unreachable fallback, two page details).
 
 Open, pinned: T7's 30 s target (38 s with a Db; no higher SQLite heap without a measured review memory budget, #361), P7b (fewer `send_all *`), C8c2b (C8c2 review follow-ups), F1.3/F1.4 (flow's API and CLI), L18/L19 (concurrency stages 2 and 3, when a program needs them). Not taken: C8c9 (per-loop fuel), C8c5, C8c6. Tuples stay a hint (L20) unless an eval shows models reach for them.
 
