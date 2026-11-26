@@ -25,6 +25,19 @@ jobs:
       - run: cargo build -p runtime --target wasm32-unknown-unknown --release
       - run: cargo test -p codegen
       - run: cargo run -p capgen && git diff --exit-code lang/src/caps_gen.rs
+  miri:
+    # The allocator and `free` under Miri (C29b), which checks every free's `Layout` (unchecked in
+    # `free`). A dated nightly, so a run is reproducible. The subset takes about a minute; the
+    # full runtime suite 28.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-11-09
+          components: miri, rust-src
+      - run: cargo +nightly-2026-11-09 miri test -p runtime -- plan_tests heap_tests
   e3:
     # E3's references and detectors; the Python arm's sandbox is macOS sandbox-exec.
     runs-on: macos-latest

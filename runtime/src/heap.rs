@@ -479,7 +479,8 @@ pub unsafe fn dealloc(p: *mut u8, l: Layout) {
 }
 
 /// `dealloc` of a block of `size` bytes, alignment 8, not yet counted towards a hand-back: the
-/// bytes listed, for `add_freed` (C29). Natively and on the test heap there are no lists: 0.
+/// bytes listed, for `add_freed` (C29). Natively and on the test heap there are no lists:
+/// `listed(size)`.
 ///
 /// # Safety
 /// `GlobalAlloc::dealloc`'s contract for `p` and the layout of `size` bytes, alignment 8.
@@ -492,15 +493,41 @@ pub unsafe fn dealloc_quiet(p: *mut u8, size: usize) -> usize {
         #[cfg(not(all(target_arch = "wasm32", not(feature = "test-heap"))))]
         {
             dealloc(p, Layout::from_size_align_unchecked(size, STEP));
-            0
+            listed(size)
         }
     }
 }
 
-/// Counts `n` bytes that `dealloc_quiet` listed (nothing natively or on the test heap).
+/// Where there are no lists (natively, the test heap): the bytes `Heap::dealloc_quiet` would
+/// list for a block of `size` bytes in native tests, so they check `free`'s byte count
+/// (C29b); 0 otherwise.
+#[inline(always)]
+pub fn listed(size: usize) -> usize {
+    #[cfg(test)]
+    return class(Layout::from_size_align(size, STEP).unwrap()).map_or(0, block);
+    #[cfg(not(test))]
+    {
+        let _ = size;
+        0
+    }
+}
+
+/// Counts `n` bytes that `dealloc_quiet` listed (natively, in tests, onto `freed()`).
 #[inline(always)]
 pub fn add_freed(n: usize) {
     #[cfg(all(target_arch = "wasm32", not(feature = "test-heap")))]
     crate::ALLOC.add_freed(n);
+    #[cfg(test)]
+    FREED.with(|f| f.set(f.get() + n));
     let _ = n;
+}
+
+// Per thread: tests run in parallel, and each checks the bytes its own `dec`s listed.
+#[cfg(test)]
+std::thread_local!(static FREED: core::cell::Cell<usize> = const { core::cell::Cell::new(0) });
+
+/// The bytes `add_freed` has counted on this test thread.
+#[cfg(test)]
+pub(crate) fn freed() -> usize {
+    FREED.with(core::cell::Cell::get)
 }

@@ -965,7 +965,7 @@ unsafe fn free_quiet(p: *mut Header, size: usize) -> usize {
     // SAFETY: `p` owns `size` bytes, now never reused.
     unsafe {
         ptr::write_bytes(p.cast::<u8>(), POISON, size);
-        0
+        heap::listed(size)
     }
     #[cfg(not(all(any(test, feature = "test-heap"), not(miri))))]
     // SAFETY: `p` was allocated by `new` (or `bytes_room`) with `layout(size)`: this size,

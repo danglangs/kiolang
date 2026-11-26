@@ -2,6 +2,7 @@
 //! as a run's table does (native test tables have none).
 
 use crate::desc::{self, Desc, Kind, Name, Plan, Slice, Table, Variant};
+use crate::heap;
 use crate::obj::{self, to_slot, Header, Key, Map};
 use crate::tests::lock;
 use alloc::vec::Vec;
@@ -274,9 +275,11 @@ fn planned_frees_free_every_shape() {
     assert_eq!(obj::live(), before);
 }
 
-/// Every kind freed through plans, one value at a time: `free` counts its objects once, at the
-/// end (C29), and after each `dec` the live count is down by exactly the objects only that value
-/// held. (The free lists' bytes are `heap_tests`': natively objects are poisoned, not listed.)
+/// Every kind freed through plans, one value at a time: `free` counts its objects and bytes
+/// once, at the end (C29), and after each `dec` the live count is down by exactly the objects
+/// only that value held, and `heap::freed` up by the bytes `free` would have listed: each
+/// object's and list buffer's class, 0 for one no class holds (C29b). `dec`'s fast path frees
+/// through `dealloc`, which counts its own bytes on wasm: 0 here.
 #[test]
 fn each_dec_takes_what_it_frees_off_the_live_count() {
     let _l = lock();
@@ -305,13 +308,16 @@ fn each_dec_takes_what_it_frees_off_the_live_count() {
             obj::inc(shared);
             shared
         };
-        // Each value, and the objects it alone holds, itself included.
-        let mut values: Vec<(*mut Header, isize)> = Vec::new();
+        // Each value, the objects it alone holds (itself included), and their listed bytes.
+        // Sizes: a record 8 + 8 a slot, a variant or closure 16 + 8 a slot, a `Str` 16 + its
+        // length, a `List` 32 and its buffer 8 a slot of capacity, a `Map` 48, a `HashMap` 96
+        // (class 128).
+        let mut values: Vec<(*mut Header, isize, usize)> = Vec::new();
 
         let nums = obj::alloc(&t, NUMS, 0);
-        values.push((nums, 1));
-        values.push((pair(str("own"), 2), 2));
-        values.push((pair(share(), 3), 1));
+        values.push((nums, 1, 0)); // the fast path
+        values.push((pair(str("own"), 2), 2, 24 + 24));
+        values.push((pair(share(), 3), 1, 24));
 
         let wide = obj::alloc(&t, WIDE, 0);
         for i in 1..69 {
@@ -319,30 +325,30 @@ fn each_dec_takes_what_it_frees_off_the_live_count() {
         }
         *obj::slot(&t, wide, 0) = to_slot(str("first"));
         *obj::slot(&t, wide, 69) = to_slot(share());
-        values.push((wide, 2));
+        values.push((wide, 2, 24)); // 568 bytes: no class
 
         // Named("a", Named("b", Box(1, 2))), a Dot, a closure.
-        values.push((named("a", named("b", shape(1, 1, 2))), 5));
-        values.push((shape(0, 0, 0), 1));
+        values.push((named("a", named("b", shape(1, 1, 2))), 5, 3 * 32 + 2 * 24));
+        values.push((shape(0, 0, 0), 1, 0));
         let c = obj::alloc(&t, CLOSURE, 0);
         *obj::slot(&t, c, 0) = 9;
         *obj::slot(&t, c, 1) = to_slot(str("cap"));
-        values.push((c, 2));
+        values.push((c, 2, 32 + 24));
 
         // Lists: empty (no buffer), of numbers (a buffer no class holds), of `Str`s, of
         // records, of enums.
-        values.push((obj::new_list(LIST_INT, Vec::new()), 1));
-        values.push((obj::new_list(LIST_INT, (0..100).collect()), 1));
+        values.push((obj::new_list(LIST_INT, Vec::new()), 1, 32));
+        values.push((obj::new_list(LIST_INT, (0..100).collect()), 1, 32));
         let strs = alloc::vec![to_slot(str("x")), to_slot(share()), to_slot(str("y")), 0];
-        values.push((obj::new_list(LIST_STR, strs), 3));
+        values.push((obj::new_list(LIST_STR, strs), 3, 32 + 32 + 24 + 24));
         let pairs = alloc::vec![to_slot(pair(str("p"), 1)), 0, to_slot(pair(share(), 2))];
-        values.push((obj::new_list(LIST_PAIR, pairs), 4));
+        values.push((obj::new_list(LIST_PAIR, pairs), 4, 32 + 24 + 3 * 24));
         let shapes = alloc::vec![
             to_slot(named("c", shape(0, 0, 0))),
             to_slot(shape(1, 3, 4)),
             to_slot(shape(0, 0, 0)),
         ];
-        values.push((obj::new_list(LIST_SHAPE, shapes), 6));
+        values.push((obj::new_list(LIST_SHAPE, shapes), 6, 32 + 24 + 2 * 32 + 24 + 2 * 16));
 
         // Maps: of records, and the hash maps with and without pointers.
         let mut m = Map::new();
@@ -352,21 +358,22 @@ fn each_dec_takes_what_it_frees_off_the_live_count() {
                 core::cell::Cell::new(to_slot(pair(str(v), 4))),
             );
         }
-        values.push((obj::new_map(MAP, m), 5));
+        values.push((obj::new_map(MAP, m), 5, 48 + 2 * (24 + 24)));
         let mut h = obj::HashMap::new();
         h.insert(Key::Str(b"k".as_slice().into()), 7);
-        values.push((obj::new_hash_map(HMAP_INT, h), 1));
+        values.push((obj::new_hash_map(HMAP_INT, h), 1, 128));
         let mut h = obj::HashMap::new();
         h.insert(Key::Int(1), to_slot(str("v")));
         h.insert(Key::Int(2), to_slot(share()));
-        values.push((obj::new_hash_map(HMAP_STR, h), 2));
+        values.push((obj::new_hash_map(HMAP_STR, h), 2, 128 + 24));
 
-        values.push((str("alone"), 1));
+        values.push((str("alone"), 1, 0));
         assert_eq!(rc(shared), 6);
-        for (p, objects) in values {
-            let before = obj::live();
+        for (p, objects, bytes) in values {
+            let (before, freed) = (obj::live(), heap::freed());
             obj::dec(&t, p);
             assert_eq!(obj::live(), before - objects);
+            assert_eq!(heap::freed() - freed, bytes, "bytes listed by {objects} objects");
         }
         assert_eq!(rc(shared), 1, "each holder dropped its reference once");
         let before = obj::live();
