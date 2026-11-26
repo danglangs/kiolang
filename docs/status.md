@@ -151,7 +151,7 @@ Compiled-only kio covers the whole language and every capability; speed work res
 
 Order ([roadmap.md](roadmap.md) "Order of work toward general purpose", set 2026-11-21):
 
-1. W1 with outside developers on the sealed change set (the milestone). The participant packet is prepared outside the repo (kio 0.1.10, with R1c); recruiting is the maintainer's.
+1. W1 with outside developers on the sealed change set (the milestone). The participant packet is prepared outside the repo (kio 0.1.12); recruiting is the maintainer's.
 
 Open, pinned: T7's 30 s target (38 s with a Db; no higher SQLite heap without a measured review memory budget, #361), P7b (fewer `send_all *`), C8c2b (C8c2 review follow-ups), F1.3/F1.4 (flow's API and CLI), L18/L19 (concurrency stages 2 and 3, when a program needs them). Not taken: C8c9 (per-loop fuel), C8c5, C8c6. Tuples stay a hint (L20) unless an eval shows models reach for them.
 
