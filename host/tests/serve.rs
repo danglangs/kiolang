@@ -139,11 +139,14 @@ fn a_request_over_memory_is_a_500_and_the_next_request_works() {
 }
 
 /// C17: a fresh instance in a reused pool slot sees nothing an earlier one wrote. Each round,
-/// four instances at once grow their memory and write a marker into every word of it; then four
-/// new instances, in the same slots (their memories' addresses are the writers'), check the
-/// memory is back to its initial size, grow it as the writers did and read every byte: the data
-/// image or zero. So both the kept initial pages (reset by `memset` on Linux) and the grown ones
-/// (by `madvise`) are read. The engine is the one `Server` builds.
+/// four instances at once grow their memory and write a marker into every word of it, or (C28)
+/// into one word every 3 pages and 56 bytes, the image's page among them, as a request writes a
+/// few pages, or into one every page and 56 bytes (more written pages than the kept memory
+/// holds); then four new instances, in the same slots (their memories' addresses are the
+/// writers'), check the memory is back to its initial size, grow it as the writers did and read
+/// every byte: the data image or zero. On Linux the pages `PAGEMAP_SCAN` reports are reset in
+/// place up to the kept memory's size, the rest by `madvise`. The engine is the one `Server`
+/// builds.
 #[test]
 fn a_reused_slot_shows_nothing_an_earlier_instance_wrote() {
     use wasm_encoder::BlockType::Empty;
@@ -160,13 +163,13 @@ fn a_reused_slot_shows_nothing_an_earlier_instance_wrote() {
         align,
         memory_index: 0,
     };
-    // fill(marker): grow by 16 pages, then store `marker` at every 8 bytes of memory.
+    // fill(marker, stride): grow by 16 pages, then store `marker` at every `stride` bytes of memory.
     #[rustfmt::skip]
     let fill = [
         I::I32Const(16), I::MemoryGrow(0), I::Drop,
         I::Loop(Empty),
-        I::LocalGet(1), I::LocalGet(0), I::I64Store(arg(3)),
-        I::LocalGet(1), I::I32Const(8), I::I32Add, I::LocalTee(1),
+        I::LocalGet(2), I::LocalGet(0), I::I64Store(arg(3)),
+        I::LocalGet(2), I::LocalGet(1), I::I32Add, I::LocalTee(2),
         I::MemorySize(0), I::I32Const(16), I::I32Shl, I::I32LtU, I::BrIf(0),
         I::End,
         I::End,
@@ -195,7 +198,7 @@ fn a_reused_slot_shows_nothing_an_earlier_instance_wrote() {
     ];
     let mut m = Enc::new();
     let mut types = TypeSection::new();
-    types.ty().function([ValType::I64], []);
+    types.ty().function([ValType::I64, ValType::I32], []);
     types.ty().function([], [ValType::I32]);
     m.section(&types);
     m.section(FunctionSection::new().function(0).function(1));
@@ -238,14 +241,21 @@ fn a_reused_slot_shows_nothing_an_earlier_instance_wrote() {
         let memory = instance.get_memory(&mut *store, "memory").unwrap();
         memory.data_ptr(&*store) as usize
     };
-    for round in 0..3 {
+    // Sparse rounds first, on fresh slots, then after one that only read, then after a full one;
+    // then more scattered written pages than the kept memory's budget.
+    #[cfg(target_os = "linux")]
+    assert!(
+        wasmtime::PoolingAllocationConfig::is_pagemap_scan_available(),
+        "PAGEMAP_SCAN (Linux 6.7+) is unavailable: this test would not reach the scan"
+    );
+    for (round, stride) in [12344, 12344, 8, 12344, 4152].into_iter().enumerate() {
         let mut written = vec![];
         let mut slots = std::collections::BTreeSet::new();
         for _ in 0..4 {
             let (mut store, instance) = start();
             slots.insert(slot(&mut store, &instance));
-            let fill = instance.get_typed_func::<i64, ()>(&mut store, "fill").unwrap();
-            fill.call(&mut store, 0x6b69_6f6b_696f_6b69).unwrap();
+            let fill = instance.get_typed_func::<(i64, i32), ()>(&mut store, "fill").unwrap();
+            fill.call(&mut store, (0x6b69_6f6b_696f_6b69, stride)).unwrap();
             written.push(store);
         }
         drop(written);

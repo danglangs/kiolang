@@ -25,7 +25,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, PoisonError};
 use wasmtime::component::{Component, HasSelf, InstancePre, Linker, Resource};
-use wasmtime::{Engine, InstanceAllocationStrategy, PoolingAllocationConfig, Result, Store};
+use wasmtime::{Enabled, Engine, InstanceAllocationStrategy, PoolingAllocationConfig, Result, Store};
 
 /// The runtime's site for objects still alive when `run` ends, a codegen bug
 /// (runtime/src/entry.rs `LEAKED`).
@@ -1009,16 +1009,24 @@ fn pool_instances() -> u32 {
 /// A request gets a fresh instance in a pool slot an earlier request used, and must see nothing
 /// that request wrote (C17). What Wasmtime 50 documents and does when an instance is dropped:
 /// - Linear memory: on Linux the first `linear_memory_keep_resident` bytes are set back to the
-///   data image (zero elsewhere) with `memset`, the rest is reset with `madvise`, which also
-///   restores it ("By default Wasmtime will use `madvise` to reset the entire contents of linear
-///   memory back to zero ... This option can be used to use `memset` instead"). Other hosts
+///   data image (zero elsewhere) with `memset` (only the pages written: `pagemap_scan` below),
+///   the rest is reset with `madvise`, which also restores it ("By default Wasmtime will use
+///   `madvise` to reset the entire contents of linear memory back to zero ... This option can
+///   be used to use `memset` instead"). Other hosts
 ///   (macOS) ignore the option and map fresh zero pages over the whole slot (`cow.rs`,
 ///   `reset_with_anon_memory`). We keep the initial memory resident: a small request's heap fits
 ///   it (runtime `heap::CHUNK`, the runtime's `--initial-heap`).
 /// - Tables: the first `table_keep_resident` bytes are zeroed with `memset` on every host, the
 ///   rest decommitted. A table is a few hundred bytes; keeping it saves an `mmap` per request.
-/// - `pagemap_scan` (reset only the pages the kernel reports written) stays off, its default:
-///   Wasmtime fixed a bug in it that left a swapped-out page's old contents to the next instance.
+/// - `pagemap_scan` (Linux 6.7+, `Auto`: off elsewhere): the kept memory is not `memset` whole;
+///   the `PAGEMAP_SCAN` ioctl lists every page that is present or swapped out and is neither the
+///   shared zero page nor a page of the image's sealed memfd, and only those are set back to the
+///   image (C28: a hello request writes 21 of the 320 4 KB pages of its 1.25 MB, the 1 MB stack
+///   one of them). Any other page reads as the image or zero when next touched (unless the
+///   process has KSM with `use_zero_pages` on, which kio never sets: a zeroed image page could
+///   then read zero). Wasmtime 50's
+///   scan includes swapped-out pages: an earlier version required present ones and left a
+///   swapped page's old contents to the next instance (`sys/unix/pagemap.rs`).
 /// - `memory_protection_keys` stays off, its default, so every slot keeps its guard region.
 /// - `async_stack_zeroing` concerns stacks of `call_async`, which kio does not use: compiled
 ///   code runs on the calling thread's stack.
@@ -1035,7 +1043,8 @@ fn pool_engine(limits: &Limits, needs: (u32, u32, u32), initial: usize) -> Resul
         .total_tables(tables.saturating_mul(n))
         .max_memory_size(limits.memory)
         .linear_memory_keep_resident(initial)
-        .table_keep_resident(1 << 20);
+        .table_keep_resident(1 << 20)
+        .pagemap_scan(Enabled::Auto);
     let mut config = config::compile_config();
     set_stack(&mut config, limits.stack);
     config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
