@@ -2,7 +2,7 @@
 
 An agent hands you a change to a kio program. This walkthrough gets the two versions side by side, runs `kio review` on them, reads the page it prints, and ends in one of three decisions. Every flag and line format is in the reference, [guide.md, Reviewing a change](guide.md#reviewing-a-change); this page is the workflow.
 
-All output below is from real runs: sections 7d and 7e of kio after 0.1.11 (R1d), the rest of section 7 of kio 0.1.10, the rest of kio 0.1.5; the commit in each `Identity` is elided.
+All output below is from real runs: sections 7d and 7e of kio 0.1.12, the rest of section 7 of kio 0.1.10, the rest of kio 0.1.5; the commit in each `Identity` is elided.
 
 ## 1. What you need
 
@@ -442,7 +442,7 @@ Not checked
   not checked  listing: db (new entry)
   not checked  tests and properties were written by the same author as the code unless stated
 Identity
-  kio 0.1.11 (<commit>)
+  kio 0.1.12 (<commit>)
   old v1/api.kio absent
   old v1/feed.kio sha256:40f97febac17a365fae229e767f13563a4ce725721492f178620a9b7b81c3807
   new d/api.kio sha256:d493928b83cae09552a69cfb0c054a2ca8fe7d243921db79b2bf74393aa6db9f
