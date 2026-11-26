@@ -2,6 +2,13 @@
 
 What a program, a grants file or a script must change for each release, newest first, with a command that finds each place to look. Run them from the program's directory. To see what an upgrade changed in a program's tests and authority, `kio review new/app.kio --base old/app.kio` under the new binary compares the two trees ([guide](guide.md#reviewing-a-change)); an old tree failing its own tests there is the upgrade's doing.
 
+## 0.1.12
+
+- **`parse_iso_utc` accepts more** (L35): `2026-11-20T10:00:00Z` (no fraction), 1-9 fraction digits, and `+HH:MM`/`-HH:MM` offsets now give `Some` (UTC), where 0.1.11 gave `None`; a date an offset carries outside years 0000-9999 is `None`. A program that relied on `None` to reject those forms: `grep -rn 'parse_iso_utc' --include='*.kio' .`.
+- **`kio review` exit codes** (R1d): a base file missing from an existing directory is now a new entry (exit 3, every grant added), not exit 2; OLD's tests failing to set up is `not checked`, not exit 1. Scripts that treat 2 or 1 from review as "cannot review": `grep -rn 'kio review' --exclude='*.kio' .`.
+- `--http-record` binds per test (T8): a grants file whose tests do not take the recorded `Http` now runs instead of being refused.
+- `kio review --json`: mutant rows gain `did_not_check_in`, `authority` gains `command_line`; existing fields unchanged. Fuel unchanged.
+
 ## 0.1.11
 
 None breaking.
