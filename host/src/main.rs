@@ -237,7 +237,26 @@ fn check(path: &str, all: bool) -> i32 {
     };
     let p = match kio_host::check_program(&prog.files) {
         Ok(p) => p,
-        Err(diags) => return print_diags(&prog, diags, "check"),
+        Err(mut diags) => {
+            // A file without `main` but with a `pub` item or a test is a module checked alone (L35).
+            let stem = std::path::Path::new(path)
+                .file_stem()
+                .map_or("lib".into(), |s| s.to_string_lossy());
+            let public = |item: &lang::ast::Item| match item {
+                lang::ast::Item::Fn(f) => f.public || f.test,
+                lang::ast::Item::Struct(s) => s.public,
+                lang::ast::Item::Enum(e) => e.public,
+                lang::ast::Item::Const(c) => c.public,
+                lang::ast::Item::Mod(..) => false,
+            };
+            let module = lang::parse::parse_all(&prog.files[0].1, 0).items.iter().any(public);
+            for d in diags.iter_mut().filter(|d| module && d.message == "no `main` function") {
+                d.hint = Some(format!(
+                    "a module is checked through a program that declares `mod {stem};`; `kio test {path}` runs its tests"
+                ));
+            }
+            return print_diags(&prog, diags, "check");
+        }
     };
     match (all, json_out()) {
         (true, true) => set_json(|o| o.report = lang::report(&p).lines().map(String::from).collect()),

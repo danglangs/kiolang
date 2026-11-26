@@ -313,6 +313,8 @@ fn the_runtime_exports_every_operation() {
         "rt_bytes_to_base64url",
         "rt_str_from_base64_u",
         "rt_str_from_base64url_u",
+        "rt_headers_get_u",
+        "rt_incoming_header_u",
         "rt_float_to_int_u",
         "rt_json_get_u",
         "rt_json_at_u",

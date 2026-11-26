@@ -3061,6 +3061,8 @@ impl<'m> FuncGen<'_, 'm> {
                     Builtin::BytesToBase64Url => ("rt_bytes_to_base64url", Nothing, None),
                     Builtin::StrFromBase64 => ("rt_str_from_base64_u", Nothing, None),
                     Builtin::StrFromBase64Url => ("rt_str_from_base64url_u", Nothing, None),
+                    Builtin::HeadersGet => ("rt_headers_get_u", Nothing, None),
+                    Builtin::IncomingHeader => ("rt_incoming_header_u", Nothing, None),
                     Builtin::ListSlice => ("rt_list_slice", Nothing, Some(SLICE_BOUNDS)),
                     Builtin::ListJoin => ("rt_list_join", Nothing, None),
                     Builtin::StrToLowercase => ("rt_str_to_lowercase", Nothing, None),

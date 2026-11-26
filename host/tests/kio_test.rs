@@ -193,6 +193,20 @@ fn filter_and_exit_codes() {
     let (code, _, err) = kio_in(pass.dir.path(), &["check", &pass.app]);
     assert_eq!(code, 1);
     assert!(err.contains("no `main` function"), "{err}");
+    // L35: `kio check`'s hint says how a module is checked and tested.
+    let app = &pass.app;
+    let hint = format!(
+        "  hint: a module is checked through a program that declares `mod app;`; `kio test {app}` runs its tests\n"
+    );
+    assert!(err.ends_with(&hint), "{err}");
+    let (code, _, err) = kio_in(pass.dir.path(), &["run", &pass.app]);
+    assert_eq!(code, 1);
+    assert!(err.ends_with("  hint: add `fn main() { .. }`\n"), "{err}");
+    // No `pub` item and no test: a program missing its `main`.
+    let script = write(pass.dir.path(), "script.kio", "fn helper() {}\n");
+    let (code, _, err) = kio_in(pass.dir.path(), &["check", &script]);
+    assert_eq!(code, 1);
+    assert!(err.ends_with("  hint: add `fn main() { .. }`\n"), "{err}");
 }
 
 #[test]

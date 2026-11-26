@@ -939,6 +939,29 @@ impl<'a> Lowerer<'a> {
     fn method(&mut self, recv: &'a ast::Expr, name: &str, args: &'a [ast::Expr]) -> ir::ExprKind {
         use check::Ty as T;
         let mutation = match (&self.checked(recv.span), name) {
+            // L35: the name first, then the two calls, each audited as the program wrote it.
+            (T::Cap(c), "header") if c == "Incoming" => {
+                let methods = &self.caps.caps[self.ids.caps[c] as usize].methods;
+                let at = |m: &str| methods.iter().position(|(n, ..)| n == m).expect("caps.wit") as u32;
+                let (names, values) = (at("header_names"), at("header_values"));
+                let local = self.cap_local(recv);
+                let strs = self.ids.ty(&T::List(Box::new(T::Str)));
+                let call = |m| Expr {
+                    kind: ir::ExprKind::CapCall(local, m, Vec::new()),
+                    ty: strs.clone(),
+                    span: recv.span,
+                };
+                let name = self.expr(&args[0]);
+                return ir::ExprKind::Builtin(Builtin::IncomingHeader, Box::new(name), vec![call(names), call(values)]);
+            }
+            (T::Struct(s, _), "header") if s == "HttpResponse" => {
+                let headers = Expr {
+                    kind: ir::ExprKind::Field(Box::new(self.expr(recv)), self.field(recv.span, "headers")),
+                    ty: self.ids.ty(&T::List(Box::new(T::Str))),
+                    span: recv.span,
+                };
+                return ir::ExprKind::Builtin(Builtin::HeadersGet, Box::new(headers), self.exprs(args));
+            }
             (T::Cap(c), _) => {
                 let methods = &self.caps.caps[self.ids.caps[c] as usize].methods;
                 let m = methods.iter().position(|(n, ..)| n == name).expect("checked method");

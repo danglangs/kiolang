@@ -1805,7 +1805,11 @@ pub(crate) fn builtin(name: &str) -> Option<(&'static str, usize)> {
 
 /// The parameter and return types of method `name` on `recv`: a capability's from `caps`, else built in.
 fn method(caps: &CapTable, recv: &Ty, name: &str) -> Option<(Vec<Ty>, Ty)> {
+    let opt_str = || Ty::Option(Box::new(Ty::Str));
     match (recv, name) {
+        // L35: built in over `header_names` and `header_values`, not a caps.wit method.
+        (Ty::Cap(c), "header") if c == "Incoming" => Some((vec![Ty::Str], opt_str())),
+        (Ty::Struct(s, _), "header") if s == "HttpResponse" => Some((vec![Ty::Str], opt_str())),
         (Ty::Cap(c), _) => {
             let (_, params, ret) = cap_methods(caps, c).iter().find(|m| m.0 == name)?;
             Some((params.clone(), ret.clone()))
@@ -2002,6 +2006,7 @@ const METHODS: &[&str] = &[
     "get_int",
     "get_list",
     "get_str",
+    "header",
     "insert",
     "is_err",
     "is_finite",
@@ -2132,7 +2137,11 @@ fn cap_methods<'a>(caps: &'a CapTable, name: &str) -> &'a [(String, Vec<Ty>, Ty)
 
 fn method_names<'a>(caps: &'a CapTable, recv: &Ty) -> Vec<&'a str> {
     if let Ty::Cap(c) = recv {
-        return cap_methods(caps, c).iter().map(|m| m.0.as_str()).collect();
+        let mut names: Vec<&str> = cap_methods(caps, c).iter().map(|m| m.0.as_str()).collect();
+        if c == "Incoming" {
+            names.push("header");
+        }
+        return names;
     }
     METHODS
         .iter()

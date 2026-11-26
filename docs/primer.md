@@ -134,7 +134,9 @@ fn main(api: Http) -> Result<Str, Failed> {
   let r = api.send("POST", "/summary", ["content-type: application/json"],
                    summary.to_json().to_bytes(), 0).map_err(|e| Failed::Http(e))?;
   if r.status != 200 && r.status != 201 { return Err(Failed::Status(r.status)); }
-  Ok("posted " + items.len().to_str())
+  // A header by name, any case; "2026-11-20T10:00:00+01:00" or "..00.123456Z" read as UTC ms.
+  let at = r.header("x-created-at").and_then(|t| t.parse_iso_utc()).unwrap_or(0);
+  Ok("posted " + items.len().to_str() + " at " + at.to_str())
 }
 ```
 
@@ -174,13 +176,6 @@ fn main(db: Db) -> Result<Str, DbErr> {
 ```
 struct Reply { status: Int, body: Json }
 
-fn header(req: Incoming, name: Str) -> Option<Str> {
-  let names = req.header_names();
-  let values = req.header_values();
-  for i in 0..names.len() { if names[i] == name { return Some(values[i]); } }
-  None
-}
-
 fn query(target: Str, key: Str) -> Option<Str> {
   let q = target.split("?");
   if q.len() < 2 { return None; }
@@ -205,7 +200,7 @@ fn route(req: Incoming, store: Kv) -> Result<Reply, KvErr> {
     } else { Ok(error(404, "not found")) },
     "POST" => if parts.len() == 3 && parts[1] == "notes" {
       let Some(id) = parts[2].parse_int() else { return Ok(error(404, "not found")); };
-      if header(req, "x-token").is_none() { return Ok(error(401, "no token")); }
+      if req.header("x-token").is_none() { return Ok(error(401, "no token")); }
       let Ok(body) = req.body().to_str().parse_json() else { return Ok(error(400, "bad json")); };
       store.set("note:" + id.to_str(), body.to_json().to_bytes())?;
       Ok(Reply { status: 201, body: body })

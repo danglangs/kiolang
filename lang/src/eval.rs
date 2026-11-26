@@ -1427,6 +1427,29 @@ fn builtin(recv: &Value, b: Builtin, (arg, arg2): Args, span: Span) -> Res {
                 None => none(),
             }
         }
+        (B::HeadersGet, Value::List(lines)) => {
+            let name = str_arg(arg);
+            let value = lines.iter().find_map(|l| match l {
+                Value::Str(l) => crate::conv::header_value(l.as_bytes(), name.as_bytes()),
+                _ => unreachable!("checked List<Str>"),
+            });
+            value.map_or_else(none, |v| some(Value::Str(String::from_utf8_lossy(v).into())))
+        }
+        (B::IncomingHeader, Value::Str(name)) => {
+            let (Some(Value::List(names)), Some(Value::List(values))) = (arg, arg2) else {
+                unreachable!("checked arguments");
+            };
+            let at = names
+                .iter()
+                .position(|n| matches!(n, Value::Str(n) if n.eq_ignore_ascii_case(name)));
+            match at.and_then(|i| values.get(i)) {
+                Some(Value::Str(v)) => {
+                    let v = crate::conv::trim_ows(v.as_bytes());
+                    some(Value::Str(String::from_utf8_lossy(v).into()))
+                }
+                _ => none(),
+            }
+        }
         (B::StrParseIsoUtc, Value::Str(s)) => match crate::conv::parse_iso_utc(s.as_bytes()) {
             Some(n) => some(Value::Int(n)),
             None => none(),

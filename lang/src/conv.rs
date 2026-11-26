@@ -105,15 +105,17 @@ pub fn iso_utc(ms: i64) -> Option<String> {
     Some(s)
 }
 
-/// `iso_utc`'s inverse: exactly `YYYY-MM-DDTHH:MM:SS.mmmZ`, or `YYYY-MM-DD` (midnight UTC);
-/// `None` for anything else, an invalid day (`2026-02-30`) included.
+/// `iso_utc`'s inverse, read leniently (L35): `YYYY-MM-DD` (midnight UTC), or
+/// `YYYY-MM-DDTHH:MM:SS`, then an optional `.` and 1 to 9 digits (cut to milliseconds), then `Z`
+/// or an offset `+HH:MM`/`-HH:MM` (converted to UTC). `None` for anything else: an invalid day
+/// (`2026-02-30`), a leap second, lowercase `z`, `+0100`, a space for `T`.
 pub fn parse_iso_utc(s: &[u8]) -> Option<i64> {
     let num = |at: usize, width: usize| -> Option<i64> {
         let digits = s.get(at..at + width)?;
         (digits.iter()).try_fold(0, |n, &c| c.is_ascii_digit().then(|| n * 10 + i64::from(c - b'0')))
     };
     let at = |i: usize, c: u8| s.get(i) == Some(&c);
-    if !(s.len() == 10 || s.len() == 24) || !(at(4, b'-') && at(7, b'-')) {
+    if s.len() < 10 || !(at(4, b'-') && at(7, b'-')) {
         return None;
     }
     let (y, m, d) = (num(0, 4)?, num(5, 2)?, num(8, 2)?);
@@ -126,15 +128,60 @@ pub fn parse_iso_utc(s: &[u8]) -> Option<i64> {
     if s.len() == 10 {
         return Some(day);
     }
-    let seps = [(10, b'T'), (13, b':'), (16, b':'), (19, b'.'), (23, b'Z')];
-    if !seps.iter().all(|&(i, c)| at(i, c)) {
+    if !(at(10, b'T') && at(13, b':') && at(16, b':')) {
         return None;
     }
-    let (h, min, sec, ms) = (num(11, 2)?, num(14, 2)?, num(17, 2)?, num(20, 3)?);
+    let (h, min, sec) = (num(11, 2)?, num(14, 2)?, num(17, 2)?);
     if h > 23 || min > 59 || sec > 59 {
         return None;
     }
-    Some(day + ((h * 60 + min) * 60 + sec) * 1000 + ms)
+    // The fraction's first three digits, padded with zeros, are the milliseconds.
+    let (mut i, mut ms) = (19, 0);
+    if at(i, b'.') {
+        let n = s[i + 1..].iter().take_while(|c| c.is_ascii_digit()).count();
+        if !(1..=9).contains(&n) {
+            return None;
+        }
+        for k in 0..3 {
+            ms = ms * 10 + if k < n { i64::from(s[i + 1 + k] - b'0') } else { 0 };
+        }
+        i += 1 + n;
+    }
+    let offset = match &s[i..] {
+        b"Z" => 0,
+        [sign @ (b'+' | b'-'), _, _, b':', _, _] => {
+            let (oh, om) = (num(i + 1, 2)?, num(i + 4, 2)?);
+            if oh > 23 || om > 59 {
+                return None;
+            }
+            let o = (oh * 60 + om) * 60_000;
+            if *sign == b'+' {
+                o
+            } else {
+                -o
+            }
+        }
+        _ => return None,
+    };
+    Some(day + ((h * 60 + min) * 60 + sec) * 1000 + ms - offset)
+}
+
+/// A header line's value (L35): `line` is `name: value` (`HttpResponse.headers`); the value
+/// when the name before the first `:` equals `name` ignoring ASCII case, trimmed of spaces and
+/// tabs.
+pub fn header_value<'a>(line: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
+    let colon = line.iter().position(|&c| c == b':')?;
+    line[..colon]
+        .eq_ignore_ascii_case(name)
+        .then(|| trim_ows(&line[colon + 1..]))
+}
+
+/// `s` without leading and trailing spaces and tabs (HTTP's optional whitespace).
+pub fn trim_ows(s: &[u8]) -> &[u8] {
+    let ows = |c: &u8| *c == b' ' || *c == b'\t';
+    let start = s.iter().position(|c| !ows(c)).unwrap_or(s.len());
+    let end = s.iter().rposition(|c| !ows(c)).map_or(start, |e| e + 1);
+    &s[start..end]
 }
 
 /// The capability error enums with `to_str` (L31); the runtime numbers them in this order.

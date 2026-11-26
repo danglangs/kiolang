@@ -394,6 +394,12 @@ pub enum Builtin {
     BytesToBase64Url,
     StrFromBase64,
     StrFromBase64Url,
+    /// L35: `resp.header(name)` as this on `resp.headers` (`List<Str>` of `name: value`), with
+    /// `name` the argument.
+    HeadersGet,
+    /// L35: `req.header(name)` as this on `name`, with the arguments `req.header_names()` and
+    /// `req.header_values()`.
+    IncomingHeader,
 }
 
 /// Every built-in method that changes its receiver.

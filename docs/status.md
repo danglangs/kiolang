@@ -142,6 +142,7 @@ Compiled-only kio covers the whole language and every capability; speed work res
 | C29 | freeing without per-object bookkeeping (plan read in place, live count and `freed` updated once per `free`, no `Layout` checks, cold panic): tree 65.0 to 58.9 ms, fuel -4.0%; json.kio 34.6 to 34.0 ms, -0.25%; every gate row's fuel lower |
 | A5 | feed aggregator built held-out on 0.1.11: 17.5 min, 1,326 lines, 45 tests; review of every new job needed a stub base; R1d, L35, T8 pinned (a5-findings.md) |
 | C29b | C29's review follow-ups: `free`'s listed bytes checked natively after each `dec` (each dropped `bytes +=` or `add_freed` fails a test), Miri on the allocator and plan tests in CI (16 tests, under a minute, dated nightly); a saturating `freed` not taken: it costs fuel, a wrap only delays a hand-back (#364) |
+| L35 | A5's library gaps: `parse_iso_utc` reads no fraction, 1-9 fraction digits and `+HH:MM`/`-HH:MM` offsets; `HttpResponse.header(name)` and `Incoming.header(name)` (case-insensitive, built in over caps.wit's methods); `kio check` of a module says how to check and test it. Harness 638 both ways, 635 agreed; gate fuel +0.0% (#365, #366) |
 
 ## Next
 

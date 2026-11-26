@@ -30,8 +30,17 @@ fn edges(p: &Program) -> Edges {
             match &x.kind {
                 ExprKind::Method(recv, m, args) => {
                     if let Some(d) = leaf_of(p, recv) {
-                        let http = matches!(p.types.get(&recv.span), Some(Ty::Cap(t)) if t == "Http");
+                        let ty = match p.types.get(&recv.span) {
+                            Some(Ty::Cap(t)) => t.as_str(),
+                            _ => "",
+                        };
+                        let http = ty == "Http";
                         match (http, m.as_str(), args.first()) {
+                            // L35: built in over these two.
+                            (false, "header", _) if ty == "Incoming" => {
+                                e.direct.push((name.clone(), d.clone(), "header_names".into()));
+                                e.direct.push((name.clone(), d, "header_values".into()));
+                            }
                             (true, "send", Some(v)) => e.direct.push((name.clone(), d, format!("send {}", verb(p, v)))),
                             (true, "send_all", Some(l)) => {
                                 for v in send_all_verbs(p, f, l) {

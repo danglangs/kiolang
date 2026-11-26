@@ -829,7 +829,7 @@ fn main() -> List<Option<Int>> {
     assert_eq!(
         shows(src),
         "[Some(0), Some(0), Some(1709164800000), Some(253402300799999), Some(-62167219200000), Some(-1), \
-         None, None, None, Some(951782400000), None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None]"
+         None, None, None, Some(951782400000), None, None, None, None, None, None, None, Some(1767225600000), None, None, None, None, Some(1767225600000), None, None, None]"
     );
     let src = r#"
 fn main() -> Bool {
@@ -1186,4 +1186,118 @@ fn main() -> List<Bool> {
     ]
 }"#;
     assert_eq!(shows(src), format!("[{}]", ["true"; 23].join(", ")));
+}
+
+/// L35: `parse_iso_utc` also reads no fraction, 1 to 9 fraction digits (cut to milliseconds)
+/// and a `+HH:MM`/`-HH:MM` offset (converted to UTC); every other form stays `None`.
+#[test]
+fn iso_dates_lenient() {
+    let src = r#"
+fn main() -> List<Str> {
+    let forms = ["2026-11-20T10:00:00Z", "2026-11-20T10:00:00.1Z", "2026-11-20T10:00:00.12Z",
+                 "2026-11-20T10:00:00.123Z", "2026-11-20T10:00:00.1239Z", "2026-11-20T10:00:00.123456789Z",
+                 "2026-11-20T10:00:00+01:00", "2026-11-20T10:00:00-05:30", "2026-11-20T10:00:00+00:00",
+                 "2026-11-20T10:00:00.5+23:59", "2026-11-20T10:00:00.999999999-23:59",
+                 "2026-01-01T00:30:00+01:00", "2024-02-29T23:00:00-02:00", "1970-01-01T00:00:00.000Z",
+                 "2026-11-20T10:00:00z", "2026-11-20T10:00:00+0100", "2026-11-20 10:00:00Z",
+                 "2026-11-20T23:59:60Z", "2026-11-20T10:00:00.Z", "2026-11-20T10:00:00.1234567890Z",
+                 "2026-11-20T10:00:00+24:00", "2026-11-20T10:00:00+01:60", "2026-11-20T10:00:00+1:00",
+                 "2026-11-20T10:00:00", "2026-11-20T10:00:00Zx", "2026-11-20T10:00Z", "2026-11-20T10:00:00.1",
+                 "2026-11-20T10:00:00.12a4Z", "2026-11-20T10:00:00+01:00Z", "2026-11-20T10:00:00 Z",
+                 "2026-11-20Z", "2026-02-30T10:00:00Z"];
+    forms.map(|f| match f.parse_iso_utc() { Some(t) => t.iso_utc(), None => "None" })
+}"#;
+    let want = [
+        "2026-11-20T10:00:00.000Z",
+        "2026-11-20T10:00:00.100Z",
+        "2026-11-20T10:00:00.120Z",
+        "2026-11-20T10:00:00.123Z",
+        "2026-11-20T10:00:00.123Z",
+        "2026-11-20T10:00:00.123Z",
+        "2026-11-20T09:00:00.000Z",
+        "2026-11-20T15:30:00.000Z",
+        "2026-11-20T10:00:00.000Z",
+        "2026-11-19T10:01:00.500Z",
+        "2026-11-21T09:59:00.999Z",
+        "2025-12-31T23:30:00.000Z",
+        "2024-03-01T01:00:00.000Z",
+        "1970-01-01T00:00:00.000Z",
+    ];
+    let shown: Vec<String> = (want.iter().map(|w| format!("{w:?}")))
+        .chain(std::iter::repeat_n("\"None\"".to_string(), 18))
+        .collect();
+    assert_eq!(shows(src), format!("[{}]", shown.join(", ")));
+    // Today's form gives the value it gave.
+    let src = r#"
+fn main() -> Bool {
+    "2026-11-20T10:00:00.000Z".parse_iso_utc() == Some(1795168800000)
+        && "2026-11-20T10:00:00Z".parse_iso_utc() == "2026-11-20T11:00:00.000+01:00".parse_iso_utc()
+}"#;
+    assert_eq!(shows(src), "true");
+}
+
+/// L35: `HttpResponse.header(name)`: the first `name: value` line whose name equals `name`
+/// ignoring ASCII case, its value trimmed of spaces and tabs.
+#[test]
+fn response_header() {
+    let src = r#"
+fn main() -> List<Option<Str>> {
+    let r = HttpResponse { status: 200, body: "".to_bytes(),
+        headers: ["content-type: text/plain", "x-a:  one \t", "x-a: two", "empty:", "no colon", "x-url: http://h:1/é", "ab: c"] };
+    [r.header("Content-Type"), r.header("X-A"), r.header("x-a"), r.header("empty"), r.header("no colon"),
+     r.header("x-url"), r.header("missing"), r.header(""), r.header("a"), r.header("ab: c"),
+     HttpResponse { status: 204, headers: [], body: "".to_bytes() }.header("x")]
+}"#;
+    assert_eq!(
+        shows(src),
+        r#"[Some("text/plain"), Some("one"), Some("one"), Some(""), None, Some("http://h:1/é"), None, None, None, None, None]"#
+    );
+    let (msg, hint) = rejects(
+        r#"fn main() -> Int { let r = HttpResponse { status: 1, headers: [], body: "".to_bytes() }; r.header(1).len() }"#,
+    );
+    assert_eq!(msg, "expected Str, found Int");
+    assert_eq!(
+        hint.as_deref(),
+        Some("`HttpResponse.header` is declared as `header(Str) -> Option<Str>`")
+    );
+}
+
+/// Grants `req: Incoming` and `res: Outgoing`: a request with three headers.
+struct Request;
+
+impl Caps for Request {
+    fn has(&self, name: &str, ty: &str) -> bool {
+        matches!((name, ty), ("req", "Incoming") | ("res", "Outgoing"))
+    }
+
+    fn call(&mut self, cap: &str, method: &str, _: Vec<Value>) -> Result<Value, String> {
+        let strs = |v: &[&str]| Value::List(v.iter().map(|s| Value::Str((*s).into())).collect::<Vec<_>>().into());
+        match (cap, method) {
+            ("req", "header_names") => Ok(strs(&["host", "x-n", "x-n"])),
+            ("req", "header_values") => Ok(strs(&["example", "1", "2"])),
+            _ => Err(format!("unsupported call `{cap}.{method}`")),
+        }
+    }
+}
+
+/// L35: `Incoming.header(name)` reads `header_names` and `header_values`: the first match
+/// ignoring ASCII case. The differential test runs this program on its own request.
+#[test]
+fn incoming_header() {
+    let src = r#"
+fn main(req: Incoming, res: Outgoing) -> List<Option<Str>> {
+    [req.header("X-N"), req.header("host"), req.header("HOST"), req.header("nope"), req.header("")]
+}"#;
+    let p = check(src, &CapTable::v0()).unwrap_or_else(|d| panic!("{d:?}"));
+    let v = run(&p, &mut Request).unwrap_or_else(|e| panic!("{}", e.msg));
+    assert_eq!(
+        p.display(&v),
+        r#"[Some("1"), Some("example"), Some("example"), None, None]"#
+    );
+    assert_eq!(lang::report(&p), "main : req header_names header_values");
+    let (msg, hint) = rejects("fn main(req: Incoming, res: Outgoing) -> Int { req.headr(\"a\").len() }");
+    assert_eq!(
+        (msg.as_str(), hint.as_deref()),
+        ("no method `headr` on Incoming", Some("did you mean `header`?"))
+    );
 }

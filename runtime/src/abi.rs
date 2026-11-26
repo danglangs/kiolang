@@ -811,6 +811,35 @@ pub unsafe extern "C" fn rt_str_from_base64url_u(s: u32) -> u32 {
     unboxed(b.map(|b| obj::to_slot(obj::new_bytes(desc::BYTES, &b))))
 }
 
+/// `resp.header(name)` on `resp.headers` (L35): the payload is a new `Str`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_headers_get_u(lines: u32, name: u32) -> u32 {
+    // SAFETY: the group's contract: `lines` is a `List<Str>`, `name` a `Str`.
+    unsafe {
+        let name = obj::bytes(ptr(name));
+        let lines = obj::elems(ptr(lines)).iter();
+        let v = lines
+            .map(|&l| obj::bytes(obj::from_slot(l)))
+            .find_map(|l| conv::header_value(l, name));
+        unboxed(v.map(|v| obj::to_slot(obj::new_bytes(desc::STR, v))))
+    }
+}
+
+/// `req.header(name)` from `req.header_names()` and `req.header_values()` (L35): the payload
+/// is a new `Str`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_incoming_header_u(name: u32, names: u32, values: u32) -> u32 {
+    // SAFETY: the group's contract: `name` is a `Str`, `names` and `values` `List<Str>`s.
+    unsafe {
+        let name = obj::bytes(ptr(name));
+        let at = obj::elems(ptr(names))
+            .iter()
+            .position(|&n| obj::bytes(obj::from_slot(n)).eq_ignore_ascii_case(name));
+        let v = at.and_then(|i| obj::elems(ptr(values)).get(i));
+        unboxed(v.map(|&v| obj::to_slot(obj::new_bytes(desc::STR, conv::trim_ows(obj::bytes(obj::from_slot(v)))))))
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rt_str_parse_iso_utc_u(s: u32) -> u32 {
     // SAFETY: the group's contract.
