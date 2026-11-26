@@ -163,7 +163,9 @@ pub fn parse_iso_utc(s: &[u8]) -> Option<i64> {
         }
         _ => return None,
     };
-    Some(day + ((h * 60 + min) * 60 + sec) * 1000 + ms - offset)
+    // An offset can move the instant past `iso_utc`'s years: `None`, so `iso_utc` of a parsed
+    // value never traps.
+    Some(day + ((h * 60 + min) * 60 + sec) * 1000 + ms - offset).filter(|t| (ISO_MIN_MS..=ISO_MAX_MS).contains(t))
 }
 
 /// A header line's value (L35): `line` is `name: value` (`HttpResponse.headers`); the value

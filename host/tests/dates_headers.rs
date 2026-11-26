@@ -39,6 +39,10 @@ fn each_date_form_agrees() {
         ("2026-11-20T10:00:00+01:60", "None"),
         ("2026-11-20T10:00:00", "None"),
         ("2026-11-20T10:00:00Zx", "None"),
+        // An offset past `iso_utc`'s years: None, so `iso_utc` of the value never traps.
+        ("0000-01-01T00:00:00+00:01", "None"),
+        ("9999-12-31T23:59:59-00:01", "None"),
+        ("0000-01-01T00:00:00-00:01", "Some(-62167219140000)"),
     ];
     for (form, want) in forms {
         let src = format!("fn main() -> Option<Int> {{ \"{form}\".parse_iso_utc() }}");
@@ -56,6 +60,22 @@ fn response_header_agrees() {
 }"#;
     let (c, i) = both(src);
     assert_eq!(c, Ok(r#"[Some("a/b"), Some("1"), Some(""), None, None]"#.to_string()));
+    assert_eq!(c, i);
+}
+
+/// `header` on a temporary from a call, in a loop: its lists are freed each time (test heap).
+#[test]
+fn header_on_a_temporary_agrees() {
+    let src = r#"fn mk(i: Int) -> HttpResponse {
+    HttpResponse { status: 200, body: "".to_bytes(), headers: ["a: " + i.to_str(), "b: x"] }
+}
+fn main() -> Int {
+    let mut n = 0;
+    for i in 0..2000 { if let Some(v) = mk(i).header("A") { n = n + v.len(); } }
+    n
+}"#;
+    let (c, i) = both(src);
+    assert_eq!(c, Ok("6890".to_string()));
     assert_eq!(c, i);
 }
 
