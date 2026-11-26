@@ -7,7 +7,7 @@ use std::path::Path;
 mod mutants;
 
 const USAGE: &str =
-    "usage: kio review <new.kio> --base <old.kio> [--grants file] [--test-grants file] [--requirements file] [--entry file [--entry-grants file]].. [--seed s] [--mutants n] [--mutations file] [--json]";
+    "usage: kio review <new.kio> --base <old.kio> [--grants file [grant flags]] [--test-grants file] [--requirements file] [--entry file [--entry-grants file [grant flags]] [--entry-test-grants file]].. [--seed s] [--mutants n] [--mutations file] [--json]";
 
 /// The largest requirements file diffed, and the most line pairs the diff compares.
 const REQUIREMENTS_MAX: u64 = 1 << 20;
@@ -68,18 +68,18 @@ const SAME_AUTHOR: &str = "tests and properties were written by the same author 
 /// `main`, the tests' grants file, and the requirements file on each side (`None` when absent).
 struct Inputs {
     old: (String, Program),
+    /// OLD's file does not exist but its directory does: `old` is that directory's modules
+    /// under an empty `main` (`read_old`, R1d1).
+    old_absent: bool,
     new: (String, Program),
     grants: Option<(String, Vec<u8>)>,
+    /// The grant flags given after `--grants` (R1d4): bound with it, the same on both sides.
+    extra: Vec<String>,
     /// The grants file beside OLD's program at G's path relative to NEW's (R1a4).
     old_grants: Beside,
-    test_grants: Option<(String, Vec<u8>)>,
-    /// Each `--http name=fake:FILE` of the test grants file, as `(name, FILE)`.
-    fakes: Vec<(String, String)>,
-    /// Each FILE of `fakes` read once, for both sides' tests and Identity.
-    fake_files: Vec<(String, Result<Vec<u8>, String>)>,
-    /// Each FILE of `fake_files` that `kio test`'s rules accept (`fake_file`): only these are hashed.
-    fakes_ok: Vec<String>,
-    requirements: Option<[(String, Option<String>); 2]>,
+    test: TestGrants,
+    /// `--requirements`' path as given, and the file on each side.
+    requirements: Option<Requirements>,
     entries: Vec<Entry>,
     /// The tests' seed (`--seed`), which also draws the mutants.
     seed: u64,
@@ -89,16 +89,55 @@ struct Inputs {
     mutations: Option<mutants::File>,
 }
 
+/// `--requirements`' path as given, and on each side the file's path and text (`None`: absent).
+type Requirements = (String, [(String, Option<String>); 2]);
+
+/// A grants file of NEW's and the grant flags given after it, and what is at its place beside
+/// OLD's program.
+type GrantsGiven<'a> = (Option<&'a (String, Vec<u8>)>, &'a [String], &'a Beside);
+
 /// Another entry of the change (`--entry`): the path as given, escaped; OLD's program (`None`:
-/// the entry is new) and NEW's, each with its path; and its `--entry-grants` file.
+/// neither the file nor its directory is there) and NEW's, each with its path; its
+/// `--entry-grants` file and the grant flags after it; its `--entry-test-grants`.
 struct Entry {
     name: String,
     old: Option<(String, Program)>,
+    /// OLD has no file here: the entry is new (`old` is its directory's modules, `read_old`).
+    old_absent: bool,
     /// Where OLD's entry is or would be.
     old_path: String,
     new: (String, Program),
     grants: Option<(String, Vec<u8>)>,
+    extra: Vec<String>,
     old_grants: Beside,
+    /// `None`: the entry's tests run under the root's (`--test-grants`, R1d3).
+    test: Option<TestGrants>,
+}
+
+/// A tests' grants file (`--test-grants`, `--entry-test-grants`) and its fakes.
+#[derive(Default)]
+struct TestGrants {
+    file: Option<(String, Vec<u8>)>,
+    /// Each `--http name=fake:FILE` of the file, as `(name, FILE)`.
+    fakes: Vec<(String, String)>,
+    /// Each FILE of `fakes` read once, for both sides' tests and Identity.
+    fake_files: Vec<(String, Result<Vec<u8>, String>)>,
+    /// Each FILE of `fake_files` that `kio test`'s rules accept (`fake_file`): only these are hashed.
+    fakes_ok: Vec<String>,
+    /// Each FILE of `fakes_ok` and what is at its place beside OLD's program (R1d7).
+    old_fakes: Vec<(String, Beside)>,
+}
+
+impl TestGrants {
+    /// The flags that apply the file, none for the defaults.
+    fn flags(&self) -> Vec<&str> {
+        self.file.as_ref().map_or(vec![], |(t, _)| vec!["--grants", t.as_str()])
+    }
+
+    /// The file as the Tests section names it.
+    fn shown(&self) -> &str {
+        self.file.as_ref().map_or(DEFAULT_TEST_GRANTS, |(t, _)| t.as_str())
+    }
 }
 
 /// Where a grants file of NEW's sits beside OLD's program: G's path relative to NEW's directory,
@@ -239,13 +278,21 @@ pub(crate) fn review(path: &str, flags: &[&str], json: bool) -> i32 {
     for p in &page.changed {
         // A fake's name as its Identity line shows it.
         let mutations = inputs.mutations.as_ref().is_some_and(|m| m.path == *p);
-        let p = match inputs.fakes_ok.contains(p) || mutations {
+        let fake = test_grants(&inputs).any(|(_, t)| t.fakes_ok.contains(p));
+        let p = match fake || mutations {
             true => ascii(p),
             false => kio_host::escape_line(p),
         };
         println!("  {:<12} {} changed while the review ran", "error", p);
     }
     code
+}
+
+/// Each tests' grants file with how the page prefixes its lines: the root's, then each entry's
+/// own (`--entry-test-grants`).
+fn test_grants(inputs: &Inputs) -> impl Iterator<Item = (String, &TestGrants)> {
+    let entries = (inputs.entries.iter()).filter_map(|e| Some((format!("{}: ", e.name), e.test.as_ref()?)));
+    std::iter::once((String::new(), &inputs.test)).chain(entries)
 }
 
 /// Each section's text lines and `--json` value as it is built.
@@ -281,26 +328,58 @@ fn labelled(label: &'static str, lines: &[String]) -> Vec<Row> {
 fn inputs(path: &str, flags: &[&str]) -> Result<Inputs, i32> {
     let (mut base, mut grants, mut test_grants, mut requirements) = (None, None, None, None);
     let (mut seed, mut mutants, mut mutations) = (None, None, None);
-    // Each `--entry` and the `--entry-grants` that follows it.
-    let mut entries: Vec<(&str, Option<&str>)> = Vec::new();
+    let mut extra: Vec<String> = Vec::new();
+    let mut entries: Vec<Given> = Vec::new();
+    // Where a grant flag goes while grant flags follow `--grants` (false) or an
+    // `--entry-grants` (true).
+    let mut grant_flags: Option<bool> = None;
     if !flags.len().is_multiple_of(2) {
         return Err(fail(USAGE.into()));
     }
     for pair in flags.chunks(2) {
+        let after = grant_flags.take();
+        if RUN_FLAGS.contains(&pair[0]) {
+            let to = match (after, entries.last_mut()) {
+                (Some(false), _) => &mut extra,
+                (Some(true), Some(e)) => &mut e.extra,
+                _ => {
+                    return Err(fail(format!(
+                        "`{} {}` is a grant: give it right after the grants file it adds to\n  hint: `--grants app.grants {} ..`, or after an `--entry-grants FILE`",
+                        pair[0],
+                        kio_host::escape_line(pair[1]),
+                        pair[0]
+                    )))
+                }
+            };
+            to.extend([pair[0].to_string(), pair[1].to_string()]);
+            grant_flags = after;
+            continue;
+        }
         match (pair[0], entries.last_mut()) {
             ("--entry", _) => {
-                entries.push((pair[1], None));
+                entries.push(Given {
+                    path: pair[1],
+                    grants: None,
+                    extra: Vec::new(),
+                    test: None,
+                });
                 continue;
             }
-            ("--entry-grants", Some((_, g @ None))) => {
-                *g = Some(pair[1]);
+            ("--entry-grants", Some(e)) if e.grants.is_none() => {
+                e.grants = Some(pair[1]);
+                grant_flags = Some(true);
                 continue;
             }
-            ("--entry-grants", _) => {
-                return Err(fail(
-                    "`--entry-grants` binds the `--entry` just before it, once\n  hint: `--entry worker.kio --entry-grants worker.grants`".into(),
-                ))
+            ("--entry-test-grants", Some(e)) if e.test.is_none() => {
+                e.test = Some(pair[1]);
+                continue;
             }
+            (flag @ ("--entry-grants" | "--entry-test-grants"), _) => {
+                return Err(fail(format!(
+                "`{flag}` binds the `--entry` just before it, once\n  hint: `--entry worker.kio {flag} worker.grants`"
+            )))
+            }
+            ("--grants", _) => grant_flags = Some(false),
             _ => {}
         }
         let slot = match pair[0] {
@@ -343,32 +422,15 @@ fn inputs(path: &str, flags: &[&str]) -> Result<Inputs, i32> {
             )))
         }
     };
-    let old = (base.to_string(), read_program(base)?);
     let new = (path.to_string(), read_program(path)?);
+    let (old_prog, old_absent) = read_old(base, &new.1)?;
+    let old = (base.to_string(), old_prog);
     let mutations = mutations.map(|m| mutants::read(m, path)).transpose()?;
-    let read = |flag: &str, g: Option<&str>| match g {
-        Some(g) => match read_regular(g.as_ref(), GRANTS_MAX, false) {
-            Ok(bytes) => Ok(Some((g.to_string(), bytes))),
-            Err(Unread::TooLarge) => Err(fail(format!(
-                "{flag} {}: over 1 MiB\n  hint: a grants file is one flag a line",
-                kio_host::escape_line(g)
-            ))),
-            Err(e) => Err(fail(format!("{flag} {}: {e}", kio_host::escape_line(g)))),
-        },
-        None => Ok(None),
-    };
+    let read = |flag: &str, g: Option<&str>| g.map(|g| read_grants(flag, g)).transpose();
     let grants = read("--grants", grants)?;
     let old_grants = match &grants {
         Some((g, _)) => beside_old(base, path, g),
         None => Err(()),
-    };
-    let test_grants = read("--test-grants", test_grants)?;
-    if let Some(t) = &test_grants {
-        shared_state(&t.0)?;
-    }
-    let (fakes, fake_files, fakes_ok) = match &test_grants {
-        Some((t, bytes)) => test_fakes(t, bytes, path)?,
-        None => Default::default(),
     };
     let requirements = match requirements {
         Some(file) if Path::new(file).is_absolute() => {
@@ -376,17 +438,16 @@ fn inputs(path: &str, flags: &[&str]) -> Result<Inputs, i32> {
                 "--requirements {file}: an absolute path names one file for both sides\n  hint: give a path relative to each program's directory, e.g. `--requirements README.md`"
             )))
         }
-        Some(file) => Some([read_requirements(base, file)?, read_requirements(path, file)?]),
+        Some(file) => Some((
+            file.to_string(),
+            [read_requirements(base, file)?, read_requirements(path, file)?],
+        )),
         None => None,
     };
-    if let Some([(o, None), (n, None)]) = &requirements {
-        return Err(fail(format!(
-            "--requirements: neither {o} nor {n} exists\n  hint: the path is relative to each program's directory, e.g. `--requirements README.md`"
-        )));
-    }
     let mut read_entries: Vec<Entry> = Vec::new();
-    for (rel, g) in entries {
-        let mut e = entry(base, path, rel, read("--entry-grants", g)?)?;
+    for g in &entries {
+        let mut e = entry(base, path, g.path, read("--entry-grants", g.grants)?)?;
+        e.extra = g.extra.clone();
         if let Some((g, _)) = &e.grants {
             e.old_grants = beside_old(&e.old_path, &e.new.0, g);
         }
@@ -398,25 +459,107 @@ fn inputs(path: &str, flags: &[&str]) -> Result<Inputs, i32> {
         }
         read_entries.push(e);
     }
-    if let Some((t, _)) = &test_grants {
-        let progs = std::iter::once(&new.1).chain(read_entries.iter().map(|e| &e.new.1));
-        source_dirs(t, &progs.flat_map(|p| p.paths.iter()).collect::<Vec<_>>())?;
+    // No tests' grants file may hold a NEW program's source.
+    let progs = std::iter::once(&new.1).chain(read_entries.iter().map(|e| &e.new.1));
+    let sources: Vec<_> = progs.flat_map(|p| p.paths.iter()).collect();
+    let test = read_test_grants("--test-grants", test_grants, (base, path), &sources)?;
+    let mut tests = Vec::new();
+    for (e, g) in read_entries.iter().zip(&entries) {
+        let sides = (e.old_path.as_str(), e.new.0.as_str());
+        tests.push(match g.test {
+            Some(_) => Some(read_test_grants("--entry-test-grants", g.test, sides, &sources)?),
+            None => None,
+        });
+    }
+    for (e, t) in read_entries.iter_mut().zip(tests) {
+        e.test = t;
     }
     Ok(Inputs {
         old,
+        old_absent,
         new,
         grants,
+        extra,
         old_grants,
-        test_grants,
-        fakes,
-        fake_files,
-        fakes_ok,
+        test,
         requirements,
         entries: read_entries,
         seed,
         mutants,
         mutations,
     })
+}
+
+/// An `--entry` as the command line gives it: its path, `--entry-grants` and the grant flags
+/// after it, and `--entry-test-grants`.
+struct Given<'a> {
+    path: &'a str,
+    grants: Option<&'a str>,
+    extra: Vec<String>,
+    test: Option<&'a str>,
+}
+
+/// The grants file `g` of `flag`, read.
+fn read_grants(flag: &str, g: &str) -> Result<(String, Vec<u8>), i32> {
+    match read_regular(g.as_ref(), GRANTS_MAX, false) {
+        Ok(bytes) => Ok((g.to_string(), bytes)),
+        Err(Unread::TooLarge) => Err(fail(format!(
+            "{flag} {}: over 1 MiB\n  hint: a grants file is one flag a line",
+            kio_host::escape_line(g)
+        ))),
+        Err(e) => Err(fail(format!("{flag} {}: {e}", kio_host::escape_line(g)))),
+    }
+}
+
+/// The tests' grants file `t` of `flag`, for the program at `new` (OLD's at `old`), read and
+/// checked: no state carried from OLD's tests to NEW's, fakes inside NEW's directory, no `--dir`
+/// over one of NEW's `sources`.
+fn read_test_grants(
+    flag: &str,
+    t: Option<&str>,
+    (old, new): (&str, &str),
+    sources: &[&std::path::PathBuf],
+) -> Result<TestGrants, i32> {
+    let Some(t) = t else {
+        return Ok(TestGrants::default());
+    };
+    let (t, bytes) = read_grants(flag, t)?;
+    shared_state(flag, &t)?;
+    let (fakes, fake_files, fakes_ok) = test_fakes(flag, &t, &bytes, new)?;
+    source_dirs(flag, &t, sources)?;
+    let old_fakes = (fakes_ok.iter())
+        .map(|f| (f.clone(), beside_old(old, new, f)))
+        .collect();
+    Ok(TestGrants {
+        file: Some((t, bytes)),
+        fakes,
+        fake_files,
+        fakes_ok,
+        old_fakes,
+    })
+}
+
+/// OLD's program at `path`, and `false`; when no file is there but its directory is, the entry
+/// is new (R1d1): that directory's modules that NEW's root `new` names (beside it or in its
+/// `kio.deps`) under a root with an empty `main`, and `true`. So a module function is compared
+/// with its old text by its qualified name, and the old modules' tests run as the base's.
+fn read_old(path: &str, new: &Program) -> Result<(Program, bool), i32> {
+    let dir = Path::new(path).parent().filter(|d| !d.as_os_str().is_empty());
+    let dir = dir.unwrap_or(".".as_ref());
+    let missing = matches!(std::fs::symlink_metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
+    if !missing || !dir.is_dir() {
+        return Ok((read_program(path)?, false));
+    }
+    let (listed, _) = deps::read(dir)?;
+    let mods: String = (mod_lines(&new.files[0].1).into_iter())
+        .filter(|(m, _)| listed.iter().any(|l| l.name == *m) || dir.join(format!("{m}.kio")).is_file())
+        .map(|(m, _)| format!("mod {m};\n"))
+        .collect();
+    // The root is no file: it stands at its directory, whose identity each test run checks.
+    let id = kio_host::path_id(dir).map_err(|e| fail(format!("{}: {e}", dir.display())))?;
+    let mut prog = with_modules(path, format!("{mods}fn main() {{}}\n"), id)?;
+    prog.paths[0] = dir.to_path_buf();
+    Ok((prog, true))
 }
 
 /// The entry `rel` beside each side's root, `old` and `new`: NEW's must exist; OLD's may not
@@ -444,27 +587,37 @@ fn entry(old: &str, new: &str, rel: &str, grants: Option<(String, Vec<u8>)>) -> 
             kio_host::escape_line(new)
         )));
     }
-    let read = |p: &Path| {
-        let p = p.display().to_string();
-        read_program(&p).map(|prog| (p, prog))
-    };
-    let old = match std::fs::symlink_metadata(&old_path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        _ => Some(read(&old_path)?),
+    let new_path = new_path.display().to_string();
+    let new = (new_path.clone(), read_program(&new_path)?);
+    // Neither the file nor its directory on OLD's side: no OLD program at all.
+    let gone = std::fs::symlink_metadata(&old_path).is_err()
+        && old_path
+            .parent()
+            .is_some_and(|d| !d.as_os_str().is_empty() && !d.is_dir());
+    let old_path = old_path.display().to_string();
+    let (old, old_absent) = match gone {
+        true => (None, true),
+        false => {
+            let (prog, absent) = read_old(&old_path, &new.1)?;
+            (Some((old_path.clone(), prog)), absent)
+        }
     };
     Ok(Entry {
         name,
         old,
-        old_path: old_path.display().to_string(),
-        new: read(&new_path)?,
+        old_absent,
+        old_path,
+        new,
         grants,
+        extra: Vec::new(),
         old_grants: Err(()),
+        test: None,
     })
 }
 
 /// Refuses a tests' grants file that gives a writable `--dir` or a file-backed `--kv` or `--db`:
 /// OLD's tests run first and would leave their writes for NEW's.
-fn shared_state(t: &str) -> Result<(), i32> {
+fn shared_state(flag: &str, t: &str) -> Result<(), i32> {
     let (flags, _) = with_grants(&["--grants", t])?;
     for pair in flags.chunks(2) {
         let Some((name, target)) = pair[1].split_once('=') else {
@@ -472,7 +625,7 @@ fn shared_state(t: &str) -> Result<(), i32> {
         };
         if ["--dir", "--kv", "--db"].contains(&pair[0].as_str()) && writable_target(target) {
             return Err(fail(format!(
-                "--test-grants {t}: `{} {name}={target}` would carry OLD's test writes into NEW's\n  hint: grant it `:ro`, use `:memory:` for a store, or leave it out for a fresh one per test",
+                "{flag} {t}: `{} {name}={target}` would carry OLD's test writes into NEW's\n  hint: grant it `:ro`, use `:memory:` for a store, or leave it out for a fresh one per test",
                 pair[0]
             )));
         }
@@ -485,9 +638,9 @@ fn shared_state(t: &str) -> Result<(), i32> {
 /// instead of running it (R1b3). Inside is decided by identity, as H28 decides it, so a symlink
 /// to the directory or a symlinked directory on the way to a file counts. A source file with
 /// other hard links is refused while any `--dir` is granted: one could be inside it.
-fn source_dirs(t: &str, sources: &[&std::path::PathBuf]) -> Result<(), i32> {
+fn source_dirs(flag: &str, t: &str, sources: &[&std::path::PathBuf]) -> Result<(), i32> {
     let (flags, _) = with_grants(&["--grants", t])?;
-    let at = format!("--test-grants {}", kio_host::escape_line(t));
+    let at = format!("{flag} {}", kio_host::escape_line(t));
     for pair in flags.chunks(2).filter(|p| p[0] == "--dir") {
         let Some((name, spec)) = pair[1].split_once('=') else {
             continue;
@@ -525,8 +678,8 @@ type Fakes = (
 /// The fakes of the test grants file `t`, parsed from the `bytes` read and hashed. A grant name
 /// that is not an identifier, or a FILE outside NEW's directory (the change does not show it),
 /// is refused.
-fn test_fakes(t: &str, bytes: &[u8], new: &str) -> Result<Fakes, i32> {
-    let at = format!("--test-grants {}", kio_host::escape_line(t));
+fn test_fakes(flag: &str, t: &str, bytes: &[u8], new: &str) -> Result<Fakes, i32> {
+    let at = format!("{flag} {}", kio_host::escape_line(t));
     let Ok(text) = std::str::from_utf8(bytes) else {
         return Err(fail(format!("{at}: not UTF-8")));
     };
@@ -583,9 +736,15 @@ fn read_requirements(program: &str, file: &str) -> Result<(String, Option<String
 }
 
 /// The Requirements section: the unified diff of the two files, as lines and as `--json` gives it.
-/// The label is on the first line only, so the diff below it reads as a diff.
-fn requirements(sides: &[(String, Option<String>); 2]) -> (Vec<Row>, serde_json::Value) {
+/// The label is on the first line only, so the diff below it reads as a diff. `file` is the path
+/// as given; on neither side, one line says so (R1d5).
+fn requirements((file, sides): &Requirements) -> (Vec<Row>, serde_json::Value) {
     let [(old_path, old), (new_path, new)] = sides;
+    if old.is_none() && new.is_none() {
+        let line = format!("no requirements file ({} on neither side)", kio_host::escape_line(file));
+        let v = json!({"old": old_path, "new": new_path, "diff": null, "error": null, "neither": true});
+        return (vec![("not checked", line)], v);
+    }
     let text = |t: &Option<String>| t.clone().unwrap_or_default();
     let mut lines: Vec<Row> = vec![("not checked", "what the change claims; kio does not check it".into())];
     let diff = match unified(&text(old), &text(new)) {
@@ -713,27 +872,24 @@ fn unified(old: &str, new: &str) -> Result<Vec<String>, String> {
 /// root's two sides check (its tests run), and whether every entry checks and every grants file
 /// binds.
 fn authority(inputs: &Inputs, page: &mut Page) -> (bool, bool) {
-    let grants = inputs.grants.as_ref();
-    let (mut value, checks, binds) = entry_authority(
-        &inputs.old.1,
-        &inputs.new,
-        (grants, &inputs.old_grants),
-        "",
-        "--grants",
-        page,
-    );
+    if inputs.old_absent {
+        let line = format!("new entry: {} has no file", kio_host::escape_line(&inputs.old.0));
+        page.authority.push(("not checked", line));
+    }
+    let grants = (inputs.grants.as_ref(), &inputs.extra[..], &inputs.old_grants);
+    let (mut value, checks, binds) = entry_authority(&inputs.old.1, &inputs.new, grants, "", "--grants", page);
+    value["new_entry"] = json!(inputs.old_absent);
     let mut ok = binds;
     let mut entries = Vec::new();
     let none = no_program();
     for e in &inputs.entries {
         let prefix = format!("{}: ", e.name);
         let old = e.old.as_ref().map_or(&none, |o| &o.1);
-        let grants = e.grants.as_ref();
-        let grants = (grants, &e.old_grants);
+        let grants = (e.grants.as_ref(), &e.extra[..], &e.old_grants);
         let (mut v, checks, binds) = entry_authority(old, &e.new, grants, &prefix, "--entry-grants", page);
         ok &= checks && binds;
         v["entry"] = json!(e.name);
-        v["new_entry"] = json!(e.old.is_none());
+        v["new_entry"] = json!(e.old_absent);
         entries.push(v);
     }
     value["entries"] = json!(entries);
@@ -759,7 +915,7 @@ fn no_program() -> Program {
 fn entry_authority(
     old: &Program,
     (new_path, new): &(String, Program),
-    (grants, old_grants): (Option<&(String, Vec<u8>)>, &Beside),
+    (grants, extra, old_grants): GrantsGiven,
     prefix: &str,
     flag: &str,
     page: &mut Page,
@@ -829,7 +985,8 @@ fn entry_authority(
     };
     let mut grant_errors = Vec::new();
     if let Some((g, bytes)) = grants {
-        let (_, out) = captured(true, || bind(new_path, g));
+        let (_, out) = captured(true, || bind(new_path, g, extra));
+        value["command_line"] = json!(extra);
         let (shown_g, shown) = (kio_host::escape_line(g), kio_host::escape_line(new_path));
         // The file's change from OLD's, then whether it binds.
         if let Ok((rel, old_g)) = old_grants {
@@ -856,7 +1013,7 @@ fn entry_authority(
             value["grants_file"] = json!(null);
         }
         if out.errors.is_empty() {
-            let items = bound(g, bytes);
+            let items = bound(g, bytes, extra);
             let what = match items.is_empty() {
                 true => String::new(),
                 false => format!(": {}", items.join(", ")),
@@ -913,6 +1070,22 @@ fn gained(old: &Program, new: &Program) -> Vec<(String, String, Vec<String>)> {
     out
 }
 
+/// The flags of a grants file that grant a capability; the others set limits or serve.
+const GRANT_FLAGS: [&str; 12] = [
+    "--dir",
+    "--http",
+    "--http-methods",
+    "--http-header",
+    "--kv",
+    "--db",
+    "--rng",
+    "--clock",
+    "--log",
+    "--hmac",
+    "--secret",
+    "--value",
+];
+
 /// The flag-level change from OLD's grants file `old` (`None`: there is none) to `new`, each a
 /// path and the bytes read once: lines (`+ --dir x=y`, `- ..`, `unchanged`, `new file`) and
 /// `--json`'s value. A file that does not parse is named; its binding error is above (NEW) or it
@@ -925,7 +1098,21 @@ fn grants_diff(new: (&String, &Vec<u8>), old: Option<&(String, Vec<u8>)>) -> (Ve
     };
     let old = old.map(|(g, b)| (g, b));
     let Some(old) = old else {
-        return (vec!["new file".into()], json!("new file"));
+        // The binds line shows the grants; what else the file sets (limits, `--audit`, `--listen`)
+        // shows here (R1d7).
+        let mut lines = vec!["new file".to_string()];
+        let other = |f: &String| !GRANT_FLAGS.iter().any(|g| f.split(' ').next() == Some(g));
+        lines.extend(
+            parse(new)
+                .unwrap_or_default()
+                .iter()
+                .filter(|f| other(f))
+                .map(|f| format!("+ {f}")),
+        );
+        return (
+            lines.iter().map(|l| kio_host::escape_line(l)).collect(),
+            json!("new file"),
+        );
     };
     let (Some(n), Some(mut o)) = (parse(new), parse(old)) else {
         let line = "a side's file does not parse; not compared";
@@ -952,15 +1139,19 @@ fn grants_diff(new: (&String, &Vec<u8>), old: Option<&(String, Vec<u8>)>) -> (Ve
 /// `--http-header`s after it in parentheses, and `--listen`, `--host` and `--ws-origin` (who may
 /// reach the program). Limits and `--audit` are left out (#290). Each part ASCII, every other
 /// character and `\` escaped, and quoted when it holds a character that separates parts here.
-fn bound(g: &str, bytes: &[u8]) -> Vec<String> {
+/// Then each grant of `extra` (the flags after `--grants`, R1d4), marked `(command line)`.
+fn bound(g: &str, bytes: &[u8], extra: &[String]) -> Vec<String> {
     let text = std::str::from_utf8(bytes).unwrap_or_default();
-    let Ok(flags) = captured(true, || grants_flags(text, g, &[])).0 else {
+    let Ok(mut flags) = captured(true, || grants_flags(text, g, &[])).0 else {
         return vec![];
     };
+    let in_file = flags.len() / 2;
+    flags.extend(extra.iter().cloned());
     let shown = ascii;
     let pairs: Vec<(&str, &str)> = flags.chunks(2).map(|p| (p[0].as_str(), p[1].as_str())).collect();
     let mut items = Vec::new();
-    for &(flag, spec) in &pairs {
+    for (i, &(flag, spec)) in pairs.iter().enumerate() {
+        let given = if i < in_file { "" } else { " (command line)" };
         let item = match flag {
             "--dir" | "--kv" | "--db" | "--rng" | "--clock" | "--log" | "--hmac" | "--secret" | "--value" => {
                 shown(spec)
@@ -968,10 +1159,20 @@ fn bound(g: &str, bytes: &[u8]) -> Vec<String> {
             "--listen" | "--host" | "--ws-origin" => format!("{flag} {}", shown(spec)),
             "--http" => {
                 let name = spec.split_once('=').map_or(spec, |(n, _)| n);
-                let extras: Vec<String> = (pairs.iter())
-                    .filter(|(f, _)| *f == "--http-methods" || *f == "--http-header")
-                    .filter_map(|(_, s)| s.split_once('=').filter(|(n, _)| *n == name))
-                    .map(|(_, v)| shown(v))
+                let extras: Vec<String> = (pairs.iter().enumerate())
+                    .filter(|(_, (f, _))| *f == "--http-methods" || *f == "--http-header")
+                    .filter_map(|(j, (_, s))| Some((j, s.split_once('=').filter(|(n, _)| *n == name)?.1)))
+                    .map(|(j, v)| {
+                        format!(
+                            "{}{}",
+                            shown(v),
+                            if j < in_file || i >= in_file {
+                                ""
+                            } else {
+                                " (command line)"
+                            }
+                        )
+                    })
                     .collect();
                 match extras.is_empty() {
                     true => shown(spec),
@@ -980,7 +1181,7 @@ fn bound(g: &str, bytes: &[u8]) -> Vec<String> {
             }
             _ => continue,
         };
-        items.push(item);
+        items.push(item + given);
     }
     items
 }
@@ -1007,9 +1208,13 @@ fn ascii_chars(s: &str) -> String {
 }
 
 /// `kio check path --grants g`'s binding, its errors in `--json`'s object; dry, so a server's
-/// grants bind here too.
-fn bind(path: &str, g: &str) -> i32 {
-    let (flags, grants_file) = match with_grants(&["--grants", g]) {
+/// grants bind here too. `extra`: grant flags given after the file, as `kio run` takes them.
+fn bind(path: &str, g: &str, extra: &[String]) -> i32 {
+    let given: Vec<&str> = ["--grants", g]
+        .into_iter()
+        .chain(extra.iter().map(String::as_str))
+        .collect();
+    let (flags, grants_file) = match with_grants(&given) {
         Ok(f) => f,
         Err(code) => return code,
     };
@@ -1030,52 +1235,165 @@ fn push_errors(rows: &mut Vec<Row>, errors: &[serde_json::Value]) {
 /// The grants line of the Tests section when there is no `--test-grants`.
 const DEFAULT_TEST_GRANTS: &str = "defaults (temporary Dir, :memory: stores, fixed clock)";
 
-/// The Tests section, and the Resources section from the same runs: `--json`'s value, whether a
-/// test was removed, tests less or a mutant of the mutations file survived, and whether a side's
-/// tests do not run, a NEW test failed or the mutants did not all run. The tests run with `--test-grants` only, else the defaults: never `main`'s grants.
-fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
-    let (flags, shown): (Vec<&str>, &str) = match &inputs.test_grants {
-        Some((t, _)) => (vec!["--grants", t], t),
-        None => (vec![], DEFAULT_TEST_GRANTS),
+/// The tests a review runs (R1d3): the root's under T, then each entry's under its
+/// `--entry-test-grants`, else T.
+struct Suite<'a> {
+    /// `None` for the root, else the entry's name: its tests are `NAME: test` on the page.
+    entry: Option<&'a str>,
+    test: &'a TestGrants,
+    /// The program on each side: OLD's (`None`: there is none) and NEW's.
+    old: Option<&'a (String, Program)>,
+    new: &'a (String, Program),
+    /// Per side, OLD's then NEW's, the tests not run: an earlier suite's (`shared_tests`).
+    skip: [Vec<String>; 2],
+}
+
+impl Suite<'_> {
+    /// What the page puts before each of its tests' names.
+    fn prefix(&self) -> String {
+        self.entry.map_or(String::new(), |e| format!("{e}: "))
+    }
+}
+
+/// The root's suite, then each entry's.
+fn suites(inputs: &Inputs) -> Vec<Suite<'_>> {
+    let mut out = vec![Suite {
+        entry: None,
+        test: &inputs.test,
+        old: Some(&inputs.old),
+        new: &inputs.new,
+        skip: Default::default(),
+    }];
+    for e in &inputs.entries {
+        let mut skip: [Vec<String>; 2] = Default::default();
+        for s in &out {
+            if let (Some(q), Some(p)) = (s.old, &e.old) {
+                skip[0].extend(shared_tests(&q.1, &p.1));
+            }
+            skip[1].extend(shared_tests(&s.new.1, &e.new.1));
+        }
+        out.push(Suite {
+            entry: Some(&e.name),
+            test: e.test.as_ref().unwrap_or(&inputs.test),
+            old: e.old.as_ref(),
+            new: &e.new,
+            skip,
+        });
+    }
+    out
+}
+
+/// The tests of `p` that `q` has too, with the same tokens in every function they may run and
+/// every constant and type those use: a shared module's, run once, as `q`'s.
+fn shared_tests(q: &Program, p: &Program) -> Vec<String> {
+    let none = no_program();
+    let (cq, cp) = (Changes::of(&none, q), Changes::of(&none, p));
+    let (Some(tq), Some(tp)) = (&cq.new, &cp.new) else {
+        return vec![];
     };
-    // A secret T names that cannot be read fails every test granted it, on both sides: one error.
-    if let Some(e) = unreadable_secret(&flags) {
-        page.tests.push((
-            "error",
-            format!("--test-grants {shown} cannot be applied; no test ran:"),
-        ));
+    let theirs: BTreeSet<String> = tq.tests().into_iter().map(|t| t.name).collect();
+    (tp.tests().into_iter().map(|t| t.name))
+        .filter(|n| theirs.contains(n) && same_as_root(&cq, &cp, n))
+        .collect()
+}
+
+/// A test as the page names it (`FILE: name` for an entry's), its suite and its result.
+struct Shown<'a> {
+    name: String,
+    suite: usize,
+    r: &'a TestResult,
+}
+
+/// One suite's tests on one side: `None` without a program there, else the results or why they
+/// did not run.
+type Run<'a> = Option<Result<&'a [TestResult], &'a Vec<serde_json::Value>>>;
+
+/// Each test of `runs` (one side's, per suite) as the page names it, of the suites whose NEW
+/// tests ran (`new_runs`): a suite that did not run has none to compare.
+fn shown<'a>(runs: &[Run<'a>], new_runs: &[Run], suites: &[Suite]) -> Vec<Shown<'a>> {
+    let mut out = Vec::new();
+    for (i, r) in runs.iter().enumerate() {
+        if let (Some(Ok(rs)), Some(Ok(_))) = (r, &new_runs[i]) {
+            let prefix = suites[i].prefix();
+            out.extend(rs.iter().map(|r| Shown {
+                name: format!("{prefix}{}", r.name),
+                suite: i,
+                r,
+            }));
+        }
+    }
+    out
+}
+
+/// The Tests grants line of `t`:the file (or the defaults) and each fake it answers from.
+fn grants_line(t: &TestGrants) -> String {
+    let answered: Vec<String> = (t.fakes.iter())
+        .map(|(n, f)| format!("{} answered from {}", ascii(n), ascii(f)))
+        .collect();
+    match answered.is_empty() {
+        true => format!("grants: {}", t.shown()),
+        false => format!("grants: {} ({})", t.shown(), answered.join(", ")),
+    }
+}
+
+/// The Tests section, and the Resources section from the same runs: `--json`'s value, whether a
+/// test was removed, tests less or a mutant of the mutations file survived, and whether NEW's
+/// tests do not run, a NEW test failed or the mutants did not all run. Each suite's tests run
+/// with its tests' grants file only, else the defaults: never `main`'s grants. OLD's tests that
+/// do not run are `not checked`, as OLD's failures are (R1d2).
+fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
+    let suites = suites(inputs);
+    // A secret a tests' grants file names that cannot be read fails every test granted it, on
+    // both sides: one error.
+    for (prefix, t) in test_grants(inputs) {
+        let Some(e) = unreadable_secret(&t.flags()) else {
+            continue;
+        };
+        let flag = if prefix.is_empty() {
+            "--test-grants"
+        } else {
+            "--entry-test-grants"
+        };
+        let line = format!("{prefix}{flag} {} cannot be applied; no test ran:", t.shown());
+        page.tests.push(("error", line));
         page.tests.extend(
             e.lines()
                 .map(|l| ("", format!("  {}", kio_host::escape_line(l.trim_start())))),
         );
-        resources(&[], &[], &[], page);
+        resources(&[], &[], &[], &[], page);
         return (
-            json!({"grants": shown, "fakes": fakes_json(inputs), "setup_error": e, "mutants": null}),
+            json!({"grants": t.shown(), "fakes": fakes_json(t), "setup_error": e, "mutants": null}),
             false,
             true,
         );
     }
-    let answered: Vec<String> = (inputs.fakes.iter())
-        .map(|(n, f)| format!("{} answered from {}", ascii(n), ascii(f)))
-        .collect();
-    let line = match answered.is_empty() {
-        true => format!("grants: {shown}"),
-        false => format!("grants: {shown} ({})", answered.join(", ")),
-    };
-    page.tests.push(("tested", line));
+    for (prefix, t) in test_grants(inputs) {
+        page.tests.push(("tested", format!("{prefix}{}", grants_line(t))));
+    }
     let seed = inputs.seed.to_string();
-    let setup: Vec<&str> = flags.iter().copied().chain(["--seed", &seed]).collect();
-    let fakes = &inputs.fake_files;
-    // Threads for the runs (`jobs`, T7), at most that many runs at once on both sides together.
-    let new_t = captured(true, || test_setup(&inputs.new.0, &setup, fakes));
-    let pairs: Vec<(&str, &str)> = (inputs.old.1.files.iter())
-        .map(|(n, s)| (n.as_str(), s.as_str()))
-        .collect();
-    let old_db = lang::check_files_for_tests(&pairs, &lang::CapTable::v0()).is_ok_and(|p| opens_db(&p));
-    let n = match &new_t.0 {
-        Ok(t) => jobs(&t.flags, old_db || opens_db(&t.program)),
-        Err(_) => 1,
+    let set_up = |s: &Suite, (path, prog): &(String, Program), skip: &[String]| {
+        let flags: Vec<&str> = s.test.flags().into_iter().chain(["--seed", &seed]).collect();
+        let (t, out) = captured(true, || {
+            test_setup_of(path, Some(prog.clone()), &flags, &s.test.fake_files)
+        });
+        t.map(|mut t| {
+            t.skip = skip.to_vec();
+            t
+        })
+        .map_err(|_| out.errors)
     };
+    // Threads for the runs (`jobs`, T7), at most that many runs at once on both sides together.
+    let new_sets: Vec<_> = suites.iter().map(|s| set_up(s, s.new, &s.skip[1])).collect();
+    let opens = |p: &Program| {
+        let pairs: Vec<(&str, &str)> = p.files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
+        lang::check_files_for_tests(&pairs, &lang::CapTable::v0()).is_ok_and(|p| opens_db(&p))
+    };
+    let db = suites.iter().filter_map(|s| s.old).any(|o| opens(&o.1))
+        || new_sets.iter().any(|t| t.as_ref().is_ok_and(|t| opens_db(&t.program)));
+    let n = (new_sets.iter())
+        .map(|t| t.as_ref().map_or(1, |t| jobs(&t.flags, db)))
+        .min()
+        .unwrap_or(1);
     RUN_LIMIT.store(n, std::sync::atomic::Ordering::Relaxed);
     let threaded = |mut t: Tests| -> Result<Tests, Vec<serde_json::Value>> {
         t.jobs = n;
@@ -1089,92 +1407,117 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
         }
         Ok(t)
     };
-    let old_side = || {
-        let (tests, out) = captured(true, || test_setup(&inputs.old.0, &setup, fakes));
-        tests.map_err(|_| out.errors).and_then(threaded).map(|t| run_tests(&t))
+    let old_side = || -> Vec<Option<Result<Vec<TestResult>, Vec<serde_json::Value>>>> {
+        (suites.iter())
+            .map(|s| {
+                s.old
+                    .map(|o| set_up(s, o, &s.skip[0]).and_then(threaded).map(|t| run_tests(&t)))
+            })
+            .collect()
     };
-    let (tests, out) = new_t;
+    let new_sets: Vec<_> = new_sets.into_iter().map(|t| t.and_then(threaded)).collect();
+    let run_new = |sets: Vec<Result<Tests, _>>| -> Vec<Result<(Vec<TestResult>, Tests), _>> {
+        sets.into_iter().map(|t| t.map(|t| (run_tests(&t), t))).collect()
+    };
     // Both sides' tests at once when no test can see another's effects; OLD's set up on a
     // thread of its own, as a checked program stays on its thread.
-    let (old, new) = match tests.map_err(|_| out.errors).and_then(threaded) {
-        Ok(t) if t.jobs > 1 => std::thread::scope(|s| {
+    let (old, new) = match n > 1 {
+        true => std::thread::scope(|s| {
             let thread = std::thread::Builder::new().stack_size(kio_host::RUN_STACK);
             let old = thread.spawn_scoped(s, old_side).expect("cannot start a thread");
-            let new = Ok((run_tests(&t), t));
+            let new = run_new(new_sets);
             (old.join().unwrap_or_else(|p| std::panic::resume_unwind(p)), new)
         }),
-        new => (old_side(), new.map(|t| (run_tests(&t), t))),
+        false => {
+            let old = old_side();
+            (old, run_new(new_sets))
+        }
     };
-    let mut sides = json!({});
-    let new_results = new.as_ref().map(|(r, _)| r);
-    for (name, s) in [("old", old.as_ref()), ("new", new_results)] {
-        sides[name] = match s {
-            // A side that predates tests has none: 0 tests, not a failure.
-            Ok(results) if results.is_empty() => {
-                page.tests.push(("tested", format!("{name}: 0 tests")));
-                json!({"passed": 0, "failed": 0, "errors": []})
-            }
-            Ok(results) => {
-                let failed = results.iter().filter(|r| r.error.is_some()).count();
-                let mut line = format!("{name}: {} passed, {failed} failed", results.len() - failed);
-                // OLD's failures back nothing; NEW's are the `error` lines below.
-                let label = match (name, failed) {
-                    ("old", 1..) => {
-                        line += "; the base fails its own tests";
-                        "not checked"
-                    }
-                    _ => "tested",
-                };
-                page.tests.push((label, line));
-                json!({"passed": results.len() - failed, "failed": failed, "errors": []})
-            }
-            Err(errors) => {
-                page.tests.push(("error", format!("{name}: the tests do not run:")));
-                push_errors(&mut page.tests, errors);
-                json!({"passed": 0, "failed": 0, "errors": errors})
-            }
-        };
-    }
-    // Compared only when both sides ran: a side that did not run has no tests to compare.
-    let (old_r, new_r): (&[TestResult], &[TestResult]) = match (&old, &new) {
-        (Ok(o), Ok((n, _))) => (o, n),
-        _ => (&[], &[]),
-    };
-    let find = |rs: &'_ [TestResult], name: &str| rs.iter().position(|r| r.name == name);
-    let added: Vec<&str> = (new_r.iter().map(|r| r.name.as_str()))
-        .filter(|n| find(old_r, n).is_none())
+    let old_runs: Vec<Run> = (old.iter())
+        .map(|r| r.as_ref().map(|r| r.as_ref().map(Vec::as_slice)))
         .collect();
+    let new_runs: Vec<Run> = (new.iter())
+        .map(|r| Some(r.as_ref().map(|(r, _)| r.as_slice())))
+        .collect();
+    let mut sides = json!({});
+    for (name, runs) in [("old", &old_runs), ("new", &new_runs)] {
+        let results: Vec<&TestResult> = (runs.iter().flatten().flatten()).flat_map(|r| r.iter()).collect();
+        let failed = results.iter().filter(|r| r.error.is_some()).count();
+        // A side that predates tests has none: 0 tests, not a failure.
+        if results.is_empty() && runs.iter().flatten().any(|r| r.is_ok()) {
+            page.tests.push(("tested", format!("{name}: 0 tests")));
+        } else if !results.is_empty() {
+            let mut line = format!("{name}: {} passed, {failed} failed", results.len() - failed);
+            // OLD's failures back nothing; NEW's are the `error` lines below.
+            let label = match (name, failed) {
+                ("old", 1..) => {
+                    line += "; the base fails its own tests";
+                    "not checked"
+                }
+                _ => "tested",
+            };
+            page.tests.push((label, line));
+        }
+        let mut errors = Vec::new();
+        for (i, r) in runs.iter().enumerate() {
+            let Some(Err(e)) = r else { continue };
+            // OLD's tests not running backs nothing either.
+            let label = if name == "old" { "not checked" } else { "error" };
+            let prefix = suites[i].prefix();
+            page.tests
+                .push((label, format!("{name}: {prefix}the tests do not run:")));
+            push_errors(&mut page.tests, e);
+            errors.extend(e.iter().cloned());
+        }
+        sides[name] = json!({"passed": results.len() - failed, "failed": failed, "errors": errors});
+    }
+    // Compared per suite, only where NEW's tests ran: a suite that did not run has none to
+    // compare. Where OLD's did not, every NEW test is added.
+    let (old_r, new_r) = (
+        shown(&old_runs, &new_runs, &suites),
+        shown(&new_runs, &new_runs, &suites),
+    );
+    let old_down: Vec<usize> = (0..suites.len())
+        .filter(|&i| matches!(old_runs[i], Some(Err(_))))
+        .collect();
+    let find = |rs: &[Shown], name: &str| rs.iter().position(|r| r.name == name);
+    let added: Vec<&Shown> = new_r.iter().filter(|n| find(&old_r, &n.name).is_none()).collect();
     let removed: Vec<&str> = (old_r.iter().map(|r| r.name.as_str()))
-        .filter(|n| find(new_r, n).is_none())
+        .filter(|n| find(&new_r, n).is_none())
         .collect();
     // An added test that fails is an `error`, not evidence.
-    let fails = |n: &str| find(new_r, n).is_some_and(|i| new_r[i].error.is_some());
-    page.tests.extend(
-        added
-            .iter()
-            .map(|n| (if fails(n) { "error" } else { "tested" }, format!("added: {n}"))),
-    );
+    for a in &added {
+        let label = if a.r.error.is_some() { "error" } else { "tested" };
+        let why = match old_down.contains(&a.suite) {
+            true => " (old's tests do not run)",
+            false => "",
+        };
+        page.tests.push((label, format!("added: {}{why}", a.name)));
+    }
     page.tests
         .extend(removed.iter().map(|n| ("not checked", format!("removed: {n}"))));
     // A test on both sides that changed, or reaches a function that did, tests something else
     // now: read it like an added one.
-    let changes = Changes::of(&inputs.old.1, &inputs.new.1);
+    let none = no_program();
+    let changes: Vec<Changes> = (suites.iter())
+        .map(|s| Changes::of(s.old.map_or(&none, |o| &o.1), &s.new.1))
+        .collect();
     let mut changed: Vec<&str> = Vec::new();
-    for n in (new_r.iter().map(|r| r.name.as_str())).filter(|n| find(old_r, n).is_some()) {
-        let mut fs = changes.reached(&[n]);
+    for n in new_r.iter().filter(|n| find(&old_r, &n.name).is_some()) {
+        let mut fs = changes[n.suite].reached(&[&n.r.name]);
         if fs.is_empty() {
             continue;
         }
-        changed.push(n);
-        fs.retain(|f| f != n);
+        changed.push(&n.name);
+        fs.retain(|f| *f != n.r.name);
         let line = match fs.is_empty() {
-            true => format!("changed: {n}"),
-            false => format!("changed: {n} (reaches changed {})", fs.join(", ")),
+            true => format!("changed: {}", n.name),
+            false => format!("changed: {} (reaches changed {})", n.name, fs.join(", ")),
         };
         page.tests.push(("not checked", line));
     }
     // A changed function no test reaches ran in no test: per program, one line naming them.
-    let unreached = unreached_changed(inputs, &changes);
+    let unreached = unreached_changed(&suites, &changes);
     for (entry, fs) in &unreached {
         let prefix = entry.map_or(String::new(), |e| format!("{e}: "));
         let line = format!("changed, reached by no test: {prefix}{}", fs.join(", "));
@@ -1186,14 +1529,14 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
     // A property that ran fewer cases than in OLD, or became an example test, tests less. One
     // that failed stopped at the failing case: its count says nothing.
     let mut fewer = Vec::new();
-    for o in old_r {
-        let (Some(op), Some(n)) = (&o.prop, find(new_r, &o.name).map(|i| &new_r[i])) else {
+    for o in &old_r {
+        let (Some(op), Some(n)) = (&o.r.prop, find(&new_r, &o.name).map(|i| &new_r[i])) else {
             continue;
         };
-        if o.error.is_some() || n.error.is_some() {
+        if o.r.error.is_some() || n.r.error.is_some() {
             continue;
         }
-        let line = match &n.prop {
+        let line = match &n.r.prop {
             Some(np) if np.compiled < op.compiled => {
                 format!("removed: {} ({} cases, {} in old)", o.name, np.compiled, op.compiled)
             }
@@ -1204,50 +1547,71 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
             ),
         };
         page.tests.push(("not checked", line));
-        let cases = n.prop.as_ref().map_or(1, |p| p.compiled);
-        fewer.push(json!({"name": o.name, "cases": cases, "old_cases": op.compiled, "property": n.prop.is_some()}));
+        let cases = n.r.prop.as_ref().map_or(1, |p| p.compiled);
+        fewer.push(json!({"name": o.name, "cases": cases, "old_cases": op.compiled, "property": n.r.prop.is_some()}));
     }
     let mut properties = Vec::new();
-    for r in new.as_ref().map_or(&[][..], |(r, _)| r) {
-        if let Some(p) = &r.prop {
+    for r in &new_r {
+        if let Some(p) = &r.r.prop {
             // A failed property's cases are its FAIL line below, not evidence.
-            let label = if r.error.is_some() { "error" } else { "tested" };
+            let label = if r.r.error.is_some() { "error" } else { "tested" };
             page.tests.push((label, format!("{}: {}", r.name, p.summary())));
             properties.push(json!({"name": r.name, "cases": p.compiled, "seed": p.seed, "discarded": p.discarded}));
         }
     }
     let mut failures = Vec::new();
-    if let Ok((results, t)) = &new {
+    for (i, run) in new.iter().enumerate() {
+        let Ok((results, t)) = run else { continue };
+        let prefix = suites[i].prefix();
         for r in results.iter().filter(|r| r.error.is_some()) {
             // The FAIL line is labelled; the lines under it share its label.
-            let lines = result_lines(t, r);
+            let mut lines = result_lines(t, r);
+            if let Some(rest) = lines[0].strip_prefix("FAIL ") {
+                lines[0] = format!("FAIL {prefix}{rest}");
+            }
             page.tests.extend(
                 lines
                     .into_iter()
                     .enumerate()
                     .map(|(i, l)| (if i == 0 { "error" } else { "" }, l)),
             );
-            failures.push(result_json(r));
+            let mut row = result_json(r);
+            row["name"] = json!(format!("{prefix}{}", r.name));
+            failures.push(row);
         }
     }
-    let old_failed: Vec<&str> = (old.as_ref().map_or(&[][..], |r| r).iter())
-        .filter(|r| r.error.is_some())
-        .map(|r| r.name.as_str())
-        .collect();
+    let mut old_failed = Vec::new();
+    for (i, r) in old_runs.iter().enumerate() {
+        let Some(Ok(rs)) = r else { continue };
+        let prefix = suites[i].prefix();
+        old_failed.extend((rs.iter().filter(|r| r.error.is_some())).map(|r| format!("{prefix}{}", r.name)));
+    }
     page.tests.extend(
         old_failed
             .iter()
             .map(|n| ("not checked", format!("failed in old: {n}"))),
     );
-    // Mutants of NEW only, once its tests ran (R1b1, R1b2).
-    let (mutants, unfinished, survived) = match &new {
-        Ok((results, t)) => mutants::run(inputs, &changes, t, results, &mut page.tests),
-        Err(_) => (json!(null), false, false),
+    // Mutants of NEW only, once the root's tests ran (R1b1, R1b2), with each entry's that ran.
+    let runs: Vec<mutants::SuiteRun> = (new.iter().enumerate())
+        .filter_map(|(i, r)| {
+            let (results, tests) = r.as_ref().ok()?;
+            Some(mutants::SuiteRun {
+                suite: i,
+                tests,
+                results,
+            })
+        })
+        .collect();
+    let (mutants, unfinished, survived) = match runs.first() {
+        Some(r) if r.suite == 0 => mutants::run(inputs, &suites, &changes, &runs, &mut page.tests),
+        _ => (json!(null), false, false),
     };
-    resources(old_r, new_r, &changed, page);
-    let failed = new.is_err() || old.is_err() || !failures.is_empty() || unfinished;
+    let down: Vec<String> = old_down.iter().map(|&i| suites[i].prefix()).collect();
+    resources(&old_r, &new_r, &changed, &down, page);
+    let failed = new.iter().any(|r| r.is_err()) || !failures.is_empty() || unfinished;
+    let added: Vec<&str> = added.iter().map(|a| a.name.as_str()).collect();
     let value = json!({
-        "grants": inputs.test_grants.as_ref().map(|(t, _)| t), "fakes": fakes_json(inputs),
+        "grants": inputs.test.file.as_ref().map(|(t, _)| t), "fakes": fakes_json(&inputs.test),
         "old": sides["old"], "new": sides["new"], "added": added, "removed": removed, "changed": changed,
         "unreached_changed": unreached, "fewer_cases": fewer, "properties": properties, "failures": failures, "old_failed": old_failed,
         "setup_error": null, "mutants": mutants,
@@ -1314,28 +1678,31 @@ impl Changes {
     }
 }
 
-/// Per program, the root (`changes` is its) then each `--entry`, its changed functions `main`
-/// reaches that no test of the root's reaches (`lang::reachable` from every test, as the report's
-/// `reached only from tests:`), in key order; a program with none is left out. An entry's
-/// function counts as reached when the root's tests reach one of its key and it runs as the
-/// root's (`same_as_root`, #290, #312).
-fn unreached_changed<'a>(inputs: &'a Inputs, changes: &Changes) -> Vec<(Option<&'a str>, Vec<String>)> {
-    let Some(root) = &changes.new else { return vec![] };
-    let tests: Vec<String> = root.tests().into_iter().map(|t| t.name).collect();
-    let reach = lang::reachable(root, tests.iter().map(String::as_str));
-    let unreached = |c: &Changes| -> Vec<String> {
-        (c.reached(&["main"]).into_iter())
-            .filter(|k| !reach.contains(k) || !same_as_root(changes, c, k))
-            .collect()
-    };
-    let mut out = vec![(None, unreached(changes))];
-    let none = no_program();
-    for e in &inputs.entries {
-        let c = Changes::of(e.old.as_ref().map_or(&none, |o| &o.1), &e.new.1);
-        out.push((Some(e.name.as_str()), unreached(&c)));
+/// Per suite's program (`changes`, the root's then each `--entry`'s), its changed functions
+/// `main` reaches that no test reaches (`lang::reachable` from every test, as the report's
+/// `reached only from tests:`), in key order; a program with none is left out. A function
+/// counts as reached by another program's tests when they reach one of its key and it runs as
+/// there (`same_as_root`, #290, #312), so a module two entries share is tested by either's.
+fn unreached_changed<'a>(suites: &[Suite<'a>], changes: &[Changes]) -> Vec<(Option<&'a str>, Vec<String>)> {
+    let reach: Vec<BTreeSet<String>> = changes.iter().map(tests_reach).collect();
+    let mut out = Vec::new();
+    for (i, c) in changes.iter().enumerate() {
+        let tested = |k: &String| {
+            (0..changes.len()).any(|j| reach[j].contains(k) && (j == i || same_as_root(&changes[j], c, k)))
+        };
+        let fs: Vec<String> = c.reached(&["main"]).into_iter().filter(|k| !tested(k)).collect();
+        if !fs.is_empty() {
+            out.push((suites[i].entry, fs));
+        }
     }
-    out.retain(|(_, fs)| !fs.is_empty());
     out
+}
+
+/// What the tests of `c`'s NEW program may run, themselves included.
+fn tests_reach(c: &Changes) -> BTreeSet<String> {
+    let Some(p) = &c.new else { return BTreeSet::new() };
+    let tests: Vec<String> = p.tests().into_iter().map(|t| t.name).collect();
+    lang::reachable(p, tests.iter().map(String::as_str))
 }
 
 /// The first `--hmac`, `--secret` or `--http-header` secret the tests' grants `flags` name that
@@ -1371,24 +1738,28 @@ fn unreadable_secret(flags: &[&str]) -> Option<String> {
 /// The Resources section: per test on both sides, fuel and peak memory old -> new when either
 /// changed by more than 2%; then over every such test the total fuel and the largest peak. A test
 /// that failed on either side stopped early: it is left out, and counted. A row for a test not in
-/// `changed_tests` (it reaches no changed function) says so.
-fn resources(old: &[TestResult], new: &[TestResult], changed_tests: &[&str], page: &mut Page) {
+/// `changed_tests` (it reaches no changed function) says so. `old_down`: the prefix of each suite
+/// whose OLD tests did not run (R1d2).
+fn resources(old: &[Shown], new: &[Shown], changed_tests: &[&str], old_down: &[String], page: &mut Page) {
     // Every test that failed in NEW, and those on both sides that failed in OLD only.
-    let failed = new.iter().filter(|n| n.error.is_some()).count();
+    let failed = new.iter().filter(|n| n.r.error.is_some()).count();
     let mut failed_old = 0;
     let pairs: Vec<(&str, Used, Used)> = (old.iter())
         .filter_map(|o| {
             let n = new.iter().find(|n| n.name == o.name)?;
-            if n.error.is_some() {
+            if n.r.error.is_some() {
                 return None;
             }
-            if o.error.is_some() {
+            if o.r.error.is_some() {
                 failed_old += 1;
                 return None;
             }
-            Some((o.name.as_str(), o.used?, n.used?))
+            Some((o.name.as_str(), o.r.used?, n.r.used?))
         })
         .collect();
+    for prefix in old_down {
+        (page.resources).push(format!("old: {prefix}the tests do not run; left out of Resources"));
+    }
     let tests = |n: usize| if n == 1 { "test" } else { "tests" };
     if failed > 0 {
         page.resources.push(format!(
@@ -1443,8 +1814,8 @@ fn resources(old: &[TestResult], new: &[TestResult], changed_tests: &[&str], pag
     let (o, n) = (sum(of, om), sum(nf, nm));
     // Each test only in NEW that passed (R1a5): its own numbers, no old to compare.
     let added: Vec<(&str, Used)> = (new.iter())
-        .filter(|n| n.error.is_none() && !old.iter().any(|o| o.name == n.name))
-        .filter_map(|n| Some((n.name.as_str(), n.used?)))
+        .filter(|n| n.r.error.is_none() && !old.iter().any(|o| o.name == n.name))
+        .filter_map(|n| Some((n.name.as_str(), n.r.used?)))
         .collect();
     let added_lines = added
         .iter()
@@ -1488,9 +1859,12 @@ fn not_checked(inputs: &Inputs, page: &mut Page) {
     let none = no_program();
     let entries = (inputs.entries.iter()).map(|e| {
         let old = e.old.as_ref().map_or(&none, |o| &o.1);
-        (Some(e.name.as_str()), old, &e.new.1, e.old.is_none())
+        let ro = read_only_dbs(e.grants.as_ref(), &e.extra);
+        (Some(e.name.as_str()), old, &e.new.1, e.old_absent, ro)
     });
-    for (entry, old, prog, added) in [(None, &inputs.old.1, &inputs.new.1, false)].into_iter().chain(entries) {
+    let ro = read_only_dbs(inputs.grants.as_ref(), &inputs.extra);
+    let root = (None, &inputs.old.1, &inputs.new.1, inputs.old_absent, ro);
+    for (entry, old, prog, added, ro) in [root].into_iter().chain(entries) {
         let Ok(p) = kio_host::check_program(&prog.files) else {
             continue;
         };
@@ -1503,9 +1877,13 @@ fn not_checked(inputs: &Inputs, page: &mut Page) {
             let Some((_, ty)) = a.main.iter().find(|(n, _)| n == param) else {
                 continue;
             };
-            let Some((_, of, what)) = BLIND_SPOTS.iter().find(|(t, _, _)| t == ty) else {
+            let Some(&(_, of, mut what)) = BLIND_SPOTS.iter().find(|(t, _, _)| t == ty) else {
                 continue;
             };
+            // A `Db` the grants file binds `:ro` changes nothing (R1d7).
+            if ty == "Db" && ro.contains(param) {
+                what = "the SQL text and what it reads";
+            }
             let reached: Vec<&str> = (methods.iter().map(String::as_str))
                 .filter(|m| of.is_empty() || of.contains(&m.split(' ').next().unwrap_or_default()))
                 .collect();
@@ -1607,32 +1985,80 @@ fn not_checked(inputs: &Inputs, page: &mut Page) {
             seen.push(change);
         }
     }
-    for (n, f) in &inputs.fakes {
-        let (n, f) = (ascii(n), ascii(f));
-        page.not_checked.push(format!(
-            "{n}: Http: tests ran against {f}, not a server; the real endpoint's answers are untested"
-        ));
+    let mut fakes_changed = Vec::new();
+    for (prefix, t) in test_grants(inputs) {
+        for (i, (n, f)) in t.fakes.iter().enumerate() {
+            page.not_checked.push(format!(
+                "{prefix}{}: Http: tests ran against {}, not a server; the real endpoint's answers are untested",
+                ascii(n),
+                ascii(f)
+            ));
+            // The answers changed with the code: read them as part of the change (R1d7).
+            let first = t.fakes.iter().position(|(_, x)| x == f) == Some(i);
+            if let Some((added, removed)) = fake_change(t, f).filter(|_| first) {
+                let what = format!("{added} -{removed} lines");
+                page.not_checked
+                    .push(format!("{prefix}fake {} changed (+{what})", ascii(f)));
+                fakes_changed.push(json!({"path": f, "added": added, "removed": removed}));
+            }
+        }
     }
     page.not_checked.push(SAME_AUTHOR.into());
-    page.not_checked_json =
-        json!({"methods": rows, "deps": dep_rows, "fakes": fakes_json(inputs), "author": SAME_AUTHOR});
+    page.not_checked_json = json!({"methods": rows, "deps": dep_rows, "fakes": fakes_json(&inputs.test), "fakes_changed": fakes_changed, "author": SAME_AUTHOR});
 }
 
-/// Each fake of the test grants file, for `--json`.
-fn fakes_json(inputs: &Inputs) -> serde_json::Value {
-    json!(inputs
+/// The lines added and removed from the fake FILE `f` beside OLD's program to NEW's, when both
+/// were read and differ (a diff too large to compare counts every line).
+fn fake_change(t: &TestGrants, f: &str) -> Option<(usize, usize)> {
+    let new = t.fake_files.iter().find(|(p, _)| p == f)?.1.as_ref().ok()?;
+    let old = match t.old_fakes.iter().find(|(p, _)| p == f)? {
+        (_, Ok((_, OldGrants::File(_, b)))) => b,
+        _ => return None,
+    };
+    if old == new {
+        return None;
+    }
+    let (o, n) = (String::from_utf8_lossy(old), String::from_utf8_lossy(new));
+    let count = |d: &[String], c: char| d.iter().filter(|l| l.starts_with(c) && !l.starts_with("@@")).count();
+    Some(match unified(&o, &n) {
+        Ok(d) => (count(&d, '+'), count(&d, '-')),
+        Err(_) => (n.lines().count(), o.lines().count()),
+    })
+}
+
+/// The `--db` grants of a grants file and the flags after it that are `:ro`: their names.
+fn read_only_dbs(grants: Option<&(String, Vec<u8>)>, extra: &[String]) -> Vec<String> {
+    let text = grants.map_or("", |(_, b)| std::str::from_utf8(b).unwrap_or_default());
+    let g = grants.map_or("", |(g, _)| g.as_str());
+    let mut flags = captured(true, || grants_flags(text, g, &[])).0.unwrap_or_default();
+    flags.extend(extra.iter().cloned());
+    (flags.chunks(2))
+        .filter(|p| p[0] == "--db")
+        .filter_map(|p| p[1].split_once('='))
+        .filter(|(_, spec)| kio_host::kv::split_spec(spec).1)
+        .map(|(name, _)| name.to_string())
+        .collect()
+}
+
+/// Each fake of a tests' grants file, for `--json`.
+fn fakes_json(t: &TestGrants) -> serde_json::Value {
+    json!(t
         .fakes
         .iter()
         .map(|(n, f)| json!({"grant": n, "path": f}))
         .collect::<Vec<_>>())
 }
 
-/// Each program one side loads: its root, then each `--entry` it has.
-fn side_programs(inputs: &Inputs, new: bool) -> Vec<&Program> {
-    let root = if new { &inputs.new.1 } else { &inputs.old.1 };
+/// Each program one side loads: its root, then each `--entry` it has; whether its root is no
+/// file (OLD's modules of a new entry, `read_old`).
+fn side_programs(inputs: &Inputs, new: bool) -> Vec<(&Program, bool)> {
+    let root = match new {
+        true => (&inputs.new.1, false),
+        false => (&inputs.old.1, inputs.old_absent),
+    };
     let entries = (inputs.entries.iter()).filter_map(|e| match new {
-        true => Some(&e.new.1),
-        false => e.old.as_ref().map(|o| &o.1),
+        true => Some((&e.new.1, false)),
+        false => e.old.as_ref().map(|o| (&o.1, e.old_absent)),
     });
     [root].into_iter().chain(entries).collect()
 }
@@ -1640,7 +2066,7 @@ fn side_programs(inputs: &Inputs, new: bool) -> Vec<&Program> {
 /// The dependencies one side's programs load, each once.
 fn side_deps(inputs: &Inputs, new: bool) -> Vec<kio_host::Dep> {
     let mut deps: Vec<kio_host::Dep> = Vec::new();
-    for d in side_programs(inputs, new).into_iter().flat_map(|p| &p.deps) {
+    for d in side_programs(inputs, new).into_iter().flat_map(|(p, _)| &p.deps) {
         if !deps.iter().any(|x| x.name == d.name && x.path == d.path) {
             deps.push(d.clone());
         }
@@ -1659,17 +2085,23 @@ fn identity(inputs: &Inputs, page: &mut Page) -> serde_json::Value {
     let mut sides = json!({});
     let mut deps = json!({});
     for (side, new) in [("old", false), ("new", true)] {
-        // Every file of the root and each entry; one they share (a module) once.
-        let mut each: Vec<(String, String)> = (side_programs(inputs, new).into_iter())
-            .flat_map(|prog| (0..prog.files.len()).map(move |i| (json_path(prog, i), hash(prog.files[i].1.as_bytes()))))
+        // Every file of the root and each entry; one they share (a module) once. A root that is
+        // no file is absent, and must stay so.
+        let mut each: Vec<(String, Option<String>)> = (side_programs(inputs, new).into_iter())
+            .flat_map(|(prog, absent)| {
+                (0..prog.files.len()).map(move |i| match i == 0 && absent {
+                    true => (prog.files[0].0.clone(), None),
+                    false => (json_path(prog, i), Some(hash(prog.files[i].1.as_bytes()))),
+                })
+            })
             .collect();
         each.sort();
         each.dedup();
-        shown.extend(each.iter().map(|(p, h)| (p.clone(), Some(h.clone()))));
-        (page.identity).extend(
-            each.iter()
-                .map(|(p, h)| format!("{side} {} sha256:{h}", kio_host::escape_line(p))),
-        );
+        shown.extend(each.iter().cloned());
+        (page.identity).extend(each.iter().map(|(p, h)| {
+            let h = h.as_ref().map_or("absent".into(), |h| format!("sha256:{h}"));
+            format!("{side} {} {h}", kio_host::escape_line(p))
+        }));
         sides[side] = json!(each
             .iter()
             .map(|(p, h)| json!({"path": p, "sha256": h}))
@@ -1696,13 +2128,31 @@ fn identity(inputs: &Inputs, page: &mut Page) -> serde_json::Value {
     let old_of = |b: &Beside| b.as_ref().ok().and_then(|(_, o)| o.file());
     let grants = file("grants", &inputs.grants, kio_host::escape_line);
     let old_grants = file("old grants", &old_of(&inputs.old_grants), kio_host::escape_line);
-    let test_grants = file("test grants", &inputs.test_grants, kio_host::escape_line);
-    // A FILE that could not be read, or that `kio test` refuses, answered nothing: its error is
-    // the tests' on both sides.
-    let test_fakes: Vec<_> = (inputs.fake_files.iter())
-        .filter(|(p, _)| inputs.fakes_ok.contains(p))
-        .filter_map(|(p, r)| file("test fake", &r.as_ref().ok().map(|b| (p.clone(), b.clone())), ascii))
-        .collect();
+    let (mut tests_json, mut test_fakes, mut old_test_fakes) = (Vec::new(), Vec::new(), Vec::new());
+    for (prefix, t) in test_grants(inputs) {
+        let what = if prefix.is_empty() {
+            "test grants"
+        } else {
+            "entry test grants"
+        };
+        tests_json.push(file(&format!("{prefix}{what}"), &t.file, kio_host::escape_line));
+        // A FILE that could not be read, or that `kio test` refuses, answered nothing: its error
+        // is the tests' on both sides.
+        for (p, r) in t.fake_files.iter().filter(|(p, _)| t.fakes_ok.contains(p)) {
+            let read = r.as_ref().ok().map(|b| (p.clone(), b.clone()));
+            test_fakes.extend(file(&format!("{prefix}test fake"), &read, ascii));
+        }
+        for (_, old) in &t.old_fakes {
+            old_test_fakes.extend(file(
+                &format!("{prefix}old test fake"),
+                &old_of(old),
+                kio_host::escape_line,
+            ));
+        }
+    }
+    // The root's first, then each entry's own.
+    let entry_test_grants: Vec<_> = tests_json.split_off(1).into_iter().flatten().collect();
+    let test_grants = tests_json.pop().flatten();
     let entry_grants: Vec<_> = (inputs.entries.iter())
         .filter_map(|e| file(&format!("{}: entry grants", e.name), &e.grants, kio_host::escape_line))
         .collect();
@@ -1716,7 +2166,7 @@ fn identity(inputs: &Inputs, page: &mut Page) -> serde_json::Value {
         })
         .collect();
     let mut files = Vec::new();
-    let requirements = inputs.requirements.as_ref().map(|sides| {
+    let requirements = inputs.requirements.as_ref().map(|(_, sides)| {
         let rows: Vec<_> = (sides.iter().zip(["old", "new"]))
             .map(|((path, text), side)| {
                 let h = text.as_ref().map(|t| hash(t.as_bytes()));
@@ -1741,7 +2191,7 @@ fn identity(inputs: &Inputs, page: &mut Page) -> serde_json::Value {
     page.changed = changed(&shown);
     json!({
         "kio": version, "commit": commit, "old": sides["old"], "new": sides["new"], "deps": deps,
-        "grants": grants, "test_grants": test_grants, "test_fakes": test_fakes, "entry_grants": entry_grants, "old_grants": old_grants, "old_entry_grants": old_entry_grants, "requirements": requirements, "mutations": mutations, "seed": inputs.seed,
+        "grants": grants, "test_grants": test_grants, "test_fakes": test_fakes, "entry_test_grants": entry_test_grants, "old_test_fakes": old_test_fakes, "entry_grants": entry_grants, "old_grants": old_grants, "old_entry_grants": old_entry_grants, "requirements": requirements, "mutations": mutations, "seed": inputs.seed,
         "changed": page.changed,
     })
 }

@@ -1,0 +1,2 @@
+--http src=fake:e/feed.http
+--http-record src=sent

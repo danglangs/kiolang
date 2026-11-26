@@ -1,0 +1,3 @@
+--db db=feeds.db:ro
+--dir out=digests
+--timeout 600

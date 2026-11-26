@@ -1,0 +1,8 @@
+pub fn page_size(n: Int) -> Int { if n > 100 { 100 } else { n } }
+
+pub fn ok(status: Int) -> Bool { status >= 200 && status < 300 }
+
+pub fn fixture_status() -> Int { 204 }
+
+#[test]
+fn ok_statuses() { assert(ok(fixture_status()), "2xx"); assert(!ok(404), "404"); }

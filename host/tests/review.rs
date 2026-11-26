@@ -284,11 +284,12 @@ fn requirements_diff() {
         err.contains("hint: give a path relative to each program's directory"),
         "{err}"
     );
-    let (code, _, err) = s.review(&["--requirements", "NOPE.md"]);
-    assert_eq!(code, 2);
-    assert!(
-        err.contains("hint: the path is relative to each program's directory"),
-        "{err}"
+    // R1d5: on neither side, a not-checked line instead of a refusal.
+    let (code, out, err) = s.review(&["--requirements", "NOPE.md"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert_eq!(
+        Sides::section(&out, "Requirements"),
+        ["  not checked  no requirements file (NOPE.md on neither side)"]
     );
 }
 
@@ -442,15 +443,20 @@ fn tests_that_do_not_run_list_nothing_as_added() {
     let (code, out, _) = s.review(&["--test-grants", &t]);
     assert_eq!(code, 1, "{out}");
     let tests = Sides::section(&out, "Tests");
-    assert_eq!(tests[1], "  error        old: the tests do not run:", "{out}");
+    // OLD's not running backs nothing (R1d2); NEW's is the error.
+    assert_eq!(tests[1], "  not checked  old: the tests do not run:", "{out}");
     assert!(tests[2].contains("`--listen` is not for kio test"), "{out}");
+    assert_eq!(tests[4], "  error        new: the tests do not run:", "{out}");
     assert!(
         !tests.iter().any(|l| l.contains("added:") || l.contains("removed:")),
         "{out}"
     );
     assert_eq!(
         Sides::section(&out, "Resources"),
-        ["  measured     no test ran on both sides"]
+        [
+            "  measured     old: the tests do not run; left out of Resources",
+            "  measured     no test ran on both sides"
+        ]
     );
 }
 
@@ -612,7 +618,11 @@ fn an_added_entry() {
     ] {
         assert!(identity.contains(&line), "{line}\n{out}");
     }
-    assert!(!identity.iter().any(|l| l.contains("old/worker.kio")), "{out}");
+    // OLD has no file there: absent, and checked to stay so.
+    assert!(
+        identity.contains(&format!("  old {dir}/old/worker.kio absent")),
+        "{out}"
+    );
     let (_, out, _) = s.review(&["--entry", "worker.kio", "--json"]);
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     let e = &v["authority"]["entries"][0];
@@ -1595,7 +1605,7 @@ fn mutants_killed_and_survived() {
     assert_eq!(
         m,
         serde_json::json!({"seed": 1, "requested": 20, "sites": 4, "drawn": 4, "made": 4, "did_not_check": 0, "error": null,
-            "skipped": [], "constants": [], "mutations": null})
+            "skipped": [], "constants": [], "unmutated": [], "mutations": null})
     );
     let row = |func: &str, (line, col): (u32, u32), from: &str, to: &str, around: &str, killed: Option<&str>| {
         let edit = format!("`{from}` -> `{to}` in `");
@@ -2532,4 +2542,404 @@ fn runs_with_a_db_fit_sqlites_heap() {
         "{out}"
     );
     assert_eq!(review_threads(&s, &["--test-grants", &t], true), (code, out));
+}
+
+/// R1d: a feed aggregator in miniature. `feed.kio` is a module the entries share; `fetch.kio`
+/// polls a feed over `Http`; `digest.kio` writes a day's digest from a `Db`, the day given per run.
+const FEED: &str = r#"pub fn page_size(n: Int) -> Int { if n > 50 { 50 } else { n } }
+
+pub fn ok(status: Int) -> Bool { status >= 200 && status < 300 }
+
+pub fn fixture_status() -> Int { 200 }
+
+#[test]
+fn ok_statuses() { assert(ok(fixture_status()), "2xx"); assert(!ok(404), "404"); }
+"#;
+
+const FETCH: &str = r#"mod feed;
+
+fn fetch(src: Http) -> Result<Bool, HttpErr> { Ok(feed::ok(src.send("GET", "/feed.xml", [], "".to_bytes(), 0)?.status)) }
+
+fn main(src: Http) -> Result<Bool, HttpErr> { fetch(src) }
+
+#[test]
+fn fetches(src: Http) -> Result<(), HttpErr> { assert(fetch(src)?, "200"); Ok(()) }
+"#;
+
+/// FETCH sending an ETag, and a test that reads the request back (`--http-record`).
+const FETCH_ETAG: &str = r#"mod feed;
+
+fn fetch(src: Http) -> Result<Bool, HttpErr> {
+  let r = src.send("GET", "/feed.xml", ["If-None-Match: \"v1\""], "".to_bytes(), 0)?;
+  Ok(r.status == 304 || feed::ok(r.status))
+}
+
+fn main(src: Http) -> Result<Bool, HttpErr> { fetch(src) }
+
+#[test]
+fn fetches(src: Http) -> Result<(), HttpErr> { assert(fetch(src)?, "200"); Ok(()) }
+
+#[test]
+fn sends_the_etag(src: Http, sent: Dir) -> Result<(), HttpErr> {
+  let _ = fetch(src)?;
+  let req = sent.read("src-1").map_err(|_| HttpErr::Timeout)?.to_str();
+  assert(req.contains("if-none-match: \"v1\""), "etag sent");
+  Ok(())
+}
+"#;
+
+const DIGEST: &str = r##"mod feed;
+
+fn header(day: Str, n: Int) -> Str { "# " + day + " (" + n.to_str() + " items)\n" }
+
+fn digest(db: Db, out: Dir, day: Str) -> Result<Int, Str> {
+  let rows = db.query("SELECT title FROM items ORDER BY id LIMIT ?", [SqlValue::Int(feed::page_size(500))]).map_err(|_| "db")?;
+  out.write(day + ".md", header(day, rows.len()).to_bytes()).map_err(|_| "write")?;
+  Ok(rows.len())
+}
+
+fn main(db: Db, out: Dir, day: Value) -> Result<Int, Str> { digest(db, out, day.get()) }
+
+#[test]
+fn dated(day: Value) { assert_eq(header(day.get(), 0), "# 2026-11-20 (0 items)\n"); }
+
+#[test]
+fn caps_the_digest() { assert_eq(feed::page_size(500), 50); }
+"##;
+
+/// A new entry: a page of items from a `Db`, its size from FEED.
+const API: &str = r#"mod feed;
+
+fn listing(db: Db, limit: Int) -> Result<Int, DbErr> {
+  let rows = db.query("SELECT id FROM items ORDER BY id LIMIT ?", [SqlValue::Int(feed::page_size(limit))])?;
+  Ok(rows.len())
+}
+
+fn main(db: Db, limit: Value) -> Result<Int, DbErr> { listing(db, limit.get().parse_int().unwrap_or(20)) }
+
+#[test]
+fn lists_a_page(db: Db) -> Result<(), DbErr> {
+  db.exec("CREATE TABLE items (id INTEGER)", [])?;
+  db.exec("INSERT INTO items VALUES (1), (2), (3)", [])?;
+  assert_eq(listing(db, 2)?, 2);
+  Ok(())
+}
+"#;
+
+/// Each `(path, text)` written under a directory of its own, with `tmp/` for kio's temporary files.
+fn tree(files: &[(&str, &str)]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    for d in ["old", "new", "tmp"] {
+        std::fs::create_dir(dir.path().join(d)).unwrap();
+    }
+    for (name, text) in files {
+        write(dir.path(), name, text);
+    }
+    dir
+}
+
+/// `(exit code, stdout, stderr)` of `kio review args..` run in `dir` (paths relative to it), on
+/// one thread when `serial` (`KIO_TEST_SERIAL`).
+fn review_in(dir: &Path, args: &[&str], serial: bool) -> (i32, String, String) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_kio"));
+    cmd.arg("review")
+        .args(args)
+        .current_dir(dir)
+        .env("TMPDIR", dir.join("tmp"));
+    if serial {
+        cmd.env("KIO_TEST_SERIAL", "1");
+    }
+    let out = cmd.output().unwrap();
+    let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+    (out.status.code().unwrap(), text(&out.stdout), text(&out.stderr))
+}
+
+/// R1d1: an entry OLD has no file for is reviewed against OLD's directory: its modules by
+/// qualified name, their tests run as the base's. FEED is unchanged, so `feed::page_size` is
+/// neither changed nor mutated, and `feed::ok_statuses` is not added.
+#[test]
+fn a_new_entry_is_compared_with_its_directorys_modules() {
+    let t = tree(&[
+        ("old/feed.kio", FEED),
+        ("old/fetch.kio", FETCH),
+        ("new/feed.kio", FEED),
+        ("new/fetch.kio", FETCH),
+        ("new/api.kio", API),
+    ]);
+    let args = ["new/api.kio", "--base", "old/api.kio"];
+    let (code, out, err) = review_in(t.path(), &args, false);
+    assert_eq!(code, 3, "{out}{err}");
+    assert_eq!(
+        Sides::section(&out, "Authority"),
+        [
+            "  not checked  new entry: old/api.kio has no file",
+            "  enforced     + db: Db (query)",
+            "  derived        query in listing",
+            "  enforced     + limit: Value (get)",
+            "  derived        get in main",
+        ]
+    );
+    assert_eq!(
+        Sides::section(&out, "Tests"),
+        [
+            DEFAULT_GRANTS,
+            "  tested       old: 1 passed, 0 failed",
+            "  tested       new: 2 passed, 0 failed",
+            "  tested       added: lists_a_page",
+            "  not checked  changed, reached by no test: main",
+            "  tested       mutants: 1 of 1 killed (generated at seed 1: 2 drawn of 2 sites, 1 did not check)",
+            "  tested       killed by: lists_a_page 1",
+        ],
+        "{out}"
+    );
+    assert_eq!(
+        Sides::section(&out, "Not checked")[..2],
+        [
+            "  not checked  db: Db query: the SQL text and what it changes",
+            "  not checked  listing: db (new entry)",
+        ]
+    );
+    let identity = Sides::section(&out, "Identity");
+    for line in [
+        "  old old/api.kio absent".to_string(),
+        format!("  old old/feed.kio sha256:{}", sha(FEED.as_bytes())),
+        format!("  new new/feed.kio sha256:{}", sha(FEED.as_bytes())),
+    ] {
+        assert!(identity.contains(&line), "{line}\n{out}");
+    }
+    assert!(!out.contains("page_size"), "{out}");
+    let (_, out, _) = review_in(t.path(), &[&args[..], &["--mutants", "0", "--json"]].concat(), false);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["authority"]["new_entry"], true);
+    assert_eq!(
+        v["identity"]["old"][0],
+        serde_json::json!({"path": "old/api.kio", "sha256": null})
+    );
+    // A directory OLD lacks stays an error.
+    let (code, out, err) = review_in(t.path(), &["new/api.kio", "--base", "gone/api.kio"], false);
+    assert_eq!((code, out.as_str()), (2, ""), "{err}");
+    assert!(err.contains("gone/api.kio: cannot read"), "{err}");
+}
+
+/// The change across entries: FEED's page size raised (only DIGEST's `main` and tests reach it),
+/// its test fixture changed, FETCH sending an ETag with a test of it that needs `--http-record`,
+/// the fake feed and FETCH's grants changed, DIGEST's grants new.
+fn across() -> tempfile::TempDir {
+    let feed_new = FEED
+        .replace("n > 50 { 50 }", "n > 100 { 100 }")
+        .replace("{ 200 }", "{ 204 }");
+    let digest_new = DIGEST.replace("page_size(500), 50)", "page_size(500), 100)");
+    tree(&[
+        ("old/feed.kio", FEED),
+        ("old/fetch.kio", FETCH),
+        ("old/digest.kio", DIGEST),
+        ("old/feed.http", "GET /feed.xml\n200\n"),
+        ("old/fetch.grants", "--http src=https://feeds.example.org\n"),
+        ("new/feed.kio", &feed_new),
+        ("new/fetch.kio", FETCH_ETAG),
+        ("new/digest.kio", &digest_new),
+        ("new/feed.http", "GET /feed.xml\n304\n---\nGET /feed.xml\n200\n"),
+        (
+            "new/fetch.grants",
+            "--http src=https://feeds.example.org\n--timeout 30\n",
+        ),
+        (
+            "new/digest.grants",
+            "--db db=feeds.db:ro\n--dir out=digests\n--timeout 600\n",
+        ),
+        (
+            "new/test.grants",
+            "--http src=fake:new/feed.http\n--http-record src=sent\n",
+        ),
+        ("new/digest-test.grants", "--value day=2026-11-20\n"),
+    ])
+}
+
+const ACROSS: [&str; 15] = [
+    "new/fetch.kio",
+    "--base",
+    "old/fetch.kio",
+    "--grants",
+    "new/fetch.grants",
+    "--test-grants",
+    "new/test.grants",
+    "--entry",
+    "digest.kio",
+    "--entry-grants",
+    "new/digest.grants",
+    "--value",
+    "day=2026-11-20",
+    "--entry-test-grants",
+    "new/digest-test.grants",
+];
+
+/// R1d2: OLD's tests not setting up (a grant only NEW's tests take) is not checked, as OLD's own
+/// failures are: exit unaffected, every NEW test added and labelled so, Resources saying why.
+#[test]
+fn old_tests_that_do_not_set_up_are_not_checked() {
+    let t = across();
+    let (code, out, err) = review_in(t.path(), &[&ACROSS[..7], &["--mutants", "0"]].concat(), false);
+    assert_eq!(code, 0, "{out}{err}");
+    assert_eq!(
+        Sides::section(&out, "Tests"),
+        [
+            "  tested       grants: new/test.grants (src answered from new/feed.http)",
+            "  not checked  old: the tests do not run:",
+            "                 --http-record src=sent: no test takes both `src: Http` and `sent: Dir`",
+            "                 hint: give the Dir parameter's name after `=`, or add `sent: Dir` to the test that takes `src: Http`",
+            "  tested       new: 3 passed, 0 failed",
+            "  tested       added: feed::ok_statuses (old's tests do not run)",
+            "  tested       added: fetches (old's tests do not run)",
+            "  tested       added: sends_the_etag (old's tests do not run)",
+        ],
+        "{out}"
+    );
+    let resources = Sides::section(&out, "Resources");
+    assert_eq!(
+        resources[0],
+        "  measured     old: the tests do not run; left out of Resources"
+    );
+    assert_eq!(resources.last().unwrap(), "  measured     no test ran on both sides");
+}
+
+/// R1d3, 4, 6, 7: one review of a change to two entries and their shared module.
+#[test]
+fn a_change_across_entries() {
+    let t = across();
+    let (code, out, err) = review_in(t.path(), &ACROSS, false);
+    assert_eq!(code, 0, "{out}{err}");
+    // A grant per run on the binds line; a new grants file's limit; a changed one's.
+    assert_eq!(
+        Sides::section(&out, "Authority"),
+        [
+            "  enforced     no change in authority",
+            "  enforced     fetch.grants: + --timeout 30",
+            "  enforced     --grants new/fetch.grants binds new/fetch.kio's main: src=https://feeds.example.org",
+            "  enforced     digest.kio: no change in authority",
+            "  enforced     digest.kio: digest.grants: new file",
+            "  enforced     digest.kio: digest.grants: + --timeout 600",
+            "  enforced     digest.kio: --entry-grants new/digest.grants binds new/digest.kio's main: db=feeds.db:ro, out=digests, day=2026-11-20 (command line)",
+        ],
+        "{out}"
+    );
+    // DIGEST's tests run under their own grants, merged; FEED's test runs once.
+    let fetch = r#"  not checked  survived: generated: new/fetch.kio:4:82: fetch: `0` -> `1` in `..."v1\\""], "".to_bytes(), 0)?;`"#;
+    let gt = "  not checked  survived: generated: new/feed.kio:1:40: digest.kio: feed::page_size: `>` -> `>=` in `...e(n: Int) -> Int { if n > 100 { 100 } else { n }...`";
+    let cap = "  not checked  survived: generated: new/feed.kio:1:42: digest.kio: feed::page_size: `100` -> `101` in `...n: Int) -> Int { if n > 100 { 100 } else { n } }`";
+    assert_eq!(
+        Sides::section(&out, "Tests"),
+        [
+            "  tested       grants: new/test.grants (src answered from new/feed.http)",
+            "  tested       digest.kio: grants: new/digest-test.grants",
+            "  tested       old: 2 passed, 0 failed",
+            "  not checked  old: the tests do not run:",
+            "                 --http-record src=sent: no test takes both `src: Http` and `sent: Dir`",
+            "                 hint: give the Dir parameter's name after `=`, or add `sent: Dir` to the test that takes `src: Http`",
+            "  tested       new: 5 passed, 0 failed",
+            "  tested       added: feed::ok_statuses (old's tests do not run)",
+            "  tested       added: fetches (old's tests do not run)",
+            "  tested       added: sends_the_etag (old's tests do not run)",
+            "  not checked  changed: digest.kio: caps_the_digest (reaches changed feed::page_size)",
+            "  tested       mutants: 7 of 10 killed (generated at seed 1: 11 drawn of 11 sites, 1 did not check)",
+            "  tested       killed by: fetches 6, digest.kio: caps_the_digest 1",
+            fetch,
+            &caret(fetch, "0)?;`", "0"),
+            gt,
+            &caret(gt, "n > 100 {", ">"),
+            cap,
+            &caret(cap, "100 { 100 } else { n } }`", "100"),
+            "  not checked  1 changed function not mutated: reached by no `main` (feed::fixture_status)",
+        ],
+        "{out}"
+    );
+    // `:ro` reads; the fake's change is counted.
+    assert_eq!(
+        Sides::section(&out, "Not checked"),
+        [
+            "  not checked  src: Http send GET: the paths, headers and bodies sent",
+            "  not checked  fetch: src (changed)",
+            "  not checked  digest.kio: db: Db query: the SQL text and what it reads",
+            "  not checked  digest.kio: out: Dir write: what is written or removed",
+            "  not checked  digest.kio: feed::page_size: db, out (changed)",
+            "  not checked  src: Http: tests ran against new/feed.http, not a server; the real endpoint's answers are untested",
+            "  not checked  fake new/feed.http changed (+3 -0 lines)",
+            SAME_AUTHOR,
+        ],
+        "{out}"
+    );
+    let identity = Sides::section(&out, "Identity");
+    for line in [
+        format!("  old test fake old/feed.http sha256:{}", sha(b"GET /feed.xml\n200\n")),
+        format!(
+            "  digest.kio: entry test grants new/digest-test.grants sha256:{}",
+            sha(b"--value day=2026-11-20\n")
+        ),
+    ] {
+        assert!(identity.contains(&line), "{line}\n{out}");
+    }
+    assert_eq!(review_in(t.path(), &ACROSS, true), (code, out, err));
+}
+
+/// R1d3: without `--entry-test-grants` an entry's tests run under `--test-grants`; here they do
+/// not set up (no DIGEST test takes `--http-record`'s pair), an error of NEW's.
+#[test]
+fn an_entrys_tests_default_to_the_test_grants() {
+    let t = across();
+    let args = [&ACROSS[..13], &["--mutants", "0"]].concat();
+    let (code, out, _) = review_in(t.path(), &args, false);
+    assert_eq!(code, 1, "{out}");
+    let tests = Sides::section(&out, "Tests");
+    let at = tests
+        .iter()
+        .position(|l| l == "  error        new: digest.kio: the tests do not run:");
+    assert!(at.is_some(), "{out}");
+    assert!(
+        tests[at.unwrap() + 1].contains("--http-record src=sent: no test takes both"),
+        "{out}"
+    );
+}
+
+/// R1d4: a grant flag goes right after the grants file it adds to.
+#[test]
+fn grant_flags_follow_a_grants_file() {
+    let t = across();
+    for args in [
+        &["new/fetch.kio", "--base", "old/fetch.kio", "--value", "day=1"][..],
+        &[
+            "new/fetch.kio",
+            "--base",
+            "old/fetch.kio",
+            "--entry",
+            "digest.kio",
+            "--value",
+            "day=1",
+        ],
+        &[
+            "new/fetch.kio",
+            "--base",
+            "old/fetch.kio",
+            "--grants",
+            "new/fetch.grants",
+            "--seed",
+            "2",
+            "--value",
+            "day=1",
+        ],
+    ] {
+        let (code, out, err) = review_in(t.path(), args, false);
+        assert_eq!((code, out.as_str()), (2, ""), "{args:?}");
+        assert!(
+            err.contains("`--value day=1` is a grant: give it right after the grants file it adds to"),
+            "{err}"
+        );
+        assert!(err.contains("hint: `--grants app.grants --value ..`"), "{err}");
+    }
+    // As `kio run` takes them: a limit the file sets once cannot be given again.
+    let args = [&ACROSS[..5], &["--timeout", "5", "--mutants", "0"]].concat();
+    let (code, out, _) = review_in(t.path(), &args, false);
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.contains("  error        --grants new/fetch.grants does not bind to new/fetch.kio's main:"),
+        "{out}"
+    );
 }

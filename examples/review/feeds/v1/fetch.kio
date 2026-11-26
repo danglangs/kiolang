@@ -1,0 +1,8 @@
+mod feed;
+
+fn fetch(src: Http) -> Result<Bool, HttpErr> { Ok(feed::ok(src.send("GET", "/feed.xml", [], "".to_bytes(), 0)?.status)) }
+
+fn main(src: Http) -> Result<Bool, HttpErr> { fetch(src) }
+
+#[test]
+fn fetches(src: Http) -> Result<(), HttpErr> { assert(fetch(src)?, "200"); Ok(()) }

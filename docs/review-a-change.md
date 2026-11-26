@@ -2,7 +2,7 @@
 
 An agent hands you a change to a kio program. This walkthrough gets the two versions side by side, runs `kio review` on them, reads the page it prints, and ends in one of three decisions. Every flag and line format is in the reference, [guide.md, Reviewing a change](guide.md#reviewing-a-change); this page is the workflow.
 
-All output below is from real runs: section 7's pages of kio 0.1.10, the rest of kio 0.1.5; the commit in each `Identity` is elided.
+All output below is from real runs: sections 7d and 7e of kio after 0.1.11 (R1d), the rest of section 7 of kio 0.1.10, the rest of kio 0.1.5; the commit in each `Identity` is elided.
 
 ## 1. What you need
 
@@ -46,21 +46,24 @@ $ git worktree remove ../../../base        # when done
 ## 3. Run `kio review`
 
 ```
-kio review NEW --base OLD [--grants G] [--test-grants T] [--requirements FILE] [--entry FILE [--entry-grants G2]].. [--seed S] [--mutants N] [--mutations FILE]
+kio review NEW --base OLD [--grants G [grant flags]] [--test-grants T] [--requirements FILE] [--entry FILE [--entry-grants G2 [grant flags]] [--entry-test-grants T2]].. [--seed S] [--mutants N] [--mutations FILE]
 ```
+
+A new entry has no file in OLD: give the path it would have, `--base old/api.kio` (section 7d).
 
 | Flag | Give it | Why |
 |---|---|---|
-| `--grants G` | the operator's grants file for `main` (`app.grants`) | shows an `error` if NEW's `main` needs a grant G does not give |
+| `--grants G` | the operator's grants file for `main` (`app.grants`), then any grant given per run (`--value day=2026-11-20`) | shows an `error` if NEW's `main` needs a grant G does not give; a grant after G binds as `kio run` takes it, marked `(command line)` |
 | `--test-grants T` | the tests' grants file, if tests need one (an `Http`, an `Hmac`, a `Secret`) | without it a test that needs one fails. It may not grant a writable `--dir` or store, nor any `--dir` that holds NEW's files (a test could read the code instead of running it) |
 | `--requirements FILE` | the file that says what the program should do (`README.md`), a path relative to each side's entry | its diff is what the change claims |
 | `--entry FILE` | each other program the change touches (`worker.kio`), a path relative to NEW's entry, the same on OLD's side | its authority and blind spots, prefixed `worker.kio:`; an entry OLD lacks is all new authority |
-| `--entry-grants G2` | right after its `--entry`: that program's grants file (`worker.grants`) | as `--grants`, for that entry |
+| `--entry-grants G2` | right after its `--entry`: that program's grants file (`worker.grants`), and grants per run after it | as `--grants`, for that entry |
+| `--entry-test-grants T2` | after its `--entry`: that program's tests' grants file, when T does not suit them (T records a grant only the root's tests take) | its tests run under T2; without it, under T |
 | `--mutants N` | how many generated mutants to run (default 20, `0` for none) | more mutants, more of the changed code checked against the tests, more time |
 | `--seed S` | the tests' seed (default 1), which also draws the mutants | another sample; the same seed gives the same page |
 | `--mutations FILE` | mutants you ask for: per entry a function, what it breaks, a `- ` line (text found once in that function) and a `+ ` line (guide, Written mutants; kio-web's `examples/flow/flow.mutants`) | each names a wrong behaviour that a test must catch; one that survives is exit 3. Keep FILE outside NEW's tree: the page notes `(inside NEW's tree)`, since the author could have written it |
 
-Review every entry the change touches: an entry left out is authority nobody reviewed. Tests are the first entry's (the one before `--base`).
+Review every entry the change touches: an entry left out is authority nobody reviewed. Each entry's tests run too, on both sides, named after it (`worker.kio: retries`); a test of a module two entries share runs once.
 
 For kio-web's flow: `--grants app.grants --test-grants test.grants --requirements README.md --entry worker.kio --entry-grants worker.grants`, with `FLOW_KEY` set (test.grants reads the key from it). Forget `FLOW_KEY` and the Tests section is one `error`, `--hmac key: `FLOW_KEY` is not set`, and no test runs.
 
@@ -409,3 +412,115 @@ $ echo $?
 ```
 
 Now it is a reject with a reason anyone can rerun. A property (`total` equals the sum of every row's number, over generated rows) would pin it for good.
+
+### d. A new entry
+
+The files are in [examples/review/feeds](../examples/review/feeds); run the commands from there. `v1/` is a feed aggregator: `feed.kio`, a module its entries share, `fetch.kio` (polls a feed over `Http`) and `digest.kio` (a day's digest from a `Db`). The change adds an API entry, `d/api.kio`, that pages items with `feed::page_size`. `v1/` has no `api.kio`: review it against the file that is not there.
+
+```console
+$ kio review d/api.kio --base v1/api.kio
+Authority
+  not checked  new entry: v1/api.kio has no file
+  enforced     + db: Db (query)
+  derived        query in listing
+  enforced     + limit: Value (get)
+  derived        get in main
+Tests
+  tested       grants: defaults (temporary Dir, :memory: stores, fixed clock)
+  tested       old: 1 passed, 0 failed
+  tested       new: 2 passed, 0 failed
+  tested       added: lists_a_page
+  not checked  changed, reached by no test: main
+  tested       mutants: 1 of 1 killed (generated at seed 1: 2 drawn of 2 sites, 1 did not check)
+  tested       killed by: lists_a_page 1
+Resources
+  measured     feed::ok_statuses: fuel 5985 -> 7833 (+30.88%), peak memory 1280 KB -> 1280 KB (+0.00%); unchanged code
+  measured     added: lists_a_page: fuel 16992, peak memory 1280 KB
+  measured     total over 1 tests on both sides: fuel 5985 -> 7833 (+30.88%), largest peak memory 1280 KB -> 1280 KB (+0.00%)
+Not checked
+  not checked  db: Db query: the SQL text and what it changes
+  not checked  listing: db (new entry)
+  not checked  tests and properties were written by the same author as the code unless stated
+Identity
+  kio 0.1.11 (<commit>)
+  old v1/api.kio absent
+  old v1/feed.kio sha256:40f97febac17a365fae229e767f13563a4ce725721492f178620a9b7b81c3807
+  new d/api.kio sha256:d493928b83cae09552a69cfb0c054a2ca8fe7d243921db79b2bf74393aa6db9f
+  new d/feed.kio sha256:40f97febac17a365fae229e767f13563a4ce725721492f178620a9b7b81c3807
+  test seed 1
+$ echo $?
+3
+```
+
+OLD's side is `v1/`'s modules that `api.kio` names, under an empty `main`: every grant is `+` (exit 3), and `feed::page_size`, unchanged, is neither `changed` nor mutated; `feed::ok_statuses` ran on both sides, so it is not `added:` (its +31% fuel is the new `main`'s types, `unchanged code`). `old v1/api.kio absent` is checked at the end too: a file written there during the review is an `error`. **Decision: ask for evidence.** The grants are what an API over a database needs, and the SQL is the one `Not checked` line to read; but `main`, which parses `limit`, ran in no test (`reached by no test`). Ask for a test of `main` with a `--value limit=..` in the test grants. (Without the base-less form, the reviewer wrote a stub `fn main() {}` as `v1/api.kio`; every function of `feed.kio` then read as changed, was mutated, and its tests were `added:`.)
+
+### e. A change across entries
+
+The next change raises `feed::page_size` from 50 to 100 for the digest, changes a test fixture in `feed.kio`, makes `fetch.kio` send an ETag (with a test that reads the request back, `--http-record`), and adds the digest's grants file. One review covers both entries: `--entry digest.kio` with its grants file, the day it is run for given on the command line after it (`--value day=..`, as `kio run` takes it), and its tests' own grants file (`--entry-test-grants`), since `e/test.grants` records `src`, which only `fetch.kio`'s tests take.
+
+```console
+$ diff -u v1/feed.kio e/feed.kio
+-pub fn page_size(n: Int) -> Int { if n > 50 { 50 } else { n } }
++pub fn page_size(n: Int) -> Int { if n > 100 { 100 } else { n } }
+...
+-pub fn fixture_status() -> Int { 200 }
++pub fn fixture_status() -> Int { 204 }
+$ kio review e/fetch.kio --base v1/fetch.kio --grants e/fetch.grants --test-grants e/test.grants \
+    --entry digest.kio --entry-grants e/digest.grants --value day=2026-11-20 --entry-test-grants e/digest-test.grants
+Authority
+  enforced     no change in authority
+  enforced     fetch.grants: + --timeout 30
+  enforced     --grants e/fetch.grants binds e/fetch.kio's main: src=https://feeds.example.org
+  enforced     digest.kio: no change in authority
+  enforced     digest.kio: digest.grants: new file
+  enforced     digest.kio: digest.grants: + --timeout 600
+  enforced     digest.kio: --entry-grants e/digest.grants binds e/digest.kio's main: db=feeds.db:ro, out=digests, day=2026-11-20 (command line)
+Tests
+  tested       grants: e/test.grants (src answered from e/feed.http)
+  tested       digest.kio: grants: e/digest-test.grants
+  tested       old: 2 passed, 0 failed
+  not checked  old: the tests do not run:
+                 --http-record src=sent: no test takes both `src: Http` and `sent: Dir`
+                 hint: give the Dir parameter's name after `=`, or add `sent: Dir` to the test that takes `src: Http`
+  tested       new: 5 passed, 0 failed
+  tested       added: feed::ok_statuses (old's tests do not run)
+  tested       added: fetches (old's tests do not run)
+  tested       added: sends_the_etag (old's tests do not run)
+  not checked  changed: digest.kio: caps_the_digest (reaches changed feed::page_size)
+  tested       mutants: 7 of 10 killed (generated at seed 1: 11 drawn of 11 sites, 1 did not check)
+  tested       killed by: fetches 6, digest.kio: caps_the_digest 1
+  not checked  survived: generated: e/fetch.kio:4:82: fetch: `0` -> `1` in `..."v1\\""], "".to_bytes(), 0)?;`
+                                                                                                        ^
+  not checked  survived: generated: e/feed.kio:1:40: digest.kio: feed::page_size: `>` -> `>=` in `...e(n: Int) -> Int { if n > 100 { 100 } else { n }...`
+                                                                                                                             ^
+  not checked  survived: generated: e/feed.kio:1:42: digest.kio: feed::page_size: `100` -> `101` in `...n: Int) -> Int { if n > 100 { 100 } else { n } }`
+                                                                                                                                ^^^
+  not checked  1 changed function not mutated: reached by no `main` (feed::fixture_status)
+Resources
+  measured     old: the tests do not run; left out of Resources
+  measured     no test changed by more than 2%
+  measured     added: feed::ok_statuses: fuel 7211, peak memory 1280 KB
+  measured     added: fetches: fuel 14216, peak memory 1280 KB
+  measured     added: sends_the_etag: fuel 20294, peak memory 1280 KB
+  measured     total over 2 tests on both sides: fuel 21633 -> 21633 (+0.00%), largest peak memory 1280 KB -> 1280 KB (+0.00%)
+Not checked
+  not checked  src: Http send GET: the paths, headers and bodies sent
+  not checked  fetch: src (changed)
+  not checked  digest.kio: db: Db query: the SQL text and what it reads
+  not checked  digest.kio: out: Dir write: what is written or removed
+  not checked  digest.kio: feed::page_size: db, out (changed)
+  not checked  src: Http: tests ran against e/feed.http, not a server; the real endpoint's answers are untested
+  not checked  fake e/feed.http changed (+3 -0 lines)
+  not checked  tests and properties were written by the same author as the code unless stated
+Identity
+  ...
+  test fake e/feed.http sha256:cd7a31b18b32735348eb19fa80e4972ea30801a422120d1b1c5290c5f3b12b4c
+  old test fake v1/feed.http sha256:dc25fb8a09f2250132eb6de02f22a600988fd253d0804bddddb1f1cedd0e8ddb
+  digest.kio: entry test grants e/digest-test.grants sha256:d337dba00483aef22c8f42c05352d297afc322f9292d9860c5e7b02b1fd7499f
+  digest.kio: entry grants e/digest.grants sha256:6c1a2cf3f898a5f72ac49b1d2c84bf618ee3f5dc1438ae64ee64da38a69ba915
+  test seed 1
+$ echo $?
+0
+```
+
+Read it per entry. `fetch.kio`'s base tests take no `sent: Dir`, so under `e/test.grants` they do not set up: `not checked` (they back nothing), not an `error`; every `fetch.kio` test is then `added:`, labelled so, and Resources says why it compares none of them. `digest.kio`'s tests ran on both sides under their own grants (the `old: 2 passed`), merged into the section with the entry's name: `caps_the_digest` changed with `page_size`, and `feed::ok_statuses`, in the module both entries load, ran once. The two `page_size` survivors are the boundary: no test asks what `page_size(100)` or `page_size(101)` returns. `feed::fixture_status` changed and only tests reach it: no mutant can be made there, and the page says so. The digest's grants file is new: its `--timeout 600` shows as a line of its own, and `db=feeds.db:ro` changes the `Db` blind spot to what the query reads. The fake feed changed with the code (+3 lines: a `304` first): read it with the change. **Decision: ask for evidence** of the page boundary (a test of `page_size(100)` and `page_size(101)`), and accept the rest. (Before, this took two reviews: the `--value` was a usage error, the digest's tests did not run, so `feed::page_size` read `changed, reached by no test`, and the base's tests not setting up was an `error`, exit 1.)

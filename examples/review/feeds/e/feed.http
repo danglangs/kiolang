@@ -1,0 +1,5 @@
+GET /feed.xml
+304
+---
+GET /feed.xml
+200

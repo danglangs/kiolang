@@ -1,0 +1,19 @@
+mod feed;
+
+fn fetch(src: Http) -> Result<Bool, HttpErr> {
+  let r = src.send("GET", "/feed.xml", ["If-None-Match: \"v1\""], "".to_bytes(), 0)?;
+  Ok(r.status == 304 || feed::ok(r.status))
+}
+
+fn main(src: Http) -> Result<Bool, HttpErr> { fetch(src) }
+
+#[test]
+fn fetches(src: Http) -> Result<(), HttpErr> { assert(fetch(src)?, "200"); Ok(()) }
+
+#[test]
+fn sends_the_etag(src: Http, sent: Dir) -> Result<(), HttpErr> {
+  let _ = fetch(src)?;
+  let req = sent.read("src-1").map_err(|_| HttpErr::Timeout)?.to_str();
+  assert(req.contains("if-none-match: \"v1\""), "etag sent");
+  Ok(())
+}

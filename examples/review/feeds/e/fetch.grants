@@ -1,0 +1,2 @@
+--http src=https://feeds.example.org
+--timeout 30

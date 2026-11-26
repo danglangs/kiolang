@@ -1,0 +1,17 @@
+mod feed;
+
+fn header(day: Str, n: Int) -> Str { "# " + day + " (" + n.to_str() + " items)\n" }
+
+fn digest(db: Db, out: Dir, day: Str) -> Result<Int, Str> {
+  let rows = db.query("SELECT title FROM items ORDER BY id LIMIT ?", [SqlValue::Int(feed::page_size(500))]).map_err(|_| "db")?;
+  out.write(day + ".md", header(day, rows.len()).to_bytes()).map_err(|_| "write")?;
+  Ok(rows.len())
+}
+
+fn main(db: Db, out: Dir, day: Value) -> Result<Int, Str> { digest(db, out, day.get()) }
+
+#[test]
+fn dated(day: Value) { assert_eq(header(day.get(), 0), "# 2026-11-20 (0 items)\n"); }
+
+#[test]
+fn caps_the_digest() { assert_eq(feed::page_size(500), 100); }

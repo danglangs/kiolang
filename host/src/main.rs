@@ -146,7 +146,7 @@ fn command(args: &[String]) -> i32 {
 }
 
 /// The commands, `{USAGE}` standing for `kio run`'s flags.
-const HELP: &str = "kio --version\n       kio deps pin [<prog.kio>]\n       kio check <prog.kio> [--all | --base <old.kio> [--detail]]\n       kio check <prog.kio> --grants <file> [flags]\n       kio mcp\n       kio review <new.kio> --base <old.kio> [--grants file] [--test-grants file] [--requirements file] [--entry file [--entry-grants file]].. [--seed s] [--mutants n] [--mutations file] [--json]\n       kio run <prog.kio> {USAGE}\n       kio test <prog.kio> {TEST_USAGE}";
+const HELP: &str = "kio --version\n       kio deps pin [<prog.kio>]\n       kio check <prog.kio> [--all | --base <old.kio> [--detail]]\n       kio check <prog.kio> --grants <file> [flags]\n       kio mcp\n       kio review <new.kio> --base <old.kio> [--grants file [grant flags]] [--test-grants file] [--requirements file] [--entry file [--entry-grants file [grant flags]] [--entry-test-grants file]].. [--seed s] [--mutants n] [--mutations file] [--json]\n       kio run <prog.kio> {USAGE}\n       kio test <prog.kio> {TEST_USAGE}";
 
 /// A program as read: its `(name, source)` files, root first, named as `lang` takes them
 /// (`web.kio` for `mod web;`); the path each was read from and its identity, then `kio.deps`'s
@@ -175,8 +175,14 @@ impl Program {
 /// root gives, if it lists NAME, else `NAME.kio` beside the root. This is operator input, read by
 /// the host like the root; the program never sees the filesystem.
 fn read_program(path: &str) -> Result<Program, i32> {
+    let (root, root_id) = kio_host::read_source(path.as_ref()).map_err(|e| fail(cannot_read(path, &e)))?;
+    with_modules(path, root, root_id)
+}
+
+/// The program whose root, read from `path` (`root_id` its identity), is `root`: its modules
+/// loaded as `read_program` loads them.
+fn with_modules(path: &str, root: String, root_id: FileId) -> Result<Program, i32> {
     let read = kio_host::read_source;
-    let (root, root_id) = read(path.as_ref()).map_err(|e| fail(cannot_read(path, &e)))?;
     let dir = std::path::Path::new(path).parent().unwrap_or(".".as_ref());
     let (listed, pins) = deps::read(dir)?;
     let mods = mod_lines(&root);
@@ -1405,6 +1411,8 @@ struct Setup {
     /// Threads the runs may take at once (`ordered`); 1 runs every test in key order, as
     /// `kio test` does. `kio review` sets it (T7).
     jobs: usize,
+    /// Tests not run: an entry's that the root runs already (`kio review`, R1d).
+    skip: Vec<String>,
 }
 
 impl std::ops::Deref for Tests {
@@ -1565,7 +1573,7 @@ fn result_json(r: &TestResult) -> serde_json::Value {
 /// 1 the example tests run first, on that many threads, then each property, its cases on them.
 fn run_tests(tests: &Tests) -> Vec<TestResult> {
     let all: Vec<lang::TestFn> = (tests.program.tests().into_iter())
-        .filter(|t| t.name.contains(&tests.filter))
+        .filter(|t| t.name.contains(&tests.filter) && !tests.skip.contains(&t.name))
         .collect();
     if tests.jobs <= 1 {
         return all.iter().map(|t| run_test(tests, t)).collect();
@@ -1853,6 +1861,12 @@ fn error_lines(e: &serde_json::Value) -> Vec<String> {
 /// The flags, program and filter of `kio test path flags`, or the exit code once the error is
 /// reported. A fake FILE in `read` is not read again (`kio review` reads each once for both sides).
 fn test_setup(path: &str, flags: &[&str], read: &FakeReads) -> Result<Tests, i32> {
+    test_setup_of(path, None, flags, read)
+}
+
+/// `test_setup` of `prog` when given (`kio review`: a program read once, or OLD's modules under
+/// an empty root), else of the program read from `path`.
+fn test_setup_of(path: &str, prog: Option<Program>, flags: &[&str], read: &FakeReads) -> Result<Tests, i32> {
     let usage = || fail(format!("usage: kio test <prog.kio> {TEST_USAGE}"));
     if !flags.len().is_multiple_of(2) {
         return Err(usage());
@@ -1909,7 +1923,10 @@ fn test_setup(path: &str, flags: &[&str], read: &FakeReads) -> Result<Tests, i32
     http_names(&flags).map_err(fail)?;
     let fakes = take_fakes(&mut flags, read)?;
     let records = take_records(&mut flags, &fakes).map_err(fail)?;
-    let prog = read_program(path)?;
+    let prog = match prog {
+        Some(p) => p,
+        None => read_program(path)?,
+    };
     let pairs: Vec<(&str, &str)> = prog.files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
     let program = match lang::check_files_for_tests(&pairs, &lang::CapTable::v0()) {
         Ok(p) => p,
@@ -1954,6 +1971,7 @@ fn test_setup(path: &str, flags: &[&str], read: &FakeReads) -> Result<Tests, i32
             mutant: false,
             engine,
             jobs: 1,
+            skip: Vec::new(),
         },
     })
 }
