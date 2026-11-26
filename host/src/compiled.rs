@@ -1022,7 +1022,7 @@ fn pool_instances() -> u32 {
 /// - `memory_protection_keys` stays off, its default, so every slot keeps its guard region.
 /// - `async_stack_zeroing` concerns stacks of `call_async`, which kio does not use: compiled
 ///   code runs on the calling thread's stack.
-fn pool_engine(limits: &Limits, needs: (u32, u32, u32), initial: usize) -> Result<Engine> {
+fn pool_engine(limits: &Limits, needs: (u32, u32, u32), _initial: usize) -> Result<Engine> {
     let (core, memories, tables) = needs;
     let n = pool_instances();
     let mut pool = PoolingAllocationConfig::new();
@@ -1034,7 +1034,8 @@ fn pool_engine(limits: &Limits, needs: (u32, u32, u32), initial: usize) -> Resul
         .max_tables_per_component(tables)
         .total_tables(tables.saturating_mul(n))
         .max_memory_size(limits.memory)
-        .linear_memory_keep_resident(initial)
+        // C28 control: nothing kept, every request's memory reset by `madvise` (Wasmtime's default).
+        .linear_memory_keep_resident(0)
         .table_keep_resident(1 << 20);
     let mut config = config::compile_config();
     set_stack(&mut config, limits.stack);
