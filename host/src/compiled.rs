@@ -1017,8 +1017,12 @@ fn pool_instances() -> u32 {
 ///   it (runtime `heap::CHUNK`, the runtime's `--initial-heap`).
 /// - Tables: the first `table_keep_resident` bytes are zeroed with `memset` on every host, the
 ///   rest decommitted. A table is a few hundred bytes; keeping it saves an `mmap` per request.
-/// - `pagemap_scan` (reset only the pages the kernel reports written) stays off, its default:
-///   Wasmtime fixed a bug in it that left a swapped-out page's old contents to the next instance.
+/// - `pagemap_scan` (reset only the pages the kernel reports written) stays off, its default.
+///   It trusts the kernel's `PAGE_IS_WRITTEN`, whose meaning changed: from Linux 7.3 it is set
+///   only in userfaultfd write-protected ranges, so the scan reports nothing and the next
+///   instance reads the previous one's memory (wasmtime#15395, open; C28's review). An earlier
+///   Wasmtime also missed swapped-out pages. Do not turn it on without a reset check that does
+///   not depend on the kernel's answer.
 /// - `memory_protection_keys` stays off, its default, so every slot keeps its guard region.
 /// - `async_stack_zeroing` concerns stacks of `call_async`, which kio does not use: compiled
 ///   code runs on the calling thread's stack.
