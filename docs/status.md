@@ -144,7 +144,7 @@ Compiled-only kio covers the whole language and every capability; speed work res
 | C29b | C29's review follow-ups: `free`'s listed bytes checked natively after each `dec` (each dropped `bytes +=` or `add_freed` fails a test), Miri on the allocator and plan tests in CI (16 tests, under a minute, dated nightly); a saturating `freed` not taken: it costs fuel, a wrap only delays a hand-back (#364) |
 | L35 | A5's library gaps: `parse_iso_utc` reads no fraction, 1-9 fraction digits and `+HH:MM`/`-HH:MM` offsets; `HttpResponse.header(name)` and `Incoming.header(name)` (case-insensitive, built in over caps.wit's methods); `kio check` of a module says how to check and test it. Harness 638 both ways, 635 agreed; gate fuel +0.0% (#365, #366) |
 | T8 | A5's test-grant and hint gaps: `--http-record` binds per test (one test grants file serves two entries); a `main` or test capability parameter hiding a function says to rename the function; guide.md says `Dir` never creates parents (#367) |
-| R1d | `kio review` of a new entry (OLD's directory's modules under an empty `main`) and of a change across entries (each entry's tests run and merge, a shared module's once; grants per run after `--grants`; OLD's tests not setting up `not checked`; unmutated, fake, limit and `:ro` lines); review-a-change.md 7d, 7e (#368-#371) |
+| R1d | `kio review` of a new entry (OLD's directory's modules under an empty `main`) and of a change across entries (each entry's tests run and merge, a shared module's once; grants per run after `--grants`; OLD's tests run without a record only NEW's tests take; unmutated, fake, limit and `:ro` lines); review-a-change.md 7d, 7e (#368-#372) |
 
 ## Next
 

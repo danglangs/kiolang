@@ -1861,12 +1861,19 @@ fn error_lines(e: &serde_json::Value) -> Vec<String> {
 /// The flags, program and filter of `kio test path flags`, or the exit code once the error is
 /// reported. A fake FILE in `read` is not read again (`kio review` reads each once for both sides).
 fn test_setup(path: &str, flags: &[&str], read: &FakeReads) -> Result<Tests, i32> {
-    test_setup_of(path, None, flags, read)
+    test_setup_of(path, None, flags, read, &[])
 }
 
 /// `test_setup` of `prog` when given (`kio review`: a program read once, or OLD's modules under
-/// an empty root), else of the program read from `path`.
-fn test_setup_of(path: &str, prog: Option<Program>, flags: &[&str], read: &FakeReads) -> Result<Tests, i32> {
+/// an empty root), else of the program read from `path`; without each `--http-record` of
+/// `unrecorded` (`kio review`: one no test of OLD's can take).
+fn test_setup_of(
+    path: &str,
+    prog: Option<Program>,
+    flags: &[&str],
+    read: &FakeReads,
+    unrecorded: &[String],
+) -> Result<Tests, i32> {
     let usage = || fail(format!("usage: kio test <prog.kio> {TEST_USAGE}"));
     if !flags.len().is_multiple_of(2) {
         return Err(usage());
@@ -1895,6 +1902,11 @@ fn test_setup_of(path: &str, prog: Option<Program>, flags: &[&str], read: &FakeR
         }
     }
     let (mut flags, grants_file) = with_grants(&rest)?;
+    flags = (flags.chunks(2))
+        .filter(|p| !(p[0] == "--http-record" && p.get(1).is_some_and(|v| unrecorded.contains(v))))
+        .flatten()
+        .cloned()
+        .collect();
     let server = ["--audit", "--listen", "--ws-origin", "--host"];
     if let Some(flag) = flags.iter().step_by(2).find(|f| server.contains(&f.as_str())) {
         return Err(fail(format!(

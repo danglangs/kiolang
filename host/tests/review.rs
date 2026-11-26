@@ -2773,33 +2773,158 @@ const ACROSS: [&str; 15] = [
     "new/digest-test.grants",
 ];
 
-/// R1d2: OLD's tests not setting up (a grant only NEW's tests take) is not checked, as OLD's own
-/// failures are: exit unaffected, every NEW test added and labelled so, Resources saying why.
+/// A change controls T: a `--http-record` only NEW's tests take must not keep OLD's tests from
+/// running (F1). OLD's run without it, so the removed test, the changed one and its fuel show,
+/// and the page stays exit 3.
+const HIDE_OLD: &str = r#"fn fetch(src: Http) -> Result<Bool, HttpErr> { Ok(src.send("GET", "/x", [], "".to_bytes(), 0)?.status == 200) }
+
+fn work(n: Int) -> Int { if n > 10 { 10 } else { n } }
+
+fn main(src: Http) -> Result<Bool, HttpErr> { fetch(src) }
+
 #[test]
-fn old_tests_that_do_not_set_up_are_not_checked() {
-    let t = across();
-    let (code, out, err) = review_in(t.path(), &[&ACROSS[..7], &["--mutants", "0"]].concat(), false);
+fn fetches(src: Http) -> Result<(), HttpErr> { assert(fetch(src)?, "200"); Ok(()) }
+
+#[test]
+fn caps() { assert_eq(work(50), 10); }
+
+#[test]
+fn small() { assert_eq(work(3), 3); }
+"#;
+
+const HIDE_NEW: &str = r#"fn fetch(src: Http) -> Result<Bool, HttpErr> { Ok(src.send("GET", "/x", [], "".to_bytes(), 0)?.status == 200) }
+
+fn work(n: Int) -> Int { let mut i = 0; let mut acc = 0; while i < 2000 { acc = acc + i; i = i + 1; } if n > 100 { 100 } else { n } }
+
+fn main(src: Http) -> Result<Bool, HttpErr> { fetch(src) }
+
+#[test]
+fn fetches(src: Http) -> Result<(), HttpErr> { assert(fetch(src)?, "200"); Ok(()) }
+
+#[test]
+fn sends(src: Http, sent: Dir) -> Result<(), HttpErr> { let _ = fetch(src)?; assert(sent.read("src-1").is_ok(), "recorded"); Ok(()) }
+
+#[test]
+fn small() { assert_eq(work(3), 3); }
+"#;
+
+#[test]
+fn a_record_only_new_tests_take_hides_no_old_test() {
+    let t = tree(&[
+        ("old/app.kio", HIDE_OLD),
+        ("new/app.kio", HIDE_NEW),
+        ("new/f.http", "GET /x\n200\n"),
+        ("new/t.grants", "--http src=fake:new/f.http\n--http-record src=sent\n"),
+    ]);
+    let args = [
+        "new/app.kio",
+        "--base",
+        "old/app.kio",
+        "--test-grants",
+        "new/t.grants",
+        "--mutants",
+        "0",
+    ];
+    let (code, out, err) = review_in(t.path(), &args, false);
+    assert_eq!(code, 3, "{out}{err}");
+    assert_eq!(
+        Sides::section(&out, "Tests"),
+        [
+            "  tested       grants: new/t.grants (src answered from new/f.http)",
+            "  tested       old: 3 passed, 0 failed",
+            "  tested       new: 3 passed, 0 failed",
+            "  tested       old: tests run without --http-record src=sent (no old test takes its Dir)",
+            "  tested       added: sends",
+            "  not checked  removed: caps",
+            "  not checked  changed: small (reaches changed work)",
+        ],
+        "{out}"
+    );
+    // The fuel row of the changed test (numbers differ under the test heap).
+    let row = &Sides::section(&out, "Resources")[0];
+    assert!(
+        row.starts_with("  measured     small: fuel ") && row.contains(" -> "),
+        "{out}"
+    );
+}
+
+/// F3: a module's test that runs in another suite on the other side (here FETCH loads FEED only
+/// in NEW, so its test moves from DIGEST's suite to the root's) is the same test: neither
+/// removed nor added.
+#[test]
+fn a_shared_test_that_moves_suites_is_the_same_test() {
+    let feed = "pub fn ok(s: Int) -> Bool { s == 200 }\n#[test]\nfn ok_t() { assert(ok(200), \"ok\"); }\n";
+    let digest = "mod feed;\nfn main() -> Int { if feed::ok(200) { 1 } else { 0 } }\n#[test]\nfn d_t() { assert(feed::ok(200), \"x\"); }\n";
+    let t = tree(&[
+        ("old/feed.kio", feed),
+        ("old/digest.kio", digest),
+        ("old/fetch.kio", "fn main() -> Int { 1 }\n#[test]\nfn root_t() { assert_eq(1, 1); }\n"),
+        ("new/feed.kio", feed),
+        ("new/digest.kio", digest),
+        (
+            "new/fetch.kio",
+            "mod feed;\nfn main() -> Int { if feed::ok(200) { 1 } else { 0 } }\n#[test]\nfn root_t() { assert_eq(1, 1); }\n",
+        ),
+    ]);
+    let args = [
+        "new/fetch.kio",
+        "--base",
+        "old/fetch.kio",
+        "--entry",
+        "digest.kio",
+        "--mutants",
+        "0",
+    ];
+    let (code, out, err) = review_in(t.path(), &args, false);
     assert_eq!(code, 0, "{out}{err}");
     assert_eq!(
         Sides::section(&out, "Tests"),
         [
-            "  tested       grants: new/test.grants (src answered from new/feed.http)",
-            "  not checked  old: the tests do not run:",
-            "                 --http-record src=sent: no test takes both `src: Http` and `sent: Dir`",
-            "                 hint: give the Dir parameter's name after `=`, or add `sent: Dir` to the test that takes `src: Http`",
+            DEFAULT_GRANTS,
+            "  tested       old: 3 passed, 0 failed",
             "  tested       new: 3 passed, 0 failed",
-            "  tested       added: feed::ok_statuses (old's tests do not run)",
-            "  tested       added: fetches (old's tests do not run)",
-            "  tested       added: sends_the_etag (old's tests do not run)",
+            "  not checked  changed, reached by no test: main",
         ],
         "{out}"
     );
-    let resources = Sides::section(&out, "Resources");
-    assert_eq!(
-        resources[0],
-        "  measured     old: the tests do not run; left out of Resources"
-    );
-    assert_eq!(resources.last().unwrap(), "  measured     no test ran on both sides");
+}
+
+/// F2: a changed function of a module two entries share is mutated against every entry's tests
+/// that reach it, each in its own program: which entry is the root does not change the kills.
+#[test]
+fn shared_mutants_do_not_depend_on_which_entry_is_the_root() {
+    let feed = |n: &str| format!("pub fn page_size(n: Int) -> Int {{ if n > {n} {{ {n} }} else {{ n }} }}\n");
+    let strong = |n: &str| {
+        format!("mod feed;\nfn main() -> Int {{ feed::page_size(500) }}\n#[test]\nfn strong() {{ assert_eq(feed::page_size(500), {n}); assert_eq(feed::page_size(101), {n}); assert_eq(feed::page_size(5), 5); }}\n")
+    };
+    let weak = "mod feed;\nfn main() -> Int { feed::page_size(5) }\n#[test]\nfn weak() { assert(feed::page_size(5) > 0, \"positive\"); }\n";
+    let t = tree(&[
+        ("old/feed.kio", &feed("50")),
+        ("old/digest.kio", &strong("50")),
+        ("old/fetch.kio", weak),
+        ("new/feed.kio", &feed("100")),
+        ("new/digest.kio", &strong("100")),
+        ("new/fetch.kio", weak),
+    ]);
+    let kills = |root: &str, entry: &str| {
+        let (new, old) = (format!("new/{root}"), format!("old/{root}"));
+        let (_, out, err) = review_in(t.path(), &[&new, "--base", &old, "--entry", entry], false);
+        let lines: Vec<String> = Sides::section(&out, "Tests")
+            .into_iter()
+            .filter(|l| l.contains("mutants:") || l.contains("survived:"))
+            .collect();
+        assert!(!lines.is_empty(), "{out}{err}");
+        let by = Sides::section(&out, "Tests")
+            .into_iter()
+            .find(|l| l.contains("killed by:"))
+            .unwrap_or_default();
+        (lines, by.replace("digest.kio: ", ""))
+    };
+    let (a, by_a) = kills("fetch.kio", "digest.kio");
+    let (b, by_b) = kills("digest.kio", "fetch.kio");
+    assert_eq!(a, b);
+    assert_eq!(by_a, by_b);
+    assert_eq!(by_a, "  tested       killed by: strong 2");
 }
 
 /// R1d3, 4, 6, 7: one review of a change to two entries and their shared module.
@@ -2822,24 +2947,24 @@ fn a_change_across_entries() {
         ],
         "{out}"
     );
-    // DIGEST's tests run under their own grants, merged; FEED's test runs once.
+    // DIGEST's tests run under their own grants, merged; FEED's test runs once. OLD's FETCH
+    // tests run without the record, and its `fetches` fails on the changed fake.
     let fetch = r#"  not checked  survived: generated: new/fetch.kio:4:82: fetch: `0` -> `1` in `..."v1\\""], "".to_bytes(), 0)?;`"#;
-    let gt = "  not checked  survived: generated: new/feed.kio:1:40: digest.kio: feed::page_size: `>` -> `>=` in `...e(n: Int) -> Int { if n > 100 { 100 } else { n }...`";
-    let cap = "  not checked  survived: generated: new/feed.kio:1:42: digest.kio: feed::page_size: `100` -> `101` in `...n: Int) -> Int { if n > 100 { 100 } else { n } }`";
+    let gt = "  not checked  survived: generated: new/feed.kio:1:40: feed::page_size: `>` -> `>=` in `...e(n: Int) -> Int { if n > 100 { 100 } else { n }...`";
+    let cap = "  not checked  survived: generated: new/feed.kio:1:42: feed::page_size: `100` -> `101` in `...n: Int) -> Int { if n > 100 { 100 } else { n } }`";
     assert_eq!(
         Sides::section(&out, "Tests"),
         [
             "  tested       grants: new/test.grants (src answered from new/feed.http)",
             "  tested       digest.kio: grants: new/digest-test.grants",
-            "  tested       old: 2 passed, 0 failed",
-            "  not checked  old: the tests do not run:",
-            "                 --http-record src=sent: no test takes both `src: Http` and `sent: Dir`",
-            "                 hint: give the Dir parameter's name after `=`, or add `sent: Dir` to the test that takes `src: Http`",
+            "  not checked  old: 3 passed, 1 failed; the base fails its own tests",
             "  tested       new: 5 passed, 0 failed",
-            "  tested       added: feed::ok_statuses (old's tests do not run)",
-            "  tested       added: fetches (old's tests do not run)",
-            "  tested       added: sends_the_etag (old's tests do not run)",
+            "  tested       old: tests run without --http-record src=sent (no old test takes its Dir)",
+            "  tested       added: sends_the_etag",
+            "  not checked  changed: feed::ok_statuses (reaches changed feed::fixture_status)",
+            "  not checked  changed: fetches (reaches changed fetch)",
             "  not checked  changed: digest.kio: caps_the_digest (reaches changed feed::page_size)",
+            "  not checked  failed in old: fetches",
             "  tested       mutants: 7 of 10 killed (generated at seed 1: 11 drawn of 11 sites, 1 did not check)",
             "  tested       killed by: fetches 6, digest.kio: caps_the_digest 1",
             fetch,
@@ -2880,8 +3005,8 @@ fn a_change_across_entries() {
     assert_eq!(review_in(t.path(), &ACROSS, true), (code, out, err));
 }
 
-/// R1d3: without `--entry-test-grants` an entry's tests run under `--test-grants`; here they do
-/// not set up (no DIGEST test takes `--http-record`'s pair), an error of NEW's.
+/// R1d3: without `--entry-test-grants` an entry's tests run under `--test-grants`: here DIGEST's
+/// `dated` lacks its `day` (T's record binds per test, T8, so the rest run).
 #[test]
 fn an_entrys_tests_default_to_the_test_grants() {
     let t = across();
@@ -2889,13 +3014,68 @@ fn an_entrys_tests_default_to_the_test_grants() {
     let (code, out, _) = review_in(t.path(), &args, false);
     assert_eq!(code, 1, "{out}");
     let tests = Sides::section(&out, "Tests");
-    let at = tests
-        .iter()
-        .position(|l| l == "  error        new: digest.kio: the tests do not run:");
+    let at = tests.iter().position(|l| l == "  error        FAIL digest.kio: dated");
     assert!(at.is_some(), "{out}");
-    assert!(
-        tests[at.unwrap() + 1].contains("--http-record src=sent: no test takes both"),
+    assert_eq!(
+        tests[at.unwrap() + 1],
+        "                 test `dated` needs `day: Value`",
         "{out}"
+    );
+}
+
+/// An entry's tests' grants are held to T's rules: no writable `--dir`.
+#[test]
+fn entry_test_grants_refuse_a_writable_dir() {
+    let t = across();
+    write(t.path(), "new/w.grants", "--dir scratch=scratch\n");
+    let args = [&ACROSS[..14], &["new/w.grants", "--mutants", "0"]].concat();
+    let (code, out, err) = review_in(t.path(), &args, false);
+    assert_eq!((code, out.as_str()), (2, ""), "{err}");
+    assert!(
+        err.contains(
+            "--entry-test-grants new/w.grants: `--dir scratch=scratch` would carry OLD's test writes into NEW's"
+        ),
+        "{err}"
+    );
+}
+
+/// F5: a written mutant of an entry whose tests do not run is said, not dropped.
+#[test]
+fn a_written_mutant_of_an_entry_whose_tests_do_not_run_is_said() {
+    let t = across();
+    write(t.path(), "new/l.grants", "--listen 127.0.0.1:1\n");
+    write(
+        t.path(),
+        "d.mutants",
+        "digest.kio: digest: no page cap\n- feed::page_size(500)\n+ 500\n",
+    );
+    let args = [
+        &ACROSS[..14],
+        &["new/l.grants", "--mutants", "0", "--mutations", "d.mutants"],
+    ]
+    .concat();
+    let (code, out, err) = review_in(t.path(), &args, false);
+    assert_eq!(code, 1, "{out}{err}");
+    let line = "  not checked  mutants: d.mutants:1: digest.kio's tests do not run, so its mutant did not run";
+    assert!(Sides::section(&out, "Tests").contains(&line.to_string()), "{out}");
+}
+
+/// F6: a new entry's base in NEW's own directory compares NEW with its own modules: said.
+#[test]
+fn a_new_entry_base_in_news_directory_is_said() {
+    let t = tree(&[("new/feed.kio", FEED), ("new/api.kio", API)]);
+    let (_, out, err) = review_in(
+        t.path(),
+        &["new/api.kio", "--base", "new/./gone.kio", "--mutants", "0"],
+        false,
+    );
+    assert_eq!(
+        Sides::section(&out, "Authority")[..2],
+        [
+            "  not checked  new entry: new/./gone.kio has no file",
+            "  not checked  new entry: new/./gone.kio shares NEW's directory; its modules are NEW's own",
+        ],
+        "{out}{err}"
     );
 }
 

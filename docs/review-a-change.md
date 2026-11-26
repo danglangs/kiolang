@@ -58,7 +58,7 @@ A new entry has no file in OLD: give the path it would have, `--base old/api.kio
 | `--requirements FILE` | the file that says what the program should do (`README.md`), a path relative to each side's entry | its diff is what the change claims |
 | `--entry FILE` | each other program the change touches (`worker.kio`), a path relative to NEW's entry, the same on OLD's side | its authority and blind spots, prefixed `worker.kio:`; an entry OLD lacks is all new authority |
 | `--entry-grants G2` | right after its `--entry`: that program's grants file (`worker.grants`), and grants per run after it | as `--grants`, for that entry |
-| `--entry-test-grants T2` | after its `--entry`: that program's tests' grants file, when T does not suit them (T records a grant only the root's tests take) | its tests run under T2; without it, under T |
+| `--entry-test-grants T2` | after its `--entry`: that program's tests' grants file, when T does not suit them (its tests need a grant T does not give, as a `--value`) | its tests run under T2; without it, under T |
 | `--mutants N` | how many generated mutants to run (default 20, `0` for none) | more mutants, more of the changed code checked against the tests, more time |
 | `--seed S` | the tests' seed (default 1), which also draws the mutants | another sample; the same seed gives the same page |
 | `--mutations FILE` | mutants you ask for: per entry a function, what it breaks, a `- ` line (text found once in that function) and a `+ ` line (guide, Written mutants; kio-web's `examples/flow/flow.mutants`) | each names a wrong behaviour that a test must catch; one that survives is exit 3. Keep FILE outside NEW's tree: the page notes `(inside NEW's tree)`, since the author could have written it |
@@ -456,7 +456,7 @@ OLD's side is `v1/`'s modules that `api.kio` names, under an empty `main`: every
 
 ### e. A change across entries
 
-The next change raises `feed::page_size` from 50 to 100 for the digest, changes a test fixture in `feed.kio`, makes `fetch.kio` send an ETag (with a test that reads the request back, `--http-record`), and adds the digest's grants file. One review covers both entries: `--entry digest.kio` with its grants file, the day it is run for given on the command line after it (`--value day=..`, as `kio run` takes it), and its tests' own grants file (`--entry-test-grants`), since `e/test.grants` records `src`, which only `fetch.kio`'s tests take.
+The next change raises `feed::page_size` from 50 to 100 for the digest, changes a test fixture in `feed.kio`, makes `fetch.kio` send an ETag (with a test that reads the request back, `--http-record`), and adds the digest's grants file. One review covers both entries: `--entry digest.kio` with its grants file, the day it is run for given on the command line after it (`--value day=..`, as `kio run` takes it), and its tests' own grants file (`--entry-test-grants`), since its test `dated` needs a `day`, which `e/test.grants` does not give.
 
 ```console
 $ diff -u v1/feed.kio e/feed.kio
@@ -478,31 +478,28 @@ Authority
 Tests
   tested       grants: e/test.grants (src answered from e/feed.http)
   tested       digest.kio: grants: e/digest-test.grants
-  tested       old: 2 passed, 0 failed
-  not checked  old: the tests do not run:
-                 --http-record src=sent: no test takes both `src: Http` and `sent: Dir`
-                 hint: give the Dir parameter's name after `=`, or add `sent: Dir` to the test that takes `src: Http`
+  not checked  old: 3 passed, 1 failed; the base fails its own tests
   tested       new: 5 passed, 0 failed
-  tested       added: feed::ok_statuses (old's tests do not run)
-  tested       added: fetches (old's tests do not run)
-  tested       added: sends_the_etag (old's tests do not run)
+  tested       old: tests run without --http-record src=sent (no old test takes its Dir)
+  tested       added: sends_the_etag
+  not checked  changed: feed::ok_statuses (reaches changed feed::fixture_status)
+  not checked  changed: fetches (reaches changed fetch)
   not checked  changed: digest.kio: caps_the_digest (reaches changed feed::page_size)
+  not checked  failed in old: fetches
   tested       mutants: 7 of 10 killed (generated at seed 1: 11 drawn of 11 sites, 1 did not check)
   tested       killed by: fetches 6, digest.kio: caps_the_digest 1
   not checked  survived: generated: e/fetch.kio:4:82: fetch: `0` -> `1` in `..."v1\\""], "".to_bytes(), 0)?;`
                                                                                                         ^
-  not checked  survived: generated: e/feed.kio:1:40: digest.kio: feed::page_size: `>` -> `>=` in `...e(n: Int) -> Int { if n > 100 { 100 } else { n }...`
-                                                                                                                             ^
-  not checked  survived: generated: e/feed.kio:1:42: digest.kio: feed::page_size: `100` -> `101` in `...n: Int) -> Int { if n > 100 { 100 } else { n } }`
-                                                                                                                                ^^^
+  not checked  survived: generated: e/feed.kio:1:40: feed::page_size: `>` -> `>=` in `...e(n: Int) -> Int { if n > 100 { 100 } else { n }...`
+                                                                                                                 ^
+  not checked  survived: generated: e/feed.kio:1:42: feed::page_size: `100` -> `101` in `...n: Int) -> Int { if n > 100 { 100 } else { n } }`
+                                                                                                                    ^^^
   not checked  1 changed function not mutated: reached by no `main` (feed::fixture_status)
 Resources
-  measured     old: the tests do not run; left out of Resources
+  measured     1 test failed in old only; left out of Resources
   measured     no test changed by more than 2%
-  measured     added: feed::ok_statuses: fuel 7211, peak memory 1280 KB
-  measured     added: fetches: fuel 14216, peak memory 1280 KB
   measured     added: sends_the_etag: fuel 20294, peak memory 1280 KB
-  measured     total over 2 tests on both sides: fuel 21633 -> 21633 (+0.00%), largest peak memory 1280 KB -> 1280 KB (+0.00%)
+  measured     total over 3 tests on both sides: fuel 28844 -> 28844 (+0.00%), largest peak memory 1280 KB -> 1280 KB (+0.00%)
 Not checked
   not checked  src: Http send GET: the paths, headers and bodies sent
   not checked  fetch: src (changed)
@@ -523,4 +520,4 @@ $ echo $?
 0
 ```
 
-Read it per entry. `fetch.kio`'s base tests take no `sent: Dir`, so under `e/test.grants` they do not set up: `not checked` (they back nothing), not an `error`; every `fetch.kio` test is then `added:`, labelled so, and Resources says why it compares none of them. `digest.kio`'s tests ran on both sides under their own grants (the `old: 2 passed`), merged into the section with the entry's name: `caps_the_digest` changed with `page_size`, and `feed::ok_statuses`, in the module both entries load, ran once. The two `page_size` survivors are the boundary: no test asks what `page_size(100)` or `page_size(101)` returns. `feed::fixture_status` changed and only tests reach it: no mutant can be made there, and the page says so. The digest's grants file is new: its `--timeout 600` shows as a line of its own, and `db=feeds.db:ro` changes the `Db` blind spot to what the query reads. The fake feed changed with the code (+3 lines: a `304` first): read it with the change. **Decision: ask for evidence** of the page boundary (a test of `page_size(100)` and `page_size(101)`), and accept the rest. (Before, this took two reviews: the `--value` was a usage error, the digest's tests did not run, so `feed::page_size` read `changed, reached by no test`, and the base's tests not setting up was an `error`, exit 1.)
+Read it per entry. `e/test.grants` records `src` into `sent`, and no base `fetch.kio` test takes `sent: Dir`: the change brought that line in, so it does not get to stop the base's tests. They run without it (`old: tests run without ..`) and compare as usual. Under the new fake, which answers `304` first, the base's `fetches` fails (`failed in old`, `not checked`: it backs nothing); it shows that the fake changed what the old code sees. `digest.kio`'s tests ran on both sides under their own grants, merged into the section with the entry's name: `caps_the_digest` changed with `page_size`, and `feed::ok_statuses`, in the module both entries load, ran once, as the root's, on both sides. The mutants of `feed::page_size` ran every test that reaches it, each in its own program, so `caps_the_digest` killed one; the two survivors are the boundary: no test asks what `page_size(100)` or `page_size(101)` returns. `feed::fixture_status` changed and only tests reach it: no mutant can be made there, and the page says so. The digest's grants file is new: its `--timeout 600` shows as a line of its own, and `db=feeds.db:ro` changes the `Db` blind spot to what the query reads. The fake feed changed with the code (+3 lines: a `304` first): read it with the change. **Decision: ask for evidence** of the page boundary (a test of `page_size(100)` and `page_size(101)`), and accept the rest. (Before, this took two reviews: the `--value` was a usage error, the digest's tests did not run, so `feed::page_size` read `changed, reached by no test`, and the base's tests not setting up was an `error`, exit 1.)

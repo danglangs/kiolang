@@ -17,6 +17,8 @@ const BUDGET_SECS: u64 = 300;
 
 /// One edit of NEW's text: in run `run`'s program (in `run`'s `runs`), file `file`, bytes
 /// `start..end` become `to`, inside function `key`, shown as `func` (`FILE: key` for an entry's).
+/// `places`: per run, where the same edit falls in its program (`file`, `start`, `end`), when the
+/// function is there with the same text and runs as here; that run's tests run it there.
 struct Site {
     run: usize,
     file: usize,
@@ -25,6 +27,7 @@ struct Site {
     to: String,
     func: String,
     key: String,
+    places: Vec<Option<(usize, usize, usize)>>,
 }
 
 /// How a mutant's runs ended: the test that failed and how, the first test a limit of T's own
@@ -45,9 +48,9 @@ pub(super) struct SuiteRun<'a> {
     pub(super) results: &'a [TestResult],
 }
 
-/// A test that may run a mutant: its unmutated result, what it may run in the mutant's program,
-/// and the run (in `run`'s `runs`) whose grants it takes.
-type Reach<'r> = (&'r TestResult, BTreeSet<String>, usize);
+/// A test that reaches a mutant's function: its unmutated result and its run (in `run`'s
+/// `runs`), whose program, mutated there, it runs under that run's grants.
+type Reach<'r> = (&'r TestResult, usize);
 
 /// The Tests section's mutant lines, pushed to `rows`: each suite's checked `changes`, the
 /// suites whose NEW tests ran (`runs`, the root's first) and their unmutated results. `--json`'s
@@ -79,20 +82,44 @@ pub(super) fn run(
         live.extend(l.into_iter().map(|(t, g, k)| (format!("{prefix}{t}"), g, k)));
     }
     skipped_lines(&live, rows);
-    // Each run's program and path, and the tests that may run its mutants: its own, then those
-    // of an earlier run that it skipped as shared (`shared_tests`).
+    // Each run's program and path, its functions' spans, and what each of its passed tests may
+    // run in it. A mutant of a function runs every run's tests that reach it where it is the
+    // same (`places`), each in its own program, so which program is the root does not matter.
     let progs: Vec<(&Program, &str)> = runs.iter().map(|r| (&r.tests.prog, r.tests.path.as_str())).collect();
-    let reach_in = |k: usize, p: &lang::Program| -> Vec<Reach> {
-        let skip = &suites[runs[k].suite].skip[1];
-        let mut out = Vec::new();
-        for (j, ts) in passed.iter().enumerate() {
-            for t in ts.iter().filter(|t| j == k || (j < k && skip.contains(&t.name))) {
-                out.push((*t, lang::reachable(p, [t.name.as_str()]), j));
-            }
-        }
-        out
+    let spans: Vec<BTreeMap<String, lang::Span>> = (runs.iter())
+        .map(|r| (changes[r.suite].new.as_ref()).map_or_else(BTreeMap::new, |p| p.fn_spans().into_iter().collect()))
+        .collect();
+    let reach: Vec<Vec<(&TestResult, BTreeSet<String>)>> = (runs.iter().enumerate())
+        .map(|(j, r)| match &changes[r.suite].new {
+            Some(p) => (passed[j].iter())
+                .map(|t| (*t, lang::reachable(p, [t.name.as_str()])))
+                .collect(),
+            None => Vec::new(),
+        })
+        .collect();
+    let places = |k: usize, (file, start, end): (usize, usize, usize), f: &str| -> Vec<Option<(usize, usize, usize)>> {
+        let Some(sk) = spans[k].get(f) else {
+            return vec![None; runs.len()];
+        };
+        let text = |j: usize, s: &lang::Span| progs[j].0.files[s.file as usize].1.get(s.start..s.end);
+        let ck = &changes[runs[k].suite];
+        (0..runs.len())
+            .map(|j| {
+                if j == k {
+                    return Some((file, start, end));
+                }
+                let sj = spans[j].get(f)?;
+                let same = text(j, sj) == text(k, sk) && same_as_root(ck, &changes[runs[j].suite], f);
+                same.then(|| (sj.file as usize, sj.start + start - sk.start, sj.start + end - sk.start))
+            })
+            .collect()
     };
-    let mut reaches: Vec<Vec<Reach>> = Vec::new();
+    let reaching = |s: &Site| -> Vec<Reach> {
+        (0..reach.len())
+            .filter(|&j| s.places.get(j).is_some_and(Option::is_some))
+            .flat_map(|j| (reach[j].iter().filter(|(_, r)| r.contains(&s.key))).map(move |(t, _)| (*t, j)))
+            .collect()
+    };
     let mut sites = Vec::new();
     // Each function with sites: its name as shown and how many.
     let mut groups: Vec<(String, usize)> = Vec::new();
@@ -102,10 +129,8 @@ pub(super) fn run(
     for (k, run) in runs.iter().enumerate() {
         let c = &changes[run.suite];
         let (Some(p), (prog, _)) = (&c.new, progs[k]) else {
-            reaches.push(Vec::new());
             continue;
         };
-        let reach = reach_in(k, p);
         // The changed functions a program's `main` reaches, where they run here as there
         // (`same_as_root`, as `unreached_changed` relates them).
         let funcs: BTreeSet<String> = match inputs.mutants {
@@ -118,13 +143,13 @@ pub(super) fn run(
         };
         let tests: Vec<String> = p.tests().into_iter().map(|t| t.name).collect();
         let deps: Vec<String> = prog.deps.iter().map(|d| format!("{}.kio", d.name)).collect();
-        let spans: BTreeMap<String, lang::Span> = p.fn_spans().into_iter().collect();
         let prefix = suites[run.suite].prefix();
         for f in funcs {
-            let Some(span) = spans.get(&f) else { continue };
+            let Some(span) = spans[k].get(&f) else { continue };
             let file = span.file as usize;
-            let reached = reach.iter().any(|(_, r, _)| r.contains(&f));
-            let before = (taken.iter()).any(|(j, g)| *g == f && same_as_root(&changes[runs[*j].suite], c, &f));
+            let at = places(k, (file, span.start, span.end), &f);
+            let reached = (0..runs.len()).any(|j| at[j].is_some() && reach[j].iter().any(|(_, r)| r.contains(&f)));
+            let before = (taken.iter()).any(|(j, g)| *g == f && at[*j].is_some());
             if !reached || before || tests.contains(&f) || deps.contains(&prog.files[file].0) {
                 continue;
             }
@@ -152,10 +177,10 @@ pub(super) fn run(
                     to,
                     func: shown.clone(),
                     key: f.clone(),
+                    places: places(k, (file, start, end), &f),
                 });
             }
         }
-        reaches.push(reach);
     }
     sites.sort_by_key(|s| (s.run, s.file, s.start, s.end));
     let order = draw(&sites, &groups, inputs.seed, inputs.mutants);
@@ -163,6 +188,7 @@ pub(super) fn run(
         bases: (runs.iter())
             .map(|r| (&r.tests.setup, limit(&r.tests.flags, "--fuel")))
             .collect(),
+        progs: progs.clone(),
         prefixes: runs.iter().map(|r| suites[r.suite].prefix()).collect(),
         start: std::time::Instant::now(),
     };
@@ -172,6 +198,8 @@ pub(super) fn run(
     let mut out: Vec<serde_json::Value> = Vec::new();
     // Each entry of the mutations file that did not run: its message and hint.
     let mut errors: Vec<(String, String)> = Vec::new();
+    // Each written mutant of an entry whose tests do not run.
+    let mut not_run: Vec<String> = Vec::new();
     // The written mutants first: each names a behaviour the reviewer asked to be constrained.
     let file = inputs.mutations.as_ref().map(|m| (ascii(&m.path), m.inside));
     for w in written {
@@ -186,7 +214,14 @@ pub(super) fn run(
                     let k = runs.iter().position(|r| suites[r.suite].entry == Some(e.name.as_str()));
                     match k.and_then(|k| Some((k, changes[runs[k].suite].new.as_ref()?))) {
                         Some(found) => found,
-                        None => continue,
+                        None => {
+                            // Said, not dropped: the reviewer asked for this mutant.
+                            let p = ascii(&e.name);
+                            not_run.push(format!(
+                                "mutants: {at}: {p}'s tests do not run, so its mutant did not run"
+                            ));
+                            continue;
+                        }
                     }
                 }
                 None => {
@@ -199,15 +234,19 @@ pub(super) fn run(
                 }
             },
         };
-        let (prog, path) = progs[k];
+        let prog = progs[k].0;
         let site = match place(prog, checked, &lang::reachable(checked, ["main"]), w) {
-            Ok(s) => Site { run: k, ..s },
+            Ok(s) => Site {
+                run: k,
+                places: places(k, (s.file, s.start, s.end), &s.key),
+                ..s
+            },
             Err((msg, hint)) => {
                 errors.push((format!("{at}: {msg}"), hint));
                 continue;
             }
         };
-        match runner.run(prog, path, &site, &reaches[k]) {
+        match runner.run(&site, &reaching(&site)) {
             Ok(Ran::DidNotCheck(why)) => errors.push((
                 format!("{at}: the mutant does not check: {why}"),
                 "change the `+` text so the program still checks; no test can run a program the checker refuses".into(),
@@ -282,15 +321,13 @@ pub(super) fn run(
             false
         }
     };
-    let mutant_of = |s: &Site| (progs[s.run].0, progs[s.run].1, &reaches[s.run]);
     if go && runs[0].tests.jobs > 1 {
         // Every mutant's examples first, a mutant to a thread (`ordered`), then in order the
         // properties of each that no example killed, their cases on the threads.
         let mut firsts = Vec::new();
         let examples = |_: &mut (), k: usize| {
             let s = &sites[order[k]];
-            let (prog, path, reach) = mutant_of(s);
-            runner.examples(prog, path, s, reach)
+            runner.examples(s, &reaching(s))
         };
         ordered(
             runs[0].tests.jobs,
@@ -305,10 +342,9 @@ pub(super) fn run(
         );
         for (k, first) in firsts.into_iter().enumerate() {
             let s = &sites[order[k]];
-            let (prog, path, reach) = mutant_of(s);
             let r = first.and_then(|f| match f {
                 Err(why) => Ok(Ran::DidNotCheck(why)),
-                Ok(runs) => runner.properties(prog, path, s, reach, runs),
+                Ok(runs) => runner.properties(s, &reaching(s), runs),
             });
             if !record(s, r) {
                 break;
@@ -316,8 +352,7 @@ pub(super) fn run(
         }
     } else if go {
         for &i in &order {
-            let (prog, path, reach) = mutant_of(&sites[i]);
-            if !record(&sites[i], runner.run(prog, path, &sites[i], reach)) {
+            if !record(&sites[i], runner.run(&sites[i], &reaching(&sites[i]))) {
                 break;
             }
         }
@@ -364,6 +399,7 @@ pub(super) fn run(
             .collect();
         rows.push(("not checked", format!("constants are not mutated: {}", each.join("; "))));
     }
+    rows.extend(not_run.iter().map(|l| ("not checked", l.clone())));
     let hinted = unfinished.iter().map(|(m, h)| (m, h.as_ref()));
     for (msg, hint) in errors.iter().map(|(m, h)| (m, Some(h))).chain(hinted) {
         rows.push(("error", format!("mutants: {msg}")));
@@ -494,6 +530,7 @@ fn place(
             to: w.to.clone(),
             func: w.func.clone(),
             key: w.func.clone(),
+            places: Vec::new(),
         }),
         [] => Err((
             format!("the `-` text is not in {f}"),
@@ -507,10 +544,11 @@ fn place(
 }
 
 /// What runs each mutant: per run (a suite whose tests ran) its tests as set up, with their
-/// grants file T, and T's own `--fuel`; how the page names its tests; and when the runs began
+/// grants file T, and T's own `--fuel`; its program and path; how the page names its tests; and when the runs began
 /// (the budget is shared).
 struct Runner<'a> {
     bases: Vec<(&'a Setup, Option<u64>)>,
+    progs: Vec<(&'a Program, &'a str)>,
     prefixes: Vec<String>,
     start: std::time::Instant,
 }
@@ -551,12 +589,11 @@ struct Runs {
 }
 
 impl Runner<'_> {
-    /// `prog` (at `path`) with edit `s`, checked, then run on the tests of `reaching` that reach
-    /// its function, examples first, until one fails.
-    fn run(&self, prog: &Program, path: &str, s: &Site, reaching: &[Reach]) -> Result<Ran, Stop> {
-        match self.examples(prog, path, s, reaching)? {
+    /// Edit `s`, checked, then run on the tests of `reaching`, examples first, until one fails.
+    fn run(&self, s: &Site, reaching: &[Reach]) -> Result<Ran, Stop> {
+        match self.examples(s, reaching)? {
             Err(why) => Ok(Ran::DidNotCheck(why)),
-            Ok(runs) => self.properties(prog, path, s, reaching, runs),
+            Ok(runs) => self.properties(s, reaching, runs),
         }
     }
 
@@ -564,11 +601,16 @@ impl Runner<'_> {
         self.start.elapsed().as_secs() >= BUDGET_SECS
     }
 
-    /// `prog` (at `path`) with edit `s`, as tests to run under its own run's grants, or the first
-    /// error if it does not check.
-    fn mutant(&self, prog: &Program, path: &str, s: &Site) -> Result<(usize, Tests), String> {
+    /// Run `j`'s program with edit `s` at its place there, set up as run `j`'s tests are, or the
+    /// first error if it does not check.
+    fn mutant(&self, s: &Site, j: usize) -> Result<Tests, String> {
+        let (prog, path) = self.progs[j];
+        let (file, start, end) = match s.places.get(j).copied().flatten() {
+            Some(at) => at,
+            None => (s.file, s.start, s.end),
+        };
         let mut files = prog.files.clone();
-        files[s.file].1.replace_range(s.start..s.end, &s.to);
+        files[file].1.replace_range(start..end, &s.to);
         let program = match kio_host::check_program(&files) {
             Ok(p) => p,
             Err(diags) => {
@@ -582,54 +624,33 @@ impl Runner<'_> {
             ids: prog.ids.clone(),
             deps: prog.deps.clone(),
         };
-        Ok((
-            s.run,
-            Tests {
-                program,
-                setup: self.setup(prog, path, s.run),
+        Ok(Tests {
+            program,
+            setup: Setup {
+                prog,
+                flags: Vec::new(),
+                filter: String::new(),
+                path: path.to_string(),
+                mutant: true,
+                ..self.bases[j].0.clone()
             },
-        ))
+        })
     }
 
-    /// The mutated `prog` (at `path`) set up as run `j`'s tests are.
-    fn setup(&self, prog: Program, path: &str, j: usize) -> Setup {
-        Setup {
-            prog,
-            flags: Vec::new(),
-            filter: String::new(),
-            path: path.to_string(),
-            mutant: true,
-            ..self.bases[j].0.clone()
-        }
-    }
-
-    /// The tests of `reaching` that reach `s`'s function and that `run` has, each with the run
-    /// whose grants it takes, examples first: the cheapest kill.
-    fn reaching<'r>(s: &Site, reaching: &[Reach<'r>], run: &Tests) -> Vec<(&'r TestResult, usize)> {
-        let all = run.program.tests();
-        let mut tests: Vec<(&TestResult, usize)> = (reaching.iter())
-            .filter(|(t, r, _)| r.contains(&s.key) && all.iter().any(|x| x.name == t.name))
-            .map(|(t, _, j)| (*t, *j))
+    /// The tests of `reaching` that are examples (or properties), in run order, then by name.
+    fn reaching<'r>(reaching: &[Reach<'r>], props: bool) -> Vec<Reach<'r>> {
+        let mut tests: Vec<Reach> = (reaching.iter().copied())
+            .filter(|(t, _)| t.prop.is_some() == props)
             .collect();
-        tests.sort_by_key(|(t, j)| (t.prop.is_some(), *j, t.name.as_str()));
+        tests.sort_by_key(|(t, j)| (*j, t.name.as_str()));
         tests
     }
 
-    /// The mutant's example tests, one at a time until one kills it, or the first error if it
-    /// does not check. Runs on any thread (`ordered`).
-    fn examples(&self, prog: &Program, path: &str, s: &Site, reaching: &[Reach]) -> Result<Result<Runs, String>, Stop> {
-        if self.over() {
-            return Err(Stop::Budget);
-        }
-        let mut run = match self.mutant(prog, path, s) {
-            Ok(run) => run,
-            Err(why) => return Ok(Err(why)),
-        };
-        let mut runs = Runs::default();
-        for (t, j) in Self::reaching(s, reaching, &run.1)
-            .into_iter()
-            .filter(|(t, _)| t.prop.is_none())
-        {
+    /// Runs `tests` on the mutant, each in its run's program, until one kills it; `Err` with the
+    /// first error when the mutant of `s`'s own program does not check.
+    fn each(&self, s: &Site, tests: &[Reach], runs: &mut Runs) -> Result<Result<(), String>, Stop> {
+        let mut built: Option<(usize, Option<Tests>)> = None;
+        for &(t, j) in tests {
             if runs.killed {
                 break;
             }
@@ -637,53 +658,54 @@ impl Runner<'_> {
             if self.over() {
                 return Err(Stop::Budget);
             }
-            runs.killed = self.one(&mut run, t, j, &mut runs)?;
+            if built.as_ref().is_none_or(|(at, _)| *at != j) {
+                let m = match self.mutant(s, j) {
+                    Ok(m) => Some(m),
+                    Err(why) if j == s.run => return Ok(Err(why)),
+                    Err(_) => None,
+                };
+                built = Some((j, m));
+            }
+            if let Some((_, Some(m))) = &mut built {
+                runs.killed = self.one(m, t, j, runs)?;
+            }
         }
-        Ok(Ok(runs))
+        Ok(Ok(()))
+    }
+
+    /// The mutant's example tests, one at a time until one kills it, or the first error if it
+    /// does not check. Runs on any thread (`ordered`).
+    fn examples(&self, s: &Site, reaching: &[Reach]) -> Result<Result<Runs, String>, Stop> {
+        if self.over() {
+            return Err(Stop::Budget);
+        }
+        // Checked first in its own program: one that does not check runs no test.
+        if let Err(why) = self.mutant(s, s.run) {
+            return Ok(Err(why));
+        }
+        let mut runs = Runs::default();
+        Ok(self
+            .each(s, &Self::reaching(reaching, false), &mut runs)?
+            .map(|()| runs))
     }
 
     /// Then, unless an example killed it, the mutant's properties, each its cases on `jobs`
     /// threads, until one kills it.
-    fn properties(
-        &self,
-        prog: &Program,
-        path: &str,
-        s: &Site,
-        reaching: &[Reach],
-        mut runs: Runs,
-    ) -> Result<Ran, Stop> {
-        let any = reaching.iter().any(|(t, r, _)| t.prop.is_some() && r.contains(&s.key));
-        if !runs.killed && any {
-            let mut run = match self.mutant(prog, path, s) {
-                Ok(run) => run,
-                Err(why) => return Ok(Ran::DidNotCheck(why)),
-            };
-            for (t, j) in Self::reaching(s, reaching, &run.1)
-                .into_iter()
-                .filter(|(t, _)| t.prop.is_some())
-            {
-                if runs.killed {
-                    break;
-                }
-                if self.over() {
-                    return Err(Stop::Budget);
-                }
-                runs.killed = self.one(&mut run, t, j, &mut runs)?;
+    fn properties(&self, s: &Site, reaching: &[Reach], mut runs: Runs) -> Result<Ran, Stop> {
+        let props = Self::reaching(reaching, true);
+        if !runs.killed && !props.is_empty() {
+            if let Err(why) = self.each(s, &props, &mut runs)? {
+                return Ok(Ran::DidNotCheck(why));
             }
         }
         Ok(Ran::Ran(runs.end, runs.tests_run, runs.fuel))
     }
 
-    /// Runs test `t` on mutant `run` (set up as the run its index names) under run `j`'s grants,
-    /// at ten times the fuel it used on NEW (at most T's), and counts it in `runs`: whether it
-    /// killed the mutant.
-    fn one(&self, (at, run): &mut (usize, Tests), t: &TestResult, j: usize, runs: &mut Runs) -> Result<bool, Stop> {
+    /// Runs test `t` on mutant `run` (run `j`'s program, set up as its tests are) at ten times
+    /// the fuel it used on NEW (at most T's), and counts it in `runs`: whether it killed the
+    /// mutant.
+    fn one(&self, run: &mut Tests, t: &TestResult, j: usize, runs: &mut Runs) -> Result<bool, Stop> {
         let (base, fuel_t) = self.bases[j];
-        if *at != j {
-            let path = run.path.clone();
-            run.setup = self.setup(run.prog.clone(), &path, j);
-            *at = j;
-        }
         let ten = t.used.map_or(u64::MAX, |u| u.fuel.saturating_mul(FUEL_FACTOR));
         let cap = ten.clamp(1, fuel_t.unwrap_or(Limits::default().fuel));
         run.flags = base.flags.clone();

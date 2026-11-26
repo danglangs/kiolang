@@ -868,6 +868,20 @@ fn unified(old: &str, new: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// A new entry's base `old` in NEW's own directory (`new`'s) is compared with NEW's modules:
+/// said, as a line, after `prefix` (F6, #372).
+fn shares_dir(old: &str, new: &str, prefix: &str, page: &mut Page) {
+    let dir = |p: &str| {
+        let d = Path::new(p).parent().filter(|d| !d.as_os_str().is_empty());
+        d.unwrap_or(".".as_ref()).canonicalize().ok()
+    };
+    if dir(old).is_some_and(|d| Some(d) == dir(new)) {
+        let base = kio_host::escape_line(old);
+        let line = format!("{prefix}new entry: {base} shares NEW's directory; its modules are NEW's own");
+        page.authority.push(("not checked", line));
+    }
+}
+
 /// The Authority section: the root's lines, then each `--entry`'s after its name. Whether the
 /// root's two sides check (its tests run), and whether every entry checks and every grants file
 /// binds.
@@ -875,6 +889,7 @@ fn authority(inputs: &Inputs, page: &mut Page) -> (bool, bool) {
     if inputs.old_absent {
         let line = format!("new entry: {} has no file", kio_host::escape_line(&inputs.old.0));
         page.authority.push(("not checked", line));
+        shares_dir(&inputs.old.0, &inputs.new.0, "", page);
     }
     let grants = (inputs.grants.as_ref(), &inputs.extra[..], &inputs.old_grants);
     let (mut value, checks, binds) = entry_authority(&inputs.old.1, &inputs.new, grants, "", "--grants", page);
@@ -884,6 +899,9 @@ fn authority(inputs: &Inputs, page: &mut Page) -> (bool, bool) {
     let none = no_program();
     for e in &inputs.entries {
         let prefix = format!("{}: ", e.name);
+        if let (true, Some((o, _))) = (e.old_absent, &e.old) {
+            shares_dir(o, &e.new.0, &prefix, page);
+        }
         let old = e.old.as_ref().map_or(&none, |o| &o.1);
         let grants = (e.grants.as_ref(), &e.extra[..], &e.old_grants);
         let (mut v, checks, binds) = entry_authority(old, &e.new, grants, &prefix, "--entry-grants", page);
@@ -1244,8 +1262,6 @@ struct Suite<'a> {
     /// The program on each side: OLD's (`None`: there is none) and NEW's.
     old: Option<&'a (String, Program)>,
     new: &'a (String, Program),
-    /// Per side, OLD's then NEW's, the tests not run: an earlier suite's (`shared_tests`).
-    skip: [Vec<String>; 2],
 }
 
 impl Suite<'_> {
@@ -1262,25 +1278,54 @@ fn suites(inputs: &Inputs) -> Vec<Suite<'_>> {
         test: &inputs.test,
         old: Some(&inputs.old),
         new: &inputs.new,
-        skip: Default::default(),
     }];
     for e in &inputs.entries {
-        let mut skip: [Vec<String>; 2] = Default::default();
-        for s in &out {
-            if let (Some(q), Some(p)) = (s.old, &e.old) {
-                skip[0].extend(shared_tests(&q.1, &p.1));
-            }
-            skip[1].extend(shared_tests(&s.new.1, &e.new.1));
-        }
         out.push(Suite {
             entry: Some(&e.name),
             test: e.test.as_ref().unwrap_or(&inputs.test),
             old: e.old.as_ref(),
             new: &e.new,
-            skip,
         });
     }
     out
+}
+
+/// Per suite on one side (`progs`, `None` without a program), the tests it leaves to an earlier
+/// suite whose tests set up there (`up`): a shared module's run once, as the earliest such
+/// program's. One whose tests do not set up leaves its shared tests to the next (F4).
+fn skips(progs: &[Option<&Program>], up: &[bool]) -> Vec<Vec<String>> {
+    (0..progs.len())
+        .map(|k| {
+            let Some(p) = progs[k] else { return Vec::new() };
+            (0..k)
+                .filter(|&j| up[j])
+                .filter_map(|j| progs[j])
+                .flat_map(|q| shared_tests(q, p))
+                .collect()
+        })
+        .collect()
+}
+
+/// Each `--http-record G=D` of tests' grants `t` (as `G=D`) that no test of `prog` can take
+/// (none takes `G: Http` and `D: Dir`): a record serves only a test that reads the Dir, so
+/// OLD's tests run without one only NEW's tests take (F1, #372).
+fn unused_records(t: &TestGrants, prog: &Program) -> Vec<String> {
+    let (Ok(p), Some((file, _))) = (kio_host::check_program(&prog.files), &t.file) else {
+        return Vec::new();
+    };
+    let (flags, _) = captured(true, || with_grants(&["--grants", file]));
+    let Ok((flags, _)) = flags else { return Vec::new() };
+    let tests = p.tests();
+    let takes = |t: &lang::TestFn, n: &str, ty: &str| t.params.iter().any(|(m, k)| m == n && k == ty);
+    (flags.chunks(2))
+        .filter(|p| p[0] == "--http-record")
+        .filter_map(|p| p.get(1))
+        .filter(|v| {
+            v.split_once('=')
+                .is_some_and(|(g, d)| !tests.iter().any(|t| takes(t, g, "Http") && takes(t, d, "Dir")))
+        })
+        .cloned()
+        .collect()
 }
 
 /// The tests of `p` that `q` has too, with the same tokens in every function they may run and
@@ -1297,11 +1342,18 @@ fn shared_tests(q: &Program, p: &Program) -> Vec<String> {
         .collect()
 }
 
-/// A test as the page names it (`FILE: name` for an entry's), its suite and its result.
+/// A test as the page names it (`FILE: name` for an entry's), its name in its program, its
+/// suite and its result (`None`: OLD's tests did not run; it is in OLD's code).
 struct Shown<'a> {
     name: String,
+    bare: String,
     suite: usize,
-    r: &'a TestResult,
+    r: Option<&'a TestResult>,
+}
+
+/// Whether `s` ran and failed.
+fn failed(s: &Shown) -> bool {
+    s.r.is_some_and(|r| r.error.is_some())
 }
 
 /// One suite's tests on one side: `None` without a program there, else the results or why they
@@ -1317,8 +1369,9 @@ fn shown<'a>(runs: &[Run<'a>], new_runs: &[Run], suites: &[Suite]) -> Vec<Shown<
             let prefix = suites[i].prefix();
             out.extend(rs.iter().map(|r| Shown {
                 name: format!("{prefix}{}", r.name),
+                bare: r.name.clone(),
                 suite: i,
-                r,
+                r: Some(r),
             }));
         }
     }
@@ -1371,19 +1424,30 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
         page.tests.push(("tested", format!("{prefix}{}", grants_line(t))));
     }
     let seed = inputs.seed.to_string();
-    let set_up = |s: &Suite, (path, prog): &(String, Program), skip: &[String]| {
+    let set_up = |s: &Suite, (path, prog): &(String, Program), unrecorded: &[String]| {
         let flags: Vec<&str> = s.test.flags().into_iter().chain(["--seed", &seed]).collect();
         let (t, out) = captured(true, || {
-            test_setup_of(path, Some(prog.clone()), &flags, &s.test.fake_files)
+            test_setup_of(path, Some(prog.clone()), &flags, &s.test.fake_files, unrecorded)
         });
-        t.map(|mut t| {
-            t.skip = skip.to_vec();
-            t
-        })
-        .map_err(|_| out.errors)
+        t.map_err(|_| out.errors)
+    };
+    // Each side's suites set up, then each told the shared tests an earlier one that set up
+    // runs (`skips`).
+    let with_skips = |sets: &mut [Option<Result<Tests, Vec<serde_json::Value>>>], progs: &[Option<&Program>]| {
+        let up: Vec<bool> = sets.iter().map(|t| matches!(t, Some(Ok(_)))).collect();
+        let skip = skips(progs, &up);
+        for (t, skip) in sets.iter_mut().zip(&skip) {
+            if let Some(Ok(t)) = t {
+                t.skip = skip.clone();
+            }
+        }
+        skip
     };
     // Threads for the runs (`jobs`, T7), at most that many runs at once on both sides together.
-    let new_sets: Vec<_> = suites.iter().map(|s| set_up(s, s.new, &s.skip[1])).collect();
+    let mut new_sets: Vec<_> = (suites.iter()).map(|s| Some(set_up(s, s.new, &[]))).collect();
+    let new_progs: Vec<Option<&Program>> = suites.iter().map(|s| Some(&s.new.1)).collect();
+    with_skips(&mut new_sets, &new_progs);
+    let new_sets: Vec<Result<Tests, _>> = new_sets.into_iter().flatten().collect();
     let opens = |p: &Program| {
         let pairs: Vec<(&str, &str)> = p.files.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
         lang::check_files_for_tests(&pairs, &lang::CapTable::v0()).is_ok_and(|p| opens_db(&p))
@@ -1407,13 +1471,42 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
         }
         Ok(t)
     };
-    let old_side = || -> Vec<Option<Result<Vec<TestResult>, Vec<serde_json::Value>>>> {
-        (suites.iter())
-            .map(|s| {
-                s.old
-                    .map(|o| set_up(s, o, &s.skip[0]).and_then(threaded).map(|t| run_tests(&t)))
+    // OLD's tests set up under T; when they do not, again without the records no OLD test can
+    // take (`unused_records`), each dropped line kept for the page.
+    let old_progs: Vec<Option<&Program>> = suites.iter().map(|s| s.old.map(|o| &o.1)).collect();
+    type OldSide = (
+        Vec<Option<Result<Vec<TestResult>, Vec<serde_json::Value>>>>,
+        Vec<Vec<String>>,
+        Vec<Vec<String>>,
+    );
+    let old_side = || -> OldSide {
+        let mut dropped = vec![Vec::new(); suites.len()];
+        let mut sets: Vec<_> = (suites.iter().enumerate())
+            .map(|(i, s)| {
+                let o = s.old?;
+                let first = set_up(s, o, &[]);
+                let gone = match first.is_ok() {
+                    true => Vec::new(),
+                    false => unused_records(s.test, &o.1),
+                };
+                if gone.is_empty() {
+                    return Some(first);
+                }
+                // A retry that does not set up either keeps the first error.
+                match set_up(s, o, &gone) {
+                    Ok(again) => {
+                        dropped[i] = gone.iter().map(|g| format!("--http-record {g}")).collect();
+                        Some(Ok(again))
+                    }
+                    _ => Some(first),
+                }
             })
-            .collect()
+            .collect();
+        let skip = with_skips(&mut sets, &old_progs);
+        let runs = (sets.into_iter())
+            .map(|t| t.map(|t| t.and_then(threaded).map(|t| run_tests(&t))))
+            .collect();
+        (runs, dropped, skip)
     };
     let new_sets: Vec<_> = new_sets.into_iter().map(|t| t.and_then(threaded)).collect();
     let run_new = |sets: Vec<Result<Tests, _>>| -> Vec<Result<(Vec<TestResult>, Tests), _>> {
@@ -1421,7 +1514,7 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
     };
     // Both sides' tests at once when no test can see another's effects; OLD's set up on a
     // thread of its own, as a checked program stays on its thread.
-    let (old, new) = match n > 1 {
+    let ((old, dropped, old_skip), new) = match n > 1 {
         true => std::thread::scope(|s| {
             let thread = std::thread::Builder::new().stack_size(kio_host::RUN_STACK);
             let old = thread.spawn_scoped(s, old_side).expect("cannot start a thread");
@@ -1471,24 +1564,81 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
         }
         sides[name] = json!({"passed": results.len() - failed, "failed": failed, "errors": errors});
     }
+    for (i, d) in dropped.iter().enumerate().filter(|(_, d)| !d.is_empty()) {
+        let line = format!(
+            "old: {}tests run without {} (no old test takes its Dir)",
+            suites[i].prefix(),
+            d.join(", ")
+        );
+        page.tests.push(("tested", line));
+    }
+    let none = no_program();
+    let changes: Vec<Changes> = (suites.iter())
+        .map(|s| Changes::of(s.old.map_or(&none, |o| &o.1), &s.new.1))
+        .collect();
     // Compared per suite, only where NEW's tests ran: a suite that did not run has none to
-    // compare. Where OLD's did not, every NEW test is added.
-    let (old_r, new_r) = (
+    // compare. Where OLD's did not, its tests are read from its code (F1): added, removed and
+    // changed still hold; where that code does not check either, every NEW test is added.
+    let (mut old_r, new_r) = (
         shown(&old_runs, &new_runs, &suites),
         shown(&new_runs, &new_runs, &suites),
     );
     let old_down: Vec<usize> = (0..suites.len())
         .filter(|&i| matches!(old_runs[i], Some(Err(_))))
         .collect();
+    let mut unknown = Vec::new();
+    for &i in old_down.iter().filter(|&&i| matches!(new_runs[i], Some(Ok(_)))) {
+        let Some(o) = suites[i].old else { continue };
+        let Ok(p) = kio_host::check_program(&o.1.files) else {
+            unknown.push(i);
+            continue;
+        };
+        let prefix = suites[i].prefix();
+        old_r.extend(
+            (p.tests().into_iter().filter(|t| !old_skip[i].contains(&t.name))).map(|t| Shown {
+                name: format!("{prefix}{}", t.name),
+                bare: t.name,
+                suite: i,
+                r: None,
+            }),
+        );
+        page.tests.push((
+            "not checked",
+            format!("old: {prefix}added, removed and changed read from the code; property cases, old's failures and Resources not compared"),
+        ));
+    }
     let find = |rs: &[Shown], name: &str| rs.iter().position(|r| r.name == name);
+    // A module's test that runs in another suite on the other side (another program loads its
+    // module first there) is the same test when its text is: matched by its name in its
+    // program (F3).
+    let mut old_texts: BTreeMap<usize, BTreeMap<String, String>> = BTreeMap::new();
+    for o in 0..old_r.len() {
+        let (bare, at) = (old_r[o].bare.clone(), old_r[o].suite);
+        if !bare.contains("::") || find(&new_r, &old_r[o].name).is_some() {
+            continue;
+        }
+        let texts =
+            (old_texts.entry(at)).or_insert_with(|| suites[at].old.map_or_else(BTreeMap::new, |p| fn_texts(&p.1)));
+        let same = |n: &&Shown| {
+            n.bare == bare
+                && n.suite != at
+                && find(&old_r, &n.name).is_none()
+                && texts
+                    .get(&bare)
+                    .is_some_and(|t| changes[n.suite].texts.get(&bare) == Some(t))
+        };
+        if let Some(n) = new_r.iter().find(same) {
+            old_r[o].name = n.name.clone();
+        }
+    }
     let added: Vec<&Shown> = new_r.iter().filter(|n| find(&old_r, &n.name).is_none()).collect();
     let removed: Vec<&str> = (old_r.iter().map(|r| r.name.as_str()))
         .filter(|n| find(&new_r, n).is_none())
         .collect();
     // An added test that fails is an `error`, not evidence.
     for a in &added {
-        let label = if a.r.error.is_some() { "error" } else { "tested" };
-        let why = match old_down.contains(&a.suite) {
+        let label = if failed(a) { "error" } else { "tested" };
+        let why = match unknown.contains(&a.suite) {
             true => " (old's tests do not run)",
             false => "",
         };
@@ -1497,19 +1647,19 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
     page.tests
         .extend(removed.iter().map(|n| ("not checked", format!("removed: {n}"))));
     // A test on both sides that changed, or reaches a function that did, tests something else
-    // now: read it like an added one.
-    let none = no_program();
-    let changes: Vec<Changes> = (suites.iter())
-        .map(|s| Changes::of(s.old.map_or(&none, |o| &o.1), &s.new.1))
-        .collect();
+    // now: read it like an added one. One matched in another suite is compared with that
+    // suite's OLD program.
     let mut changed: Vec<&str> = Vec::new();
-    for n in new_r.iter().filter(|n| find(&old_r, &n.name).is_some()) {
-        let mut fs = changes[n.suite].reached(&[&n.r.name]);
+    for (n, o) in new_r.iter().filter_map(|n| Some((n, &old_r[find(&old_r, &n.name)?]))) {
+        let mut fs = match (o.suite == n.suite, suites[o.suite].old) {
+            (false, Some(op)) => Changes::of(&op.1, &suites[n.suite].new.1).reached(&[&n.bare]),
+            _ => changes[n.suite].reached(&[&n.bare]),
+        };
         if fs.is_empty() {
             continue;
         }
         changed.push(&n.name);
-        fs.retain(|f| *f != n.r.name);
+        fs.retain(|f| *f != n.bare);
         let line = match fs.is_empty() {
             true => format!("changed: {}", n.name),
             false => format!("changed: {} (reaches changed {})", n.name, fs.join(", ")),
@@ -1530,13 +1680,16 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
     // that failed stopped at the failing case: its count says nothing.
     let mut fewer = Vec::new();
     for o in &old_r {
-        let (Some(op), Some(n)) = (&o.r.prop, find(&new_r, &o.name).map(|i| &new_r[i])) else {
+        let (Some(or), Some(n)) = (o.r, find(&new_r, &o.name).map(|i| &new_r[i])) else {
             continue;
         };
-        if o.r.error.is_some() || n.r.error.is_some() {
+        let (Some(op), Some(nr)) = (&or.prop, n.r) else {
+            continue;
+        };
+        if or.error.is_some() || nr.error.is_some() {
             continue;
         }
-        let line = match &n.r.prop {
+        let line = match &nr.prop {
             Some(np) if np.compiled < op.compiled => {
                 format!("removed: {} ({} cases, {} in old)", o.name, np.compiled, op.compiled)
             }
@@ -1547,14 +1700,14 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
             ),
         };
         page.tests.push(("not checked", line));
-        let cases = n.r.prop.as_ref().map_or(1, |p| p.compiled);
-        fewer.push(json!({"name": o.name, "cases": cases, "old_cases": op.compiled, "property": n.r.prop.is_some()}));
+        let cases = nr.prop.as_ref().map_or(1, |p| p.compiled);
+        fewer.push(json!({"name": o.name, "cases": cases, "old_cases": op.compiled, "property": nr.prop.is_some()}));
     }
     let mut properties = Vec::new();
     for r in &new_r {
-        if let Some(p) = &r.r.prop {
+        if let Some(p) = r.r.and_then(|x| x.prop.as_ref()) {
             // A failed property's cases are its FAIL line below, not evidence.
-            let label = if r.r.error.is_some() { "error" } else { "tested" };
+            let label = if failed(r) { "error" } else { "tested" };
             page.tests.push((label, format!("{}: {}", r.name, p.summary())));
             properties.push(json!({"name": r.name, "cases": p.compiled, "seed": p.seed, "discarded": p.discarded}));
         }
@@ -1606,7 +1759,7 @@ fn tests(inputs: &Inputs, page: &mut Page) -> (serde_json::Value, bool, bool) {
         Some(r) if r.suite == 0 => mutants::run(inputs, &suites, &changes, &runs, &mut page.tests),
         _ => (json!(null), false, false),
     };
-    let down: Vec<String> = old_down.iter().map(|&i| suites[i].prefix()).collect();
+    let down: Vec<String> = (old_down.iter()).map(|&i| suites[i].prefix()).collect();
     resources(&old_r, &new_r, &changed, &down, page);
     let failed = new.iter().any(|r| r.is_err()) || !failures.is_empty() || unfinished;
     let added: Vec<&str> = added.iter().map(|a| a.name.as_str()).collect();
@@ -1742,19 +1895,20 @@ fn unreadable_secret(flags: &[&str]) -> Option<String> {
 /// whose OLD tests did not run (R1d2).
 fn resources(old: &[Shown], new: &[Shown], changed_tests: &[&str], old_down: &[String], page: &mut Page) {
     // Every test that failed in NEW, and those on both sides that failed in OLD only.
-    let failed = new.iter().filter(|n| n.r.error.is_some()).count();
+    let failed = new.iter().filter(|n| self::failed(n)).count();
     let mut failed_old = 0;
     let pairs: Vec<(&str, Used, Used)> = (old.iter())
         .filter_map(|o| {
             let n = new.iter().find(|n| n.name == o.name)?;
-            if n.r.error.is_some() {
+            let (or, nr) = (o.r?, n.r?);
+            if nr.error.is_some() {
                 return None;
             }
-            if o.r.error.is_some() {
+            if or.error.is_some() {
                 failed_old += 1;
                 return None;
             }
-            Some((o.name.as_str(), o.r.used?, n.r.used?))
+            Some((o.name.as_str(), or.used?, nr.used?))
         })
         .collect();
     for prefix in old_down {
@@ -1814,8 +1968,8 @@ fn resources(old: &[Shown], new: &[Shown], changed_tests: &[&str], old_down: &[S
     let (o, n) = (sum(of, om), sum(nf, nm));
     // Each test only in NEW that passed (R1a5): its own numbers, no old to compare.
     let added: Vec<(&str, Used)> = (new.iter())
-        .filter(|n| n.r.error.is_none() && !old.iter().any(|o| o.name == n.name))
-        .filter_map(|n| Some((n.name.as_str(), n.r.used?)))
+        .filter(|n| !self::failed(n) && !old.iter().any(|o| o.name == n.name))
+        .filter_map(|n| Some((n.name.as_str(), n.r?.used?)))
         .collect();
     let added_lines = added
         .iter()
