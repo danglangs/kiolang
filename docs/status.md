@@ -154,6 +154,7 @@ Order ([roadmap.md](roadmap.md) "Order of work toward general purpose", set 2026
 1. W1 with outside developers on the sealed change set (the milestone). The participant packet is prepared outside the repo (kio 0.1.12); recruiting is the maintainer's.
 2. A6: a fifth held-out app (log analyzer: 1 GB of files, incremental runs, `mcp`) on 0.1.12, while W1 waits ([product-todo.md](product-todo.md) A6).
 3. C8c2b (struct generator in CI, test-heap pointer checks), then P7b (fewer `send_all *`). Instantiation trimming stays deferred (8-10 µs, under C28's bar).
+4. G1 (a deterministic gate over `kio review --json`, policy written before the run) on the 24 classified changes, then G3: the generator / reviewer / gate / approver workflow simulated on a new sealed set against Python.
 
 Open, pinned: T7's 30 s target (38 s with a Db; no higher SQLite heap without a measured review memory budget, #361), P7b (fewer `send_all *`), C8c2b (C8c2 review follow-ups), F1.3/F1.4 (flow's API and CLI), L18/L19 (concurrency stages 2 and 3, when a program needs them). Not taken: C8c9 (per-loop fuel), C8c5, C8c6. Tuples stay a hint (L20) unless an eval shows models reach for them.
 
