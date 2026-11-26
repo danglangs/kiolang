@@ -24,7 +24,9 @@ mkdir -p "$OUT"
 export CARGO_TARGET_DIR="$TARGET"
 (cd "$ROOT" && cargo $PLUS build --release -p kio)
 cargo $PLUS build --release --locked --manifest-path rust/Cargo.toml
-cargo $PLUS build --release --locked --manifest-path probe/Cargo.toml
+# The probe depends on host by path: a version bump changes its lock, so it is not --locked
+# (its other pins stay as the lock has them).
+cargo $PLUS build --release --manifest-path probe/Cargo.toml
 KIO_FP=
 if [ "$(uname -s)" = Linux ] && [ -z "$NO_PERF" ] && command -v perf >/dev/null; then
   # The split needs whole stacks: the same source with frame pointers (Cranelift's code keeps them).
