@@ -1083,6 +1083,30 @@ fn a_record_no_test_takes_is_refused() {
     );
 }
 
+/// T8: a record binds per test, as every grant does: one test grants file serves two entries,
+/// the app's tests recording, the worker's taking neither the fake nor its `Dir`.
+#[test]
+fn one_grants_file_serves_two_entries() {
+    let app = Case::new(
+        "#[test]\nfn posts(hook: Http, sent: Dir) -> Result<(), IoErr> {\n    let _ = hook.get(\"/a\");\n    assert_eq(sent.list(\"\")?, [\"hook-1\"]);\n    Ok(())\n}\nfn main() {}\n",
+    );
+    let t = app.dir.path();
+    let worker = write(
+        t,
+        "worker.kio",
+        "#[test]\nfn counts(sent: Dir, out: Dir) -> Result<(), IoErr> {\n    assert_eq(sent.list(\"\")?.len(), 0);\n    Ok(())\n}\nfn main() {}\n",
+    );
+    let hook = app.file("hook.http", "GET /a\n200\n");
+    let g = app.file(
+        "t.grants",
+        &format!("--http hook=fake:{hook}\n--http-record hook=sent\n"),
+    );
+    let (code, out, err) = app.kio(&["--grants", &g]);
+    assert_eq!((code, out.as_str()), (0, "ok   posts\n1 passed, 0 failed\n"), "{err}");
+    let (code, out, err) = kio_in(&t.join("tmp"), &["test", &worker, "--grants", &g]);
+    assert_eq!((code, out.as_str()), (0, "ok   counts\n1 passed, 0 failed\n"), "{err}");
+}
+
 /// L29: compiled, a test's `unwrap` or `expect` gives the payload, or the stop is that test's
 /// FAIL at the call with lang's message; a property's cases also run in the interpreter here.
 #[test]

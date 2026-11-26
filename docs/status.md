@@ -143,6 +143,7 @@ Compiled-only kio covers the whole language and every capability; speed work res
 | A5 | feed aggregator built held-out on 0.1.11: 17.5 min, 1,326 lines, 45 tests; review of every new job needed a stub base; R1d, L35, T8 pinned (a5-findings.md) |
 | C29b | C29's review follow-ups: `free`'s listed bytes checked natively after each `dec` (each dropped `bytes +=` or `add_freed` fails a test), Miri on the allocator and plan tests in CI (16 tests, under a minute, dated nightly); a saturating `freed` not taken: it costs fuel, a wrap only delays a hand-back (#364) |
 | L35 | A5's library gaps: `parse_iso_utc` reads no fraction, 1-9 fraction digits and `+HH:MM`/`-HH:MM` offsets; `HttpResponse.header(name)` and `Incoming.header(name)` (case-insensitive, built in over caps.wit's methods); `kio check` of a module says how to check and test it. Harness 638 both ways, 635 agreed; gate fuel +0.0% (#365, #366) |
+| T8 | A5's test-grant and hint gaps: `--http-record` binds per test (one test grants file serves two entries); a `main` or test capability parameter hiding a function says to rename the function; guide.md says `Dir` never creates parents (#367) |
 
 ## Next
 
@@ -150,7 +151,6 @@ Order ([roadmap.md](roadmap.md) "Order of work toward general purpose", set 2026
 
 1. W1 with outside developers on the sealed change set (the milestone). The participant packet is prepared outside the repo (kio 0.1.10, with R1c); recruiting is the maintainer's.
 2. R1d: `kio review` of a new entry and of a change across entries (A5 #1-#7).
-3. L35 and T8: dates with offsets, `header(name)`, test grants per test, two hints (A5 #8-#14).
 
 Open, pinned: T7's 30 s target (38 s with a Db; no higher SQLite heap without a measured review memory budget, #361), P7b (fewer `send_all *`), C8c2b (C8c2 review follow-ups), F1.3/F1.4 (flow's API and CLI), L18/L19 (concurrency stages 2 and 3, when a program needs them). Not taken: C8c9 (per-loop fuel), C8c5, C8c6. Tuples stay a hint (L20) unless an eval shows models reach for them.
 

@@ -1918,11 +1918,14 @@ fn test_setup(path: &str, flags: &[&str], read: &FakeReads) -> Result<Tests, i32
             return Err(2);
         }
     };
-    // A record no test can take is a typo: its test would find no records.
+    // A record binds per test, as every grant does (T8): a file whose tests do not take the
+    // fake runs without it (one grants file serves two entries). When tests take the fake but
+    // none takes the `Dir` too, the record is a typo: its test would find no records.
     let takes = |t: &lang::TestFn, name: &str, ty: &str| t.params.iter().any(|(n, k)| n == name && k == ty);
     let tests = program.tests();
     for (grant, dir) in &records {
-        if !tests.iter().any(|t| takes(t, grant, "Http") && takes(t, dir, "Dir")) {
+        let used = tests.iter().any(|t| takes(t, grant, "Http"));
+        if used && !tests.iter().any(|t| takes(t, grant, "Http") && takes(t, dir, "Dir")) {
             return Err(fail(format!(
                 "--http-record {grant}={dir}: no test takes both `{grant}: Http` and `{dir}: Dir`\n  hint: give the Dir parameter's name after `=`, or add `{dir}: Dir` to the test that takes `{grant}: Http`"
             )));

@@ -1744,6 +1744,39 @@ fn calling_a_non_function() {
     let src = "fn f() {} fn main() { let f = 1; f(); }";
     assert_eq!(reject(src).0, "`f` is Int, not a function");
     assert_eq!(hint(src), "the local `f` hides the function `f`; rename the local");
+    // T8: a `main` or test capability parameter is named by its grant: rename the function.
+    let v0 = |src: &str| {
+        let d = check(src, &CapTable::v0()).expect_err(src);
+        (d[0].msg.clone(), d[0].hint.clone().unwrap_or_default())
+    };
+    let grant = "the parameter `admin` hides the function `admin`: rename the function `admin`; the parameter's name is its grant's";
+    for src in [
+        "fn admin(s: Secret) -> Bool { true } fn main(admin: Secret) -> Bool { admin(admin) }",
+        "fn admin(s: Secret) -> Bool { true } #[test] fn t(admin: Secret) { assert(admin(admin), \"x\"); } fn main() {}",
+    ] {
+        let want = ("`admin` is Secret, not a function".to_string(), grant.to_string());
+        assert_eq!(v0(src), want, "{src}");
+    }
+    let turbofish =
+        "fn first<T>(xs: List<T>) -> Option<T> { None } fn main(first: Dir) -> Option<Int> { first::<Int>([]) }";
+    assert_eq!(
+        v0(turbofish).1,
+        "rename the function `first`; the parameter's name is its grant's"
+    );
+    // A `let` in `main`, a helper's parameter, or a test's data parameter: rename the local.
+    for src in [
+        "fn admin() {} fn main(admin: Secret) { let admin = 1; admin(); }",
+        "fn admin() {} fn helper(admin: Secret) { admin(); } fn main() {}",
+        "fn n() {} #[test] fn t(n: Int) { n(); } fn main() {}",
+    ] {
+        let name = if src.contains("n()") && !src.contains("admin") {
+            "n"
+        } else {
+            "admin"
+        };
+        let want = format!("the local `{name}` hides the function `{name}`; rename the local");
+        assert_eq!(v0(src).1, want, "{src}");
+    }
     let (msg, at) = reject("fn main() { (1 + 2)(3); }");
     assert_eq!(
         (msg.as_str(), at.as_str()),

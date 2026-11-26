@@ -2604,6 +2604,7 @@ fn check_all(files: &[(&str, &str)], caps: &CapTable, need_main: bool) -> Result
             item_uses: HashMap::new(),
             uses: Vec::new(),
             in_test: false,
+            entry: false,
         };
         diags.extend(sig_err.or_else(|| c.function(f).err()));
         // The types this function's lowering names that are or may become (by substituting
@@ -2896,6 +2897,9 @@ struct Checker<'a> {
     uses: Vec<Use>,
     /// Whether the function being checked is a `#[test]`, where `assume` may be called.
     in_test: bool,
+    /// Whether the function being checked is `main` or a `#[test]`, whose capability
+    /// parameters are named by their grants.
+    entry: bool,
 }
 
 impl<'a> Checker<'a> {
@@ -2914,6 +2918,7 @@ impl<'a> Checker<'a> {
         self.scopes = vec![params.collect()];
         self.ret = sig.ret.clone();
         self.in_test = sig.test;
+        self.entry = sig.test || (self.home.module.is_empty() && f.name == "main");
         // A property's data parameters are generated (`prop::generate`): no function inside, some
         // value to generate, and a bounded size together, since the host builds each case.
         let mut total = 0u64;
@@ -4759,12 +4764,23 @@ impl<'a> Checker<'a> {
         (tparams.iter()).any(|t| ret.is_none_or(|r| mentions(r, t)) && !fixed.iter().any(|p| mentions(p, t)))
     }
 
+    /// Whether `name` is, where it is used, a capability parameter of `main` or a test: its name
+    /// is its grant's, so the function it hides is the one to rename (T8).
+    fn grant_param(&self, name: &str) -> bool {
+        let at = self.scopes.iter().rposition(|s| s.contains_key(name));
+        self.entry && at == Some(0) && matches!(self.scopes[0][name].ty, Ty::Cap(_) | Ty::Group(_))
+    }
+
     /// The key and signature of function `name` written with a turbofish, which a local of
     /// that name would hide.
     fn turbofish_fn(&self, span: Span, name: &str) -> Result<(String, &'a Sig), Diag> {
         if self.scopes.iter().any(|s| s.contains_key(name)) {
             let msg = format!("the local `{name}` hides the function `{name}`");
-            return Err(err(span, msg, Some("rename the local")));
+            let hint = match self.grant_param(name) {
+                true => format!("rename the function `{name}`; the parameter's name is its grant's"),
+                false => "rename the local".to_string(),
+            };
+            return Err(err(span, msg, Some(&hint)));
         }
         self.named_fn(span, name, None)
     }
@@ -4840,6 +4856,9 @@ impl<'a> Checker<'a> {
         };
         let Ty::Fn(params, ret) = &ty else {
             let hint = match &callee.kind {
+                ExprKind::Name(n) if self.sigs.contains_key(&*key(self.home.module, n)) && self.grant_param(n) => {
+                    format!("the parameter `{n}` hides the function `{n}`: rename the function `{n}`; the parameter's name is its grant's")
+                }
                 ExprKind::Name(n) if self.sigs.contains_key(&*key(self.home.module, n)) => {
                     format!("the local `{n}` hides the function `{n}`; rename the local")
                 }
