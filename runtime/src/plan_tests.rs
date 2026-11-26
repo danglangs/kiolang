@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 // struct Pair { s: Str, n: Int }    struct Nums { a: Int, b: Float }    struct Wide { 70 slots }
 // enum Shape { Dot, Box(Int, Int), Named(Str, Shape) }
 // List<Int>  List<Str>  List<Pair>  Map<Str, Pair>  HashMap<Str, Int>  HashMap<Int, Str>
-// a closure capturing (Int, Str)
+// a closure capturing (Int, Str)    List<Shape>
 const PAIR: u32 = 6;
 const NUMS: u32 = 7;
 const WIDE: u32 = 8;
@@ -21,7 +21,8 @@ const MAP: u32 = 13;
 const HMAP_INT: u32 = 14;
 const HMAP_STR: u32 = 15;
 const CLOSURE: u32 = 16;
-const N: u32 = 17;
+const LIST_SHAPE: u32 = 17;
+const N: u32 = 18;
 
 const NO: Name = Name { off: 0, len: 0 };
 
@@ -67,6 +68,7 @@ const DESCS: [Desc; N as usize] = [
         name: NO,
         slots: Slice { start: 74, len: 2 },
     },
+    Desc::List { elem: SHAPE },
 ];
 
 /// Slots: Pair, Nums, Wide (Str at 0 and 69, Int between), Box, Named, the closure's.
@@ -131,6 +133,7 @@ fn plans_are_worked_out_from_the_table() {
         other(Kind::HashMap),
         other(Kind::HashMapOfPtrs),
         plan(0b10, 32, Kind::Variant),
+        other(Kind::ListOfPtrs),
         // Shape's variants: Dot, Box(Int, Int), Named(Str, Shape).
         plan(0, 16, Kind::Variant),
         plan(0, 32, Kind::Variant),
@@ -269,6 +272,107 @@ fn planned_frees_free_every_shape() {
         obj::dec(&t, shared);
     }
     assert_eq!(obj::live(), before);
+}
+
+/// Every kind freed through plans, one value at a time: `free` counts its objects once, at the
+/// end (C29), and after each `dec` the live count is down by exactly the objects only that value
+/// held. (The free lists' bytes are `heap_tests`': natively objects are poisoned, not listed.)
+#[test]
+fn each_dec_takes_what_it_frees_off_the_live_count() {
+    let _l = lock();
+    let plans = obj::plans(&T);
+    let t = Table { plans: &plans, ..T };
+    let shared = str("shared");
+    // SAFETY: every object is live and laid out as its descriptor says; each `dec` drops a
+    // reference this test owns.
+    unsafe {
+        let pair = |s: *mut Header, n: i64| {
+            let p = obj::alloc(&t, PAIR, 0);
+            *obj::slot(&t, p, 0) = to_slot(s);
+            *obj::slot(&t, p, 1) = n as u64;
+            p
+        };
+        let shape = |v: u32, a: u64, b: u64| {
+            let p = obj::alloc(&t, SHAPE, v);
+            if v != 0 {
+                *obj::slot(&t, p, 0) = a;
+                *obj::slot(&t, p, 1) = b;
+            }
+            p
+        };
+        let named = |s: &str, inner: *mut Header| shape(2, to_slot(str(s)), to_slot(inner));
+        let share = || {
+            obj::inc(shared);
+            shared
+        };
+        // Each value, and the objects it alone holds, itself included.
+        let mut values: Vec<(*mut Header, isize)> = Vec::new();
+
+        let nums = obj::alloc(&t, NUMS, 0);
+        values.push((nums, 1));
+        values.push((pair(str("own"), 2), 2));
+        values.push((pair(share(), 3), 1));
+
+        let wide = obj::alloc(&t, WIDE, 0);
+        for i in 1..69 {
+            *obj::slot(&t, wide, i) = 0xdead_beef;
+        }
+        *obj::slot(&t, wide, 0) = to_slot(str("first"));
+        *obj::slot(&t, wide, 69) = to_slot(share());
+        values.push((wide, 2));
+
+        // Named("a", Named("b", Box(1, 2))), a Dot, a closure.
+        values.push((named("a", named("b", shape(1, 1, 2))), 5));
+        values.push((shape(0, 0, 0), 1));
+        let c = obj::alloc(&t, CLOSURE, 0);
+        *obj::slot(&t, c, 0) = 9;
+        *obj::slot(&t, c, 1) = to_slot(str("cap"));
+        values.push((c, 2));
+
+        // Lists: empty (no buffer), of numbers (a buffer no class holds), of `Str`s, of
+        // records, of enums.
+        values.push((obj::new_list(LIST_INT, Vec::new()), 1));
+        values.push((obj::new_list(LIST_INT, (0..100).collect()), 1));
+        let strs = alloc::vec![to_slot(str("x")), to_slot(share()), to_slot(str("y")), 0];
+        values.push((obj::new_list(LIST_STR, strs), 3));
+        let pairs = alloc::vec![to_slot(pair(str("p"), 1)), 0, to_slot(pair(share(), 2))];
+        values.push((obj::new_list(LIST_PAIR, pairs), 4));
+        let shapes = alloc::vec![
+            to_slot(named("c", shape(0, 0, 0))),
+            to_slot(shape(1, 3, 4)),
+            to_slot(shape(0, 0, 0)),
+        ];
+        values.push((obj::new_list(LIST_SHAPE, shapes), 6));
+
+        // Maps: of records, and the hash maps with and without pointers.
+        let mut m = Map::new();
+        for (k, v) in [(b"k", "v"), (b"l", "w")] {
+            m.insert(
+                Key::Str(k.as_slice().into()),
+                core::cell::Cell::new(to_slot(pair(str(v), 4))),
+            );
+        }
+        values.push((obj::new_map(MAP, m), 5));
+        let mut h = obj::HashMap::new();
+        h.insert(Key::Str(b"k".as_slice().into()), 7);
+        values.push((obj::new_hash_map(HMAP_INT, h), 1));
+        let mut h = obj::HashMap::new();
+        h.insert(Key::Int(1), to_slot(str("v")));
+        h.insert(Key::Int(2), to_slot(share()));
+        values.push((obj::new_hash_map(HMAP_STR, h), 2));
+
+        values.push((str("alone"), 1));
+        assert_eq!(rc(shared), 6);
+        for (p, objects) in values {
+            let before = obj::live();
+            obj::dec(&t, p);
+            assert_eq!(obj::live(), before - objects);
+        }
+        assert_eq!(rc(shared), 1, "each holder dropped its reference once");
+        let before = obj::live();
+        obj::dec(&t, shared);
+        assert_eq!(obj::live(), before - 1);
+    }
 }
 
 /// A variant number the enum does not have is refused, as `Table::variant` refuses it. (Not

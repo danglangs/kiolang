@@ -139,13 +139,13 @@ Compiled-only kio covers the whole language and every capability; speed work res
 | C28 | `--listen` reset and instantiation on Linux: no change kept; `pagemap_scan` would leak memory across requests on Linux 7.3+ (wasmtime#15395, #363), `madvise` reset is slower; a request writes 21-27 of 320 pages |
 | D9, D10 | docs/upgrading.md (0.1.6-0.1.8, a grep per breaking change, the `_` arm that takes a new variant) to docs/release-notes.md's template; guide.md: foreign keys enforced, every default limit in one table, backing up and restoring a `--db` file, what `kio review --base` compares, the outbox pattern (run in host/tests/docs_examples.rs) |
 | C26 | freeing profiled: tree 26 of 65 ms (546 M fuel, 4.19 M frees at 174 fuel and 6.2 ns an object), json.kio 4 of 34 ms (812 k frees); instructions per object in the generic loop, not cache misses, plus 4x Rust's object count; Rust drops its tree in 4 ms. C29 pinned (tree -5 to -6 ms, -2.6% fuel) |
+| C29 | freeing without per-object bookkeeping (plan read in place, live count and `freed` updated once per `free`, no `Layout` checks, cold panic): tree 65.0 to 58.9 ms, fuel -4.0%; json.kio 34.6 to 34.0 ms, -0.25%; every gate row's fuel lower |
 
 ## Next
 
 Order ([roadmap.md](roadmap.md) "Order of work toward general purpose", set 2026-11-21):
 
 1. W1 with outside developers on the sealed change set (the milestone). The participant packet is prepared outside the repo (kio 0.1.10, with R1c); recruiting is the maintainer's.
-2. C29: freeing without per-object bookkeeping (from C26: tree -5 to -6 ms, -2.6% fuel; json.kio flat).
 
 Open, pinned: T7's 30 s target (38 s with a Db; no higher SQLite heap without a measured review memory budget, #361), P7b (fewer `send_all *`), C8c2b (C8c2 review follow-ups), F1.3/F1.4 (flow's API and CLI), L18/L19 (concurrency stages 2 and 3, when a program needs them). Not taken: C8c9 (per-loop fuel), C8c5, C8c6. Tuples stay a hint (L20) unless an eval shows models reach for them.
 

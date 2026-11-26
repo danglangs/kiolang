@@ -666,11 +666,38 @@ unsafe fn plan(plans: &[Plan], p: *mut Header) -> Plan {
     }
 }
 
+/// `plan`'s fields, read in place rather than copied (C29).
+///
+/// # Safety
+/// As `plan`.
+#[inline(always)]
+unsafe fn plan_of(plans: &[Plan], p: *mut Header) -> (u64, u32, Kind) {
+    // SAFETY: `p` is live; an enum has its variant at HEADER.
+    unsafe {
+        let pl = &plans[(*p).desc as usize];
+        if pl.kind != Kind::Enum {
+            return (pl.mask, pl.size, pl.kind);
+        }
+        let v: u32 = *field(p, HEADER);
+        assert!(u64::from(v) < pl.mask);
+        let pl = &plans[(pl.size + v) as usize];
+        (pl.mask, pl.size, pl.kind)
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn not_an_object() -> ! {
+    panic!("an object's plan is an enum's or a scalar's")
+}
+
 /// Frees `p`, whose count `release` took to 0, and every object only it kept alive. A
 /// worklist, not recursion, so a deep value costs heap, not stack.
 ///
 /// One plan per object (C8b7): a record's pointer slots are the set bits of its mask, and its
 /// size is the plan's, so this loop, most of freeing a large value, reads no descriptors.
+///
+/// The live count and the heap's `freed` are updated once, at the end (C29).
 ///
 /// # Safety
 /// The module's contract, and `p` has no references left.
@@ -678,6 +705,9 @@ unsafe fn free(t: &Table, mut p: *mut Header) {
     // The first child that dies is freed next; the others wait in `work`, which allocates only
     // if an object has two.
     let mut work = Vec::new();
+    // Objects freed, and bytes listed for `heap::add_freed`.
+    let mut n: isize = 0;
+    let mut bytes = 0;
     // Native test tables have no plans: work them out for this call.
     let made;
     let plans = if t.plans.is_empty() {
@@ -699,16 +729,16 @@ unsafe fn free(t: &Table, mut p: *mut Header) {
                     }
                 }
             };
-            let pl = plan(plans, p);
-            let size = match pl.kind {
+            let (mask, plan_size, kind) = plan_of(plans, p);
+            let size = match kind {
                 Kind::Record | Kind::Variant => {
-                    let off = if pl.kind == Kind::Record { HEADER } else { ENUM_SLOTS };
-                    let mut m = pl.mask;
+                    let off = if kind == Kind::Record { HEADER } else { ENUM_SLOTS };
+                    let mut m = mask;
                     while m != 0 {
                         child(from_slot(*field::<u64>(p, off + 8 * m.trailing_zeros() as usize)));
                         m &= m - 1;
                     }
-                    pl.size as usize
+                    plan_size as usize
                 }
                 Kind::Wide => {
                     let (off, slots) = record(t, p);
@@ -717,32 +747,33 @@ unsafe fn free(t: &Table, mut p: *mut Header) {
                             child(from_slot(*field::<u64>(p, off + 8 * i)));
                         }
                     }
-                    pl.size as usize
+                    plan_size as usize
                 }
                 Kind::Bytes => BYTES_DATA + *field::<u32>(p, 12) as usize,
                 Kind::List | Kind::ListOfBytes | Kind::ListOfPtrs => {
-                    if pl.kind == Kind::ListOfBytes {
+                    if kind == Kind::ListOfBytes {
                         // Dying elements that hold nothing are freed here rather than queued
                         // in `work` (C8b6: a list of words grew `work` every few words).
                         for &v in elems(p) {
                             let c = from_slot(v);
                             if release(c) {
-                                free_memory(c, BYTES_DATA + *field::<u32>(c, 12) as usize);
+                                n += 1;
+                                bytes += free_quiet(c, BYTES_DATA + *field::<u32>(c, 12) as usize);
                             }
                         }
-                    } else if pl.kind == Kind::ListOfPtrs {
+                    } else if kind == Kind::ListOfPtrs {
                         elems(p).iter().for_each(|&v| child(from_slot(v)));
                     }
-                    // The `Vec`'s buffer, freed as `Vec` would, without the call through
-                    // `alloc::alloc`.
+                    // The `Vec`'s buffer, freed as `Vec` would (layout `[u64; cap]`, valid
+                    // since `Vec` allocated it), without the call through `alloc::alloc`.
                     let b = body(p).read();
                     if b.cap != 0 {
-                        heap::dealloc(b.ptr.cast(), Layout::array::<u64>(b.cap).unwrap());
+                        bytes += heap::dealloc_quiet(b.ptr.cast(), 8 * b.cap);
                     }
                     HEADER + size_of::<ListBody>()
                 }
                 Kind::Map | Kind::MapOfPtrs => {
-                    if pl.kind == Kind::MapOfPtrs {
+                    if kind == Kind::MapOfPtrs {
                         (*field::<Map>(p, HEADER))
                             .values()
                             .for_each(|v| child(from_slot(v.get())));
@@ -751,7 +782,7 @@ unsafe fn free(t: &Table, mut p: *mut Header) {
                     HEADER + size_of::<MapBody>()
                 }
                 Kind::HashMap | Kind::HashMapOfPtrs => {
-                    if pl.kind == Kind::HashMapOfPtrs {
+                    if kind == Kind::HashMapOfPtrs {
                         (*field::<HashMap>(p, HEADER))
                             .values()
                             .for_each(|&v| child(from_slot(v)));
@@ -759,19 +790,22 @@ unsafe fn free(t: &Table, mut p: *mut Header) {
                     ptr::drop_in_place(field::<HashMap>(p, HEADER));
                     HEADER + size_of::<HashMap>()
                 }
-                Kind::Enum | Kind::Scalar => panic!("{pl:?} is not an object's plan"),
+                Kind::Enum | Kind::Scalar => not_an_object(),
             };
-            free_memory(p, size);
+            n += 1;
+            bytes += free_quiet(p, size);
         }
         p = if next.is_null() {
             match work.pop() {
                 Some(c) => c,
-                None => return,
+                None => break,
             }
         } else {
             next
         };
     }
+    live_add(-n);
+    heap::add_freed(bytes);
 }
 
 /// `p` if this is its only reference, else a copy with count 1 sharing (inc'ing) its
@@ -921,4 +955,22 @@ unsafe fn free_memory(p: *mut Header, size: usize) {
     unsafe {
         heap::dealloc(p.cast(), layout(size))
     };
+}
+
+/// `free_memory` without its counts (C29): the bytes listed, for `heap::add_freed`. The caller
+/// takes the object off the live count.
+#[inline(always)]
+unsafe fn free_quiet(p: *mut Header, size: usize) -> usize {
+    #[cfg(all(any(test, feature = "test-heap"), not(miri)))]
+    // SAFETY: `p` owns `size` bytes, now never reused.
+    unsafe {
+        ptr::write_bytes(p.cast::<u8>(), POISON, size);
+        0
+    }
+    #[cfg(not(all(any(test, feature = "test-heap"), not(miri))))]
+    // SAFETY: `p` was allocated by `new` (or `bytes_room`) with `layout(size)`: this size,
+    // alignment 8.
+    unsafe {
+        heap::dealloc_quiet(p.cast(), size)
+    }
 }

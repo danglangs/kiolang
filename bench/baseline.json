@@ -1,89 +1,89 @@
 {
-  "kio": "kio 0.1.8 (ae6f3ca + C27)",
+  "kio": "kio 0.1.10 (0c7ff40 + C29)",
   "rows": {
     "startup": {
       "value": "0",
-      "fuel": 6376,
+      "fuel": 6168,
       "peak_memory": 1310720
     },
     "fib": {
       "value": "9227465",
-      "fuel": 1060061491,
+      "fuel": 1060061283,
       "peak_memory": 1310720
     },
     "loop": {
       "value": "30993",
-      "fuel": 2100006269,
+      "fuel": 2100006061,
       "peak_memory": 1310720
     },
     "strings": {
       "value": "588890",
-      "fuel": 59531857,
-      "peak_memory": 3670016
+      "fuel": 59530525,
+      "peak_memory": 3473408
     },
     "list": {
       "value": "1577147139",
-      "fuel": 958732985,
+      "fuel": 958727523,
       "peak_memory": 18415616
     },
     "map": {
       "value": "4770177159354",
-      "fuel": 338582679,
+      "fuel": 337251161,
       "peak_memory": 4718592
     },
     "hashmap": {
       "value": "4770177159354",
-      "fuel": 243050714,
+      "fuel": 241718291,
       "peak_memory": 5373952
     },
     "tree": {
       "value": "523822424596",
-      "fuel": 1289358839,
+      "fuel": 1237977586,
       "peak_memory": 93913088
     },
     "closures": {
       "value": "333334000000",
-      "fuel": 199830172,
+      "fuel": 199820224,
       "peak_memory": 26542080
     },
     "mandel": {
       "value": "3968704681311",
-      "fuel": 284564219,
+      "fuel": 284564072,
       "peak_memory": 1310720
     },
     "json": {
       "value": "1048619",
-      "fuel": 616996788,
+      "fuel": 615456033,
       "peak_memory": 15007744
     },
     "json_builtin": {
       "value": "1048619",
-      "fuel": 179073732,
-      "peak_memory": 16384000
+      "fuel": 176900259,
+      "peak_memory": 16252928
     },
     "csv": {
       "value": "657846262417",
-      "fuel": 183959637,
+      "fuel": 182352718,
       "peak_memory": 8388608
     },
     "logscan": {
       "value": "476232435",
-      "fuel": 253583032,
+      "fuel": 253499561,
       "peak_memory": 3932160
     },
     "records": {
       "value": "4374326005253",
-      "fuel": 169880478,
+      "fuel": 167880483,
       "peak_memory": 12189696
     },
     "chars": {
       "value": "10",
-      "fuel": 11636,
+      "fuel": 11428,
       "peak_memory": 1310720
     },
     "map_insert": {
       "value": "1000",
-      "fuel": 2722103,
+      "fuel": 2721420,
       "peak_memory": 1310720
     }
   }

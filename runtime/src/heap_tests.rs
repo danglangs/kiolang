@@ -321,3 +321,36 @@ fn a_hand_back_that_keeps_much_waits_for_as_much_to_be_freed() {
         assert_eq!(inner_live(&h), 0);
     }
 }
+
+/// `dealloc_quiet` lists a block as `dealloc` does and returns its class's bytes (0 for a
+/// block no class holds), but counts nothing towards a hand-back until `add_freed` (C29).
+#[test]
+fn a_quiet_free_counts_towards_a_hand_back_only_once_added() {
+    let h = heap(usize::MAX);
+    unsafe {
+        let a = h.alloc(l(20));
+        assert_eq!(h.dealloc_quiet(a, 20), 24);
+        assert_eq!(h.alloc(l(24)), a, "listed");
+        assert_eq!(h.dealloc_quiet(a, 24), 24);
+        let big = h.alloc(l(LISTED + 1));
+        assert_eq!(h.dealloc_quiet(big, LISTED + 1), 0, "to the inner allocator");
+        assert_eq!(inner_live(&h), 1);
+
+        let n = HELD / SMALL + 1;
+        let ps: std::vec::Vec<_> = (0..n).map(|_| h.alloc(l(SMALL))).collect();
+        let chunks = inner_live(&h);
+        let keep = h.alloc(l(8));
+        let bytes: usize = ps.into_iter().map(|p| h.dealloc_quiet(p, SMALL)).sum();
+        assert_eq!(bytes, n * SMALL);
+        let big = h.alloc(l(LISTED + 1));
+        assert_eq!(inner_live(&h), chunks + 2, "nothing counted: no hand-back");
+        h.dealloc(big, l(LISTED + 1));
+        h.add_freed(bytes);
+        let big = h.alloc(l(LISTED + 1));
+        assert_eq!(inner_live(&h), 2, "counted: every free chunk handed back first");
+        h.dealloc(big, l(LISTED + 1));
+        h.dealloc(keep, l(8));
+        h.flush();
+        assert_eq!(inner_live(&h), 0);
+    }
+}

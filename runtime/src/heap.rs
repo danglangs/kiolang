@@ -268,6 +268,36 @@ impl<A: GlobalAlloc> Heap<A> {
         }
     }
 
+    /// `dealloc` of a block of `size` bytes, alignment 8, without adding to `freed`: the bytes
+    /// it listed (0 if no class holds `size`), which the caller adds with `add_freed` (C29).
+    ///
+    /// # Safety
+    /// `dealloc`'s contract for `p` and the layout of `size` bytes, alignment 8.
+    #[inline(always)]
+    pub unsafe fn dealloc_quiet(&self, p: *mut u8, size: usize) -> usize {
+        // SAFETY: the caller's contract: `p` was allocated with this layout, so it is valid.
+        let l = unsafe { Layout::from_size_align_unchecked(size, STEP) };
+        match class(l) {
+            Some(c) => {
+                // SAFETY: as in `dealloc`.
+                unsafe { p.cast::<*mut u8>().write(self.free[c].get()) };
+                self.free[c].set(p);
+                block(c)
+            }
+            None => {
+                // SAFETY: the caller's contract, passed on.
+                unsafe { self.inner.dealloc(p, l) };
+                0
+            }
+        }
+    }
+
+    /// Counts `n` bytes that `dealloc_quiet` listed towards the next hand-back.
+    #[inline(always)]
+    pub fn add_freed(&self, n: usize) {
+        self.freed.set(self.freed.get() + n);
+    }
+
     /// A block of class `c`, uninitialized: listed, else carved.
     #[inline]
     unsafe fn take(&self, c: usize) -> *mut u8 {
@@ -446,4 +476,31 @@ pub unsafe fn dealloc(p: *mut u8, l: Layout) {
         #[cfg(not(target_arch = "wasm32"))]
         alloc::alloc::dealloc(p, l);
     }
+}
+
+/// `dealloc` of a block of `size` bytes, alignment 8, not yet counted towards a hand-back: the
+/// bytes listed, for `add_freed` (C29). Natively and on the test heap there are no lists: 0.
+///
+/// # Safety
+/// `GlobalAlloc::dealloc`'s contract for `p` and the layout of `size` bytes, alignment 8.
+#[inline(always)]
+pub unsafe fn dealloc_quiet(p: *mut u8, size: usize) -> usize {
+    // SAFETY: the caller's contract; `p` was allocated with this layout, so it is valid.
+    unsafe {
+        #[cfg(all(target_arch = "wasm32", not(feature = "test-heap")))]
+        return crate::ALLOC.dealloc_quiet(p, size);
+        #[cfg(not(all(target_arch = "wasm32", not(feature = "test-heap"))))]
+        {
+            dealloc(p, Layout::from_size_align_unchecked(size, STEP));
+            0
+        }
+    }
+}
+
+/// Counts `n` bytes that `dealloc_quiet` listed (nothing natively or on the test heap).
+#[inline(always)]
+pub fn add_freed(n: usize) {
+    #[cfg(all(target_arch = "wasm32", not(feature = "test-heap")))]
+    crate::ALLOC.add_freed(n);
+    let _ = n;
 }
