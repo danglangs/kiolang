@@ -2,6 +2,12 @@
 
 What a program, a grants file or a script must change for each release, newest first, with a command that finds each place to look. Run them from the program's directory. To see what an upgrade changed in a program's tests and authority, `kio review new/app.kio --base old/app.kio` under the new binary compares the two trees ([guide](guide.md#reviewing-a-change)); an old tree failing its own tests there is the upgrade's doing.
 
+## 0.1.11
+
+None breaking.
+
+- Fuel is the same or lower on every program (C29: freeing a large value, up to 4% less); no action.
+
 ## 0.1.10
 
 - **`kio review`'s page reads differently** (R1c): a caret line (unlabelled, `^` under the edited token) follows each generated survivor; Not checked grant lines lose their `(changed: f, g)` suffix, and each changed function is named once on its own line, `f, g: grant1, grant2 (changed)` (`(new entry)` for an `--entry` the base lacks); a Resources row whose test reaches no changed function ends `; unchanged code`. Scripts that parse the text page: `grep -rn 'kio review' --exclude='*.kio' .`; read `--json` instead, whose Not checked and Resources rows are unchanged (mutant rows gain `caret`).
